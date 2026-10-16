@@ -3787,3 +3787,5 @@ impl Interpreter for BecomeInterpreter {
 }
 
 mod new;
+
+pub use new::NewInterpreter;

@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
-use become_derive::handler;
 use core::cell::Cell;
+use handler_derive::{handler, handler_table};
 
 use bytecode::Opcode;
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, Convert, DenseString, FrameMeta, Heap, Hint, HostCtx,
-    NativeIndex, Object, Register, Smi, Tagged, ThreadState, VM, Value, VmError, Word,
-    interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    Args, CallTarget, Callee, Coercion, Convert, DenseString, EntryFn, FrameMeta, Handle,
+    HandleSlice, Heap, Hint, HostCtx, Interpreter, NativeIndex, Object, Register, Smi, Tagged,
+    ThreadState, VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
 
 #[cfg(feature = "star_fusion")]
@@ -250,6 +250,11 @@ pub struct TableArg<'h>(pub &'static [Handler; 256], core::marker::PhantomData<&
 
 impl<'h> TableArg<'h> {
     #[inline(always)]
+    pub fn new(table: &'static [Handler; 256]) -> TableArg<'h> {
+        TableArg(table, core::marker::PhantomData)
+    }
+
+    #[inline(always)]
     pub fn get(&self, op: u8) -> Handler {
         self.0[op as usize]
     }
@@ -315,7 +320,7 @@ macro_rules! reenter {
                 .raw()
                 .to_bits()
         {
-            become throw_dispatch(fault_ip, $regs, $acc, $ctx, $table, $roots, $float)
+            become throw_dispatch::<STRIDE>(fault_ip, $regs, $acc, $ctx, $table, $roots, $float)
         }
         let p = fault_ip.wrapping_add(
             (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::$op.operands().len() },
@@ -326,18 +331,13 @@ macro_rules! reenter {
     }};
 }
 
-/// Call a cold helper with operand access, park the returned `Acc`
-/// through the rooted slot (it may have crossed a GC), and reenter.
-macro_rules! next_slow {
-    ($op:ident, $ip:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr, $slow:path) => {{
-        let pc = $ip as usize - $ctx.code_ptr() as usize;
-        let v: Acc = $slow($ip, $regs, $acc, $ctx, $float);
-        let state: &ThreadState = $ctx.state;
-        let acc_slot = state.acc_slot();
-        acc_slot.store(v.get($ctx.heap()));
-        let acc = Acc::set(acc_slot.get($ctx.heap()));
-        reenter!($op, pc, $regs, acc, $ctx, $table, $roots, $float)
-    }};
+/// Tail into a cold helper with operand access. The callee owns its
+/// continuation: it computes a result and re-enters with
+/// `set_acc_raw` + `reenter!` (a plain `return` would end the frame).
+macro_rules! slow {
+    ($ip:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr, $slow:path) => {
+        become $slow($ip, $regs, $acc, $ctx, $table, $roots, $float)
+    };
 }
 
 /// Dispatch to the instruction at `$ip + $off` — the jump-target form
@@ -352,7 +352,7 @@ macro_rules! jump {
 /// current instruction as the fault site.
 macro_rules! throw {
     ($ip:expr, $r:expr, $a:expr, $x:expr, $t:ident, $k:ident, $f:ident) => {
-        become throw_dispatch($ip, $r, $a, $x, $t, $k, $f)
+        become throw_dispatch::<STRIDE>($ip, $r, $a, $x, $t, $k, $f)
     };
 }
 
@@ -367,7 +367,7 @@ macro_rules! backedge {
             if $x.heap_mut().safepoint_poll() {
                 state.set_termination(vm_core::Termination::Shutdown);
                 state.set_pending_exception($x.heap().known().undefined.as_tagged($x.heap()));
-                become throw_dispatch($ip, $r, $a, $x, $t, $k, $f)
+                become throw_dispatch::<STRIDE>($ip, $r, $a, $x, $t, $k, $f)
             }
             let pc = $target as usize - $x.code_ptr() as usize;
             let acc = Acc::set(acc_slot.get($x.heap()));
@@ -390,68 +390,60 @@ macro_rules! dispatch_frame {
     }};
 }
 
-extern "rust-preserve-none" fn op_trap<'h>(
-    _ip: *const u8,
-    _regs: Regs,
-    _acc: Acc,
-    _ctx: &mut Ctx<'_, 'h>,
-    _table: TableArg<'h>,
-    _roots: RootsArg<'h>,
-    _float: FloatReg,
-) -> Acc {
-    unreachable!("trap opcode")
+#[handler]
+fn op_trap(frame: Frame) -> Acc {
+    let byte = unsafe { *frame.ip() };
+    unreachable!("unimplemented opcode {:?}", Opcode::from_byte(byte))
 }
 
-#[cold]
-#[inline(never)]
-#[rustc_align(32)]
-extern "rust-preserve-none" fn throw_dispatch<'h>(
-    fault_ip: *const u8,
-    _regs: Regs,
-    _acc: Acc,
-    ctx: &mut Ctx<'_, 'h>,
-    table: TableArg<'h>,
-    roots: RootsArg<'h>,
-    float: FloatReg,
-) -> Acc {
-    let mut pc = fault_ip as usize - ctx.code_ptr() as usize;
+#[handler]
+fn throw_dispatch(frame: Frame) {
+    let mut pc = frame.pc();
     loop {
-        let base = ctx.frame_base();
-        let handled = if ctx.state().termination().is_some() {
+        let base = frame.ctx().frame_base();
+        let handled = if frame.ctx().state().termination().is_some() {
             // A termination is not an exception: no handler (catch or
             // finally in any frame) may observe or intercept it.
             None
         } else {
-            let callable = ctx
+            let callable = frame
+                .ctx()
                 .stack()
                 .frame_header(base)
                 .callable_slot()
-                .get(ctx.heap());
+                .get(frame.ctx().heap());
             callable
                 .as_heap_object()
-                .and_then(|obj| obj.callable_info(ctx.heap()))
-                .and_then(|info| info.handlers.get(ctx.heap()))
+                .and_then(|obj| obj.callable_info(frame.ctx().heap()))
+                .and_then(|info| info.handlers.get(frame.ctx().heap()))
                 .and_then(|handlers| handlers.lookup(pc))
         };
         if let Some(handler_pc) = handled {
             // park the word before the continuation re-takes ctx
             // exclusively: an Acc carries no heap borrow
             let ex = Acc::set(
-                ctx.state()
-                    .take_pending_exception_tagged(ctx.heap())
+                frame
+                    .ctx()
+                    .state()
+                    .take_pending_exception_tagged(frame.ctx().heap())
                     .expect("pending exception must be set while unwinding"),
             );
-            let code = ctx.code_ptr();
-            let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            let ip = unsafe { code.add(handler_pc) };
-            let h = table.get(unsafe { *ip });
-            become h(ip, regs, ex, ctx, table, roots, float)
+            frame.set_acc_raw(ex);
+            dispatch_frame!(handler_pc)
         }
-        if base == ctx.base_anchor() {
-            return Acc::set(ctx.heap().known().exception.as_tagged(ctx.heap()).erase());
+        if base == frame.ctx().base_anchor() {
+            return Acc::set(
+                frame
+                    .ctx()
+                    .heap()
+                    .known()
+                    .exception
+                    .as_tagged(frame.ctx().heap())
+                    .erase(),
+            );
         }
-        let caller = ctx.stack().pop_frame(base);
-        ctx.set_frame_base(caller.base);
+        let caller = frame.ctx().stack().pop_frame(base);
+        frame.ctx().set_frame_base(caller.base);
         pc = caller.handler_pc;
     }
 }
@@ -490,20 +482,25 @@ fn op_add(frame: Frame) {
             next!()
         }
         frame.set_float(sum);
-        next_slow!(slow_box_number)
+        slow!(slow_box_number)
     }
-    next_slow!(slow_add)
+    slow!(slow_add)
 }
 
-#[handler]
-fn slow_box_number(frame: Frame) {
-    Acc::set(frame.ctx().heap_mut().new_number(frame.float()))
+#[handler(Add)]
+#[cold]
+fn slow_box_number(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    frame.set_acc_raw(Acc::set(frame.ctx().heap_mut().new_number(frame.float())));
+    reenter!(pc)
 }
 
-#[handler]
-fn slow_add(frame: Frame) {
+#[handler(Add)]
+#[cold]
+fn slow_add(frame: Frame) -> Acc {
+    let pc = frame.pc();
     let state = frame.ctx().state();
-    state.handle_scope(|scope| {
+    let v: Acc = state.handle_scope(|scope| {
         let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let rhs = scope.handle(frame.acc());
         let vm = frame.ctx().vm();
@@ -549,25 +546,31 @@ fn slow_add(frame: Frame) {
                 None => Acc::set(heap.new_number(sum)),
             }
         }
-    })
+    });
+    frame.set_acc_raw(v);
+    reenter!(pc)
 }
 
-#[handler]
-fn slow_proxy_apply(frame: Frame) {
+#[handler(CallNoFeedback)]
+#[cold]
+fn slow_proxy_apply(frame: Frame) -> Acc {
+    let pc = frame.pc();
     let args_base = frame.signed::<1>();
     let count = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
     let heap = frame.ctx().heap_mut();
-    state.handle_scope(|scope| {
+    let v: Acc = state.handle_scope(|scope| {
         let callee = scope.handle(frame.regs().get(frame.signed::<0>(), heap));
         let staged = state.stack().args(state.frame_base(), args_base, count);
         match Proxy::apply(vm, heap, state, callee, staged) {
-            Ok(Coercion::Threw) => return Acc::set(heap.known().exception.as_tagged(heap).erase()),
+            Ok(Coercion::Threw) => Acc::set(heap.known().exception.as_tagged(heap).erase()),
             Ok(Coercion::Value(v)) => Acc::set(v),
             Err(err) => Acc::set(raise_runtime(vm, heap, state, err)),
         }
-    })
+    });
+    frame.set_acc_raw(v);
+    reenter!(pc)
 }
 
 #[handler(CallRuntime)]
@@ -582,9 +585,7 @@ fn op_call_runtime(frame: Frame) -> Acc {
     let args = state.stack().window(frame.ctx().frame_base(), base, count);
     let nctx = HostCtx::new(vm, frame.ctx().heap_mut(), state);
     let v = native(nctx, None, args);
-    let acc_slot = state.acc_slot();
-    acc_slot.store(v);
-    frame.set_acc(acc_slot.get(frame.ctx().heap()));
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -647,7 +648,7 @@ fn op_return(frame: Frame) -> Acc {
 }
 
 #[handler(CallNoFeedback)]
-fn op_call(frame: Frame) -> Acc {
+fn op_call_no_feedback(frame: Frame) -> Acc {
     let pc = frame.pc();
     let size = (if STRIDE == 2 { 2 } else { 1 })
         + STRIDE * const { Opcode::CallNoFeedback.operands().len() };
@@ -664,7 +665,7 @@ fn op_call(frame: Frame) -> Acc {
             throw!()
         }
         Some(CallTarget::Proxy(_)) => {
-            next_slow!(slow_proxy_apply)
+            slow!(slow_proxy_apply)
         }
         Some(CallTarget::Native(rt)) => {
             let v = frame.ctx().call_runtime(
@@ -674,10 +675,7 @@ fn op_call(frame: Frame) -> Acc {
                     .stack()
                     .window(frame.ctx().frame_base(), base_r, count),
             );
-            let state = frame.ctx().state();
-            let acc_slot = state.acc_slot();
-            acc_slot.store(v.get(frame.ctx().heap()));
-            frame.set_acc(acc_slot.get(frame.ctx().heap()));
+            frame.set_acc_raw(v);
             reenter!(pc)
         }
         Some(CallTarget::Bytecode {
@@ -719,21 +717,123 @@ fn op_call(frame: Frame) -> Acc {
     }
 }
 
-const fn new_table() -> [Handler; 256] {
-    let mut t = [op_trap as Handler; 256];
-    t[Opcode::Load as usize] = op_load::<1> as Handler;
-    t[Opcode::Store as usize] = op_store::<1> as Handler;
-    t[Opcode::Add as usize] = op_add::<1> as Handler;
-    t[Opcode::CallRuntime as usize] = op_call_runtime::<1> as Handler;
-    t[Opcode::Jump as usize] = op_jump::<1> as Handler;
-    t[Opcode::JumpIfTruthy as usize] = op_jump_if_truthy::<1> as Handler;
-    t[Opcode::JumpIfFalsy as usize] = op_jump_if_falsy::<1> as Handler;
-    t[Opcode::JumpIfNotUndefined as usize] = op_jump_if_not_undefined::<1> as Handler;
-    t[Opcode::JumpLoop as usize] = op_jump_loop::<1> as Handler;
-    t[Opcode::Return as usize] = op_return::<1> as Handler;
-    t[Opcode::CallNoFeedback as usize] = op_call::<1> as Handler;
-    t
+handler_table!(
+    op_load,
+    op_store,
+    op_add,
+    op_call_runtime,
+    op_jump,
+    op_jump_if_truthy,
+    op_jump_if_falsy,
+    op_jump_if_not_undefined,
+    op_jump_loop,
+    op_return,
+    op_call_no_feedback,
+);
+
+fn enter<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    callable: Handle<'_, Object>,
+    args: HandleSlice<'_>,
+    new_target: Option<Handle<'a, Value>>,
+) -> Result<Tagged<'a, Value>, VmError> {
+    match callable.as_tagged(heap).erase().call_target(heap) {
+        None => Err(VmError::Type),
+        // the proxy dispatch above already intercepted these
+        Some(CallTarget::Proxy(_)) => Err(VmError::Type),
+        Some(CallTarget::Native(rt)) => {
+            let f = vm.runtime(rt);
+            let nctx = HostCtx::new(vm, heap, state);
+            Ok(f(nctx, new_target, args.as_args()))
+        }
+        Some(CallTarget::Bytecode {
+            target,
+            info,
+            context,
+            kind,
+            ..
+        }) => {
+            if new_target.is_none() && kind.is_class_constructor() {
+                return Err(VmError::Type);
+            }
+            let stack = state.stack();
+            let new_target_value = match &new_target {
+                Some(nt) => nt.as_tagged(heap).erase(),
+                None => heap.known().undefined.as_tagged(heap).erase(),
+            };
+            let staged = stack.stage_slice(args.as_tagged())?;
+            let frame = stack.push_frame(
+                heap,
+                FrameMeta::ROOT,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                new_target_value,
+                staged,
+            )?;
+            state.set_frame_base(frame.base);
+            state.set_frame_active(true);
+
+            let mut ctx = Ctx::new(vm, state, heap, frame.base);
+            let ip = ctx.code_ptr();
+            let regs = unsafe { Regs::new(ctx.regs_ptr()) };
+            let table = TableArg::new(&NEW_TABLE_NARROW);
+            let roots = RootsArg::from_heap(ctx.heap());
+            // the fresh frame is entered at pc 0 with the accumulator
+            // seeded undefined (the frame init wrote the slot)
+            let acc_slot = state.acc_slot();
+            let acc = Acc::set(acc_slot.get(ctx.heap()));
+            let acc = table.get(unsafe { *ip })(
+                ip,
+                regs,
+                acc,
+                &mut ctx,
+                table,
+                roots,
+                FloatReg::new(f64::NAN),
+            );
+            let Ctx { heap, .. } = ctx;
+            Ok(acc.get(heap))
+        }
+    }
 }
 
-#[used]
-pub static NEW_TABLE_NARROW: [Handler; 256] = new_table();
+/// `Interpreter` entry: `VM::new::<GC, NewInterpreter>(..)`.
+pub fn execute<'a>(
+    vm: &VM,
+    heap: &'a mut Heap,
+    state: &ThreadState,
+    callable: Handle<'_, Object>,
+    args: HandleSlice<'_>,
+    new_target: Option<Handle<'_, Value>>,
+) -> Result<Tagged<'a, Value>, VmError> {
+    let stack = state.stack();
+
+    let saved_top = stack.top();
+    let was_active = state.is_frame_active();
+    let outer = was_active.then(|| state.frame_base());
+
+    state.handle_scope(|scope| {
+        let result = enter(vm, heap, state, callable, args, new_target)?;
+        let rooted = scope.handle(result);
+        stack.set_top(saved_top);
+        if let Some(outer) = outer {
+            state.set_frame_base(outer);
+        } else {
+            state.set_frame_active(false);
+        }
+        Ok(rooted.as_tagged(heap))
+    })
+}
+
+/// The `#[handler]`-based interpreter (work in progress: only the
+/// opcodes registered in `NEW_TABLE_NARROW` run; the rest trap).
+pub struct NewInterpreter;
+
+impl Interpreter for NewInterpreter {
+    const EXECUTE: EntryFn = execute;
+}
