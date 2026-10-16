@@ -153,6 +153,7 @@ use slow::*;
 
 pub struct HandlerTable([Handler; 256]);
 
+#[cfg(feature = "star_fusion")]
 const fn star_lookahead(op: Opcode) -> bool {
     matches!(
         op,

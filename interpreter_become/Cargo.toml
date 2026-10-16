@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 vm_core = { path = "../vm_core" }
 bytecode = { path = "../bytecode" }
+become_derive = { path = "../become_derive" }
 
 [dev-dependencies]
 js_compiler = { path = "../js/js_compiler" }
