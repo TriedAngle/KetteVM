@@ -44,8 +44,8 @@
 //!
 //! A slow path is the same `#[handler(Opcode)]` form plus `#[cold]`
 //! and not listed in `handler_table!`. The hot handler tail-calls it
-//! with `slow!(path)`; the slow path owns its continuation — it
-//! computes a result and re-enters with `set_acc_raw` +
+//! with `tail!(path)`; the slow path owns its continuation — it
+//! computes a result and re-enters with `set_acc` +
 //! `reenter!` (keeping the advance compile-time via the opcode).
 //!
 //! # Receiver syntax
@@ -70,7 +70,7 @@
 //!   blocks, resolved against the consumer's features) are therefore
 //!   written once, commented, in the interpreter crate.
 //!
-//! `slow!(path)` instantiates the slow path at the handler's
+//! `tail!(path)` instantiates the target at the handler's
 //! stride (`path::<STRIDE>`); do not write the turbofish yourself.
 //!
 //! The receiver may use any name that does not collide with a
@@ -102,14 +102,15 @@ const EXITS: &[&str] = &[
     "dispatch",
     "jump",
     "throw",
-    "slow",
+    "tail",
     "reenter",
     "backedge",
     "dispatch_frame",
 ];
 
 /// Removed exit names, matched only to produce a helpful error.
-const DEAD_EXITS: &[(&str, &str)] = &[("throw_dispatch", "throw"), ("next_slow", "slow")];
+const DEAD_EXITS: &[(&str, &str)] =
+    &[("throw_dispatch", "throw"), ("next_slow", "tail"), ("slow", "tail")];
 
 /// `handler_table!(op_load, op_store, ..)` — semi-automatic dispatch
 /// table generation. Each listed handler fn is registered, at both
@@ -186,7 +187,7 @@ const PARAM_NAMES: &[&str] = &["ip", "regs", "acc", "ctx", "table", "roots", "fl
 enum Mode {
     /// `#[handler(Add)]`: opcode known. Hot handlers are listed in
     /// `handler_table!`; cold ones (`#[cold]`) are tail-called through
-    /// `slow!` and own their continuation (`set_acc_raw` + `reenter!`).
+    /// `tail!` and own their continuation (`set_acc` + `reenter!`).
     Dispatch(Ident),
     /// `#[handler]`: no opcode (trampolines such as `op_trap`,
     /// `throw_dispatch`, a future `op_wide`). May dispatch and decode
@@ -388,7 +389,7 @@ impl Rewriter {
                 no_args(name, &args)?;
                 Ok(quote!(#name!(ip, regs, acc, ctx, table, roots, float)))
             }
-            "slow" => {
+            "tail" => {
                 let path = one_arg(name, args)?;
                 reject_turbofish(name, &path)?;
                 Ok(quote!(#name!(ip, regs, acc, ctx, table, roots, float, #path::<STRIDE>)))
@@ -455,7 +456,7 @@ impl Rewriter {
             }
 
             // accumulator / float writes
-            "set_acc" | "set_acc_smi" | "set_acc_raw" => {
+            "set_acc" | "set_acc_smi" => {
                 self.mut_acc = true;
                 one_arg(method, args).map(|a| quote!(#method!(acc, #a)))
             }
@@ -476,7 +477,7 @@ impl Rewriter {
                 }
             }
 
-            "next" | "dispatch" | "jump" | "throw" | "slow" | "reenter"
+            "next" | "dispatch" | "jump" | "throw" | "tail" | "reenter"
             | "backedge" | "dispatch_frame" => Err(syn::Error::new(
                 method.span(),
                 format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
@@ -646,7 +647,7 @@ fn reject_turbofish(name: &Ident, path: &TokenStream2) -> syn::Result<()> {
     {
         return Err(syn::Error::new(
             name.span(),
-            "`slow!` appends `::<STRIDE>` itself; drop the turbofish",
+            "`tail!` appends `::<STRIDE>` itself; drop the turbofish",
         ));
     }
     Ok(())

@@ -4,11 +4,13 @@ use core::cell::Cell;
 use handler_derive::{handler, handler_table};
 
 use bytecode::Opcode;
+use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, Convert, DenseString, EntryFn, FrameMeta, Handle,
-    HandleSlice, Heap, Hint, HostCtx, Interpreter, NativeIndex, Object, Register, Smi, Tagged,
-    ThreadState, VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    Args, CallTarget, Callee, Coercion, Convert, DenseString, EntryFn, FeedbackVector, FrameMeta,
+    Handle, HandleSlice, Heap, Hint, HostCtx, Interpreter, NativeIndex, Object, Recv, Register,
+    Smi, Tagged, ThreadState, VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL,
+    raise_runtime,
 };
 
 #[cfg(feature = "star_fusion")]
@@ -77,13 +79,6 @@ macro_rules! set_acc {
 macro_rules! set_acc_smi {
     ($acc:ident, $v:expr) => {
         $acc = Acc::from_smi_bits($v)
-    };
-}
-
-/// Overwrite the accumulator with an already-encoded word.
-macro_rules! set_acc_raw {
-    ($acc:ident, $v:expr) => {
-        $acc = $v
     };
 }
 
@@ -164,6 +159,13 @@ impl<'s, 'h> Ctx<'s, 'h> {
             .as_ptr()
     }
 
+    /// The current frame's feedback vector, or `None` for functions
+    /// without feedback slots.
+    #[inline(always)]
+    pub fn feedback_ref<'f>(&self, heap: &'f Heap) -> Option<Tagged<'f, FeedbackVector>> {
+        self.stack().frame_header(self.frame_base()).feedback(heap)
+    }
+
     #[inline(always)]
     pub fn regs_ptr(&self) -> *mut Register {
         unsafe { self.stack().slots_ptr().add(self.frame_base()) }
@@ -199,7 +201,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
     }
 
     #[inline(always)]
-    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Acc {
+    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
         let (vm, state) = (self.vm, self.state);
         let f = vm.runtime(rt);
         let stack = state.stack();
@@ -213,13 +215,13 @@ impl<'s, 'h> Ctx<'s, 'h> {
         if bump.is_some() {
             stack.set_top(saved);
         }
-        Acc::set(v)
+        v
     }
 
     #[inline(always)]
-    pub fn raise_tag(&mut self, err: VmError) -> Acc {
+    pub fn raise_tag(&mut self, err: VmError) -> Tagged<'_, Value> {
         let (vm, state) = (self.vm, self.state);
-        Acc::set(raise_runtime(vm, self.heap_mut(), state, err))
+        raise_runtime(vm, self.heap_mut(), state, err)
     }
 }
 
@@ -331,10 +333,8 @@ macro_rules! reenter {
     }};
 }
 
-/// Tail into a cold helper with operand access. The callee owns its
-/// continuation: it computes a result and re-enters with
-/// `set_acc_raw` + `reenter!` (a plain `return` would end the frame).
-macro_rules! slow {
+/// Tail into a named handler fn with the full dispatch ABI.
+macro_rules! tail {
     ($ip:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr, $slow:path) => {
         become $slow($ip, $regs, $acc, $ctx, $table, $roots, $float)
     };
@@ -421,14 +421,12 @@ fn throw_dispatch(frame: Frame) {
         if let Some(handler_pc) = handled {
             // park the word before the continuation re-takes ctx
             // exclusively: an Acc carries no heap borrow
-            let ex = Acc::set(
-                frame
-                    .ctx()
-                    .state()
-                    .take_pending_exception_tagged(frame.ctx().heap())
-                    .expect("pending exception must be set while unwinding"),
-            );
-            frame.set_acc_raw(ex);
+            let ex = frame
+                .ctx()
+                .state()
+                .take_pending_exception_tagged(frame.ctx().heap())
+                .expect("pending exception must be set while unwinding");
+            frame.set_acc(ex);
             dispatch_frame!(handler_pc)
         }
         if base == frame.ctx().base_anchor() {
@@ -482,16 +480,16 @@ fn op_add(frame: Frame) {
             next!()
         }
         frame.set_float(sum);
-        slow!(slow_box_number)
+        tail!(slow_box_number)
     }
-    slow!(slow_add)
+    tail!(slow_add)
 }
 
 #[handler(Add)]
 #[cold]
 fn slow_box_number(frame: Frame) -> Acc {
     let pc = frame.pc();
-    frame.set_acc_raw(Acc::set(frame.ctx().heap_mut().new_number(frame.float())));
+    frame.set_acc(frame.ctx().heap_mut().new_number(frame.float()));
     reenter!(pc)
 }
 
@@ -500,54 +498,52 @@ fn slow_box_number(frame: Frame) -> Acc {
 fn slow_add(frame: Frame) -> Acc {
     let pc = frame.pc();
     let state = frame.ctx().state();
-    let v: Acc = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| {
         let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let rhs = scope.handle(frame.acc());
         let vm = frame.ctx().vm();
         let heap = frame.ctx().heap_mut();
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => return Acc::set(heap.known().exception.as_tagged(heap).erase()),
+            Ok(Coercion::Threw) => return heap.known().exception.as_tagged(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => return Acc::set(heap.known().exception.as_tagged(heap).erase()),
+            Ok(Coercion::Threw) => return heap.known().exception.as_tagged(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
         if lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
             || rhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
         {
             let a = match Convert::to_string(heap, &scope, lhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             let b = match Convert::to_string(heap, &scope, rhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
-            Acc::set(
-                DenseString::concat(heap, &scope, a, b)
-                    .as_tagged(heap)
-                    .erase(),
-            )
+            DenseString::concat(heap, &scope, a, b)
+                .as_tagged(heap)
+                .erase()
         } else {
             let a = match lhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             let b = match rhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             let sum = a + b;
             match Smi::from_f64(sum) {
-                Some(s) => Acc::set(s.into_tagged()),
-                None => Acc::set(heap.new_number(sum)),
+                Some(s) => s.into_tagged(),
+                None => heap.new_number(sum),
             }
         }
     });
-    frame.set_acc_raw(v);
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -555,21 +551,14 @@ fn slow_add(frame: Frame) -> Acc {
 #[cold]
 fn slow_proxy_apply(frame: Frame) -> Acc {
     let pc = frame.pc();
-    let args_base = frame.signed::<1>();
-    let count = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let heap = frame.ctx().heap_mut();
-    let v: Acc = state.handle_scope(|scope| {
-        let callee = scope.handle(frame.regs().get(frame.signed::<0>(), heap));
-        let staged = state.stack().args(state.frame_base(), args_base, count);
-        match Proxy::apply(vm, heap, state, callee, staged) {
-            Ok(Coercion::Threw) => Acc::set(heap.known().exception.as_tagged(heap).erase()),
-            Ok(Coercion::Value(v)) => Acc::set(v),
-            Err(err) => Acc::set(raise_runtime(vm, heap, state, err)),
-        }
-    });
-    frame.set_acc_raw(v);
+    let v = proxy_apply_window_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        frame.signed::<1>(),
+        frame.unsigned::<2>(),
+    );
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -661,11 +650,11 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
         .call_target(frame.ctx().heap());
     match ct {
         None => {
-            frame.set_acc_raw(frame.ctx().raise_tag(VmError::Type));
+            frame.set_acc(frame.ctx().raise_tag(VmError::Type));
             throw!()
         }
         Some(CallTarget::Proxy(_)) => {
-            slow!(slow_proxy_apply)
+            tail!(slow_proxy_apply)
         }
         Some(CallTarget::Native(rt)) => {
             let v = frame.ctx().call_runtime(
@@ -675,7 +664,7 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
                     .stack()
                     .window(frame.ctx().frame_base(), base_r, count),
             );
-            frame.set_acc_raw(v);
+            frame.set_acc(v);
             reenter!(pc)
         }
         Some(CallTarget::Bytecode {
@@ -686,7 +675,7 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
             ..
         }) => {
             if kind.is_class_constructor() {
-                frame.set_acc_raw(frame.ctx().raise_tag(VmError::Type));
+                frame.set_acc(frame.ctx().raise_tag(VmError::Type));
                 throw!()
             }
             let state = frame.ctx().state();
@@ -706,7 +695,7 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
                 args,
             ) {
                 Ok(pushed) => pushed,
-                Err(err) => return frame.ctx().raise_tag(err),
+                Err(err) => return Acc::set(frame.ctx().raise_tag(err)),
             };
             state.set_frame_base(pushed.base);
             let entry = state.stack().frame_header(pushed.base).code(heap).as_ptr();
@@ -715,6 +704,371 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
             dispatch!(entry)
         }
     }
+}
+
+#[handler(Call)]
+fn op_call(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Call.operands().len() };
+    let mc = match call_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        frame.signed::<1>(),
+        frame.unsigned::<2>(),
+        frame.unsigned::<3>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_proxy),
+    }
+}
+
+#[handler(CallMethod0)]
+fn op_call_method0(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallMethod0.operands().len() };
+    let mc = match call_method_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        frame.signed::<1>(),
+        [0, 0],
+        0,
+        frame.unsigned::<2>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_method0_proxy),
+    }
+}
+
+#[handler(CallMethod1)]
+fn op_call_method1(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallMethod1.operands().len() };
+    let mc = match call_method_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        frame.signed::<1>(),
+        [frame.signed::<2>(), 0],
+        1,
+        frame.unsigned::<3>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_method1_proxy),
+    }
+}
+
+#[handler(CallMethod2)]
+fn op_call_method2(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallMethod2.operands().len() };
+    let mc = match call_method_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        frame.signed::<1>(),
+        [frame.signed::<2>(), frame.signed::<3>()],
+        2,
+        frame.unsigned::<4>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_method2_proxy),
+    }
+}
+
+#[handler(CallFunction0)]
+fn op_call_function0(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallFunction0.operands().len() };
+    let mc = match call_function_start(
+        frame.ctx(), frame.regs(), frame.signed::<0>(), pc, size, [0, 0], 0, frame.unsigned::<1>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_function0_proxy),
+    }
+}
+
+#[handler(CallFunction1)]
+fn op_call_function1(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallFunction1.operands().len() };
+    let mc = match call_function_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        [frame.signed::<1>(), 0],
+        1,
+        frame.unsigned::<2>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_function1_proxy),
+    }
+}
+
+#[handler(CallFunction2)]
+fn op_call_function2(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 })
+        + STRIDE * const { Opcode::CallFunction2.operands().len() };
+    let mc = match call_function_start(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        pc,
+        size,
+        [frame.signed::<1>(), frame.signed::<2>()],
+        2,
+        frame.unsigned::<3>(),
+    ) {
+        Ok(mc) => mc,
+        Err(err) => {
+            frame.set_acc(frame.ctx().raise_tag(err));
+            throw!()
+        }
+    };
+    match mc {
+        MethodCall::Value(v) => {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+        MethodCall::Frame(_) => {
+            let heap = frame.ctx().heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            frame.set_acc(undefined);
+            dispatch!(frame.ctx().code_ptr())
+        }
+        MethodCall::Proxy => tail!(slow_call_function2_proxy),
+    }
+}
+
+#[handler(Call)]
+#[cold]
+fn slow_call_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_window_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        frame.signed::<1>(),
+        frame.unsigned::<2>(),
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallMethod0)]
+#[cold]
+fn slow_call_method0_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Reg(frame.signed::<1>()),
+        [0, 0],
+        0,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallMethod1)]
+#[cold]
+fn slow_call_method1_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Reg(frame.signed::<1>()),
+        [frame.signed::<2>(), 0],
+        1,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallMethod2)]
+#[cold]
+fn slow_call_method2_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Reg(frame.signed::<1>()),
+        [frame.signed::<2>(), frame.signed::<3>()],
+        2,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallFunction0)]
+#[cold]
+fn slow_call_function0_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Undefined,
+        [0, 0],
+        0,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallFunction1)]
+#[cold]
+fn slow_call_function1_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Undefined,
+        [frame.signed::<1>(), 0],
+        1,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(CallFunction2)]
+#[cold]
+fn slow_call_function2_proxy(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let v = proxy_apply_scattered_slow(
+        frame.ctx(),
+        frame.regs(),
+        frame.signed::<0>(),
+        Recv::Undefined,
+        [frame.signed::<1>(), frame.signed::<2>()],
+        2,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
 }
 
 handler_table!(
@@ -729,7 +1083,474 @@ handler_table!(
     op_jump_loop,
     op_return,
     op_call_no_feedback,
+    op_call,
+    op_call_method0,
+    op_call_method1,
+    op_call_method2,
+    op_call_function0,
+    op_call_function1,
+    op_call_function2,
 );
+
+enum MethodCall<'a> {
+    /// the call completed (runtime callee): the value or the exception
+    /// sentinel
+    Value(Tagged<'a, Value>),
+    /// a bytecode frame was pushed and made current: enter it through
+    /// the handler table
+    Frame(FrameMeta),
+    /// a callable proxy: the caller tail-calls the slow proxy dispatch
+    Proxy,
+}
+
+/// Invoke a runtime callee over scattered call-site registers.
+#[inline(always)]
+fn dispatch_runtime_scattered<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    rt: NativeIndex,
+    recv: Recv,
+    args: [i32; 2],
+    argc: usize,
+) -> Tagged<'a, Value> {
+    match x
+        .stack()
+        .stage_scattered(x.heap(), x.frame_base(), recv, args, argc)
+    {
+        Ok(a) => x.call_runtime(rt, a),
+        Err(err) => x.raise_tag(err),
+    }
+}
+
+/// Push a callee frame (facts from a `CallTarget::Bytecode` destructure
+/// or a call-IC hit; the caller is the current frame) and switch to it.
+/// Entry is at pc 0 with the accumulator seeded undefined.
+#[inline(always)]
+fn push_callee_frame<'a>(
+    x: &Ctx<'_, '_>,
+    pc: usize,
+    size: usize,
+    callee: Callee<'_>,
+    args: Args,
+) -> Result<MethodCall<'a>, VmError> {
+    let meta = x.caller_meta(pc + size, pc);
+    let heap = x.heap();
+    let undefined = heap.known().undefined.as_tagged(heap).erase();
+    let frame = x.stack().push_frame(heap, meta, callee, undefined, args)?;
+    x.set_frame_base(frame.base);
+    Ok(MethodCall::Frame(frame))
+}
+
+/// Push a callee frame from scattered call-site registers (one copy
+/// per word).
+#[inline(always)]
+fn push_scattered_frame<'a>(
+    x: &Ctx<'_, '_>,
+    pc: usize,
+    size: usize,
+    callee: Callee<'_>,
+    recv: Recv,
+    args: [i32; 2],
+    argc: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let meta = x.caller_meta(pc + size, pc);
+    let heap = x.heap();
+    let undefined = heap.known().undefined.as_tagged(heap).erase();
+    let frame =
+        x.stack()
+            .push_scattered_frame(heap, meta, callee, undefined, recv, args, argc)?;
+    x.set_frame_base(frame.base);
+    Ok(MethodCall::Frame(frame))
+}
+
+#[inline(always)]
+fn call_method_start<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    recv: i32,
+    args: [i32; 2],
+    argc: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee_word) {
+        CallProbe::Bytecode(CallHit {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            push_scattered_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                Recv::Reg(recv),
+                args,
+                argc,
+            )
+        }
+        CallProbe::Native(rt) => Ok(MethodCall::Value(dispatch_runtime_scattered(
+            x,
+            rt,
+            Recv::Reg(recv),
+            args,
+            argc,
+        ))),
+        CallProbe::Miss => slow_call_method_miss(x, regs, callee_reg, pc, size, recv, args, argc, fb),
+    }
+}
+
+#[inline(always)]
+fn call_function_start<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    args: [i32; 2],
+    argc: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee_word) {
+        CallProbe::Bytecode(CallHit {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            push_scattered_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                Recv::Undefined,
+                args,
+                argc,
+            )
+        }
+        CallProbe::Native(rt) => Ok(MethodCall::Value(dispatch_runtime_scattered(
+            x,
+            rt,
+            Recv::Undefined,
+            args,
+            argc,
+        ))),
+        CallProbe::Miss => slow_call_function_miss(x, regs, callee_reg, pc, size, args, argc, fb),
+    }
+}
+
+/// `Call` (contiguous `[receiver, args...]` window) with the same call IC.
+#[inline(always)]
+fn call_start<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    base: i32,
+    count: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee_word) {
+        CallProbe::Bytecode(CallHit {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            push_callee_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                x.stack().window(x.frame_base(), base, count),
+            )
+        }
+        CallProbe::Native(rt) => Ok(MethodCall::Value(
+            x.call_runtime(rt, x.stack().window(x.frame_base(), base, count)),
+        )),
+        CallProbe::Miss => slow_call_miss(x, regs, callee_reg, pc, size, base, count, fb),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn slow_call_method_miss<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    recv: i32,
+    args: [i32; 2],
+    argc: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match callee_word.call_target(x.heap()) {
+        None => Ok(MethodCall::Value(x.raise_tag(VmError::Type))),
+        Some(CallTarget::Proxy(_)) => Ok(MethodCall::Proxy),
+        Some(CallTarget::Native(rt)) => {
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Native(rt),
+            );
+            Ok(MethodCall::Value(dispatch_runtime_scattered(
+                x,
+                rt,
+                Recv::Reg(recv),
+                args,
+                argc,
+            )))
+        }
+        Some(CallTarget::Bytecode {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Bytecode(info),
+            );
+            push_scattered_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                Recv::Reg(recv),
+                args,
+                argc,
+            )
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn slow_call_function_miss<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    args: [i32; 2],
+    argc: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match callee_word.call_target(x.heap()) {
+        None => Ok(MethodCall::Value(x.raise_tag(VmError::Type))),
+        Some(CallTarget::Proxy(_)) => Ok(MethodCall::Proxy),
+        Some(CallTarget::Native(rt)) => {
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Native(rt),
+            );
+            Ok(MethodCall::Value(dispatch_runtime_scattered(
+                x,
+                rt,
+                Recv::Undefined,
+                args,
+                argc,
+            )))
+        }
+        Some(CallTarget::Bytecode {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Bytecode(info),
+            );
+            push_scattered_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                Recv::Undefined,
+                args,
+                argc,
+            )
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn slow_call_miss<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    pc: usize,
+    size: usize,
+    base: i32,
+    count: usize,
+    fb: usize,
+) -> Result<MethodCall<'a>, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    match callee_word.call_target(x.heap()) {
+        None => Ok(MethodCall::Value(x.raise_tag(VmError::Type))),
+        Some(CallTarget::Proxy(_)) => Ok(MethodCall::Proxy),
+        Some(CallTarget::Native(rt)) => {
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Native(rt),
+            );
+            Ok(MethodCall::Value(
+                x.call_runtime(rt, x.stack().window(x.frame_base(), base, count)),
+            ))
+        }
+        Some(CallTarget::Bytecode {
+            target,
+            info,
+            context,
+            kind,
+        }) => {
+            if kind.is_class_constructor() {
+                return Ok(MethodCall::Value(x.raise_tag(VmError::Type)));
+            }
+            InlineCache::call_update(
+                x.heap(),
+                x.feedback_ref(x.heap()),
+                fb,
+                callee_word,
+                CallRecord::Bytecode(info),
+            );
+            push_callee_frame(
+                x,
+                pc,
+                size,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                x.stack().window(x.frame_base(), base, count),
+            )
+        }
+    }
+}
+
+/// Apply a callable proxy over a windowed call site (`Call`/
+/// `CallNoFeedback`): the window is already rooted inside the frame.
+#[cold]
+#[inline(never)]
+fn proxy_apply_window_slow<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    args_base: i32,
+    count: usize,
+) -> Tagged<'a, Value> {
+    let vm = x.vm();
+    let state = x.state();
+    let staged = state.stack().args(x.frame_base(), args_base, count);
+    let heap = x.heap_mut();
+    let v = state.handle_scope(|scope| {
+        let callee = scope.handle(regs.get(callee_reg, heap));
+        match Proxy::apply(vm, heap, state, callee, staged) {
+            Ok(Coercion::Threw) => heap.known().exception.as_tagged(heap).erase(),
+            Ok(Coercion::Value(v)) => v,
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
+    });
+    v
+}
+
+/// Apply a callable proxy over scattered call-site registers: stage
+/// `[receiver, args...]` at the top, root it for the call, and restore
+/// the top afterwards.
+#[cold]
+#[inline(never)]
+fn proxy_apply_scattered_slow<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    regs: Regs,
+    callee_reg: i32,
+    recv: Recv,
+    args: [i32; 2],
+    argc: usize,
+) -> Tagged<'a, Value> {
+    let vm = x.vm();
+    let state = x.state();
+    let base = x.frame_base();
+    let heap = x.heap_mut();
+    let staged = match state.stack().stage_scattered(heap, base, recv, args, argc) {
+        Ok(a) => a,
+        Err(err) => return raise_runtime(vm, heap, state, err),
+    };
+    let saved_top = state.stack().top();
+    if let Some(top) = state.stack().rooting_top(staged) {
+        state.stack().set_top(top);
+    }
+    let v = state.handle_scope(|scope| {
+        let callee = scope.handle(regs.get(callee_reg, heap));
+        match Proxy::apply(vm, heap, state, callee, staged) {
+            Ok(Coercion::Threw) => heap.known().exception.as_tagged(heap).erase(),
+            Ok(Coercion::Value(v)) => v,
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
+    });
+    state.stack().set_top(saved_top);
+    v
+}
 
 fn enter<'a>(
     vm: &'a VM,
