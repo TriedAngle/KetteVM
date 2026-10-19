@@ -13,7 +13,7 @@ fn main() {
     let mut parts = Vec::new();
     for path in std::env::args().skip(1) {
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("ovm: cannot read {path}: {e}");
+            eprintln!("kettevm: cannot read {path}: {e}");
             std::process::exit(1);
         });
         parts.push(src);

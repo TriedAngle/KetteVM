@@ -190,7 +190,7 @@ const HARD_SKIP_PATHS: &[&str] = &[
 #[derive(Default)]
 struct Stats {
     pass: usize,
-    /// Paths of passing tests; kept only so `OVM_AUDIT` can dump them.
+    /// Paths of passing tests; kept only so `KETTEVM_AUDIT` can dump them.
     passed: Vec<PathBuf>,
     fail: Vec<(PathBuf, String)>,
     panicked: Vec<PathBuf>,
@@ -355,7 +355,7 @@ fn run_test_inner(
         stats.skipped_panic += 1;
         return;
     }
-    // `OVM_AUDIT=1` runs the soft-skipped tests too (feature/path/pattern
+    // `KETTEVM_AUDIT=1` runs the soft-skipped tests too (feature/path/pattern
     // frontmatter): used to spot skips the VM no longer needs. The hard
     // resource skips and KNOWN_PANICS still apply.
     let hard = HARD_SKIP_PATHS.iter().any(|p| path_str.contains(p));
@@ -488,12 +488,12 @@ fn main() {
 
 fn real_main() -> i32 {
     // caught panics are counted per test; don't spam stderr for each
-    // (OVM_PANIC_MSG=1 keeps the default hook to debug a specific test)
-    if std::env::var_os("OVM_PANIC_MSG").is_none() {
+    // (KETTEVM_PANIC_MSG=1 keeps the default hook to debug a specific test)
+    if std::env::var_os("KETTEVM_PANIC_MSG").is_none() {
         std::panic::set_hook(Box::new(|_| {}));
     }
-    let progress = std::env::var_os("OVM_PROGRESS").is_some();
-    let audit = std::env::var_os("OVM_AUDIT").is_some();
+    let progress = std::env::var_os("KETTEVM_PROGRESS").is_some();
+    let audit = std::env::var_os("KETTEVM_AUDIT").is_some();
     let args: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
     if args.is_empty() {
         eprintln!("usage: test262 <harness...> <test-file-or-dir>...");
@@ -521,7 +521,7 @@ fn real_main() -> i32 {
 
     // shard the sorted file list across workers; every test spins a fresh
     // VM anyway (realm isolation), so workers are independent
-    let jobs = std::env::var("OVM_JOBS")
+    let jobs = std::env::var("KETTEVM_JOBS")
         .ok()
         .and_then(|j| j.parse().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));

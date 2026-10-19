@@ -1,5 +1,5 @@
 /*
- * OVM-runnable subset of microbench.js.
+ * KetteVM-runnable subset of microbench.js.
  *
  * Generated from microbench.js by removing only the constructs our
  * codegen cannot lower yet:

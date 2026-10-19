@@ -596,7 +596,7 @@ pub fn proxy_apply_regs_slow<'a>(
     result
 }
 
-/// Exception dispatch: walk the ovm frames from the faulting one, consulting
+/// Exception dispatch: walk the kettevm frames from the faulting one, consulting
 /// each frame's static handler table for a try range covering
 /// `fault_pc`; on a hit, take the pending exception and tail-dispatch
 /// into the handler with it in the accumulator. Pops frames until the

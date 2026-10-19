@@ -1,4 +1,7 @@
-# ovm
+# KetteVM
+
+A fast virtual machine for dynamic languages.
+
 Default build
 
     cargo build --release -p vm
@@ -9,7 +12,7 @@ Fast build (nightly toolchain):
 
 Run:
 
-    target/release/ovm script.js
+    target/release/kettevm script.js
 
 Example Run (Deltablue):
 

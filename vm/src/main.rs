@@ -57,7 +57,7 @@ fn run_js_group(thread: &mut Thread, paths: &[String]) {
         match std::fs::read_to_string(path) {
             Ok(src) => parts.push(src),
             Err(e) => {
-                eprintln!("ovm: cannot read {path}: {e}");
+                eprintln!("kettevm: cannot read {path}: {e}");
                 std::process::exit(1);
             }
         }
@@ -85,7 +85,7 @@ fn run_file(thread: &mut Thread, path: &str) {
     let src = match std::fs::read_to_string(path) {
         Ok(src) => src,
         Err(e) => {
-            eprintln!("ovm: cannot read {path}: {e}");
+            eprintln!("kettevm: cannot read {path}: {e}");
             std::process::exit(1);
         }
     };
@@ -98,7 +98,7 @@ fn run_file(thread: &mut Thread, path: &str) {
         Some("js") => run_with::<JavascriptCompiler>(thread, &src, path),
         Some("ktt") => run_with::<KetteCompiler>(thread, &src, path),
         _ => {
-            eprintln!("ovm: cannot tell the language of {path} (expected .js or .ktt)");
+            eprintln!("kettevm: cannot tell the language of {path} (expected .js or .ktt)");
             std::process::exit(1);
         }
     }
@@ -132,7 +132,7 @@ fn repl(thread: &mut Thread) {
             Ok(0) => break, // EOF
             Ok(_) => {}
             Err(e) => {
-                eprintln!("ovm: read error: {e}");
+                eprintln!("kettevm: read error: {e}");
                 break;
             }
         }

@@ -5,7 +5,7 @@ pub use interpreter_match_loop::{Interpreter, MatchLoopInterpreter};
 #[cfg(feature = "fast")]
 pub use interpreter_become::BecomeInterpreter;
 
-/// The interpreter the `ovm` binary runs on. Enabling the `fast` feature
+/// The interpreter the `kettevm` binary runs on. Enabling the `fast` feature
 /// (nightly-only) picks the tail-call interpreter; otherwise the portable
 /// match-loop interpreter is used.
 #[cfg(feature = "fast")]

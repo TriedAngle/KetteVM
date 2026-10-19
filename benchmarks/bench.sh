@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wall-time benchmark harness for the OVM interpreters and QuickJS.
+# Wall-time benchmark harness for the KetteVM interpreters and QuickJS.
 #
 #   benchmarks/bench.sh <match-binary> <become-binary> [quickjs-binary] [node-binary]
 #
@@ -16,7 +16,7 @@
 # - deltablue: Octane is time-boxed (~2s: 1s warmup + 1s measured) and
 #   reports a normalized score (iterations/ms), so wall time is
 #   meaningless and no amplification is needed: the score IS the metric.
-#   Median score of RUNS measurements. The ovm binaries take the three
+#   Median score of RUNS measurements. The kettevm binaries take the three
 #   files as arguments (they join them into one script); QuickJS takes
 #   them as `-I` includes plus the runner as the main file.
 #

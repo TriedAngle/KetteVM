@@ -1,6 +1,6 @@
 // Minimal CLI runner for the vendored Octane suites: feed this file after
 // base.js and the benchmark files, e.g.
-//   ovm benchmarks/octane/base.js benchmarks/octane/deltablue/deltablue.js \
+//   kettevm benchmarks/octane/base.js benchmarks/octane/deltablue/deltablue.js \
 //      benchmarks/octane/run.js
 
 var runner = {
