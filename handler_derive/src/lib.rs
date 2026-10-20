@@ -35,8 +35,8 @@
 //!
 //! the full dispatch ABI and stride without an opcode: hand-written
 //! attributes (`#[cold]`, `#[rustc_align(32)]`, ...) pass through.
-//! Trampolines may dispatch (`dispatch!`, `jump!`, `throw!`,
-//! `backedge!`, `dispatch_frame!`) and decode operands, but not use
+//! Trampolines may dispatch (`dispatch!`, `dispatch_frame!`) and
+//! decode operands, but not use
 //! the size-computing exits (`next!`, `reenter!` need
 //! the opcode).
 //!
@@ -52,18 +52,18 @@
 //!
 //! - `frame.method(..)` — the closed set of reads and writes over the
 //!   generated parameters (see the `macro_rules!` shims and the arms
-//!   of `expand_method`): `ip`, `regs`, `acc`, `acc_raw`, `float`,
+//!   of `expand_method`): `ip`, `regs`, `acc`, `float`,
 //!   `pc`, `ctx`, `signed::<I>()`, `unsigned::<I>()`,
 //!   `opcode_check()`, and the writes `set_acc*` / `set_float`
 //!   (dispatch handlers only). Everything else on `Ctx` goes through
 //!   `frame.ctx().heap()` and friends — an explicit hop, since
 //!   `frame.ctx()` is the `ctx` parameter itself.
-//! - `next!()` / `dispatch!(p)` / `jump!(off)` / `slow!(path)` /
-//!   `reenter!(pc)` / `throw!()` / `backedge!(target)` /
-//!   `dispatch_frame!(pc)` — control transfers that never return. The
+//! - `next!()` / `dispatch!(p)` / `slow!(path)` / `reenter!(pc)` /
+//!   `dispatch_frame!(pc)` — control transfers that
+//!   never return. The
 //!   rewrite turns the short form into a call of the module-level
 //!   `macro_rules!` (`dispatch!`, `next!`, `reenter!`, `slow!`,
-//!   `throw!`, `backedge!`, `dispatch_frame!`) defined by the consumer
+//!   `dispatch_frame!`) defined by the consumer
 //!   next to the handlers, filling in the opcode and the parameters:
 //!   `next!()` becomes `next!(Add, ip, regs, ctx, table, roots, float,
 //!   acc)`. The macro bodies (including their `star_fusion` cfg
@@ -100,17 +100,11 @@ use syn::Token;
 const EXITS: &[&str] = &[
     "next",
     "dispatch",
-    "jump",
-    "throw",
     "tail",
     "reenter",
-    "backedge",
     "dispatch_frame",
+    "call_enter",
 ];
-
-/// Removed exit names, matched only to produce a helpful error.
-const DEAD_EXITS: &[(&str, &str)] =
-    &[("throw_dispatch", "throw"), ("next_slow", "tail"), ("slow", "tail")];
 
 /// `handler_table!(op_load, op_store, ..)` — semi-automatic dispatch
 /// table generation. Each listed handler fn is registered, at both
@@ -381,14 +375,6 @@ impl Rewriter {
                 let p = one_arg(name, args)?;
                 Ok(quote!(#name!(#p, acc, regs, ctx, table, roots, float)))
             }
-            "jump" => {
-                let off = one_arg(name, args)?;
-                Ok(quote!(#name!(ip, #off, acc, regs, ctx, table, roots, float)))
-            }
-            "throw" => {
-                no_args(name, &args)?;
-                Ok(quote!(#name!(ip, regs, acc, ctx, table, roots, float)))
-            }
             "tail" => {
                 let path = one_arg(name, args)?;
                 reject_turbofish(name, &path)?;
@@ -399,22 +385,30 @@ impl Rewriter {
                 let op = op.unwrap();
                 Ok(quote!(#name!(#op, #pc, regs, acc, ctx, table, roots, float)))
             }
-            "backedge" => {
-                let target = one_arg(name, args)?;
-                Ok(quote!(#name!(ip, #target, regs, acc, ctx, table, roots, float)))
-            }
             "dispatch_frame" => {
                 let pc = one_arg(name, args)?;
                 Ok(quote!(#name!(#pc, acc, ctx, table, roots, float)))
             }
-            _ if DEAD_EXITS.iter().any(|(old, _)| *old == name.to_string().as_str()) => {
-                let (old, new) = DEAD_EXITS
-                    .iter()
-                    .find(|(old, _)| *old == name.to_string().as_str())
-                    .unwrap();
-                Err(syn::Error::new(
-                    name.span(),
-                    format!("`{old}!` was renamed to `{new}!`"),
+            "call_enter" => {
+                if self.op.is_none() {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        "`call_enter!` advances past the instruction, which needs the opcode: \
+                         use #[handler(Opcode)]",
+                    ));
+                }
+                let op = self.op.as_ref().unwrap();
+                let (result, pc) = match split_args(args).as_slice() {
+                    [r, p] if !r.is_empty() && !p.is_empty() => (r.clone(), p.clone()),
+                    _ => {
+                        return Err(syn::Error::new(
+                            name.span(),
+                            "`call_enter(result, pc)` takes exactly two arguments",
+                        ))
+                    }
+                };
+                Ok(quote!(
+                    #name!(#op, #result, #pc, regs, acc, ctx, table, roots, float)
                 ))
             }
             _ => unreachable!("match_exit only yields known exit names"),
@@ -438,10 +432,10 @@ impl Rewriter {
             "ip" => no_args(method, &args).map(|_| quote!(#method!(ip))),
             "regs" => no_args(method, &args).map(|_| quote!(#method!(regs))),
             "acc" => no_args(method, &args).map(|_| quote!(#method!(acc, ctx))),
-            "acc_raw" => no_args(method, &args).map(|_| quote!(#method!(acc))),
             "float" => no_args(method, &args).map(|_| quote!(#method!(float))),
             "pc" => no_args(method, &args).map(|_| quote!(#method!(ip, ctx))),
             "ctx" => no_args(method, &args).map(|_| quote!(ctx)),
+            "ctx_ref" => no_args(method, &args).map(|_| quote!(&*ctx)),
 
             // dispatch-mode only
             "opcode_check" => {
@@ -477,8 +471,8 @@ impl Rewriter {
                 }
             }
 
-            "next" | "dispatch" | "jump" | "throw" | "tail" | "reenter"
-            | "backedge" | "dispatch_frame" => Err(syn::Error::new(
+            "next" | "dispatch" | "tail" | "reenter"
+            | "dispatch_frame" => Err(syn::Error::new(
                 method.span(),
                 format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
             )),
@@ -557,8 +551,7 @@ fn is_punct(tt: Option<&TokenTree>, c: char) -> bool {
 /// map back onto the written one), the arguments, and the next index.
 fn match_exit(tts: &[TokenTree], i: usize) -> Option<(Ident, Span, TokenStream2, Span, usize)> {
     let TokenTree::Ident(name) = &tts[i] else { return None };
-    let name_str = name.to_string();
-    if !EXITS.contains(&name_str.as_str()) && !DEAD_EXITS.iter().any(|(old, _)| *old == name_str) {
+    if !EXITS.contains(&name.to_string().as_str()) {
         return None;
     }
     if is_punct(tts.get(i.wrapping_sub(1)), '.') || is_punct(tts.get(i.wrapping_sub(1)), ':') {

@@ -3,7 +3,7 @@ use interpreter_become::NewInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, FixedArray, FixedByteArray, Handle, HandleScope, Heap,
-    Object, ObjectSlotsInit, Smi, Tagged, Thread, Value, VM, new_feedback_vector,
+    Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, new_feedback_vector,
 };
 
 /// The new `#[handler]`-based interpreter plugs into `VM::new` like
@@ -35,9 +35,7 @@ fn callable<'s>(
     let constants = {
         let empty: &[Tagged<'_, Value>] = &[];
         let staged = scope.stage(empty);
-        thread
-            .heap()
-            .allocate_handle::<FixedArray>(staged, scope)
+        thread.heap().allocate_handle::<FixedArray>(staged, scope)
     };
     let info = thread.heap().allocate_handle::<CallableInfoObject>(
         CallableInfoInit {

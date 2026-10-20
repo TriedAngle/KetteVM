@@ -419,6 +419,30 @@ impl Stack {
         )
     }
 
+    /// Push a frame whose parameters come as a value slice, stored
+    /// directly into the parameter slots.
+    #[inline(always)]
+    pub fn push_frame_values(
+        &self,
+        heap: &Heap,
+        caller: FrameMeta,
+        callee: Callee<'_>,
+        new_target: Tagged<'_, Value>,
+        values: &[Tagged<'_, Value>],
+    ) -> Result<FrameMeta, VmError> {
+        let count = values.len();
+        self.push_frame_with(
+            heap,
+            caller,
+            callee,
+            new_target,
+            count,
+            |stack, anchor, _| {
+                stack.write_params(anchor, values);
+            },
+        )
+    }
+
     /// Push a callee frame from scattered call-site registers: the
     /// parameters are written straight from the caller's operands.
     #[inline(always)]
