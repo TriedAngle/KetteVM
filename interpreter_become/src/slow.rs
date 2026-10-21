@@ -335,16 +335,6 @@ slow_handler!(slow_create_empty_object, |ip, ops, regs, acc, ctx, float| {
     obj
 });
 
-slow_handler!(slow_create_bare_object, |ip, ops, regs, acc, ctx, float| {
-    let heap = unsafe { ctx.heap_mut() };
-    let state = ctx.state();
-    let obj = state.handle_scope(|scope| {
-        let map = heap.known().plain_object_map;
-        heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
-    });
-    obj
-});
-
 slow_handler!(slow_create_block_context, |ip, ops, regs, acc, ctx, float| {
     let count = ops.unsigned::<0>();
     slow_try!(ctx, create_block_context_slow(ctx, count))

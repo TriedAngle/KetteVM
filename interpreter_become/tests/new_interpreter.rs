@@ -297,6 +297,47 @@ fn move_and_load_zero_handlers() {
     assert_eq!(run(&p, 3, &[smi(0)]), smi(42));
 }
 
+/// Size the elements store up front, write index 2 through the no-shadow
+/// store (lands in the headroom), and read it back.
+#[test]
+fn sized_array_literal_handler() {
+    let mut p = Vec::new();
+    emit(&mut p, Opcode::CreateSizedArrayLiteral, &[4]);
+    emit(&mut p, Opcode::Store, &[1]);
+    emit(&mut p, Opcode::LoadSmi, &[2]);
+    emit(&mut p, Opcode::Store, &[2]);
+    emit(&mut p, Opcode::LoadSmi, &[42]);
+    emit(&mut p, Opcode::StoreKeyedPropertyNoShadow, &[1, 2, 0]);
+    emit(&mut p, Opcode::LoadElementImm, &[1, 2, 0]);
+    emit(&mut p, Opcode::Return, &[]);
+    assert_eq!(run(&p, 3, &[smi(0)]), smi(42));
+}
+
+/// The bump paths decline under GC stress, so the same program exercises
+/// the collecting fallback.
+#[test]
+fn literals_under_gc_stress() {
+    let mut obj = Vec::new();
+    emit(&mut obj, Opcode::CreateEmptyObjectLiteral, &[]);
+    emit(&mut obj, Opcode::Return, &[]);
+
+    let mut arr = Vec::new();
+    emit(&mut arr, Opcode::CreateSizedArrayLiteral, &[8]);
+    emit(&mut arr, Opcode::Return, &[]);
+
+    for p in [&obj, &arr] {
+        let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+        vm.arm_gc_stress();
+        let mut thread = vm.attach();
+        let result = thread.handle_scope(|thread, scope| {
+            let f = callable(thread, &scope, p, 1, 0);
+            thread.execute(f, &[smi(0)])
+        });
+        assert!(!thread.has_pending_exception());
+        assert!(result.expect("literal must not throw").is_ptr());
+    }
+}
+
 /// `LoadNull` yields a falsy value: the branch skips the `LoadSmi 1`.
 #[test]
 fn load_null_handler() {
@@ -364,6 +405,153 @@ fn bitwise_slow_paths() {
     case(Opcode::ShiftLeft, 2, smi(10 << 2));
     case(Opcode::ShiftRight, 2, smi(10 >> 2));
     case(Opcode::ShiftRightLogical, 2, smi(10 >> 2));
+}
+
+/// Run a program and decode a true/false result against the well-known
+/// singleton objects.
+fn run_boolean(program: &[u8], register_count: usize, args: &[Value]) -> bool {
+    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let mut thread = vm.attach();
+    let result = thread
+        .handle_scope(|thread, scope| {
+            let f = callable(thread, &scope, program, register_count, 0);
+            thread.execute(f, args)
+        })
+        .expect("program must not throw");
+    let heap = thread.heap();
+    let t = heap.known().true_object.as_tagged(heap).erase();
+    let f = heap.known().false_object.as_tagged(heap).erase();
+    if result == t.raw() {
+        true
+    } else if result == f.raw() {
+        false
+    } else {
+        panic!("result is not a boolean");
+    }
+}
+
+/// The ordering comparisons (Smi fast path) and the two equality ops.
+#[test]
+fn comparison_handlers() {
+    for (op, a, b, expected) in [
+        (Opcode::LessThan, 2, 3, true),
+        (Opcode::LessThan, 3, 2, false),
+        (Opcode::GreaterThan, 3, 2, true),
+        (Opcode::GreaterThan, 2, 3, false),
+        (Opcode::LessThanOrEqual, 2, 2, true),
+        (Opcode::LessThanOrEqual, 3, 2, false),
+        (Opcode::GreaterThanOrEqual, 2, 2, true),
+        (Opcode::GreaterThanOrEqual, 2, 3, false),
+        (Opcode::EqualStrict, 2, 2, true),
+        (Opcode::EqualStrict, 2, 3, false),
+    ] {
+        // acc = a (Load 1), other = b (r2)
+        let mut p = Vec::new();
+        emit(&mut p, Opcode::Load, &[1]);
+        emit(&mut p, op, &[2]);
+        emit(&mut p, Opcode::Return, &[]);
+        assert_eq!(run_boolean(&p, 3, &[smi(0), smi(a), smi(b)]), expected, "{op:?}");
+    }
+}
+
+/// `TestReferenceEqual` against the same and a different Smi.
+#[test]
+fn test_reference_equal_handler() {
+    for (b, expected) in [(2, true), (3, false)] {
+        let mut p = Vec::new();
+        emit(&mut p, Opcode::Load, &[1]);
+        emit(&mut p, Opcode::TestReferenceEqual, &[2]);
+        emit(&mut p, Opcode::Return, &[]);
+        assert_eq!(run_boolean(&p, 3, &[smi(0), smi(2), smi(b)]), expected);
+    }
+}
+
+/// The literal/context allocations produce heap objects.
+#[test]
+fn literal_handlers() {
+    for (op, operands) in [
+        (Opcode::CreateEmptyObjectLiteral, &[][..]),
+        (Opcode::CreateSizedArrayLiteral, &[4][..]),
+        (Opcode::CreateBlockContext, &[2][..]),
+    ] {
+        let mut p = Vec::new();
+        emit(&mut p, op, operands);
+        emit(&mut p, Opcode::Return, &[]);
+        assert!(run(&p, 1, &[smi(0)]).is_ptr(), "{op:?}");
+    }
+}
+
+/// `Construct`: a primitive result falls back to the synthesized `this`;
+/// an object result is returned as-is.
+#[test]
+fn construct_handler() {
+    fn run_construct(body: &[u8]) -> Value {
+        let mut outer = Vec::new();
+        emit(&mut outer, Opcode::Construct, &[0, 1, 0]);
+        emit(&mut outer, Opcode::Return, &[]);
+
+        let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+        let mut thread = vm.attach();
+        let result = thread.handle_scope(|thread, scope| {
+            let inner = callable(thread, &scope, body, 1, 0);
+            let outer = callable(thread, &scope, &outer, 2, 0);
+            let inner_word = inner.as_tagged(&*thread.heap()).raw();
+            thread.execute(outer, &[inner_word, smi(0)])
+        });
+        assert!(!thread.has_pending_exception(), "construct threw");
+        result.expect("construct must not throw")
+    }
+
+    // primitive return: the synthesized receiver is the result
+    let mut primitive = Vec::new();
+    emit(&mut primitive, Opcode::LoadSmi, &[5]);
+    emit(&mut primitive, Opcode::Return, &[]);
+    let this = run_construct(&primitive);
+    assert!(this.is_ptr(), "primitive result must be replaced by `this`");
+    assert_ne!(this, smi(5));
+
+    // object return: the object is the result
+    let mut object = Vec::new();
+    emit(&mut object, Opcode::CreateEmptyObjectLiteral, &[]);
+    emit(&mut object, Opcode::Return, &[]);
+    assert!(run_construct(&object).is_ptr());
+}
+
+/// `StoreKeyedPropertyNoShadow` writes through the same element store as
+/// the Shadow variant (the only difference is the lookup semantics).
+#[test]
+fn keyed_store_no_shadow_handler() {
+    let mut p = Vec::new();
+    emit(&mut p, Opcode::CreateEmptyArrayLiteral, &[]);
+    emit(&mut p, Opcode::Store, &[1]);
+    emit(&mut p, Opcode::LoadSmi, &[0]);
+    emit(&mut p, Opcode::Store, &[2]);
+    emit(&mut p, Opcode::LoadSmi, &[42]);
+    emit(&mut p, Opcode::StoreKeyedPropertyNoShadow, &[1, 2, 0]);
+    emit(&mut p, Opcode::LoadElementImm, &[1, 0, 0]);
+    emit(&mut p, Opcode::Return, &[]);
+    assert_eq!(run(&p, 3, &[smi(0)]), smi(42));
+}
+
+/// `ReThrow` sets the accumulator as the pending exception and unwinds.
+#[test]
+fn rethrow_handler() {
+    let mut p = Vec::new();
+    emit(&mut p, Opcode::LoadSmi, &[7]);
+    emit(&mut p, Opcode::ReThrow, &[]);
+
+    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let mut thread = vm.attach();
+    let result = thread.handle_scope(|thread, scope| {
+        let f = callable(thread, &scope, &p, 1, 0);
+        thread.execute(f, &[smi(0)])
+    });
+    let exception = {
+        let heap = thread.heap();
+        heap.known().exception.as_tagged(heap).raw()
+    };
+    assert_eq!(result, Ok(exception));
+    assert!(thread.has_pending_exception(), "the rethrow must surface");
 }
 
 /// A non-callable callee raises through the miss path and unwinds out.

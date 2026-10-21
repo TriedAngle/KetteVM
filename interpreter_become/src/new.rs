@@ -6,10 +6,10 @@ use handler_derive::{handler, handler_table};
 use bytecode::Opcode;
 use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
-    Args, CallTarget, CallableInfoObject, Callee, ContextInit, ContextObject, Convert, EntryFn,
-    FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter,
-    NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value, VmError, Word,
-    interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    Args, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert,
+    EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
+    Interpreter, NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value,
+    VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
 
 use crate::new_macros::*;
@@ -445,6 +445,11 @@ fn op_load_global(frame: Frame) {
     tail!(slow_global_load)
 }
 
+#[handler(LoadGlobalNoThrow)]
+fn op_load_global_no_throw(frame: Frame) {
+    tail!(slow_global_load_nothrow)
+}
+
 #[handler(LoadNamedProperty)]
 fn op_load_named_property(frame: Frame) {
     let heap = frame.ctx().heap();
@@ -616,6 +621,56 @@ fn op_store_keyed_property(frame: Frame) {
         }
     }
     tail!(slow_keyed_store)
+}
+
+#[handler(StoreKeyedPropertyNoShadow)]
+fn op_store_keyed_property_no_shadow(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let key = frame.regs().get(frame.signed::<1>(), heap);
+    let fb = frame.unsigned::<2>();
+    if let Some(idx) = key.to_i64()
+        && idx >= 0
+    {
+        if recv
+            .store_array_element_in_place(heap, idx as usize, frame.acc())
+            .is_ok()
+        {
+            next!()
+        }
+        if let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            idx as usize,
+            frame.acc(),
+        ) {
+            frame.set_acc(v);
+            next!()
+        }
+    }
+    tail!(slow_keyed_store_no_shadow)
+}
+
+#[handler(StoreNamedPropertyNoShadow)]
+fn op_store_named_property_no_shadow(frame: Frame) {
+    tail!(slow_store_named_no_shadow)
+}
+
+#[handler(StoreNamedPropertyNoShadowFast)]
+fn op_store_named_property_no_shadow_fast(frame: Frame) {
+    tail!(slow_store_named_no_shadow_fast)
+}
+
+#[handler(StoreGlobal)]
+fn op_store_global(frame: Frame) {
+    tail!(slow_store_global)
+}
+
+#[handler(AddParent)]
+fn op_add_parent(frame: Frame) {
+    tail!(slow_add_parent)
 }
 
 // --- arithmetic ---
@@ -1087,6 +1142,79 @@ fn op_equal(frame: Frame) {
     tail!(slow_equal)
 }
 
+#[handler(LessThan)]
+fn op_less_than(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (frame.acc().smi_bits(), other.smi_bits()) {
+        frame.set_acc(Convert::boolean(heap, a < b));
+        next!()
+    }
+    tail!(slow_less_than)
+}
+
+#[handler(GreaterThan)]
+fn op_greater_than(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (frame.acc().smi_bits(), other.smi_bits()) {
+        frame.set_acc(Convert::boolean(heap, a > b));
+        next!()
+    }
+    tail!(slow_greater_than)
+}
+
+#[handler(LessThanOrEqual)]
+fn op_less_than_or_equal(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (frame.acc().smi_bits(), other.smi_bits()) {
+        frame.set_acc(Convert::boolean(heap, a <= b));
+        next!()
+    }
+    tail!(slow_less_than_or_equal)
+}
+
+#[handler(GreaterThanOrEqual)]
+fn op_greater_than_or_equal(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (frame.acc().smi_bits(), other.smi_bits()) {
+        frame.set_acc(Convert::boolean(heap, a >= b));
+        next!()
+    }
+    tail!(slow_greater_than_or_equal)
+}
+
+#[handler(EqualStrict)]
+fn op_equal_strict(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    frame.set_acc(Convert::boolean(heap, Compare::strict_equal(heap, frame.acc(), other)));
+    next!()
+}
+
+#[handler(TestReferenceEqual)]
+fn op_test_reference_equal(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let other = frame.regs().get(frame.signed::<0>(), heap);
+    frame.set_acc(Convert::boolean(heap, other == frame.acc()));
+    next!()
+}
+
+#[handler(TestTypeof)]
+fn op_test_typeof(frame: Frame) {
+    let heap = frame.ctx().heap();
+    frame.set_acc(Object::type_of(heap, frame.acc()));
+    next!()
+}
+
+#[handler(InstanceOf)]
+fn op_instance_of(frame: Frame) {
+    let _ = frame.signed::<0>();
+    tail!(slow_instance_of)
+}
+
 #[handler(CompareJump)]
 fn op_compare_jump(frame: Frame) -> Acc {
     let heap = frame.ctx().heap();
@@ -1498,6 +1626,48 @@ fn op_create_empty_array_literal(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
+#[handler(CreateSizedArrayLiteral)]
+fn op_create_sized_array_literal(frame: Frame) {
+    let capacity = frame.unsigned::<0>();
+    if let Some(v) = frame.ctx().heap_mut().try_new_array_with_capacity(capacity) {
+        frame.set_acc(v.erase());
+        next!()
+    }
+    let pc = frame.pc();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        frame
+            .ctx()
+            .heap_mut()
+            .new_array_with_capacity(&scope, capacity)
+            .erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(CreateEmptyObjectLiteral)]
+fn op_create_empty_object_literal(frame: Frame) {
+    if let Some(v) = frame.ctx().heap_mut().try_new_empty_object() {
+        frame.set_acc(v.erase());
+        next!()
+    }
+    let pc = frame.pc();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let heap = frame.ctx().heap_mut();
+        let map = roots.known(heap).object_initial_map;
+        heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(CreateBlockContext)]
+fn op_create_block_context(frame: Frame) {
+    tail!(slow_create_block_context)
+}
+
 // --- contexts ---
 
 #[handler(LoadContextSlot)]
@@ -1704,6 +1874,17 @@ fn op_throw(frame: Frame) -> Acc {
     tail!(throw_dispatch)
 }
 
+#[handler(ReThrow)]
+fn op_re_throw(frame: Frame) -> Acc {
+    frame.ctx().state().set_pending_exception(frame.acc());
+    tail!(throw_dispatch)
+}
+
+#[handler(Construct)]
+fn op_construct(frame: Frame) {
+    tail!(slow_construct)
+}
+
 #[handler(ThrowReferenceErrorIfHole)]
 fn op_throw_reference_error_if_hole(frame: Frame) -> Acc {
     let heap = frame.ctx().heap();
@@ -1770,6 +1951,14 @@ handler_table!(
     op_shift_right_immediate,
     op_shift_right_logical_immediate,
     op_equal,
+    op_less_than,
+    op_greater_than,
+    op_less_than_or_equal,
+    op_greater_than_or_equal,
+    op_equal_strict,
+    op_test_reference_equal,
+    op_test_typeof,
+    op_instance_of,
     op_compare_jump,
     op_inc_loc,
     op_dec_loc,
@@ -1781,17 +1970,29 @@ handler_table!(
     op_create_closure,
     op_throw,
     op_store_named_property,
+    op_store_named_property_no_shadow,
+    op_store_named_property_no_shadow_fast,
+    op_store_keyed_property_no_shadow,
+    op_store_global,
+    op_add_parent,
     op_load_context_slot,
     op_store_context_slot,
     op_push_context,
     op_pop_context,
     op_create_function_context,
     op_create_empty_array_literal,
+    op_create_sized_array_literal,
+    op_construct,
+    op_create_empty_object_literal,
+    op_create_block_context,
     op_load_hole,
     op_load_new_target,
     op_load_context,
     op_load_current_closure,
     op_throw_reference_error_if_hole,
+    op_throw,
+    op_re_throw,
+    op_load_global_no_throw,
 );
 
 // --- entry ---

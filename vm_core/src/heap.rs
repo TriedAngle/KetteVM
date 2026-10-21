@@ -722,14 +722,17 @@ impl Heap {
         let raw = self
             .allocate_raw(FixedArray::<Value>::layout_for(len))
             .expect("heap allocation failed (out of memory)");
+        self.init_hole_array_raw(raw, len)
+    }
+
+    /// Initialize freshly reserved `FixedArray` storage as `len` holes.
+    fn init_hole_array_raw<'a>(&'a self, raw: NonNull<u8>, len: usize) -> Tagged<'a, FixedArray> {
         // Resolve the fill after the reservation: a TLAB refill above can
         // run a minor collection (the hole is not immortal), and no GC can
-        // run between this read and the slot writes below. Resolving earlier
-        // left a stale hole word in the fresh array.
+        // run between this read and the slot writes below.
         let fill = self.known().the_hole.as_tagged(self).raw();
         let mut ptr = raw.cast::<FixedArray>();
-        // Safety: raw memory just reserved; no GC can run inside init
-        // (the &mut borrow is still outstanding).
+        // Safety: raw memory just reserved; no GC can run inside init.
         let obj = unsafe { ptr.as_mut() };
         let host = obj.tagged(self);
         obj.header.map.init(self.known().array_map.as_tagged(self));
@@ -886,6 +889,66 @@ impl Heap {
         // Safety: raw memory just reserved; no GC can run here.
         unsafe { ptr.as_mut() }.init(self, &init);
         // Safety: fresh strong pointer, anchored at this borrow.
+        Some(unsafe { Tagged::from_raw_ptr(ptr) })
+    }
+
+    /// Bump-only `{}` literal: `object_initial_map`, empty slots and
+    /// elements, `length` 0. Never parks, collects or refills — `None`
+    /// when the window is exhausted, leaving the caller free to take the
+    /// general allocation path after snapshotting its pc.
+    #[inline]
+    pub fn try_new_empty_object<'a>(&'a mut self) -> Option<Tagged<'a, Object>> {
+        #[cfg(feature = "stress-minor-gc")]
+        if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let init = ObjectInit {
+            map: self.known().object_initial_map,
+            slots: self.known().empty_fixed_array,
+            elements: self.known().empty_fixed_array,
+            length: 0,
+        };
+        let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
+        let raw = self.tlab.try_alloc(size)?;
+        let mut ptr = raw.cast::<Object>();
+        // Safety: raw memory just reserved; no GC can run here.
+        unsafe { ptr.as_mut() }.init(self, &init);
+        // Safety: fresh strong pointer, anchored at this borrow.
+        Some(unsafe { Tagged::from_raw_ptr(ptr) })
+    }
+
+    /// Bump-only sized array literal: a hole-filled elements store of
+    /// `capacity` plus the array object, both from the current TLAB.
+    /// Never parks, collects or refills.
+    #[inline]
+    pub fn try_new_array_with_capacity<'a>(
+        &'a mut self,
+        capacity: usize,
+    ) -> Option<Tagged<'a, Object>> {
+        #[cfg(feature = "stress-minor-gc")]
+        if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let elems_size = FixedArray::<Value>::layout_for(capacity)
+            .size()
+            .next_multiple_of(Tlab::ALIGN);
+        let obj_size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
+        let elems_raw = self.tlab.try_alloc(elems_size)?;
+        let Some(obj_raw) = self.tlab.try_alloc(obj_size) else {
+            // The elements reservation is orphaned until the next minor
+            // GC; the caller takes the general path.
+            return None;
+        };
+        let elements = self.init_hole_array_raw(elems_raw, capacity);
+        let mut ptr = obj_raw.cast::<Object>();
+        // Safety: raw memory just reserved; no GC can run here.
+        unsafe { ptr.as_mut() }.init_raw(
+            self,
+            self.known().js_array_map.as_tagged(self),
+            self.known().empty_fixed_array.as_tagged(self),
+            elements,
+            0,
+        );
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
 

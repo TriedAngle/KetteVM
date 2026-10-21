@@ -2,17 +2,15 @@ use bytecode::{Opcode, Operands, decode, jump_target};
 use vm_core::proxy::Proxy;
 
 use vm_core::cold::{
-    add, apply_store_outcome, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm,
-    keyed_store, named_load, numeric, store_global, store_named, store_named_no_shadow,
+    add, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm, keyed_store,
+    named_load, numeric, store_global, store_named, store_named_no_shadow,
 };
-use vm_core::ic::StoreOutcomeKind;
-use vm_core::ic::{CallProbe, CallRecord, ElementHit, Hit, InlineCache, MonoProbe, StoreHit};
+use vm_core::ic::{CallProbe, CallRecord, ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::interpreter::{Ctx, Unwind, unwind};
 use vm_core::{
     CallTarget, CallableInfoObject, Callee, Coercion, Compare, ContextInit, ContextObject, Convert,
-    FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, Key, LoadOutcome, Lookup,
-    NativeIndex, Object, Recv, Register, ScopeInfo, SlotName, Smi, StoreSemantics, Tagged,
-    Termination, ThreadState, VM, Value, VmError,
+    FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, NativeIndex, Object, Recv, Register,
+    ScopeInfo, Smi, StoreSemantics, Tagged, Termination, ThreadState, VM, Value, VmError,
 };
 
 /// The per-instruction control flow of the dispatch loop (the error
@@ -304,7 +302,7 @@ fn step<'a>(
             acc.store(heap.known().the_hole.as_tagged(heap).erase());
             Flow::Next
         }
-        Opcode::LoadGlobal | Opcode::LoadGlobalFast => {
+        Opcode::LoadGlobal => {
             let global = heap.known().global_object.as_tagged(heap).erase();
             if let Some(Hit::Value(v)) =
                 InlineCache::try_load(heap, ctx.feedback_ref(heap), ops.idx(1), global)
@@ -334,7 +332,7 @@ fn step<'a>(
             acc.store(v);
             Flow::Sync
         }
-        Opcode::LoadNamedProperty | Opcode::LoadNamedPropertyFast => {
+        Opcode::LoadNamedProperty => {
             let receiver = stack.reg(heap, frame_base, ops.reg(0));
             // the become interpreter's three-tier probe: inline value hit,
             // out-of-line monomorphic handler, polymorphic resume
@@ -551,259 +549,28 @@ fn step<'a>(
             acc.store(v);
             Flow::Sync
         }
-        Opcode::StoreKeyedSlot => {
-            let recv_reg = ops.reg(0);
-            let key_reg = ops.reg(1);
-            state.handle_scope(|scope| -> Flow {
-                let receiver = scope.handle(stack.reg(heap, frame_base, recv_reg));
-                let raw = scope.handle(stack.reg(heap, frame_base, key_reg));
-                let Some(key) = fold!(ctx, Object::to_property_key(vm, heap, state, raw)) else {
-                    return Flow::Threw;
-                };
-                let key = scope.handle(key);
-
-                if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
-                    return match fold!(
-                        ctx,
-                        Proxy::set(
-                            vm,
-                            heap,
-                            state,
-                            receiver,
-                            key.erase(),
-                            scope.handle(acc.get(heap)),
-                            receiver,
-                        )
-                    ) {
-                        Coercion::Threw => Flow::Threw,
-                        Coercion::Value(_) => Flow::Sync,
-                    };
-                }
-
-                let name: Handle<'_, SlotName> =
-                    match fold!(ctx, key.as_tagged(heap).erase().classify_key(heap)) {
-                        Key::Element(i) => {
-                            let Some(obj) = scope.cast::<Object>(heap, receiver.as_tagged(heap))
-                            else {
-                                throw_err!(ctx, VmError::Type);
-                            };
-                            if obj.as_tagged(heap).is_array(heap) {
-                                let value = scope.handle(acc.get(heap));
-                                fold!(
-                                    ctx,
-                                    obj.as_tagged(heap).erase().store_array_element_in_place(
-                                        heap,
-                                        i,
-                                        value.as_tagged(heap)
-                                    )
-                                );
-                                return Flow::Next;
-                            }
-                            let smi: Handle<'_, Smi> = scope.handle(Smi::new(i as i64));
-                            let name = smi.as_tagged(heap).erase().as_name();
-                            if matches!(
-                                receiver.as_tagged(heap).lookup(heap, name),
-                                Lookup::NotFound
-                            ) {
-                                throw_err!(ctx, VmError::OutOfBounds);
-                            }
-                            scope.handle(name)
-                        }
-                        Key::Name(key) => scope.handle(key),
-                    };
-
-                let value = scope.handle(acc.get(heap));
-                let outcome = fold!(
-                    ctx,
-                    receiver.as_tagged(heap).store_lookup(
-                        heap,
-                        &scope,
-                        name.as_tagged(heap),
-                        value.as_tagged(heap),
-                        StoreSemantics::WriteThrough,
-                    )
-                );
-                let receiver = scope.handle(stack.reg(heap, frame_base, recv_reg));
-                // `Err(())` = threw (the pending exception is set)
-                if apply_store_outcome(ctx, receiver, outcome, value).is_err() {
-                    return Flow::Threw;
-                }
-                Flow::Sync
-            })
-        }
-        Opcode::StoreGlobalFast => {
-            let name = stack
-                .callable(heap, frame_base)
-                .as_ref()
-                .constant_slot_name(heap, ops.idx(0));
-            match fold!(
-                ctx,
-                heap.known()
-                    .global_object
-                    .as_tagged(heap)
-                    .erase()
-                    .store_lookup_existing(heap, name, acc.get(heap), StoreSemantics::WriteThrough)
-            ) {
-                true => Flow::Sync,
-                false => throw_err!(ctx, VmError::OutOfBounds),
-            }
-        }
-        Opcode::LoadKeyedPropertyFast => {
-            if let Some(idx) = Smi::decode(acc.get(heap).raw())
-                && idx.value() >= 0
-                && let Some(recv) = stack.reg(heap, frame_base, ops.reg(0)).as_heap_object()
-                && let Some(v) = recv
+        Opcode::StoreNamedPropertyNoShadowFast => state.handle_scope(|scope| -> Flow {
+            let receiver = scope.handle(stack.reg(heap, frame_base, ops.reg(0)));
+            let name = scope.handle(
+                stack
+                    .callable(heap, frame_base)
                     .as_ref()
-                    .element_value_dense(heap, idx.value() as usize)
-            {
-                acc.store(v);
-                return Flow::Next;
-            }
-            debug_assert!(
-                !Proxy::is_proxy(heap, stack.reg(heap, frame_base, ops.reg(0))),
-                "fast load on a proxy receiver"
+                    .constant_slot_name(heap, ops.idx(1)),
             );
-            let receiver = stack.reg(heap, frame_base, ops.reg(0));
-            let key = acc.get(heap).as_name();
-            match fold!(ctx, receiver.load_outcome_keyed(heap, key)) {
-                LoadOutcome::Value(v) => acc.store(v),
-                LoadOutcome::Getter(_) => {
-                    debug_assert!(false, "fast load on an accessor property");
-                    acc.store(heap.known().undefined.as_tagged(heap).erase());
-                }
+            let written = fold!(
+                ctx,
+                receiver.as_tagged(heap).erase().store_lookup_existing(
+                    heap,
+                    name.as_tagged(heap),
+                    acc.get(heap),
+                    StoreSemantics::WriteThrough,
+                )
+            );
+            if !written {
+                throw_err!(ctx, VmError::OutOfBounds);
             }
             Flow::Sync
-        }
-        Opcode::StoreNamedPropertyFast | Opcode::StoreNamedPropertyNoShadowFast => {
-            let semantics = match op {
-                Opcode::StoreNamedPropertyNoShadowFast => StoreSemantics::WriteThrough,
-                _ => StoreSemantics::Shadow,
-            };
-            state.handle_scope(|scope| -> Flow {
-                let receiver = scope.handle(stack.reg(heap, frame_base, ops.reg(0)));
-                let name = scope.handle(
-                    stack
-                        .callable(heap, frame_base)
-                        .as_ref()
-                        .constant_slot_name(heap, ops.idx(1)),
-                );
-                let vector = ctx.feedback_ref(heap).map(|v| scope.handle(v));
-                let value = scope.handle(acc.get(heap));
-
-                // store IC (Shadow semantics only: WriteThrough stores
-                // into parent-pair arrays that no map describes)
-                if op == Opcode::StoreNamedPropertyFast
-                    && let Some(hit) = InlineCache::try_store(
-                        heap,
-                        &scope,
-                        vector,
-                        ops.idx(2),
-                        receiver,
-                        name,
-                        value,
-                    )
-                {
-                    debug_assert!(
-                        !matches!(hit, StoreHit::Setter(_)),
-                        "fast store on a setter"
-                    );
-                    return Flow::Next;
-                }
-
-                let prev = receiver.as_tagged(heap).as_heap_object().map(|o| {
-                    let map = o.as_ref().map(heap);
-                    scope.handle(map)
-                });
-                let written = fold!(
-                    ctx,
-                    receiver.as_tagged(heap).erase().store_lookup_existing(
-                        heap,
-                        name.as_tagged(heap),
-                        acc.get(heap),
-                        semantics,
-                    )
-                );
-                if !written {
-                    throw_err!(ctx, VmError::OutOfBounds);
-                }
-                if op == Opcode::StoreNamedPropertyFast
-                    && let Some(prev) = prev
-                {
-                    InlineCache::update_store(
-                        heap,
-                        &scope,
-                        vector,
-                        ops.idx(2),
-                        receiver,
-                        name,
-                        prev,
-                        StoreOutcomeKind::Done,
-                    );
-                }
-                Flow::Sync
-            })
-        }
-        Opcode::StoreKeyedPropertyFast => {
-            if let Some(idx) = Smi::decode(stack.reg(heap, frame_base, ops.reg(1)).raw())
-                && idx.value() >= 0
-                && stack
-                    .reg(heap, frame_base, ops.reg(0))
-                    .store_array_element_in_place(heap, idx.value() as usize, acc.get(heap))
-                    .is_ok()
-            {
-                return Flow::Next;
-            }
-            state.handle_scope(|scope| -> Flow {
-                let receiver = scope.handle(stack.reg(heap, frame_base, ops.reg(0)));
-                let key = scope.handle(stack.reg(heap, frame_base, ops.reg(1)));
-                match fold!(ctx, key.as_tagged(heap).erase().classify_key(heap)) {
-                    Key::Element(i) => {
-                        if receiver
-                            .as_tagged(heap)
-                            .as_heap_object()
-                            .is_some_and(|obj| obj.as_ref().is_array(heap))
-                        {
-                            let receiver = scope
-                                .cast::<Object>(heap, receiver.as_tagged(heap))
-                                .expect("array receiver is an object");
-                            let value = scope.handle(acc.get(heap));
-                            fold!(
-                                ctx,
-                                Object::store_array_element(heap, &scope, &receiver, i, &value)
-                            );
-                            return Flow::Sync;
-                        }
-                        let name = Tagged::from(Smi::new(i as i64));
-                        match fold!(
-                            ctx,
-                            receiver.as_tagged(heap).erase().store_lookup_existing(
-                                heap,
-                                name,
-                                acc.get(heap),
-                                StoreSemantics::Shadow,
-                            )
-                        ) {
-                            true => Flow::Sync,
-                            false => throw_err!(ctx, VmError::OutOfBounds),
-                        }
-                    }
-                    Key::Name(name) => {
-                        match fold!(
-                            ctx,
-                            receiver.as_tagged(heap).erase().store_lookup_existing(
-                                heap,
-                                name,
-                                acc.get(heap),
-                                StoreSemantics::Shadow,
-                            )
-                        ) {
-                            true => Flow::Sync,
-                            false => throw_err!(ctx, VmError::OutOfBounds),
-                        }
-                    }
-                }
-            })
-        }
+        }),
         Opcode::Move => {
             stack.set_reg(
                 frame_base,
@@ -1540,14 +1307,6 @@ fn step<'a>(
         Opcode::CreateSizedArrayLiteral => {
             let capacity = ops.uimm(0) as usize;
             let obj = state.handle_scope(|scope| heap.new_array_with_capacity(&scope, capacity));
-            acc.store(obj.erase());
-            Flow::Sync
-        }
-        Opcode::CreateBareObjectLiteral => {
-            let obj = state.handle_scope(|scope| {
-                let map = heap.known().plain_object_map;
-                heap.new_object(&scope, map, HandleSlice::EMPTY)
-            });
             acc.store(obj.erase());
             Flow::Sync
         }

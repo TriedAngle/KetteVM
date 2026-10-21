@@ -16,9 +16,10 @@ use bytecode::Opcode;
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    AccessorPair, Coercion, Compare, Convert, DenseString, EntryClass, Errors, Handle, Heap, Hint,
-    HostCtx, Key, LoadOutcome, Lookup, Object, PropertyDescriptor, Prototype, SlotName, Smi,
-    StoreOutcome, StoreSemantics, Tagged, ThreadState, VM, Value, raise_runtime,
+    AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
+    Errors, FixedArray, Handle, Heap, Hint, HostCtx, Key, LoadOutcome, Lookup, Object,
+    PropertyDescriptor, Prototype, SlotName, Smi, StoreOutcome, StoreSemantics, Tagged,
+    ThreadState, VM, Value, VmError, raise_runtime,
 };
 
 use crate::new::{Acc, Ctx, TableArg, throw_dispatch};
@@ -582,6 +583,50 @@ pub fn slow_equal(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
+macro_rules! compare_slow {
+    ($op:ident, $name:ident, $cmp:expr) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.acc());
+                let rhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                compare_body(vm, frame.ctx().heap_mut(), state, roots, $cmp, lhs, rhs)
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+}
+
+compare_slow!(LessThan, slow_less_than, 2);
+compare_slow!(GreaterThan, slow_greater_than, 4);
+compare_slow!(LessThanOrEqual, slow_less_than_or_equal, 3);
+compare_slow!(GreaterThanOrEqual, slow_greater_than_or_equal, 5);
+
+#[handler(InstanceOf)]
+#[cold]
+pub fn slow_instance_of(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let object = scope.handle(frame.acc());
+        let callable = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let heap = frame.ctx().heap_mut();
+        match Object::instance_of(vm, heap, state, object, callable) {
+            Ok(Some(r)) => Convert::boolean(heap, r),
+            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+            Err(e) => raise_runtime(vm, heap, state, e),
+        }
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
 #[handler(CompareJump)]
 #[cold]
 pub fn slow_compare_jump(frame: Frame) -> Acc {
@@ -649,6 +694,38 @@ pub fn slow_compare_jump(frame: Frame) -> Acc {
     };
     let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
     dispatch!(dest)
+}
+
+// --- literals ---
+
+#[handler(CreateBlockContext)]
+#[cold]
+pub fn slow_create_block_context(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let count = frame.unsigned::<0>();
+    let base = frame.ctx().frame_base();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let heap = frame.ctx().heap_mut();
+        let outer = scope
+            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
+            .expect("frame context slot holds a ContextObject");
+        let slots = if count == 0 {
+            roots.known(heap).empty_fixed_array
+        } else {
+            let values =
+                scope.stage(&vec![roots.known(heap).the_hole.as_tagged(heap).erase(); count]);
+            heap.allocate_handle::<FixedArray>(values, &scope)
+        };
+        heap.allocate::<ContextObject>(ContextInit {
+            outer: Some(outer),
+            slots,
+            scope_info: roots.known(heap).empty_scope_info,
+        })
+        .erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
 }
 
 // --- locals ---
@@ -937,16 +1014,17 @@ pub fn slow_named_load(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
-#[handler(LoadGlobal)]
-pub fn slow_global_load(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let name_idx = frame.unsigned::<0>();
-    let fb_slot = frame.unsigned::<1>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let heap = frame.ctx().heap_mut();
+fn global_load_body<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    roots: RootsArg<'_>,
+    base: usize,
+    name_idx: usize,
+    fb_slot: usize,
+    throws: bool,
+) -> Tagged<'a, Value> {
+    state.handle_scope(|scope| {
         let global = roots.known(heap).global_object;
         let name = scope.handle(
             state
@@ -987,6 +1065,9 @@ pub fn slow_global_load(frame: Frame) -> Acc {
                     Err(e) => return raise_runtime(vm, heap, state, e),
                 }
             }
+            Lookup::NotFound if !throws => {
+                return roots.known(heap).undefined.as_tagged(heap).erase();
+            }
             Lookup::NotFound => {
                 // unresolvable reference: GetValue throws a
                 // ReferenceError naming the binding
@@ -1003,25 +1084,54 @@ pub fn slow_global_load(frame: Frame) -> Acc {
             }
         };
         out.as_tagged(heap).erase()
-    });
-    frame.set_acc(v);
+    })
+}
+
+#[handler(LoadGlobal)]
+#[cold]
+pub fn slow_global_load(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<0>();
+    let fb_slot = frame.unsigned::<1>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val =
+        global_load_body(vm, frame.ctx().heap_mut(), state, roots, base, name_idx, fb_slot, true);
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(LoadGlobalNoThrow)]
+#[cold]
+pub fn slow_global_load_nothrow(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<0>();
+    let fb_slot = frame.unsigned::<1>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val =
+        global_load_body(vm, frame.ctx().heap_mut(), state, roots, base, name_idx, fb_slot, false);
+    frame.set_acc(val);
     reenter!(pc)
 }
 
 // --- stores ---
 
-#[handler(StoreKeyedProperty)]
-pub fn slow_keyed_store(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let fb = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
+fn keyed_store_body<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    roots: RootsArg<'_>,
+    base: usize,
+    fb: usize,
+    recv: Handle<'_, Value>,
+    raw_key: Handle<'_, Value>,
+    value: Handle<'_, Value>,
+    semantics: StoreSemantics,
+) -> Tagged<'a, Value> {
+    state.handle_scope(|scope| {
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::set(vm, heap, state, recv, raw_key, value, recv) {
                 Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
@@ -1166,7 +1276,7 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
             &scope,
             name.as_tagged(heap),
             value.as_tagged(heap),
-            StoreSemantics::Shadow,
+            semantics,
         ) {
             Ok(o) => o,
             Err(e) => return raise_runtime(vm, heap, state, e),
@@ -1175,8 +1285,64 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
             Ok(()) => value.as_tagged(heap).erase(),
             Err(()) => roots.known(heap).exception.as_tagged(heap).erase(),
         }
+    })
+}
+
+#[handler(StoreKeyedProperty)]
+#[cold]
+pub fn slow_keyed_store(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<2>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        keyed_store_body(
+            vm,
+            frame.ctx().heap_mut(),
+            state,
+            roots,
+            base,
+            fb,
+            recv,
+            raw_key,
+            value,
+            StoreSemantics::Shadow,
+        )
     });
-    frame.set_acc(v);
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(StoreKeyedPropertyNoShadow)]
+#[cold]
+pub fn slow_keyed_store_no_shadow(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<2>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        keyed_store_body(
+            vm,
+            frame.ctx().heap_mut(),
+            state,
+            roots,
+            base,
+            fb,
+            recv,
+            raw_key,
+            value,
+            StoreSemantics::WriteThrough,
+        )
+    });
+    frame.set_acc(val);
     reenter!(pc)
 }
 
@@ -1250,5 +1416,202 @@ pub fn slow_store_named(frame: Frame) -> Acc {
         )
     });
     frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(StoreGlobal)]
+#[cold]
+pub fn slow_store_global(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<0>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let name = scope.handle(
+            state
+                .stack()
+                .frame_header(base)
+                .constants(&*heap)
+                .at(&*heap, name_idx)
+                .erase()
+                .as_name(),
+        );
+        let global = scope.handle(roots.known(heap).global_object.as_tagged(heap).erase());
+        store_named_tail_body(
+            vm,
+            heap,
+            state,
+            roots,
+            base,
+            global,
+            name,
+            value,
+            None,
+            StoreSemantics::WriteThrough,
+        )
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+/// `StoreNamedPropertyNoShadow`/`...Fast`: WriteThrough semantics, no IC.
+macro_rules! named_no_shadow_slow {
+    ($op:ident, $name:ident) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let base = frame.ctx().frame_base();
+            let name_idx = frame.unsigned::<1>();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let value = scope.handle(frame.acc());
+                let heap = frame.ctx().heap_mut();
+                let name = scope.handle(
+                    state
+                        .stack()
+                        .frame_header(base)
+                        .constants(&*heap)
+                        .at(&*heap, name_idx)
+                        .erase()
+                        .as_name(),
+                );
+                store_named_tail_body(
+                    vm,
+                    heap,
+                    state,
+                    roots,
+                    base,
+                    recv,
+                    name,
+                    value,
+                    None,
+                    StoreSemantics::WriteThrough,
+                )
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+}
+
+named_no_shadow_slow!(StoreNamedPropertyNoShadow, slow_store_named_no_shadow);
+named_no_shadow_slow!(StoreNamedPropertyNoShadowFast, slow_store_named_no_shadow_fast);
+
+#[handler(AddParent)]
+#[cold]
+pub fn slow_add_parent(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let recv_reg = frame.signed::<0>();
+    let name_idx = frame.unsigned::<1>();
+    let base = frame.ctx().frame_base();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let receiver = scope.handle(frame.regs().get(recv_reg, frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let name = scope.handle(
+            state
+                .stack()
+                .frame_header(base)
+                .constants(&*heap)
+                .at(&*heap, name_idx)
+                .erase()
+                .as_name(),
+        );
+        let Some(receiver) = scope.cast::<Object>(heap, receiver.as_tagged(heap)) else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        if let Err(e) = Object::add_parent(heap, &scope, receiver, name, value) {
+            return raise_runtime(vm, heap, state, e);
+        }
+        value.as_tagged(heap).erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+// --- construct ---
+
+#[handler(Construct)]
+#[cold]
+pub fn slow_construct(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let callee_reg = frame.signed::<0>();
+    let args_base = frame.signed::<1>();
+    let count = frame.unsigned::<2>();
+    let base = frame.ctx().frame_base();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let callee = scope.handle(frame.regs().get(callee_reg, frame.ctx().heap()));
+        let heap = frame.ctx().heap_mut();
+        let Some(obj) = callee.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        if !obj.map(heap).kind().is_constructor() {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let args = state.stack().args(base, args_base, count);
+        if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
+            return match Proxy::construct(vm, heap, state, callee, args, callee) {
+                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Value(v)) => v,
+                Err(e) => raise_runtime(vm, heap, state, e),
+            };
+        }
+        // a derived constructor's `this` is the hole until `super()` binds
+        // it; ordinary and base-class constructors synthesize the receiver
+        let derived = obj.map(heap).kind().is_class_constructor()
+            && obj
+                .callable_info(heap)
+                .is_some_and(|info| info.function_kind().is_derived_class_constructor());
+        let callee_obj = scope
+            .cast::<Object>(heap, callee.as_tagged(heap))
+            .expect("constructible callee is an object");
+        let receiver = if derived {
+            scope.handle(roots.known(heap).the_hole.as_tagged(heap).erase())
+        } else {
+            match Object::create_construct_receiver_value(vm, heap, state, callee_obj.erase()) {
+                Ok(Some(r)) => scope.handle(r),
+                Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
+                Err(e) => return raise_runtime(vm, heap, state, e),
+            }
+        };
+        let mut staged: Vec<Tagged<'_, Value>> = Vec::with_capacity(count + 1);
+        staged.push(receiver.as_tagged(heap).erase());
+        staged.extend(args.iter(heap));
+        let staged = scope.stage(&staged);
+        let result = match HostCtx::enter(
+            vm,
+            heap,
+            state,
+            callee_obj.erase(),
+            staged,
+            Some(callee_obj.erase()),
+        ) {
+            Ok(v) => scope.handle(v),
+            Err(e) => return raise_runtime(vm, heap, state, e),
+        };
+        if result.as_tagged(heap) == roots.known(heap).exception.as_tagged(heap).erase() {
+            return roots.known(heap).exception.as_tagged(heap).erase();
+        }
+        if result.as_tagged(heap).is_primitive(heap) {
+            if derived {
+                // a derived constructor returned a primitive (ES 9.2.2.1)
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+            receiver.as_tagged(heap).erase()
+        } else {
+            result.as_tagged(heap).erase()
+        }
+    });
+    frame.set_acc(val);
     reenter!(pc)
 }

@@ -2276,20 +2276,6 @@ extern "rust-preserve-none" fn op_greater_than_or_equal<'a, const STRIDE: usize>
 }
 
 #[rustc_align(32)]
-extern "rust-preserve-none" fn op_create_bare_object<'a, const STRIDE: usize>(
-    ip: *const u8,
-    regs: Regs,
-    acc: Tagged<'a, Value>,
-    ctx: &Ctx<'a>,
-    table: TableArg<'a>,
-    roots: RootsArg<'a>,
-    float: FloatReg,
-) -> Tagged<'a, Value> {
-    Ops::<STRIDE>::new(ip, Opcode::CreateBareObjectLiteral);
-    become slow_create_bare_object::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
-}
-
-#[rustc_align(32)]
 extern "rust-preserve-none" fn op_create_block_context<'a, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
@@ -2302,32 +2288,6 @@ extern "rust-preserve-none" fn op_create_block_context<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::CreateBlockContext);
     let _ = ops.unsigned::<0>();
     become slow_create_block_context::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
-}
-
-#[rustc_align(32)]
-extern "rust-preserve-none" fn op_load_global_fast<'a, const STRIDE: usize>(
-    ip: *const u8,
-    regs: Regs,
-    acc: Tagged<'a, Value>,
-    ctx: &Ctx<'a>,
-    table: TableArg<'a>,
-    roots: RootsArg<'a>,
-    float: FloatReg,
-) -> Tagged<'a, Value> {
-    let ops = Ops::<STRIDE>::new(ip, Opcode::LoadGlobalFast);
-    let fb = ops.unsigned::<1>();
-    let global = ctx
-        .heap()
-        .known()
-        .global_object
-        .as_tagged(ctx.heap())
-        .erase();
-    if let Some(Hit::Value(v)) =
-        InlineCache::try_load(ctx.heap(), ctx.feedback_ref(ctx.heap()), fb, global)
-    {
-        next!(LoadGlobalFast, ip, regs, ctx, table, roots, float, v)
-    }
-    become slow_global_load::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
 
 #[rustc_align(32)]
@@ -2437,44 +2397,6 @@ extern "rust-preserve-none" fn op_add_parent<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::AddParent);
     let _ = (ops.signed::<0>(), ops.unsigned::<1>());
     become slow_add_parent::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
-}
-
-#[rustc_align(32)]
-extern "rust-preserve-none" fn op_load_named_fast<'a, const STRIDE: usize>(
-    ip: *const u8,
-    regs: Regs,
-    acc: Tagged<'a, Value>,
-    ctx: &Ctx<'a>,
-    table: TableArg<'a>,
-    roots: RootsArg<'a>,
-    float: FloatReg,
-) -> Tagged<'a, Value> {
-    let ops = Ops::<STRIDE>::new(ip, Opcode::LoadNamedPropertyFast);
-    let r = ops.signed::<0>();
-    let fb = ops.unsigned::<2>();
-    let recv = regs.get(r, ctx.heap());
-    match InlineCache::probe_mono(ctx.heap(), ctx.feedback_ref(ctx.heap()), fb, recv) {
-        MonoProbe::Value(v) => next!(LoadNamedPropertyFast, ip, regs, ctx, table, roots, float, v),
-        MonoProbe::Handler(obj, handler) => {
-            if let Some(Hit::Value(v)) = InlineCache::apply_mono(ctx.heap(), obj, handler) {
-                next!(LoadNamedPropertyFast, ip, regs, ctx, table, roots, float, v)
-            }
-        }
-        MonoProbe::Poly {
-            obj,
-            map,
-            pairs,
-            start,
-        } => {
-            if let Some(Hit::Value(v)) =
-                InlineCache::try_load_resume(ctx.heap(), obj, map, pairs, start)
-            {
-                next!(LoadNamedPropertyFast, ip, regs, ctx, table, roots, float, v)
-            }
-        }
-        MonoProbe::Miss | MonoProbe::NotReceiver => {}
-    }
-    become slow_named_load::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
 
 #[rustc_align(32)]
@@ -3543,9 +3465,7 @@ const fn table_narrow() -> [Handler; 256] {
     t[Opcode::EqualStrict as usize] = op_equal_strict::<1> as Handler;
     t[Opcode::JumpIfNotUndefined as usize] = op_jump_if_not_undefined::<1> as Handler;
     t[Opcode::LessThanOrEqual as usize] = op_less_than_or_equal::<1> as Handler;
-    t[Opcode::CreateBareObjectLiteral as usize] = op_create_bare_object::<1> as Handler;
     t[Opcode::CreateBlockContext as usize] = op_create_block_context::<1> as Handler;
-    t[Opcode::LoadGlobalFast as usize] = op_load_global_fast::<1> as Handler;
     t[Opcode::LoadGlobalNoThrow as usize] = op_load_global_nothrow::<1> as Handler;
     t[Opcode::StoreGlobal as usize] = op_store_global::<1> as Handler;
     t[Opcode::StoreNamedPropertyNoShadow as usize] = op_store_named_no_shadow::<1> as Handler;
@@ -3553,7 +3473,6 @@ const fn table_narrow() -> [Handler; 256] {
     t[Opcode::LoadCurrentClosure as usize] = op_load_current_closure::<1> as Handler;
     t[Opcode::GreaterThanOrEqual as usize] = op_greater_than_or_equal::<1> as Handler;
     t[Opcode::AddParent as usize] = op_add_parent::<1> as Handler;
-    t[Opcode::LoadNamedPropertyFast as usize] = op_load_named_fast::<1> as Handler;
     t[Opcode::StoreNamedPropertyNoShadowFast as usize] =
         op_store_named_no_shadow_fast::<1> as Handler;
     t[Opcode::Wide as usize] = op_wide as Handler;
@@ -3650,9 +3569,7 @@ const fn table_wide() -> [Handler; 256] {
     t[Opcode::EqualStrict as usize] = op_equal_strict::<2> as Handler;
     t[Opcode::JumpIfNotUndefined as usize] = op_jump_if_not_undefined::<2> as Handler;
     t[Opcode::LessThanOrEqual as usize] = op_less_than_or_equal::<2> as Handler;
-    t[Opcode::CreateBareObjectLiteral as usize] = op_create_bare_object::<2> as Handler;
     t[Opcode::CreateBlockContext as usize] = op_create_block_context::<2> as Handler;
-    t[Opcode::LoadGlobalFast as usize] = op_load_global_fast::<2> as Handler;
     t[Opcode::LoadGlobalNoThrow as usize] = op_load_global_nothrow::<2> as Handler;
     t[Opcode::StoreGlobal as usize] = op_store_global::<2> as Handler;
     t[Opcode::StoreNamedPropertyNoShadow as usize] = op_store_named_no_shadow::<2> as Handler;
@@ -3660,7 +3577,6 @@ const fn table_wide() -> [Handler; 256] {
     t[Opcode::LoadCurrentClosure as usize] = op_load_current_closure::<2> as Handler;
     t[Opcode::GreaterThanOrEqual as usize] = op_greater_than_or_equal::<2> as Handler;
     t[Opcode::AddParent as usize] = op_add_parent::<2> as Handler;
-    t[Opcode::LoadNamedPropertyFast as usize] = op_load_named_fast::<2> as Handler;
     t[Opcode::StoreNamedPropertyNoShadowFast as usize] =
         op_store_named_no_shadow_fast::<2> as Handler;
     t

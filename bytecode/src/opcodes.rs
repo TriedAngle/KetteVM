@@ -218,25 +218,13 @@ define_opcodes! {
     StoreKeyedProperty { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] }, // acc -> reg (obj) reg (key) idx (feedback)
     StoreKeyedPropertyNoShadow { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
 
-    /// acc -> reg (obj) reg (key): Kette `obj[key] = value`. Element keys
-    /// are written in place only — a miss or hole is a RangeError, never
-    /// an implicit elements-store growth; name keys use the WriteThrough
-    /// store. (JS keeps `StoreKeyedProperty*`.)
-    StoreKeyedSlot { operands: [Register, Register], acc: reads, indices: [Unchecked, Unchecked] },
-
     // -- fast property access (Kette): no proxy traps, no accessor
     // invocation, no user-code key coercion; loads and Shadow stores use
     // inline caches; stores write existing slots only — a miss is an
     // error, never a transition
-    LoadGlobalFast { operands: [Index, Index], acc: writes, indices: [ConstantPool, Feedback] }, // idx (constant pool name) idx (feedback) -> acc; ReferenceError on miss
-    StoreGlobalFast { operands: [Index], acc: reads, indices: [ConstantPool] }, // acc -> idx (constant pool name)
 
-    LoadNamedPropertyFast { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
-    LoadKeyedPropertyFast { operands: [Register], acc: reads_writes, indices: [Unchecked] }, // reg (obj); key in acc -> acc
 
-    StoreNamedPropertyFast { operands: [Register, Index, Index], acc: reads, indices: [Unchecked, ConstantPool, Feedback] }, // acc -> reg (obj) idx (constant pool name) idx (feedback); Shadow semantics
     StoreNamedPropertyNoShadowFast { operands: [Register, Index, Index], acc: reads, indices: [Unchecked, ConstantPool, Feedback] }, // WriteThrough semantics
-    StoreKeyedPropertyFast { operands: [Register, Register], acc: reads, indices: [Unchecked, Unchecked] }, // acc -> reg (obj) reg (key); Shadow semantics
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)
 
@@ -270,9 +258,6 @@ define_opcodes! {
     /// operand capacity (filled with holes, `length` 0): literal element
     /// stores then append within headroom instead of reallocating.
     CreateSizedArrayLiteral { operands: [UImmediate], acc: writes, indices: [Unchecked] },
-    /// -> acc (plain_object_map: extensible, no [[Prototype]]):
-    /// Self-style (Kette) objects, whose parents are pair-encoded
-    CreateBareObjectLiteral { operands: [], acc: writes, indices: [] },
 
     CreateClosure { operands: [Index], acc: writes, indices: [ConstantPool] }, // idx -> acc
 

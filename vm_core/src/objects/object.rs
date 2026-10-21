@@ -592,6 +592,26 @@ pub struct ObjectSlotsInit<'m, 'v> {
     pub length: usize,
 }
 
+impl Object {
+    /// Initialize fresh storage directly from anchored words, without
+    /// `Handle`s. The bump-allocation fast paths call this after reading
+    /// well-known words and guarantee no GC between the reads and here.
+    pub(crate) fn init_raw(
+        &mut self,
+        heap: &Heap,
+        map: Tagged<'_, Map>,
+        slots: Tagged<'_, FixedArray>,
+        elements: Tagged<'_, FixedArray>,
+        length: usize,
+    ) {
+        let host = self.tagged(heap);
+        self.header.map.set(heap, host, map);
+        self.slots.set(heap, host, slots);
+        self.elements.set(heap, host, elements);
+        self.length.set(heap, host, Smi::new(length as i64));
+    }
+}
+
 impl HeapObject for Object {
     const KIND: ObjectKind = ObjectKind::Object;
 
@@ -612,12 +632,13 @@ impl HeapObject for Object {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        let host = self.tagged(heap);
-        self.header.map.set(heap, host, config.map.as_tagged(heap));
-        self.slots.set(heap, host, config.slots.as_tagged(heap));
-        self.elements
-            .set(heap, host, config.elements.as_tagged(heap));
-        self.length.set(heap, host, Smi::new(config.length as i64));
+        self.init_raw(
+            heap,
+            config.map.as_tagged(heap),
+            config.slots.as_tagged(heap),
+            config.elements.as_tagged(heap),
+            config.length,
+        );
     }
 
     fn header(&self) -> &Header {
