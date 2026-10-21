@@ -5,9 +5,9 @@
 
 use crate::{
     AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Handle,
-    HandleSlice, Heap, Key, LoadOutcome, Lookup, Object, ObjectSlotsInit, PropertyDescriptor,
-    SlotName, Smi, StoreOutcome, StoreSemantics, StringData, StringOwn, Symbol, Tagged, Transition,
-    Value, VmError,
+    HandleSlice, Heap, Key, LanguageMode, LoadOutcome, Lookup, Object, ObjectSlotsInit,
+    PropertyDescriptor, SlotName, Smi, StoreOutcome, StoreSemantics, StringData, StringOwn, Symbol,
+    Tagged, Transition, Value, VmError,
 };
 
 use crate::Float;
@@ -41,8 +41,6 @@ pub fn native_fn(id: bytecode::BuiltinFn) -> NativeFn {
         bytecode::BuiltinFn::SetClassFields => set_class_fields,
         bytecode::BuiltinFn::InitInstanceFields => init_instance_fields,
         bytecode::BuiltinFn::RequireObjectCoercible => require_object_coercible,
-        bytecode::BuiltinFn::DeletePropertySloppy => delete_property_sloppy,
-        bytecode::BuiltinFn::DeletePropertyStrict => delete_property_strict,
         bytecode::BuiltinFn::DeleteIdentifierSloppy => delete_identifier_sloppy,
         bytecode::BuiltinFn::DeleteSuperProperty => delete_super_property,
         bytecode::BuiltinFn::ForInEnumerate => for_in_enumerate,
@@ -98,41 +96,24 @@ fn require_object_coercible<'a>(
 
 // ---- delete (ES 13.5.1) ----------------------------------------------------
 
-/// `delete obj.key` in sloppy code: (obj, key) -> bool.
-fn delete_property_sloppy<'a>(
-    nctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
+/// `delete obj.key` (ES 13.5.1.2): (obj, key) -> bool, TypeError on a
+/// refused delete in strict code. The interpreter reaches this directly
+/// from `Opcode::Delete`; the strictness is the dispatch mode, not a
+/// runtime argument.
+pub fn delete_property_operator<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    target: Handle<'_, Value>,
+    raw_key: Handle<'_, Value>,
+    mode: LanguageMode,
 ) -> Tagged<'a, Value> {
-    delete_property(nctx, new_target, args, false)
-}
-
-/// `delete obj.key` in strict code: (obj, key) -> bool, TypeError when
-/// the delete fails (ES 13.5.1.2 step 4.h).
-fn delete_property_strict<'a>(
-    nctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    delete_property(nctx, new_target, args, true)
-}
-
-fn delete_property<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-    strict: bool,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let strict = mode.is_strict();
     // the reference's key is coerced before the base is touched (ES
     // 13.15.5 EvaluatePropertyAccess: user toString/valueOf of a
     // computed key runs even when the delete afterwards throws);
     // the coercion allocates, so the base must stay rooted across it
     state.handle_scope(|scope| {
-        let target = scope.handle(args.get(heap, 0));
-        let raw_key = args.get_handle(heap, 1);
         let Some(key) = rt_try!(
             vm,
             heap,
@@ -1325,17 +1306,28 @@ fn apply_store_outcome(
     receiver: Handle<'_, Value>,
     outcome: StoreOutcome<'_>,
     value: Handle<'_, Value>,
+    mode: LanguageMode,
 ) -> Result<bool, VmError> {
     match outcome {
         StoreOutcome::Transition {
             receiver: recv,
             name,
         } => {
+            let strict = mode.is_strict();
             state.handle_scope(|scope| {
-                Object::add_own_property(heap, &scope, recv, name, PropertyDescriptor::data(value))
-                    // TODO(strict-mode): a false result must throw in strict code;
-                    // the current store path preserves its existing sloppy result.
-                    .map(|_| false)
+                let added = Object::add_own_property(
+                    heap,
+                    &scope,
+                    recv,
+                    name,
+                    PropertyDescriptor::data(value),
+                )?;
+                // non-extensible receiver: silent in sloppy code,
+                // TypeError in strict (ES 10.4.5.5 PutValue step 5)
+                if !added && strict {
+                    return Err(VmError::Type);
+                }
+                Ok(false)
             })
         }
         StoreOutcome::CallSetter { setter } => state.handle_scope(|scope| {
@@ -2047,6 +2039,7 @@ fn store_dynamic_name<'a>(
     } = nctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
+    let mode = state.language_mode(heap);
     state.handle_scope(|scope| {
         let found = rt_try!(
             vm,
@@ -2083,8 +2076,9 @@ fn store_dynamic_name<'a>(
                         name.as_tagged(heap).as_name(),
                         value.as_tagged(heap),
                         StoreSemantics::WriteThrough,
+                        mode,
                     )?;
-                    apply_store_outcome(vm, heap, state, global, outcome, value)
+                    apply_store_outcome(vm, heap, state, global, outcome, value, mode)
                 });
                 let threw = rt_try!(vm, heap, state, threw);
                 if threw {
@@ -2284,7 +2278,17 @@ fn super_set_property<'a>(
             vm,
             heap,
             state,
-            apply_store_outcome(vm, heap, state, recv, outcome, value)
+            apply_store_outcome(
+                vm,
+                heap,
+                state,
+                recv,
+                outcome,
+                value,
+                // `super.x = v` always throws on a failed [[Set]]
+                // (ES 13.15.5.1), independent of the language mode
+                LanguageMode::Strict,
+            )
         ) {
             return heap.known().exception.as_tagged(heap).erase();
         }

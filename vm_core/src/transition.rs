@@ -3,8 +3,8 @@ use core::alloc::Layout;
 use crate::proxy::Proxy;
 use crate::{
     AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap,
-    HeapObject, Key, Lookup, Map, MapInit, MapKind, MaybeWeak, Object, Prototype, SlotFlags,
-    SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    HeapObject, Key, LanguageMode, Lookup, Map, MapInit, MapKind, MaybeWeak, Object, Prototype,
+    SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
 };
 
 /// Store semantics:
@@ -80,9 +80,9 @@ impl<'a> Tagged<'a, Value> {
         name: Tagged<'a, SlotName>,
         value: Tagged<'a, Value>,
         semantics: StoreSemantics,
+        mode: LanguageMode,
     ) -> Result<StoreOutcome<'s>, VmError> {
-        // TODO(strict-mode): take the active function's language mode and
-        // distinguish throwing strict failures from ignored sloppy failures.
+        let strict = mode.is_strict();
         // null/undefined have no [[Prototype]]: property access throws
         if self.ptr_eq(heap.known().null.as_tagged(heap).erase())
             || self.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
@@ -91,10 +91,14 @@ impl<'a> Tagged<'a, Value> {
         }
         // non-receiver heap values (VMStrings, Symbols, Floats, ...) and
         // smis are not property stores' targets: sloppy-mode stores onto
-        // primitives are silently ignored (strict throws — deferred with
-        // the other language-mode TODOs)
+        // primitives are silently ignored, strict ones throw (ES 10.4.5.5
+        // PutValue step 5)
         let Some(receiver) = scope.cast::<Object>(heap, self) else {
-            return Ok(StoreOutcome::Done);
+            return if strict {
+                Err(VmError::Type)
+            } else {
+                Ok(StoreOutcome::Done)
+            };
         };
         match self.lookup(heap, name) {
             Lookup::Data {
@@ -104,7 +108,11 @@ impl<'a> Tagged<'a, Value> {
                 ..
             } => {
                 if !flags.is_writable() {
-                    return Err(VmError::Type);
+                    return if strict {
+                        Err(VmError::Type)
+                    } else {
+                        Ok(StoreOutcome::Done)
+                    };
                 }
                 let host = holder.erase();
                 if semantics == StoreSemantics::Shadow && host != self {
@@ -125,9 +133,14 @@ impl<'a> Tagged<'a, Value> {
             Lookup::Accessor { pair, .. } => {
                 let setter = pair.set.get(heap);
                 // no setter (undefined sentinel): sloppy-mode writes to a
-                // setter-less accessor are silently ignored
+                // setter-less accessor are silently ignored, strict ones
+                // throw (ES 10.4.5.5 PutValue step 5)
                 if setter.ptr_eq(heap.known().undefined.as_tagged(heap).erase()) {
-                    return Ok(StoreOutcome::Done);
+                    return if strict {
+                        Err(VmError::Type)
+                    } else {
+                        Ok(StoreOutcome::Done)
+                    };
                 }
                 Ok(StoreOutcome::CallSetter {
                     setter: scope.handle(setter),
@@ -145,10 +158,11 @@ impl<'s, T> Handle<'s, T> {
         name: Tagged<'a, SlotName>,
         value: Tagged<'a, Value>,
         semantics: StoreSemantics,
+        mode: LanguageMode,
     ) -> Result<StoreOutcome<'d>, VmError> {
         self.as_tagged(heap)
             .erase()
-            .store_lookup(heap, scope, name, value, semantics)
+            .store_lookup(heap, scope, name, value, semantics, mode)
     }
 }
 
@@ -159,7 +173,9 @@ impl<'a> Tagged<'a, Value> {
         name: Tagged<'a, SlotName>,
         value: Tagged<'a, Value>,
         semantics: StoreSemantics,
+        mode: LanguageMode,
     ) -> Result<bool, VmError> {
+        let strict = mode.is_strict();
         if self.ptr_eq(heap.known().null.as_tagged(heap).erase())
             || self.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
         {
@@ -183,7 +199,7 @@ impl<'a> Tagged<'a, Value> {
                 ..
             } => {
                 if !flags.is_writable() {
-                    return Err(VmError::Type);
+                    return if strict { Err(VmError::Type) } else { Ok(true) };
                 }
                 let host = holder.erase();
                 if semantics == StoreSemantics::Shadow && host != self {

@@ -1,17 +1,17 @@
 //! Materialization: `bytecode::Program` → VM heap objects.
 //!
-//! Each compiled function becomes a `CallableInfoObject` (bytecode +
-//! constants + handler table); closures reference them from the constants
-//! table. Constants are converted to heap values: interned strings,
+//! Each compiled function becomes a `Code` (instruction bytes + dispatch
+//! mode) wrapped in a `CallableInfoObject` (constants + handler table);
+//! closures reference them from the constants table. Constants are converted to heap values: interned strings,
 //! `Float`s, oddball singletons, and child callable infos.
 //!
 //! The materializer is frontend-agnostic: it consumes the compiled program
 //! function table and knows nothing about the language that produced it.
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, ContextObject, FixedArray, FixedByteArray, FunctionKind,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FixedArray, FunctionKind,
     Handle, HandleScope, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, ScopeInfo,
-    ScopeInfoInit, Tagged, Value, VmError, decode_wtf8, new_feedback_vector,
+    ScopeInfoInit, Tagged, Value, VmError, decode_wtf8, mode_from_strict, new_feedback_vector,
 };
 
 use bytecode::{CallableKind, Constant, FunctionId, Program};
@@ -125,7 +125,13 @@ fn materialize_function<'s>(
         materialized.push(value);
     }
 
-    let bytecode = heap.allocate_handle::<FixedByteArray>(program.code(function), scope);
+    let code = heap.allocate_handle::<Code>(
+        CodeInit {
+            bytes: program.code(function),
+            mode: mode_from_strict(function.strict),
+        },
+        scope,
+    );
     let words: Vec<Tagged<'_, Value>> = materialized.iter().map(|h| h.as_tagged(heap)).collect();
     let constants = heap.allocate_handle::<FixedArray>(scope.stage(&words), scope);
     let handlers = if program.handlers(function).is_empty() {
@@ -141,7 +147,7 @@ fn materialize_function<'s>(
 
     let info = heap.allocate_handle::<CallableInfoObject>(
         CallableInfoInit {
-            bytecode,
+            code,
             constants,
             register_count: function.register_count as usize,
             handlers,
@@ -172,7 +178,6 @@ fn materialize_function<'s>(
         function.arity as usize,
         function.length as usize,
         kind,
-        function.strict,
     );
     infos[fid.index()] = Some(info);
     Ok(info)

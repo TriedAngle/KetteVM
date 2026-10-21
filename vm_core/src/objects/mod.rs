@@ -2,6 +2,7 @@ pub mod array;
 pub mod byte_array;
 pub mod callable;
 pub mod cell;
+pub mod code;
 pub mod context;
 pub mod data_handler;
 pub mod dictionary;
@@ -19,6 +20,7 @@ pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
+pub use code::{Code, CodeInit};
 pub use context::{
     ContextInit, ContextObject, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit,
     ScopeInfo, ScopeInfoInit,
@@ -134,6 +136,8 @@ pub enum ObjectKind {
     DataHandler = 22,
     /// Sparse-array elements backing store (internal, never a receiver)
     NumberDictionary = 23,
+    /// Compiled code: instruction bytes plus the dispatch-mode id
+    Code = 24,
 }
 
 impl ObjectKind {
@@ -183,6 +187,7 @@ pub unsafe fn object_layout(addr: NonNull<()>) -> Layout {
             ObjectKind::PrototypeInfo => (*addr.cast::<PrototypeInfo>().as_ptr()).layout(),
             ObjectKind::DataHandler => (*addr.cast::<DataHandler>().as_ptr()).layout(),
             ObjectKind::NumberDictionary => (*addr.cast::<NumberDictionary>().as_ptr()).layout(),
+            ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -232,6 +237,7 @@ pub unsafe fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
             ObjectKind::NumberDictionary => {
                 (*addr.cast::<NumberDictionary>().as_ptr()).visit_edges(visitor)
             }
+            ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).visit_edges(visitor),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray

@@ -90,12 +90,14 @@
 //! map call sites onto the expansion.
 
 use proc_macro::TokenStream;
-use proc_macro2::{Delimiter, Group, Ident, Punct, Span, Spacing, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{
+    Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream as TokenStream2, TokenTree,
+};
 use quote::quote;
+use syn::Token;
 use syn::parse_macro_input;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::Token;
 
 const EXITS: &[&str] = &[
     "next",
@@ -106,79 +108,169 @@ const EXITS: &[&str] = &[
     "call_enter",
 ];
 
-/// `handler_table!(op_load, op_store, ..)` — semi-automatic dispatch
-/// table generation. Each listed handler fn is registered, at both
-/// strides, under the `Opcode` variant derived from its name
-/// (`op_jump_if_truthy` -> `Opcode::JumpIfTruthy`); the rest of the
-/// table is filled with `op_trap`. Emits `TABLE_NARROW` (`::<1>`)
-/// and `TABLE_WIDE` (`::<2>`), both `#[used]` statics referencing
-/// the `op_trap` and handler fns in the invoking scope.
+/// `handler_table! { base: [..], modes: { <name>: [..], .. } }` —
+/// dispatch-mode table generation.
+///
+/// * `base` lists mode-independent handlers; each is registered at both
+///   strides under the `Opcode` variant derived from its name
+///   (`op_jump_if_truthy` -> `Opcode::JumpIfTruthy`).
+/// * `modes` maps a mode name to the handlers that belong only to
+///   it. The opcode comes from the handler name with `_<name>` stripped
+///   (`op_store_named_property_strict` -> `Opcode::StoreNamedProperty`),
+///   so modes may diverge freely without a separate opcode mapping.
+///   The macro itself attaches no meaning to the names: adding one is a
+///   consumer-local change.
+///
+/// Every table starts as `op_trap` and gets the `base` entries plus its
+/// mode's entries. For each mode the macro emits
+/// `__table_{narrow,wide}_<name>` const fns; the consumer turns them into
+/// its `DispatchTable` statics.
 #[proc_macro]
 pub fn handler_table(input: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
-    match expand_table(&names) {
+    let spec = parse_macro_input!(input as TableSpec);
+    match expand_table(&spec) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_table(names: &Punctuated<Ident, Token![,]>) -> syn::Result<TokenStream2> {
+fn expand_table(spec: &TableSpec) -> syn::Result<TokenStream2> {
     let mut narrow = Vec::new();
     let mut wide = Vec::new();
-    for name in names {
-        let full = name.to_string();
-        let Some(snake) = full.strip_prefix("op_") else {
-            return Err(syn::Error::new(
-                name.span(),
-                "handler names must start with `op_` (they map to the like-named `Opcode` variant)",
-            ));
-        };
-        if snake.is_empty() {
-            return Err(syn::Error::new(name.span(), "handler name is just `op_`"));
-        }
-        let mut camel = String::new();
-        for seg in snake.split('_') {
-            let mut chars = seg.chars();
-            if let Some(f) = chars.next() {
-                camel.extend(f.to_uppercase());
-            }
-            camel.push_str(chars.as_str());
-        }
-        let op = Ident::new(&camel, name.span());
+    for name in &spec.base {
+        let op = opcode_of(name, None)?;
         narrow.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
         wide.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
     }
-    Ok(quote! {
-        #[rustfmt::skip]
-        const fn new_table_narrow() -> [Handler; 256] {
-            let mut t = [op_trap::<1> as Handler; 256];
-            #(#narrow)*
-            t
+    // One entry per mode-specific function: no generics, so modes may
+    // diverge freely. The opcode is the handler name with the mode's
+    // suffix removed.
+    let mut builders = Vec::new();
+    for (mode, names) in &spec.modes {
+        let suffix = format!("_{mode}");
+        let mut narrow_mode = Vec::new();
+        let mut wide_mode = Vec::new();
+        for name in names {
+            let op = opcode_of(name, Some(&suffix))?;
+            narrow_mode.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
+            wide_mode.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
         }
+        let narrow_fn = Ident::new(&format!("__table_narrow_{mode}"), mode.span());
+        let wide_fn = Ident::new(&format!("__table_wide_{mode}"), mode.span());
+        builders.push(quote! {
+            #[allow(dead_code)]
+            #[rustfmt::skip]
+            const fn #narrow_fn() -> [Handler; 256] {
+                let mut t = [op_trap::<1> as Handler; 256];
+                #(#narrow)*
+                #(#narrow_mode)*
+                t
+            }
 
-        #[used]
-        #[rustfmt::skip]
-        pub static TABLE_NARROW: [Handler; 256] = new_table_narrow();
-
-        #[rustfmt::skip]
-        const fn new_table_wide() -> [Handler; 256] {
-            let mut t = [op_trap::<2> as Handler; 256];
-            #(#wide)*
-            t
-        }
-
-        #[used]
-        #[rustfmt::skip]
-        pub static TABLE_WIDE: [Handler; 256] = new_table_wide();
-    })
+            #[allow(dead_code)]
+            #[rustfmt::skip]
+            const fn #wide_fn() -> [Handler; 256] {
+                let mut t = [op_trap::<2> as Handler; 256];
+                #(#wide)*
+                #(#wide_mode)*
+                t
+            }
+        });
+    }
+    Ok(quote!(#(#builders)*))
 }
 
-const PARAM_NAMES: &[&str] = &["ip", "regs", "acc", "ctx", "table", "roots", "float", "STRIDE"];
+/// `op_jump_if_truthy` -> `Opcode::JumpIfTruthy`. With a mode suffix,
+/// the suffix is required and stripped first
+/// (`op_store_named_property_sloppy` -> `Opcode::StoreNamedProperty`).
+fn opcode_of(name: &Ident, suffix: Option<&str>) -> syn::Result<Ident> {
+    let full = name.to_string();
+    let Some(rest) = full.strip_prefix("op_") else {
+        return Err(syn::Error::new(
+            name.span(),
+            "handler names must start with `op_` (they map to the like-named `Opcode` variant)",
+        ));
+    };
+    let rest = match suffix {
+        Some(suffix) => rest.strip_suffix(suffix).ok_or_else(|| {
+            syn::Error::new(
+                name.span(),
+                format!("handler `{full}` must end with `{suffix}` (the mode names the opcode)"),
+            )
+        })?,
+        None => rest,
+    };
+    if rest.is_empty() {
+        return Err(syn::Error::new(name.span(), "handler name is just `op_`"));
+    }
+    let mut camel = String::new();
+    for seg in rest.split('_') {
+        let mut chars = seg.chars();
+        if let Some(f) = chars.next() {
+            camel.extend(f.to_uppercase());
+        }
+        camel.push_str(chars.as_str());
+    }
+    Ok(Ident::new(&camel, name.span()))
+}
+
+struct TableSpec {
+    base: Vec<Ident>,
+    modes: Vec<(Ident, Vec<Ident>)>,
+}
+
+impl syn::parse::Parse for TableSpec {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut base = Vec::new();
+        let mut modes: Vec<(Ident, Vec<Ident>)> = Vec::new();
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![:]>()?;
+            match key.to_string().as_str() {
+                "base" => {
+                    let content;
+                    syn::bracketed!(content in input);
+                    let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+                    base.extend(names);
+                }
+                "modes" => {
+                    let content;
+                    syn::braced!(content in input);
+                    while !content.is_empty() {
+                        let name: Ident = content.parse()?;
+                        content.parse::<Token![:]>()?;
+                        let list;
+                        syn::bracketed!(list in content);
+                        let names = Punctuated::<Ident, Token![,]>::parse_terminated(&list)?;
+                        modes.push((name, names.into_iter().collect()));
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown handler_table key `{other}`: expected `base` or `modes`"),
+                    ));
+                }
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(Self { base, modes })
+    }
+}
+
+const PARAM_NAMES: &[&str] = &[
+    "ip", "regs", "acc", "ctx", "table", "roots", "float", "STRIDE",
+];
 
 /// The two handler forms; every form has the full dispatch ABI and
-/// the stride. What a mode may use follows from the one thing it may
+/// the stride. What a form may use follows from the one thing it may
 /// not know: the opcode (instruction-size math).
-enum Mode {
+enum HandlerForm {
     /// `#[handler(Add)]`: opcode known. Hot handlers are listed in
     /// `handler_table!`; cold ones (`#[cold]`) are tail-called through
     /// `tail!` and own their continuation (`set_acc` + `reenter!`).
@@ -189,10 +281,10 @@ enum Mode {
     Trampoline,
 }
 
-impl Mode {
+impl HandlerForm {
     fn op(&self) -> Option<&Ident> {
         match self {
-            Mode::Dispatch(op) => Some(op),
+            HandlerForm::Dispatch(op) => Some(op),
             _ => None,
         }
     }
@@ -201,42 +293,48 @@ impl Mode {
 #[proc_macro_attribute]
 pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func: syn::ItemFn = parse_macro_input!(item as syn::ItemFn);
-    let mode = if attr.is_empty() {
-        Mode::Trampoline
+    let form = if attr.is_empty() {
+        HandlerForm::Trampoline
     } else {
         match syn::parse::<Ident>(attr) {
-            Ok(op) => Mode::Dispatch(op),
-            Err(_) => {
-                return syn::Error::new(
-                    Span::call_site(),
-                    "#[handler] takes either no argument (dispatch trampoline) or an Opcode variant",
-                )
-                .to_compile_error()
-                .into()
-            }
+            Ok(op) => HandlerForm::Dispatch(op),
+            Err(_) => return syn::Error::new(
+                Span::call_site(),
+                "#[handler] takes either no argument (dispatch trampoline) or an Opcode variant",
+            )
+            .to_compile_error()
+            .into(),
         }
     };
-    match expand(mode, &func) {
+    match expand(form, &func) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand(mode: Mode, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
+fn expand(form: HandlerForm, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
     let (recv, ret) = validate_sig(func)?;
     let name = &func.sig.ident;
     let vis = &func.vis;
     let block = &func.block;
     let attrs = &func.attrs;
     let mut rw = Rewriter {
-        op: mode.op().cloned(),
+        op: form.op().cloned(),
         recv: recv.to_string(),
         mut_acc: false,
         mut_float: false,
     };
     let body = rw.rewrite(quote!(#block));
-    let acc = if rw.mut_acc { quote!(mut acc) } else { quote!(acc) };
-    let float = if rw.mut_float { quote!(mut float) } else { quote!(float) };
+    let acc = if rw.mut_acc {
+        quote!(mut acc)
+    } else {
+        quote!(acc)
+    };
+    let float = if rw.mut_float {
+        quote!(mut float)
+    } else {
+        quote!(float)
+    };
     // every generated fn is 32-byte aligned; the mode governs only
     // the rewriting — the emission is one shape
     Ok(quote! {
@@ -265,16 +363,25 @@ fn expand(mode: Mode, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
 fn validate_sig(func: &syn::ItemFn) -> syn::Result<(Ident, TokenStream2)> {
     let sig = &func.sig;
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
-        return Err(syn::Error::new(sig.generics.span(), "#[handler] fns take no generics"));
+        return Err(syn::Error::new(
+            sig.generics.span(),
+            "#[handler] fns take no generics",
+        ));
     }
     if sig.inputs.len() != 1 {
-        return Err(syn::Error::new(sig.span(), "#[handler] fns take exactly one `<name>: Frame` parameter"));
+        return Err(syn::Error::new(
+            sig.span(),
+            "#[handler] fns take exactly one `<name>: Frame` parameter",
+        ));
     }
     let syn::FnArg::Typed(pat) = &sig.inputs[0] else {
         return Err(syn::Error::new(sig.span(), "#[handler] fns have no `self`"));
     };
     let syn::Pat::Ident(pi) = &*pat.pat else {
-        return Err(syn::Error::new(pat.span(), "the #[handler] receiver must be a plain identifier"));
+        return Err(syn::Error::new(
+            pat.span(),
+            "the #[handler] receiver must be a plain identifier",
+        ));
     };
     let recv = &pi.ident;
     if PARAM_NAMES.contains(&recv.to_string().as_str()) {
@@ -284,18 +391,22 @@ fn validate_sig(func: &syn::ItemFn) -> syn::Result<(Ident, TokenStream2)> {
         ));
     }
     if !matches!(&*pat.ty, syn::Type::Path(tp) if tp.path.is_ident("Frame")) {
-        return Err(syn::Error::new(pat.span(), "#[handler] takes a single `<name>: Frame` parameter"));
+        return Err(syn::Error::new(
+            pat.span(),
+            "#[handler] takes a single `<name>: Frame` parameter",
+        ));
     }
     // the return type is optional (`Acc`); `-> !` is also accepted
     // for fns whose every path must transfer control away
     let ret = match &sig.output {
         syn::ReturnType::Default => quote!(-> Acc),
         syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Never(_)) => quote!(-> !),
-        syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Path(tp) if tp.path.is_ident("Acc")) => {
+        syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Path(tp) if tp.path.is_ident("Acc")) =>
+        {
             quote!(-> Acc)
         }
         syn::ReturnType::Type(_, ty) => {
-            return Err(syn::Error::new(ty.span(), "#[handler] fns return `Acc`"))
+            return Err(syn::Error::new(ty.span(), "#[handler] fns return `Acc`"));
         }
     };
     Ok((recv.clone(), ret))
@@ -362,7 +473,9 @@ impl Rewriter {
         if matches!(name.to_string().as_str(), "next" | "reenter") && self.op.is_none() {
             return Err(syn::Error::new(
                 name.span(),
-                format!("`{name}!` advances past the instruction, which needs the opcode: use #[handler(Opcode)]"),
+                format!(
+                    "`{name}!` advances past the instruction, which needs the opcode: use #[handler(Opcode)]"
+                ),
             ));
         }
         let op = self.op.as_ref();
@@ -405,7 +518,7 @@ impl Rewriter {
                         return Err(syn::Error::new(
                             name.span(),
                             "`call_enter(result, pc)` takes exactly two arguments",
-                        ))
+                        ));
                     }
                 };
                 Ok(quote!(
@@ -446,8 +559,7 @@ impl Rewriter {
                         "`opcode_check` asserts the instruction against a known opcode: use #[handler(Opcode)]",
                     ));
                 }
-                no_args(method, &args)
-                    .map(|_| quote!(Ops::<STRIDE>::new(ip, Opcode::#op)))
+                no_args(method, &args).map(|_| quote!(Ops::<STRIDE>::new(ip, Opcode::#op)))
             }
 
             // accumulator / float writes
@@ -472,15 +584,16 @@ impl Rewriter {
                 }
             }
 
-            "next" | "dispatch" | "tail" | "reenter"
-            | "dispatch_frame" => Err(syn::Error::new(
+            "next" | "dispatch" | "tail" | "reenter" | "dispatch_frame" => Err(syn::Error::new(
                 method.span(),
                 format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
             )),
 
             _ => Err(syn::Error::new(
                 method.span(),
-                format!("unknown `Frame` method `{method}`: use `frame.ctx().{method}(..)` for context access"),
+                format!(
+                    "unknown `Frame` method `{method}`: use `frame.ctx().{method}(..)` for context access"
+                ),
             )),
         }
     }
@@ -496,24 +609,29 @@ fn match_method(
     i: usize,
     recv: &str,
 ) -> Option<(Ident, Option<TokenStream2>, TokenStream2, Span, usize)> {
-    let TokenTree::Ident(rcv) = &tts[i] else { return None };
+    let TokenTree::Ident(rcv) = &tts[i] else {
+        return None;
+    };
     if rcv != recv {
         return None;
     }
     if is_punct(tts.get(i.wrapping_sub(1)), '.') {
         return None;
     }
-    let TokenTree::Punct(dot) = tts.get(i + 1)? else { return None };
+    let TokenTree::Punct(dot) = tts.get(i + 1)? else {
+        return None;
+    };
     if dot.as_char() != '.' {
         return None;
     }
-    let TokenTree::Ident(method) = &tts.get(i + 2)? else { return None };
+    let TokenTree::Ident(method) = &tts.get(i + 2)? else {
+        return None;
+    };
     let method = method.clone();
     let mut j = i + 3;
 
     let mut turbo = None;
-    if is_punct(tts.get(j), ':') && is_punct(tts.get(j + 1), ':') && is_punct(tts.get(j + 2), '<')
-    {
+    if is_punct(tts.get(j), ':') && is_punct(tts.get(j + 1), ':') && is_punct(tts.get(j + 2), '<') {
         let mut depth = 1usize;
         j += 3;
         let start = j;
@@ -534,7 +652,9 @@ fn match_method(
         j += 1;
     }
 
-    let TokenTree::Group(g) = tts.get(j)? else { return None };
+    let TokenTree::Group(g) = tts.get(j)? else {
+        return None;
+    };
     if g.delimiter() != Delimiter::Parenthesis {
         return None;
     }
@@ -551,18 +671,24 @@ fn is_punct(tt: Option<&TokenTree>, c: char) -> bool {
 /// spans of the `!` and the argument group (so the emitted call can
 /// map back onto the written one), the arguments, and the next index.
 fn match_exit(tts: &[TokenTree], i: usize) -> Option<(Ident, Span, TokenStream2, Span, usize)> {
-    let TokenTree::Ident(name) = &tts[i] else { return None };
+    let TokenTree::Ident(name) = &tts[i] else {
+        return None;
+    };
     if !EXITS.contains(&name.to_string().as_str()) {
         return None;
     }
     if is_punct(tts.get(i.wrapping_sub(1)), '.') || is_punct(tts.get(i.wrapping_sub(1)), ':') {
         return None;
     }
-    let TokenTree::Punct(bang) = tts.get(i + 1)? else { return None };
+    let TokenTree::Punct(bang) = tts.get(i + 1)? else {
+        return None;
+    };
     if bang.as_char() != '!' {
         return None;
     }
-    let TokenTree::Group(g) = tts.get(i + 2)? else { return None };
+    let TokenTree::Group(g) = tts.get(i + 2)? else {
+        return None;
+    };
     if g.delimiter() != Delimiter::Parenthesis {
         return None;
     }
@@ -599,14 +725,20 @@ fn no_args(name: &Ident, args: &TokenStream2) -> syn::Result<()> {
     if args.is_empty() {
         Ok(())
     } else {
-        Err(syn::Error::new(name.span(), format!("`{name}` takes no arguments")))
+        Err(syn::Error::new(
+            name.span(),
+            format!("`{name}` takes no arguments"),
+        ))
     }
 }
 
 fn one_arg(name: &Ident, args: TokenStream2) -> syn::Result<TokenStream2> {
     match split_args(args).as_slice() {
         [a] if !a.is_empty() => Ok(a.clone()),
-        _ => Err(syn::Error::new(name.span(), format!("`{name}(..)` takes exactly one argument"))),
+        _ => Err(syn::Error::new(
+            name.span(),
+            format!("`{name}(..)` takes exactly one argument"),
+        )),
     }
 }
 
@@ -637,8 +769,9 @@ fn split_args(args: TokenStream2) -> Vec<TokenStream2> {
 /// hand-written turbofish would fight that.
 fn reject_turbofish(name: &Ident, path: &TokenStream2) -> syn::Result<()> {
     let tts: Vec<TokenTree> = path.clone().into_iter().collect();
-    if tts.windows(3).any(|w| is_punct(Some(&w[0]), ':') && is_punct(Some(&w[1]), ':') && is_punct(Some(&w[2]), '<'))
-    {
+    if tts.windows(3).any(|w| {
+        is_punct(Some(&w[0]), ':') && is_punct(Some(&w[1]), ':') && is_punct(Some(&w[2]), '<')
+    }) {
         return Err(syn::Error::new(
             name.span(),
             "`tail!` appends `::<STRIDE>` itself; drop the turbofish",

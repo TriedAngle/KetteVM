@@ -234,8 +234,8 @@ fn code_bytes(ctx: &Ctx<'_>) -> &'static [u8] {
     let (ptr, len) = {
         // the slice is re-derived after every event that can move it
         // (allocation, nested run)
-        let arr = ctx.stack().frame_header(ctx.frame_base()).code(ctx.heap());
-        let bytes = arr.as_slice();
+        let code = ctx.stack().frame_header(ctx.frame_base()).code(ctx.heap());
+        let bytes = code.as_slice();
         (bytes.as_ptr(), bytes.len())
     };
 
@@ -542,6 +542,24 @@ fn step<'a>(
                 acc.get(heap),
                 Some(fb),
                 semantics,
+            );
+            if ctx.is_throw(v) {
+                return Flow::Threw;
+            }
+            acc.store(v);
+            Flow::Sync
+        }
+        Opcode::Delete => {
+            let args = stack.window(frame_base, ops.reg_list(0), ops.reg_count(1));
+            let target = args.get_handle(heap, 0);
+            let key = args.get_handle(heap, 1);
+            let v = vm_core::intrinsics::delete_property_operator(
+                vm,
+                heap,
+                state,
+                target,
+                key,
+                ctx.language_mode(),
             );
             if ctx.is_throw(v) {
                 return Flow::Threw;

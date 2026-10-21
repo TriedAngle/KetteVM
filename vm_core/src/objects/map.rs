@@ -421,6 +421,7 @@ impl MapKind {
     pub const PROTOTYPE_INFO: MapKind = MapKind(ObjectKind::PrototypeInfo as u64);
     pub const DATA_HANDLER: MapKind = MapKind(ObjectKind::DataHandler as u64);
     pub const NUMBER_DICTIONARY: MapKind = MapKind(ObjectKind::NumberDictionary as u64);
+    pub const CODE: MapKind = MapKind(ObjectKind::Code as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -463,6 +464,7 @@ impl MapKind {
             Self::CELL => ObjectKind::Cell,
             Self::PROTOTYPE_INFO => ObjectKind::PrototypeInfo,
             Self::DATA_HANDLER => ObjectKind::DataHandler,
+            Self::CODE => ObjectKind::Code,
             _ => panic!("invalid object kind"),
         }
     }

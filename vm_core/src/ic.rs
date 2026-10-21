@@ -1,8 +1,8 @@
 use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
-    Heap, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SlotName, Smi, Tagged, Value,
-    WeakFixedArray, WeakFixedArrayInit,
+    Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SlotName, Smi,
+    Tagged, Value, WeakFixedArray, WeakFixedArrayInit,
 };
 
 /// Beyond this many live (map, handler) pairs a site goes megamorphic.
@@ -833,17 +833,24 @@ fn store_handler<'s>(
 }
 
 /// A setter found on a prototype or owned by the receiver: run it, or treat
-/// a setter-less accessor as a silently ignored write.
+/// a setter-less accessor as a silently ignored write in sloppy code. Strict
+/// code must throw, which is not representable as a `StoreHit`; `None`
+/// defers to the slow path, where `store_lookup` raises.
 fn setter_action<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
     pair: Tagged<'_, AccessorPair>,
-) -> StoreAction<'s> {
+    mode: LanguageMode,
+) -> Option<StoreAction<'s>> {
     let setter = pair.set.get(heap);
     if setter == heap.known().undefined.as_tagged(heap) {
-        StoreAction::Noop
+        if mode.is_strict() {
+            None
+        } else {
+            Some(StoreAction::Noop)
+        }
     } else {
-        StoreAction::Setter(scope.handle(setter))
+        Some(StoreAction::Setter(scope.handle(setter)))
     }
 }
 
@@ -1231,6 +1238,7 @@ impl InlineCache {
         receiver: Handle<'_, Value>,
         name: Handle<'_, SlotName>,
         value: Handle<'_, Value>,
+        mode: LanguageMode,
     ) -> Option<StoreHit<'a>> {
         let vector = vector?;
         let recv = ic_receiver(receiver.as_tagged(heap).erase(), heap)?;
@@ -1252,7 +1260,7 @@ impl InlineCache {
                 StoreAction::Transition(scope.handle(target))
             } else {
                 // own setter as a whole weak pair
-                setter_action(heap, scope, strong.get_as::<AccessorPair>(heap)?)
+                setter_action(heap, scope, strong.get_as::<AccessorPair>(heap)?, mode)?
             }
         } else {
             let data_handler = handler.as_strong()?.get_as::<DataHandler>(heap)?;
@@ -1266,7 +1274,7 @@ impl InlineCache {
                         .data(heap, 0)
                         .as_strong()?
                         .get_as::<AccessorPair>(heap)?;
-                    setter_action(heap, scope, pair)
+                    setter_action(heap, scope, pair, mode)?
                 }
                 _ => return None,
             }

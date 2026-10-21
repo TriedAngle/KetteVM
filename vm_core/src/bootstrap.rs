@@ -2,10 +2,10 @@ use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, Cell, CellInit, ContextInit, ContextObject, FixedArray,
-    FixedByteArray, Global, Handle, HandleData, HandleScope, HandleSlice, Heap, Map, MapInit,
-    MapKind, Object, ObjectInit, RootHandles, ScopeInfo, ScopeInfoInit, SlotName, Smi,
-    StringInterner, Symbol, Tagged, Value,
+    CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit,
+    ContextObject, FixedArray, Global, Handle, HandleData, HandleScope, HandleSlice, Heap,
+    MODE_SLOPPY, Map, MapInit, MapKind, Object, ObjectInit, RootHandles, ScopeInfo, ScopeInfoInit,
+    SlotName, Smi, StringInterner, Symbol, Tagged, Value,
 };
 
 #[derive(Clone, Copy)]
@@ -26,6 +26,7 @@ pub struct WellKnown {
     pub float_map: Global<Map>,
     pub array_map: Global<Map>,
     pub byte_array_map: Global<Map>,
+    pub code_map: Global<Map>,
     pub dense_latin1_string_map: Global<Map>,
     pub dense_utf16_string_map: Global<Map>,
     pub symbol_map: Global<Map>,
@@ -243,6 +244,7 @@ fn uninited_wellknown(roots: &RootHandles) -> WellKnown {
         float_map: map,
         array_map: map,
         byte_array_map: map,
+        code_map: map,
         dense_latin1_string_map: map,
         dense_utf16_string_map: map,
         symbol_map: map,
@@ -455,6 +457,7 @@ pub fn bootstrap_basics(heap: &mut Heap, roots: &RootHandles) {
     let float_map = alloc_map(heap, roots, MapKind::FLOAT);
     let array_map = alloc_map(heap, roots, MapKind::FIXED_ARRAY);
     let byte_array_map = alloc_map(heap, roots, MapKind::FIXED_BYTE_ARRAY);
+    let code_map = alloc_map(heap, roots, MapKind::CODE);
     let dense_latin1_string_map =
         alloc_map(heap, roots, MapKind::DENSE_STRING.union(MapKind::LATIN1));
     let dense_utf16_string_map = alloc_map(heap, roots, MapKind::DENSE_STRING);
@@ -511,6 +514,7 @@ pub fn bootstrap_basics(heap: &mut Heap, roots: &RootHandles) {
     known.float_map = float_map;
     known.array_map = array_map;
     known.byte_array_map = byte_array_map;
+    known.code_map = code_map;
     known.dense_latin1_string_map = dense_latin1_string_map;
     known.dense_utf16_string_map = dense_utf16_string_map;
     known.symbol_map = symbol_map;
@@ -660,10 +664,15 @@ pub fn bootstrap_well_known(heap: &mut Heap, roots: &RootHandles) {
         object_prototype,
         2, // [callable info, context], like function_map
     );
-    let empty_code = heap.allocate::<FixedByteArray>(&[1]).as_handle(&scope);
+    let empty_code = heap
+        .allocate::<Code>(CodeInit {
+            bytes: &[1],
+            mode: MODE_SLOPPY,
+        })
+        .as_handle(&scope);
     let empty_info = heap
         .allocate::<CallableInfoObject>(CallableInfoInit {
-            bytecode: empty_code,
+            code: empty_code,
             constants: known.empty_fixed_array,
             register_count: 0,
             handlers: None,

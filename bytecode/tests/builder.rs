@@ -190,7 +190,7 @@ fn staged_runtime_calls_lay_out_the_window_in_order() {
             },
             Instr {
                 op: Opcode::CallRuntime,
-                ops: vec![19, 1, 3],
+                ops: vec![bytecode::BuiltinFn::SetFunctionName as i64, 1, 3],
                 at: 14
             }, // SetFunctionName discriminant
             Instr {

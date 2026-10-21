@@ -218,12 +218,7 @@ define_opcodes! {
     StoreKeyedProperty { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] }, // acc -> reg (obj) reg (key) idx (feedback)
     StoreKeyedPropertyNoShadow { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
 
-    // -- fast property access (Kette): no proxy traps, no accessor
-    // invocation, no user-code key coercion; loads and Shadow stores use
-    // inline caches; stores write existing slots only — a miss is an
-    // error, never a transition
-
-
+    Delete { operands: [RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked] },
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)
 

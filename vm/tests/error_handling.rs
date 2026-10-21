@@ -1,8 +1,8 @@
 use bytecode::{Opcode, emit};
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{
-    CallableInfoInit, CallableInfoObject, FixedArray, FixedByteArray, HandlerEntryInit,
-    HandlerTable, HandlerTableInit, ObjectSlotsInit, Smi, Tagged, Value,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, HandlerEntryInit,
+    HandlerTable, HandlerTableInit, MODE_SLOPPY, ObjectSlotsInit, Smi, Tagged, Value,
 };
 use vm::{Thread, VM};
 
@@ -20,9 +20,13 @@ fn callable(
 ) -> Value {
     let _the_hole = thread.heap().known().the_hole;
     let empty_context = thread.heap().known().empty_context;
-    let bytecode = thread
-        .heap()
-        .allocate_handle::<FixedByteArray>(program, scope);
+    let code = thread.heap().allocate_handle::<Code>(
+        CodeInit {
+            bytes: program,
+            mode: MODE_SLOPPY,
+        },
+        scope,
+    );
     let constants = thread
         .heap()
         .allocate_handle::<FixedArray>(scope.stage(constants), scope);
@@ -34,7 +38,7 @@ fn callable(
     let info = thread.heap().allocate_handle::<CallableInfoObject>(
         CallableInfoInit {
             expected_slots: 0,
-            bytecode,
+            code,
             constants,
             register_count,
             handlers,

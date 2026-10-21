@@ -2,8 +2,8 @@ use bytecode::{Opcode, emit};
 use interpreter_become::BecomeInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
-    CallableInfoInit, CallableInfoObject, FixedArray, FixedByteArray, Handle, HandleScope, Heap,
-    Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, new_feedback_vector,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
+    MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, new_feedback_vector,
 };
 
 /// The `#[handler]`-based interpreter plugs into `VM::new` like any
@@ -27,9 +27,13 @@ fn callable<'s>(
     register_count: usize,
     feedback_slots: usize,
 ) -> Handle<'s, Object> {
-    let bytecode = thread
-        .heap()
-        .allocate_handle::<FixedByteArray>(program, scope);
+    let code = thread.heap().allocate_handle::<Code>(
+        CodeInit {
+            bytes: program,
+            mode: MODE_SLOPPY,
+        },
+        scope,
+    );
     let constants = {
         let empty: &[Tagged<'_, Value>] = &[];
         let staged = scope.stage(empty);
@@ -38,7 +42,7 @@ fn callable<'s>(
     let info = thread.heap().allocate_handle::<CallableInfoObject>(
         CallableInfoInit {
             expected_slots: 0,
-            bytecode,
+            code,
             constants,
             register_count,
             handlers: None,

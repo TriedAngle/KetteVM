@@ -1,8 +1,8 @@
 use core::cell::Cell;
 
 use crate::{
-    CallableInfoObject, EdgeVisitable, FeedbackVector, FixedArray, FixedByteArray, Handle,
-    HandleSlice, Heap, Object, Register, Smi, Tagged, Value, Visitor,
+    CallableInfoObject, Code, EdgeVisitable, FeedbackVector, FixedArray, Handle, HandleSlice, Heap,
+    Object, Register, Smi, Tagged, Value, Visitor,
 };
 
 use crate::VmError;
@@ -201,11 +201,11 @@ impl FrameHeader {
         self.regcount.read_smi().value() as usize
     }
 
-    /// The frame's own bytecode.
+    /// The frame's code object (instruction bytes + dispatch mode).
     #[inline(always)]
-    pub fn code<'h>(&self, heap: &'h Heap) -> Tagged<'h, FixedByteArray> {
+    pub fn code<'h>(&self, heap: &'h Heap) -> Tagged<'h, Code> {
         // Safety: only `init_frame_header` writes this slot, always the
-        // frame's bytecode.
+        // frame's code object.
         unsafe { self.code.get(heap).cast() }
     }
 
@@ -714,7 +714,7 @@ impl Stack {
         register_count: usize,
     ) -> FrameMeta {
         let info = callee.info;
-        let bytecode = info.bytecode.get(heap);
+        let code = info.code.get(heap);
         let constants = info.constants.get(heap);
         let feedback = info.feedback.get(heap).map_or_else(
             || heap.known().the_hole.as_tagged(heap).erase(),
@@ -731,7 +731,7 @@ impl Stack {
                 saved_base: Register::from_value(smi(caller.base)),
                 feedback: Register::from_value(feedback),
                 constants: Register::from_value(constants.erase()),
-                code: Register::from_value(bytecode.erase()),
+                code: Register::from_value(code.erase()),
                 new_target: Register::from_value(new_target),
                 context: Register::from_value(callee.context),
                 argc: Register::from_value(smi(argc)),

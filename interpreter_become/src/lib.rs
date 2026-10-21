@@ -15,8 +15,8 @@ use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
 use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
-    Args, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert,
-    EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
+    Args, CallTarget, CallableInfoObject, Callee, Code, Compare, ContextInit, ContextObject,
+    Convert, EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
     Interpreter, NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value,
     VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
@@ -278,19 +278,28 @@ pub struct Ctx<'s, 'h> {
     /// that may collect (reenter, the safepoint poll, the unwinder);
     /// interior mutability, like `safepoints`.
     code: Cell<*const u8>,
+    /// The current frame's dispatch mode, resolved from its `Code`
+    /// mode at the same edges as `code`. `dispatch_frame!`/`call_enter!`
+    /// read it after switching frames; intra-frame exits keep the
+    /// threaded `TableArg` and never touch this cell.
+    table: Cell<&'static DispatchTable>,
     safepoints: Cell<u32>,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
-        let code = state.stack().frame_header(base_anchor).code(heap).as_ptr();
+        let (code, table) = {
+            let code = state.stack().frame_header(base_anchor).code(&*heap);
+            (code.as_ptr(), table_for(code.mode()))
+        };
         Ctx {
             vm,
             state,
             heap,
             base_anchor,
             code: Cell::new(code),
+            table: Cell::new(table),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
         }
     }
@@ -347,34 +356,38 @@ impl<'s, 'h> Ctx<'s, 'h> {
     /// point that may have collected and moved the bytecode.
     #[inline(always)]
     pub fn reload_code(&self) {
-        let code = {
-            let state = self.state;
-            let heap = &*self.heap;
-            state
-                .stack()
-                .frame_header(state.frame_base())
-                .code(heap)
-                .as_ptr()
-        };
-        self.code.set(code);
+        let state = self.state;
+        let heap = &*self.heap;
+        let code = state.stack().frame_header(state.frame_base()).code(heap);
+        self.code.set(code.as_ptr());
+        self.table.set(table_for(code.mode()));
     }
 
     /// Switch to the frame at `base` (pop/unwind)
     #[inline(always)]
     pub fn switch_frame(&self, base: usize) {
-        let code = {
-            let state = self.state;
-            let heap = &*self.heap;
-            state.stack().frame_header(base).code(heap).as_ptr()
-        };
+        let state = self.state;
+        let heap = &*self.heap;
+        let code = state.stack().frame_header(base).code(heap);
         self.state.set_frame_base(base);
-        self.code.set(code);
+        self.code.set(code.as_ptr());
+        self.table.set(table_for(code.mode()));
     }
 
+    /// Switch to a freshly pushed frame, whose `Code` the caller already
+    /// read from the callee's info.
     #[inline(always)]
-    pub fn switch_frame_code(&self, base: usize, code: *const u8) {
+    pub fn switch_frame_code(&self, base: usize, code: Tagged<'_, Code>) {
         self.state.set_frame_base(base);
-        self.code.set(code);
+        self.code.set(code.as_ptr());
+        self.table.set(table_for(code.mode()));
+    }
+
+    /// The current frame's dispatch mode. Only the frame-switching
+    /// exits call this; intra-frame dispatch uses the threaded table.
+    #[inline(always)]
+    pub fn table(&self) -> TableArg<'static> {
+        TableArg::new(self.table.get())
     }
 
     /// The current frame's feedback vector
@@ -463,17 +476,32 @@ impl Acc {
     }
 }
 
-pub struct TableArg<'h>(pub &'static [Handler; 256], core::marker::PhantomData<&'h ()>);
+/// One dispatch mode: the narrow and wide handler tables for a
+/// language mode. Grouping the two strides keeps `op_wide` a field access
+/// (it used to reach for a separate global), and lets a frame carry the
+/// whole mode in one pointer.
+pub struct DispatchTable {
+    pub narrow: [Handler; 256],
+    pub wide: [Handler; 256],
+}
+
+pub struct TableArg<'h>(pub &'static DispatchTable, core::marker::PhantomData<&'h ()>);
 
 impl<'h> TableArg<'h> {
     #[inline(always)]
-    pub fn new(table: &'static [Handler; 256]) -> TableArg<'h> {
+    pub fn new(table: &'static DispatchTable) -> TableArg<'h> {
         TableArg(table, core::marker::PhantomData)
     }
 
     #[inline(always)]
     pub fn get(&self, op: u8) -> Handler {
-        self.0[op as usize]
+        self.0.narrow[op as usize]
+    }
+
+    /// The wide-stride handler for the same mode (`Wide` prefix).
+    #[inline(always)]
+    pub fn wide(&self, op: u8) -> Handler {
+        self.0.wide[op as usize]
     }
 }
 
@@ -495,13 +523,13 @@ pub type Handler = for<'h> extern "rust-preserve-none" fn(
 /// `Wide` prefix comes back through here. The table argument is
 /// narrow for the whole execution; only the handler stride varies.
 #[handler]
-fn op_wide(frame: Frame) -> Acc {
-    let h = TableArg::new(&TABLE_WIDE).get(unsafe { *ip.add(1) });
+fn op_wide(frame: Frame) {
+    let h = table.wide(unsafe { *ip.add(1) });
     become h(ip, regs, acc, ctx, table, roots, float)
 }
 
 #[handler]
-fn op_trap(frame: Frame) -> Acc {
+fn op_trap(frame: Frame) {
     let byte = unsafe { *frame.ip() };
     unreachable!("unimplemented opcode {:?}", Opcode::from_byte(byte))
 }
@@ -813,7 +841,7 @@ fn op_store(frame: Frame) {
 }
 
 #[handler(StoreNamedProperty)]
-fn op_store_named_property(frame: Frame) {
+fn op_store_named_property_sloppy(frame: Frame) {
     let recv = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let name_idx = frame.unsigned::<1>();
     let fb_slot = frame.unsigned::<2>();
@@ -833,11 +861,35 @@ fn op_store_named_property(frame: Frame) {
     ) {
         next!()
     }
-    tail!(slow_store_named)
+    tail!(slow_store_named_sloppy)
+}
+
+#[handler(StoreNamedProperty)]
+fn op_store_named_property_strict(frame: Frame) {
+    let recv = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
+    let name_idx = frame.unsigned::<1>();
+    let fb_slot = frame.unsigned::<2>();
+    let name = frame
+        .ctx()
+        .constants_ref(frame.ctx().heap())
+        .at(frame.ctx().heap(), name_idx)
+        .as_name();
+
+    if InlineCache::try_store_fast(
+        frame.ctx().heap(),
+        frame.ctx().feedback_ref(frame.ctx().heap()),
+        fb_slot,
+        recv,
+        name,
+        frame.acc(),
+    ) {
+        next!()
+    }
+    tail!(slow_store_named_strict)
 }
 
 #[handler(StoreKeyedProperty)]
-fn op_store_keyed_property(frame: Frame) {
+fn op_store_keyed_property_sloppy(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
@@ -863,11 +915,41 @@ fn op_store_keyed_property(frame: Frame) {
             next!()
         }
     }
-    tail!(slow_keyed_store)
+    tail!(slow_keyed_store_sloppy)
+}
+
+#[handler(StoreKeyedProperty)]
+fn op_store_keyed_property_strict(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let key = frame.regs().get(frame.signed::<1>(), heap);
+    let fb = frame.unsigned::<2>();
+    if let Some(idx) = key.to_i64()
+        && idx >= 0
+    {
+        if recv
+            .store_array_element_in_place(heap, idx as usize, frame.acc())
+            .is_ok()
+        {
+            next!()
+        }
+        if let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            idx as usize,
+            frame.acc(),
+        ) {
+            frame.set_acc(v);
+            next!()
+        }
+    }
+    tail!(slow_keyed_store_strict)
 }
 
 #[handler(StoreKeyedPropertyNoShadow)]
-fn op_store_keyed_property_no_shadow(frame: Frame) {
+fn op_store_keyed_property_no_shadow_sloppy(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
@@ -893,17 +975,107 @@ fn op_store_keyed_property_no_shadow(frame: Frame) {
             next!()
         }
     }
-    tail!(slow_keyed_store_no_shadow)
+    tail!(slow_keyed_store_no_shadow_sloppy)
+}
+
+#[handler(StoreKeyedPropertyNoShadow)]
+fn op_store_keyed_property_no_shadow_strict(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let key = frame.regs().get(frame.signed::<1>(), heap);
+    let fb = frame.unsigned::<2>();
+    if let Some(idx) = key.to_i64()
+        && idx >= 0
+    {
+        if recv
+            .store_array_element_in_place(heap, idx as usize, frame.acc())
+            .is_ok()
+        {
+            next!()
+        }
+        if let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            idx as usize,
+            frame.acc(),
+        ) {
+            frame.set_acc(v);
+            next!()
+        }
+    }
+    tail!(slow_keyed_store_no_shadow_strict)
 }
 
 #[handler(StoreNamedPropertyNoShadow)]
-fn op_store_named_property_no_shadow(frame: Frame) {
-    tail!(slow_store_named_no_shadow)
+fn op_store_named_property_no_shadow_sloppy(frame: Frame) {
+    tail!(slow_store_named_no_shadow_sloppy)
+}
+
+#[handler(StoreNamedPropertyNoShadow)]
+fn op_store_named_property_no_shadow_strict(frame: Frame) {
+    tail!(slow_store_named_no_shadow_strict)
 }
 
 #[handler(StoreGlobal)]
-fn op_store_global(frame: Frame) {
-    tail!(slow_store_global)
+fn op_store_global_sloppy(frame: Frame) {
+    tail!(slow_store_global_sloppy)
+}
+
+#[handler(StoreGlobal)]
+fn op_store_global_strict(frame: Frame) {
+    tail!(slow_store_global_strict)
+}
+
+#[handler(Delete)]
+fn op_delete_sloppy(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let args = frame
+        .ctx()
+        .state()
+        .stack()
+        .window(base, frame.signed::<0>(), frame.unsigned::<1>());
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let target = args.get_handle(frame.ctx().heap(), 0);
+    let raw_key = args.get_handle(frame.ctx().heap(), 1);
+    let v = vm_core::intrinsics::delete_property_operator(
+        vm,
+        frame.ctx().heap_mut(),
+        state,
+        target,
+        raw_key,
+        vm_core::LanguageMode::Sloppy,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(Delete)]
+fn op_delete_strict(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let args = frame
+        .ctx()
+        .state()
+        .stack()
+        .window(base, frame.signed::<0>(), frame.unsigned::<1>());
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let target = args.get_handle(frame.ctx().heap(), 0);
+    let raw_key = args.get_handle(frame.ctx().heap(), 1);
+    let v = vm_core::intrinsics::delete_property_operator(
+        vm,
+        frame.ctx().heap_mut(),
+        state,
+        target,
+        raw_key,
+        vm_core::LanguageMode::Strict,
+    );
+    frame.set_acc(v);
+    reenter!(pc)
 }
 
 #[handler(AddParent)]
@@ -1454,7 +1626,7 @@ fn op_instance_of(frame: Frame) {
 }
 
 #[handler(CompareJump)]
-fn op_compare_jump(frame: Frame) -> Acc {
+fn op_compare_jump(frame: Frame) {
     let heap = frame.ctx().heap();
     let other = frame.regs().get(frame.signed::<0>(), heap);
     let kind = frame.unsigned::<1>();
@@ -1543,12 +1715,12 @@ fn op_dec_loc(frame: Frame) {
 // --- control flow ---
 
 #[handler(Jump)]
-fn op_jump(frame: Frame) -> Acc {
+fn op_jump(frame: Frame) {
     dispatch!(frame.ip().wrapping_offset(frame.signed::<0>() as isize))
 }
 
 #[handler(JumpIfTruthy)]
-fn op_jump_if_truthy(frame: Frame) -> Acc {
+fn op_jump_if_truthy(frame: Frame) {
     let off = frame.signed::<0>();
     if frame.acc().is_truthy(frame.ctx().heap()) {
         dispatch!(frame.ip().wrapping_offset(off as isize))
@@ -1557,7 +1729,7 @@ fn op_jump_if_truthy(frame: Frame) -> Acc {
 }
 
 #[handler(JumpIfFalsy)]
-fn op_jump_if_falsy(frame: Frame) -> Acc {
+fn op_jump_if_falsy(frame: Frame) {
     let off = frame.signed::<0>();
     if !frame.acc().is_truthy(frame.ctx().heap()) {
         dispatch!(frame.ip().wrapping_offset(off as isize))
@@ -1566,7 +1738,7 @@ fn op_jump_if_falsy(frame: Frame) -> Acc {
 }
 
 #[handler(JumpIfNotUndefined)]
-fn op_jump_if_not_undefined(frame: Frame) -> Acc {
+fn op_jump_if_not_undefined(frame: Frame) {
     let off = frame.signed::<0>();
     let undefined = roots
         .known(frame.ctx().heap())
@@ -1580,7 +1752,7 @@ fn op_jump_if_not_undefined(frame: Frame) -> Acc {
 }
 
 #[handler(JumpLoop)]
-fn op_jump_loop(frame: Frame) -> Acc {
+fn op_jump_loop(frame: Frame) {
     let target = frame.ip().wrapping_offset(frame.signed::<0>() as isize);
     if frame.ctx().safepoint_tick() {
         let pc = target as usize - frame.ctx().code_ptr() as usize;
@@ -1618,7 +1790,7 @@ fn op_jump_loop(frame: Frame) -> Acc {
 }
 
 #[handler(Return)]
-fn op_return(frame: Frame) -> Acc {
+fn op_return(frame: Frame) {
     frame.opcode_check();
     if frame.ctx().frame_base() == frame.ctx().base_anchor() {
         return acc;
@@ -1669,7 +1841,7 @@ fn op_return(frame: Frame) -> Acc {
 // --- calls ---
 
 #[handler(Call)]
-fn op_call(frame: Frame) -> Acc {
+fn op_call(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let result = call_window_start::<STRIDE>(
@@ -1686,7 +1858,7 @@ fn op_call(frame: Frame) -> Acc {
 }
 
 #[handler(CallNoFeedback)]
-fn op_call_no_feedback(frame: Frame) -> Acc {
+fn op_call_no_feedback(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let size = (if STRIDE == 2 { 2 } else { 1 })
@@ -1709,7 +1881,7 @@ fn op_call_no_feedback(frame: Frame) -> Acc {
 }
 
 #[handler(CallRuntime)]
-fn op_call_runtime(frame: Frame) -> Acc {
+fn op_call_runtime(frame: Frame) {
     let pc = frame.pc();
     let rt = frame.unsigned::<0>();
     let base = frame.signed::<1>();
@@ -1725,7 +1897,7 @@ fn op_call_runtime(frame: Frame) -> Acc {
 }
 
 #[handler(CallMethod0)]
-fn op_call_method0(frame: Frame) -> Acc {
+fn op_call_method0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
@@ -1743,7 +1915,7 @@ fn op_call_method0(frame: Frame) -> Acc {
 }
 
 #[handler(CallMethod1)]
-fn op_call_method1(frame: Frame) -> Acc {
+fn op_call_method1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
@@ -1762,7 +1934,7 @@ fn op_call_method1(frame: Frame) -> Acc {
 }
 
 #[handler(CallMethod2)]
-fn op_call_method2(frame: Frame) -> Acc {
+fn op_call_method2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
@@ -1782,7 +1954,7 @@ fn op_call_method2(frame: Frame) -> Acc {
 }
 
 #[handler(CallFunction0)]
-fn op_call_function0(frame: Frame) -> Acc {
+fn op_call_function0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let result = call_scatter_start::<STRIDE, false>(
@@ -1803,7 +1975,7 @@ fn op_call_function0(frame: Frame) -> Acc {
 }
 
 #[handler(CallFunction1)]
-fn op_call_function1(frame: Frame) -> Acc {
+fn op_call_function1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let arg0 = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
@@ -1825,7 +1997,7 @@ fn op_call_function1(frame: Frame) -> Acc {
 }
 
 #[handler(CallFunction2)]
-fn op_call_function2(frame: Frame) -> Acc {
+fn op_call_function2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let arg0 = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
@@ -1850,12 +2022,7 @@ fn op_call_function2(frame: Frame) -> Acc {
 // --- literals ---
 
 #[handler(CreateClosure)]
-fn op_create_closure(frame: Frame) -> Acc {
-    // `Object::create_closure` is more than an allocation (length/name
-    // property transitions, a fresh per-closure prototype for `normal`
-    // functions): no single-bump fast path exists until its final shape
-    // is cached per callable info. The whole body lives here — there is
-    // no faster path to tail into.
+fn op_create_closure(frame: Frame) {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let info_idx = frame.unsigned::<0>();
@@ -1886,7 +2053,7 @@ fn op_create_closure(frame: Frame) -> Acc {
 }
 
 #[handler(CreateEmptyArrayLiteral)]
-fn op_create_empty_array_literal(frame: Frame) -> Acc {
+fn op_create_empty_array_literal(frame: Frame) {
     if let Some(v) = frame.ctx().heap_mut().try_new_array_literal() {
         frame.set_acc(v.erase());
         next!()
@@ -1947,7 +2114,7 @@ fn op_create_block_context(frame: Frame) {
 // --- contexts ---
 
 #[handler(LoadContextSlot)]
-fn op_load_context_slot(frame: Frame) -> Acc {
+fn op_load_context_slot(frame: Frame) {
     let slot = frame.unsigned::<0>();
     let depth = frame.unsigned::<1>();
     let base = frame.ctx().frame_base();
@@ -2006,7 +2173,7 @@ fn op_load_context_slot(frame: Frame) -> Acc {
 }
 
 #[handler(StoreContextSlot)]
-fn op_store_context_slot(frame: Frame) -> Acc {
+fn op_store_context_slot(frame: Frame) {
     let slot = frame.unsigned::<0>();
     let depth = frame.unsigned::<1>();
     let base = frame.ctx().frame_base();
@@ -2044,7 +2211,7 @@ fn op_store_context_slot(frame: Frame) -> Acc {
 }
 
 #[handler(PushContext)]
-fn op_push_context(frame: Frame) -> Acc {
+fn op_push_context(frame: Frame) {
     let r = frame.signed::<0>();
     let base = frame.ctx().frame_base();
     let heap = frame.ctx().heap();
@@ -2070,7 +2237,7 @@ fn op_push_context(frame: Frame) -> Acc {
 }
 
 #[handler(PopContext)]
-fn op_pop_context(frame: Frame) -> Acc {
+fn op_pop_context(frame: Frame) {
     let r = frame.signed::<0>();
     let base = frame.ctx().frame_base();
     let context = frame.regs().get(r, frame.ctx().heap());
@@ -2091,7 +2258,7 @@ fn op_pop_context(frame: Frame) -> Acc {
 }
 
 #[handler(CreateFunctionContext)]
-fn op_create_function_context(frame: Frame) -> Acc {
+fn op_create_function_context(frame: Frame) {
     // allocation is the operation and there is no faster path to tail
     // into: the whole body lives here
     let pc = frame.pc();
@@ -2145,13 +2312,13 @@ fn op_create_function_context(frame: Frame) -> Acc {
 // --- exceptions ---
 
 #[handler(Throw)]
-fn op_throw(frame: Frame) -> Acc {
+fn op_throw(frame: Frame) {
     frame.ctx().state().set_pending_exception(frame.acc());
     tail!(throw_dispatch)
 }
 
 #[handler(Construct)]
-fn op_construct(frame: Frame) -> Acc {
+fn op_construct(frame: Frame) {
     let pc = frame.pc();
     let size =
         (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Construct.operands().len() };
@@ -2187,7 +2354,7 @@ fn op_construct(frame: Frame) -> Acc {
 }
 
 #[handler(ThrowReferenceErrorIfHole)]
-fn op_throw_reference_error_if_hole(frame: Frame) -> Acc {
+fn op_throw_reference_error_if_hole(frame: Frame) {
     let heap = frame.ctx().heap();
     if frame.acc() == roots.known(heap).the_hole.as_tagged(heap).erase() {
         let _ = frame.ctx().raise_tag(VmError::Reference);
@@ -2196,7 +2363,8 @@ fn op_throw_reference_error_if_hole(frame: Frame) -> Acc {
     next!()
 }
 
-handler_table!(
+handler_table! {
+  base: [
     op_wide,
     op_load,
     op_move,
@@ -2266,14 +2434,9 @@ handler_table!(
     op_load_keyed_property,
     op_load_keyed_property_reg,
     op_load_element_imm,
-    op_store_keyed_property,
     op_load_named_property,
     op_create_closure,
     op_throw,
-    op_store_named_property,
-    op_store_named_property_no_shadow,
-    op_store_keyed_property_no_shadow,
-    op_store_global,
     op_add_parent,
     op_load_context_slot,
     op_store_context_slot,
@@ -2290,9 +2453,51 @@ handler_table!(
     op_load_context,
     op_load_current_closure,
     op_throw_reference_error_if_hole,
-    op_throw,
     op_load_global_no_throw,
-);
+  ],
+  modes: {
+    sloppy: [
+      op_delete_sloppy,
+      op_store_named_property_sloppy,
+      op_store_keyed_property_sloppy,
+      op_store_named_property_no_shadow_sloppy,
+      op_store_keyed_property_no_shadow_sloppy,
+      op_store_global_sloppy,
+    ],
+    strict: [
+      op_delete_strict,
+      op_store_named_property_strict,
+      op_store_keyed_property_strict,
+      op_store_named_property_no_shadow_strict,
+      op_store_keyed_property_no_shadow_strict,
+      op_store_global_strict,
+    ],
+  },
+}
+
+pub static TABLE_SLOPPY: DispatchTable = DispatchTable {
+    narrow: __table_narrow_sloppy(),
+    wide: __table_wide_sloppy(),
+};
+
+pub static TABLE_STRICT: DispatchTable = DispatchTable {
+    narrow: __table_narrow_strict(),
+    wide: __table_wide_strict(),
+};
+
+/// Resolve a [`vm_core::Code`] mode id to its dispatch table. Only the
+/// frame-switching exits call this; the result is cached in `Ctx`.
+#[inline(always)]
+pub fn table_for(mode: u8) -> &'static DispatchTable {
+    match mode {
+        vm_core::MODE_STRICT => &TABLE_STRICT,
+        vm_core::MODE_SLOPPY => &TABLE_SLOPPY,
+        other => {
+            debug_assert!(false, "dispatch mode {other} has no table");
+            &TABLE_SLOPPY
+        }
+    }
+}
 
 // --- entry ---
 
@@ -2345,7 +2550,7 @@ fn enter<'a>(
             let mut ctx = Ctx::new(vm, state, heap, frame.base);
             let ip = ctx.code_ptr();
             let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            let table = TableArg::new(&TABLE_NARROW);
+            let table = ctx.table();
             let roots = RootsArg::from_heap(ctx.heap());
             // the fresh frame is entered at pc 0 with the accumulator
             // seeded undefined

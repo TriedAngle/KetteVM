@@ -450,7 +450,11 @@ pub fn keyed_store<'a>(
                             };
                             let setter = pair.set.get(heap);
                             if setter == heap.known().undefined.as_tagged(heap) {
-                                return value.as_tagged(heap).erase();
+                                return if ctx.language_mode().is_strict() {
+                                    ctx.raise_tag(VmError::Type)
+                                } else {
+                                    value.as_tagged(heap).erase()
+                                };
                             }
                             let setter = scope.handle(setter);
                             return match apply_store_outcome(
@@ -464,8 +468,13 @@ pub fn keyed_store<'a>(
                             };
                         }
                         Some(EntryClass::ReadOnly) => {
-                            // sloppy-mode assignment silently ignores
-                            return value.as_tagged(heap).erase();
+                            // sloppy-mode assignment silently ignores,
+                            // strict throws (ES 10.4.5.5 PutValue step 5)
+                            return if ctx.language_mode().is_strict() {
+                                ctx.raise_tag(VmError::Type)
+                            } else {
+                                value.as_tagged(heap).erase()
+                            };
                         }
                         Some(EntryClass::Data) => {
                             let obj = scope
@@ -558,6 +567,7 @@ pub fn keyed_store<'a>(
             name.as_tagged(heap),
             value.as_tagged(heap),
             semantics,
+            ctx.language_mode(),
         ) {
             Ok(o) => o,
             Err(e) => return ctx.raise_tag(e),
@@ -669,6 +679,7 @@ pub fn store_named<'a>(
             recv.erase(),
             name,
             value,
+            ctx.language_mode(),
         ) {
             return match hit {
                 StoreHit::Done => value.as_tagged(heap).erase(),
@@ -730,6 +741,18 @@ pub fn store_global<'a>(
         let value = scope.handle(value);
         let name = scope.handle(ctx.constants_ref(heap).at(heap, name_idx).erase().as_name());
         let global = scope.handle(heap.known().global_object.as_tagged(heap).erase());
+        // Unresolvable reference: sloppy creates a global property, strict
+        // throws ReferenceError (ES 9.1.1.2.6 SetMutableBinding, 6.2.5.6
+        // PutValue step 5). Declared globals exist on the object (or its
+        // prototype chain) by the time any store runs.
+        if ctx.language_mode().is_strict()
+            && matches!(
+                global.as_tagged(heap).lookup(heap, name.as_tagged(heap)),
+                Lookup::NotFound
+            )
+        {
+            return ctx.raise_tag(VmError::Reference);
+        }
         store_named_tail(ctx, global, name, value, None, StoreSemantics::WriteThrough)
     })
 }
@@ -774,6 +797,7 @@ fn store_named_tail_scoped<'a>(
         name.as_tagged(heap),
         value.as_tagged(heap),
         semantics,
+        ctx.language_mode(),
     ) {
         Ok(o) => o,
         Err(e) => return ctx.raise_tag(e),
@@ -817,24 +841,31 @@ pub fn apply_store_outcome(
         StoreOutcome::Transition {
             receiver: recv,
             name,
-        } => state.handle_scope(|scope| {
-            match Object::add_own_property(
-                heap,
-                &scope,
-                recv,
-                name,
-                PropertyDescriptor::data(value),
-            ) {
-                // TODO(strict-mode): a false result must throw in strict
-                // code; the current store path preserves its existing
-                // sloppy result.
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    ctx.raise_tag(e);
-                    Err(())
+        } => {
+            let strict = ctx.language_mode().is_strict();
+            state.handle_scope(|scope| {
+                match Object::add_own_property(
+                    heap,
+                    &scope,
+                    recv,
+                    name,
+                    PropertyDescriptor::data(value),
+                ) {
+                    Ok(true) => Ok(()),
+                    // non-extensible receiver: silent in sloppy code,
+                    // TypeError in strict (ES 10.4.5.5 PutValue step 5)
+                    Ok(false) if strict => {
+                        ctx.raise_tag(VmError::Type);
+                        Err(())
+                    }
+                    Ok(false) => Ok(()),
+                    Err(e) => {
+                        ctx.raise_tag(e);
+                        Err(())
+                    }
                 }
-            }
-        }),
+            })
+        }
         StoreOutcome::CallSetter { setter } => state.handle_scope(|scope| {
             let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
             match HostCtx::enter(vm, heap, state, setter, args, None) {

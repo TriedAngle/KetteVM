@@ -10,7 +10,9 @@ use crate::errors::Errors;
 use crate::heap::{Heap, Register};
 use crate::stack::{FrameMeta, Stack};
 use crate::value::{Tagged, Value};
-use crate::{Args, FeedbackVector, FixedArray, HostCtx, NativeIndex, ThreadState, VM, VmError};
+use crate::{
+    Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, ThreadState, VM, VmError,
+};
 
 /// Loop back-edge ticks between safepoint polls.
 pub const SAFEPOINT_INTERVAL: u32 = 1 << 12;
@@ -101,6 +103,25 @@ impl<'a> Ctx<'a> {
     #[inline(always)]
     pub fn base_anchor(&self) -> usize {
         self.base_anchor
+    }
+
+    /// The current frame's language mode, from its `Code`. Generic runtime
+    /// helpers that operate on behalf of the running function use this;
+    /// mode-sensitive *handlers* carry the mode as a constant instead.
+    #[inline(always)]
+    pub fn language_mode(&self) -> LanguageMode {
+        let state = self.state();
+        if !state.is_frame_active() {
+            return LanguageMode::Sloppy;
+        }
+        let heap = self.heap();
+        LanguageMode::from_mode(
+            state
+                .stack()
+                .frame_header(state.frame_base())
+                .code(heap)
+                .mode(),
+        )
     }
 
     /// The current frame's anchor (the frame-pointer analogue). Frame

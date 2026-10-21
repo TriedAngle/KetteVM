@@ -774,6 +774,12 @@ impl FnBuilder {
         self.emit_tracked(Opcode::CallRuntime, &[f as u32, base, count]);
     }
 
+    /// `delete obj[key]` over a two-register list `[obj, key]`.
+    pub fn delete_property(&mut self, args: RegList) {
+        let [base, count] = args.operands();
+        self.emit_tracked(Opcode::Delete, &[base, count]);
+    }
+
     pub fn construct(&mut self, callee: Reg, args: RegList) {
         let [base, count] = args.operands();
         self.emit_tracked(Opcode::Construct, &[callee.operand(), base, count]);

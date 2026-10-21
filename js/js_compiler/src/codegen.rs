@@ -1341,12 +1341,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     MemberRef::Private(_) => unreachable!(),
                 }
                 self.b.store(base);
-                let runtime_fn = if self.c.facts.functions[self.fid.0 as usize].strict {
-                    BuiltinFn::DeletePropertyStrict
-                } else {
-                    BuiltinFn::DeletePropertySloppy
-                };
-                self.b.call_runtime(runtime_fn, RegList::new(base, 2));
+                // one opcode, two dispatch-profile handlers: sloppy
+                // returns false on a refused delete, strict throws
+                self.b.delete_property(RegList::new(base, 2));
                 self.b.drop_temps(mark);
                 Ok(())
             }

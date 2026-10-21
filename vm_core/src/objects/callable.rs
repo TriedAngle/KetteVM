@@ -1,15 +1,15 @@
 use core::alloc::Layout;
 
 use crate::{
-    DenseString, EdgeVisitable, FeedbackVector, FixedArray, FixedByteArray, GcSlot, Handle,
-    HandlerTable, Header, Heap, HeapObject, ObjectKind, OptionGcSlot, SlotName, Smi, Tagged, Value,
-    Visitor,
+    Code, DenseString, EdgeVisitable, FeedbackVector, FixedArray, GcSlot, Handle, HandlerTable,
+    Header, Heap, HeapObject, ObjectKind, OptionGcSlot, SlotName, Smi, Tagged, Value, Visitor,
 };
 
 #[repr(C)]
 pub struct CallableInfoObject {
     pub header: Header,
-    pub bytecode: GcSlot<FixedByteArray>,
+    /// The function's code: instruction bytes plus the dispatch mode.
+    pub code: GcSlot<Code>,
     pub constants: GcSlot<FixedArray>,
     pub register_count: GcSlot<Smi>,
     pub handlers: OptionGcSlot<HandlerTable>,
@@ -27,9 +27,6 @@ pub struct CallableInfoObject {
     /// function's own body. Seeds the constructor slack preallocation.
     pub expected_slots: GcSlot<Smi>,
     pub kind: GcSlot<Smi>,
-    /// Language mode is preserved now; strict-sensitive call/store/delete
-    /// branches are intentionally deferred.
-    pub strict: GcSlot<Smi>,
 }
 
 #[repr(i64)]
@@ -98,7 +95,7 @@ impl FunctionKind {
 }
 
 pub struct CallableInfoInit<'a> {
-    pub bytecode: Handle<'a, FixedByteArray>,
+    pub code: Handle<'a, Code>,
     pub constants: Handle<'a, FixedArray>,
     pub register_count: usize,
     pub handlers: Option<Handle<'a, HandlerTable>>,
@@ -118,8 +115,7 @@ impl HeapObject for CallableInfoObject {
         self.header
             .map
             .init(heap.known().callable_map.as_tagged(heap));
-        self.bytecode
-            .set(heap, host, config.bytecode.as_tagged(heap));
+        self.code.set(heap, host, config.code.as_tagged(heap));
         self.constants
             .set(heap, host, config.constants.as_tagged(heap));
         self.register_count
@@ -142,7 +138,6 @@ impl HeapObject for CallableInfoObject {
             .set(heap, host, Smi::new(config.expected_slots as i64));
         self.kind
             .set(heap, host, Smi::new(FunctionKind::Normal as i64));
-        self.strict.set(heap, host, Smi::new(0));
     }
 
     fn header(&self) -> &Header {
@@ -157,7 +152,7 @@ impl HeapObject for CallableInfoObject {
 impl EdgeVisitable for CallableInfoObject {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.bytecode.as_raw());
+        visitor.visit(self.code.as_raw());
         visitor.visit(self.constants.as_raw());
         visitor.visit(self.handlers.as_raw());
         visitor.visit(self.feedback.as_raw());
@@ -182,7 +177,6 @@ impl CallableInfoObject {
         name: Option<Tagged<'_, Value>>,
         formal_parameter_count: usize,
         kind: FunctionKind,
-        strict: bool,
     ) {
         self.set_metadata_full(
             heap,
@@ -190,7 +184,6 @@ impl CallableInfoObject {
             formal_parameter_count,
             formal_parameter_count,
             kind,
-            strict,
         )
     }
 
@@ -201,7 +194,6 @@ impl CallableInfoObject {
         formal_parameter_count: usize,
         formal_length: usize,
         kind: FunctionKind,
-        strict: bool,
     ) {
         let host = self.tagged(heap);
         self.name.set(
@@ -218,7 +210,6 @@ impl CallableInfoObject {
         let descriptor =
             register_count | ((formal_parameter_count as u64 + 1) << 16) | ((kind as u64) << 32);
         self.descriptor.set(heap, host, Smi::new(descriptor as i64));
-        self.strict.set(heap, host, Smi::new(i64::from(strict)));
     }
 
     /// Attach the (already allocated) inline-cache state.
@@ -254,10 +245,6 @@ impl CallableInfoObject {
 
     pub fn function_kind(&self) -> FunctionKind {
         FunctionKind::decode(self.kind.to_smi().value())
-    }
-
-    pub fn is_strict(&self) -> bool {
-        self.strict.to_smi().value() != 0
     }
 
     /// Decode a constant-pool property name.

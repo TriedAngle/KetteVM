@@ -18,6 +18,7 @@ pub mod ic;
 pub mod interner;
 pub mod interpreter;
 pub mod intrinsics;
+pub mod language;
 pub mod lookup;
 pub mod materialize;
 pub mod native;
@@ -49,13 +50,14 @@ pub use heap::{
 };
 pub use interner::StringInterner;
 pub use interpreter::{Ctx, Unwind};
+pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
 pub use lookup::{Key, LoadOutcome, Lookup};
 pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
 pub use objects::{
-    AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, ContextInit,
-    ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE,
-    DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding,
-    EntryClass, FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float,
+    AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit,
+    ContextInit, ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA,
+    DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind,
+    Encoding, EntryClass, FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float,
     FunctionKind, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header,
     HeapObject, Map, MapInit, MapKind, NumberDictionary, NumberDictionaryInit, Object, ObjectInit,
     ObjectKind, ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject,
@@ -199,6 +201,18 @@ impl ThreadState {
     #[inline(always)]
     pub fn is_frame_active(&self) -> bool {
         self.frame_active.get()
+    }
+
+    /// The running frame's language mode, read from its `Code`. Runtime
+    /// helpers without a `Ctx` (there are a few: dynamic-name stores,
+    /// direct eval) use this rather than re-deriving it from the caller.
+    #[inline(always)]
+    pub fn language_mode(&self, heap: &Heap) -> language::LanguageMode {
+        if !self.is_frame_active() {
+            return language::LanguageMode::Sloppy;
+        }
+        let code = self.stack.frame_header(self.frame_base()).code(heap);
+        language::LanguageMode::from_mode(code.mode())
     }
 
     #[inline(always)]
