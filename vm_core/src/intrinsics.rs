@@ -1772,7 +1772,7 @@ fn throw_if_not_object_or_null<'a>(
     let null = heap.known().null.as_tagged(heap).raw();
     // Safety: rooted-slot word, fresh at both uses below.
     let ok =
-        raw == null || unsafe { Tagged::<Value>::from_value_unchecked(raw) }.is_primitive(heap);
+        raw == null || !unsafe { Tagged::<Value>::from_value_unchecked(raw) }.is_primitive(heap);
     if !ok {
         return raise_runtime(vm, heap, state, VmError::Type);
     }

@@ -549,28 +549,6 @@ fn step<'a>(
             acc.store(v);
             Flow::Sync
         }
-        Opcode::StoreNamedPropertyNoShadowFast => state.handle_scope(|scope| -> Flow {
-            let receiver = scope.handle(stack.reg(heap, frame_base, ops.reg(0)));
-            let name = scope.handle(
-                stack
-                    .callable(heap, frame_base)
-                    .as_ref()
-                    .constant_slot_name(heap, ops.idx(1)),
-            );
-            let written = fold!(
-                ctx,
-                receiver.as_tagged(heap).erase().store_lookup_existing(
-                    heap,
-                    name.as_tagged(heap),
-                    acc.get(heap),
-                    StoreSemantics::WriteThrough,
-                )
-            );
-            if !written {
-                throw_err!(ctx, VmError::OutOfBounds);
-            }
-            Flow::Sync
-        }),
         Opcode::Move => {
             stack.set_reg(
                 frame_base,

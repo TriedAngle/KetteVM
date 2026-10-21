@@ -1,11 +1,11 @@
-use interpreter_become::BecomeInterpreter;
+use interpreter_become::{BecomeInterpreter, NewInterpreter};
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm_core::VM;
+use vm_core::{Interpreter, VM};
 
-fn run(label: &str, src: &str) {
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+fn run_one<I: Interpreter>(label: &str, src: &str) {
+    let vm = VM::new::<MarkSweep, I>(MarkSweepConfig::default())
         .unwrap()
         .add::<JSRuntime>()
         .unwrap();
@@ -15,6 +15,12 @@ fn run(label: &str, src: &str) {
     if let Some(ex) = thread.take_pending_exception() {
         panic!("{label}: pending exception: {ex:?}");
     }
+}
+
+/// Every `Construct` case runs on both shells.
+fn run(label: &str, src: &str) {
+    run_one::<BecomeInterpreter>(label, src);
+    run_one::<NewInterpreter>(label, src);
 }
 
 const CHECK: &str = "function check(c, m) { if (!c) { throw new Error(m); } }\n";
@@ -105,6 +111,60 @@ fn construct_fast_path() {
       check(f() == 5, 'plain call primitive');
       function g() {{ return {{ a: 1 }}; }}
       check(g().a == 1, 'plain call object');"
+        ),
+    );
+    run(
+        "derived_class",
+        &format!(
+            "{CHECK}
+      class A {{ constructor(x) {{ this.x = x; }} }}
+      class B extends A {{ constructor(x) {{ super(x); this.y = 2; }} }}
+      var b = new B(7);
+      check(b.x == 7, 'derived super field');
+      check(b.y == 2, 'derived own field');"
+        ),
+    );
+    run(
+        "derived_primitive_return",
+        &format!(
+            "{CHECK}
+      class A {{ constructor(x) {{ this.x = x; }} }}
+      class B extends A {{ constructor(x) {{ super(x); return 5; }} }}
+      var b = new B(7);
+      check(b.x == 7, 'derived primitive return keeps this');"
+        ),
+    );
+    run(
+        "derived_captured_this",
+        &format!(
+            "{CHECK}
+      class A {{ constructor(x) {{ this.x = x; }} }}
+      class B extends A {{ constructor(x) {{ super(x); this.get = () => this; }} }}
+      var b = new B(3);
+      check(b.x == 3, 'captured this field');
+      check(b.get() == b, 'arrow captured this');"
+        ),
+    );
+    run(
+        "derived_delegated_super",
+        &format!(
+            "{CHECK}
+      class A {{ constructor(x) {{ this.x = x; }} }}
+      class B extends A {{ constructor(x) {{ (() => super(x))(); this.y = 2; }} }}
+      var b = new B(7);
+      check(b.x == 7, 'delegated super field');
+      check(b.y == 2, 'delegated own field');"
+        ),
+    );
+    run(
+        "derived_without_super_throws",
+        &format!(
+            "{CHECK}
+      class A {{ constructor(x) {{ this.x = x; }} }}
+      class B extends A {{ constructor() {{ return 1; }} }}
+      var caught = false;
+      try {{ new B(); }} catch (e) {{ caught = e.name == 'ReferenceError'; }}
+      check(caught, 'uninitialized this must throw ReferenceError');"
         ),
     );
     run(

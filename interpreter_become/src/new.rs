@@ -658,11 +658,6 @@ fn op_store_named_property_no_shadow(frame: Frame) {
     tail!(slow_store_named_no_shadow)
 }
 
-#[handler(StoreNamedPropertyNoShadowFast)]
-fn op_store_named_property_no_shadow_fast(frame: Frame) {
-    tail!(slow_store_named_no_shadow_fast)
-}
-
 #[handler(StoreGlobal)]
 fn op_store_global(frame: Frame) {
     tail!(slow_store_global)
@@ -1385,6 +1380,44 @@ fn op_return(frame: Frame) -> Acc {
     if frame.ctx().frame_base() == frame.ctx().base_anchor() {
         return acc;
     }
+    // A frame pushed by `Construct` carries the callee in `new.target`
+    let constructing = {
+        let heap = frame.ctx().heap();
+        let new_target = frame
+            .ctx()
+            .stack()
+            .frame_header(frame.ctx().frame_base())
+            .new_target_slot()
+            .get(heap);
+        new_target != roots.known(heap).undefined.as_tagged(heap).erase()
+    };
+    
+    if constructing {
+        let heap = frame.ctx().heap();
+        let val = frame.acc();
+        if val.is_primitive(heap) {
+            let this_val = frame.regs().get(0, heap);
+            if this_val == roots.known(heap).the_hole.as_tagged(heap).erase() {
+                // a derived constructor escaped without initializing `this`
+                let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
+                frame.ctx().switch_frame(caller.base);
+                let _ = frame.ctx().raise_tag(VmError::Reference);
+                let fault_ip = unsafe { frame.ctx().code_ptr().add(caller.pc) };
+                become throw_dispatch::<STRIDE>(
+                    fault_ip,
+                    unsafe { Regs::new(core::ptr::null_mut()) },
+                    acc,
+                    frame.ctx(),
+                    table,
+                    roots,
+                    float,
+                )
+            }
+            frame.set_acc(this_val);
+        } else {
+            frame.set_acc(val);
+        }
+    }
     let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
     frame.ctx().switch_frame(caller.base);
     dispatch_frame!(caller.pc)
@@ -1881,8 +1914,39 @@ fn op_re_throw(frame: Frame) -> Acc {
 }
 
 #[handler(Construct)]
-fn op_construct(frame: Frame) {
-    tail!(slow_construct)
+fn op_construct(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let size =
+        (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Construct.operands().len() };
+    let callee_reg = frame.signed::<0>();
+    let args_base = frame.signed::<1>();
+    let count = frame.unsigned::<2>();
+    match construct_start(frame.ctx(), pc, size, frame.regs(), callee_reg, args_base, count) {
+        Ok(ConstructStart::Frame) => {
+            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
+            let acc = Acc::set(
+                roots
+                    .known(frame.ctx().heap())
+                    .undefined
+                    .as_tagged(frame.ctx().heap())
+                    .erase(),
+            );
+            let entry = frame.ctx().code_ptr();
+            let h = table.get(unsafe { *entry });
+            become h(entry, regs, acc, frame.ctx(), table, roots, float)
+        }
+        Ok(ConstructStart::Native(rt)) => {
+            let val = construct_native(frame.ctx(), rt, callee_reg, args_base, count);
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+        Ok(ConstructStart::Threw) => tail!(throw_dispatch),
+        Ok(ConstructStart::Slow) => tail!(slow_construct),
+        Err(e) => {
+            let _ = frame.ctx().raise_tag(e);
+            tail!(throw_dispatch)
+        }
+    }
 }
 
 #[handler(ThrowReferenceErrorIfHole)]
@@ -1971,7 +2035,6 @@ handler_table!(
     op_throw,
     op_store_named_property,
     op_store_named_property_no_shadow,
-    op_store_named_property_no_shadow_fast,
     op_store_keyed_property_no_shadow,
     op_store_global,
     op_add_parent,

@@ -1457,7 +1457,7 @@ pub fn slow_store_global(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
-/// `StoreNamedPropertyNoShadow`/`...Fast`: WriteThrough semantics, no IC.
+/// `StoreNamedPropertyNoShadow`: WriteThrough semantics, no IC.
 macro_rules! named_no_shadow_slow {
     ($op:ident, $name:ident) => {
         #[handler($op)]
@@ -1501,7 +1501,6 @@ macro_rules! named_no_shadow_slow {
 }
 
 named_no_shadow_slow!(StoreNamedPropertyNoShadow, slow_store_named_no_shadow);
-named_no_shadow_slow!(StoreNamedPropertyNoShadowFast, slow_store_named_no_shadow_fast);
 
 #[handler(AddParent)]
 #[cold]

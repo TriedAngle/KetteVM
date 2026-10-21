@@ -537,8 +537,7 @@ impl<'a> FunctionGen<'a> {
                 let name = self.name_constant(name);
                 self.expr(value)?;
                 let feedback = self.b.new_feedback();
-                self.b
-                    .store_named_property_no_shadow_fast(obj, name, feedback);
+                self.b.store_named_property_no_shadow(obj, name, feedback);
                 self.b.drop_temp();
                 Ok(())
             }

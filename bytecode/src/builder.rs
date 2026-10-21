@@ -675,13 +675,6 @@ impl FnBuilder {
         );
     }
 
-    pub fn store_named_property_no_shadow_fast(&mut self, obj: Reg, name: ConstIdx, fb: Feedback) {
-        self.emit_tracked(
-            Opcode::StoreNamedPropertyNoShadowFast,
-            &[obj.operand(), name.0, fb.0],
-        );
-    }
-
     /// `dst <- src` (the `Move` opcode takes the destination first).
     pub fn move_reg(&mut self, dst: Reg, src: Reg) {
         self.emit_tracked(Opcode::Move, &[dst.operand(), src.operand()]);

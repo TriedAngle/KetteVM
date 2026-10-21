@@ -8,8 +8,8 @@ use bytecode::Opcode;
 use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, FeedbackVector, Heap, NativeIndex, Tagged, Value, VmError,
-    raise_runtime,
+    Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, Heap, HostCtx, Map,
+    NativeIndex, Object, Tagged, Value, VmError, raise_runtime,
 };
 
 use crate::{Regs, RootsArg};
@@ -283,5 +283,185 @@ pub fn proxy_apply_staged<'a>(
         }
     });
     stack.set_top(saved_top);
+    v
+}
+
+// --- construct ---
+
+/// Outcome of a `Construct` fast-path attempt.
+pub enum ConstructStart {
+    /// a constructor frame was pushed (the receiver cache already points
+    /// at it); `op_return` applies the receiver fixup on the way out
+    Frame,
+    /// a native constructor: call it directly with `new_target` set
+    Native(NativeIndex),
+    /// receiver synthesis threw; the pending exception is set
+    Threw,
+    /// not an ordinary function constructor: take the general path
+    Slow,
+}
+
+/// Synthesize the `this` (or stage the hole for a derived constructor)
+/// and stage the `[receiver, args...]` parameter window at the stack top.
+fn construct_receiver_args<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    base: usize,
+    args_base: i32,
+    count: usize,
+    derived: bool,
+    regs: Regs,
+    callee_reg: i32,
+) -> Result<Option<Args>, VmError> {
+    let vm = x.vm();
+    let state = x.state();
+    state.handle_scope(|scope| {
+        let heap = x.heap_mut();
+        let receiver: Handle<'_, Value> = if derived {
+            scope.handle(heap.known().the_hole.as_tagged(heap).erase())
+        } else {
+            let callee_word = regs.get(callee_reg, heap);
+            let Some(callee) = scope.cast::<Object>(heap, callee_word) else {
+                return Err(VmError::Type);
+            };
+            if let Some(map) = state.construct_initial_map(heap, callee.as_tagged(heap)) {
+                // identity-keyed initial-map cache hit: allocate directly,
+                // with the parser's slot estimate as headroom
+                let map = scope.handle(map);
+                let expected = callee
+                    .as_tagged(heap)
+                    .as_ref()
+                    .callable_info(heap)
+                    .map_or(0, |info| info.as_ref().expected_slots());
+                let capacity = if expected == 0 {
+                    0
+                } else {
+                    expected.max(2) + Map::SLACK_MARGIN
+                };
+                scope.handle(heap.new_object_prealloc(&scope, map, capacity).erase())
+            } else {
+                let Some(obj) =
+                    Object::create_construct_receiver_value(vm, heap, state, callee.erase())?
+                else {
+                    return Ok(None);
+                };
+                let obj = scope.handle(obj);
+                let obj: Handle<'_, Object> = scope
+                    .cast::<Object>(heap, obj.as_tagged(heap))
+                    .expect("receiver is an object");
+                crate::slow::construct_cache_record(heap, state, &scope, callee, obj);
+                scope.handle(obj.as_tagged(heap).erase())
+            }
+        };
+        let staged = state.stack().stage_construct(
+            base,
+            receiver.as_tagged(heap).erase(),
+            args_base,
+            count,
+        )?;
+        Ok(Some(staged))
+    })
+}
+
+/// The `Construct` fast path: constructible bytecode callees push their
+/// frame directly (receiver synthesis cached per closure); native
+/// constructors are called with `new_target`; everything else falls back
+/// to `cold::construct` in `slow_construct`.
+pub fn construct_start<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    pc: usize,
+    size: usize,
+    regs: Regs,
+    callee_reg: i32,
+    args_base: i32,
+    count: usize,
+) -> Result<ConstructStart, VmError> {
+    let callee_word = regs.get(callee_reg, x.heap());
+    let heap = x.heap();
+    if !callee_word
+        .as_heap_object()
+        .is_some_and(|o| o.map(heap).kind().is_constructor())
+    {
+        return Ok(ConstructStart::Slow);
+    }
+    let kind = match callee_word.call_target(heap) {
+        Some(CallTarget::Native(rt)) => return Ok(ConstructStart::Native(rt)),
+        Some(CallTarget::Bytecode { kind, .. }) => kind,
+        _ => return Ok(ConstructStart::Slow),
+    };
+    let derived = kind.is_derived_class_constructor();
+    if !derived && kind != FunctionKind::Normal && kind != FunctionKind::BaseClassConstructor {
+        return Ok(ConstructStart::Slow);
+    }
+    let base = x.frame_base();
+    let Some(staged) =
+        construct_receiver_args(x, base, args_base, count, derived, regs, callee_reg)?
+    else {
+        return Ok(ConstructStart::Threw);
+    };
+    // The receiver synthesis may have collected: re-read the callee from
+    // the rooted register window and walk its target again.
+    let callee_word = regs.get(callee_reg, x.heap());
+    let Some(CallTarget::Bytecode {
+        target,
+        info,
+        context,
+        kind,
+        ..
+    }) = callee_word.call_target(x.heap())
+    else {
+        return Ok(ConstructStart::Slow);
+    };
+    let derived = kind.is_derived_class_constructor();
+    if !derived && kind != FunctionKind::Normal && kind != FunctionKind::BaseClassConstructor {
+        return Ok(ConstructStart::Slow);
+    }
+    let code = info.as_ref().bytecode.get(x.heap()).as_ptr();
+    let frame = x.stack().push_frame(
+        x.heap(),
+        x.caller_meta(pc + size, pc),
+        Callee {
+            callable: target.erase(),
+            info,
+            context: context.erase(),
+        },
+        callee_word,
+        staged,
+    )?;
+    x.switch_frame_code(frame.base, code);
+    Ok(ConstructStart::Frame)
+}
+
+/// Invoke a native constructor: `undefined` receiver at the window's
+/// element 0, `new_target` rooted over the callee register.
+pub fn construct_native<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    rt: NativeIndex,
+    callee_reg: i32,
+    args_base: i32,
+    count: usize,
+) -> Tagged<'a, Value> {
+    let f = x.vm().runtime(rt);
+    let state = x.state();
+    let base = x.frame_base();
+    let stack = state.stack();
+    let undefined = stack.undefined_word(x.heap());
+    let args = match stack.stage_construct(base, undefined, args_base, count) {
+        Ok(a) => a,
+        Err(err) => {
+            let _ = x.raise_tag(err);
+            return x.heap().known().exception.as_tagged(x.heap()).erase();
+        }
+    };
+    let saved = stack.top();
+    let bump = stack.rooting_top(args);
+    if let Some(top) = bump {
+        stack.set_top(top);
+    }
+    let new_target = Some(stack.reg_handle(base, callee_reg));
+    let nctx = HostCtx::new(x.vm(), x.heap_mut(), state);
+    let v = f(nctx, new_target, args);
+    if bump.is_some() {
+        stack.set_top(saved);
+    }
     v
 }

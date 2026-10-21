@@ -2898,6 +2898,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 super_once_check(self);
                 self.b.load(result);
                 self.b.store_context_slot(slot, depth);
+                if direct {
+                    // mirror the bound `this` into the frame register: the
+                    // interpreter's [[Construct]] return fixup reads it
+                    let this = self.b.this_reg();
+                    self.b.load(result);
+                    self.b.store(this);
+                }
             }
             None => {
                 let this = self.b.this_reg();

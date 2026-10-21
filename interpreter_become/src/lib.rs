@@ -2336,21 +2336,6 @@ extern "rust-preserve-none" fn op_store_named_no_shadow<'a, const STRIDE: usize>
 }
 
 #[rustc_align(32)]
-extern "rust-preserve-none" fn op_store_named_no_shadow_fast<'a, const STRIDE: usize>(
-    ip: *const u8,
-    regs: Regs,
-    acc: Tagged<'a, Value>,
-    ctx: &Ctx<'a>,
-    table: TableArg<'a>,
-    roots: RootsArg<'a>,
-    float: FloatReg,
-) -> Tagged<'a, Value> {
-    let ops = Ops::<STRIDE>::new(ip, Opcode::StoreNamedPropertyNoShadowFast);
-    let _ = (ops.signed::<0>(), ops.unsigned::<1>(), ops.unsigned::<2>());
-    become slow_store_named_no_shadow::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
-}
-
-#[rustc_align(32)]
 extern "rust-preserve-none" fn op_instance_of<'a, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
@@ -3092,7 +3077,7 @@ extern "rust-preserve-none" fn construct_trampoline<'a>(
     ctx.set_frame_base(caller.base);
     let v = if acc.is_primitive(ctx.heap()) {
         if this_val == ctx.heap().known().the_hole.as_tagged(ctx.heap()).erase() {
-            let _ = ctx.raise_tag(VmError::Type);
+            let _ = ctx.raise_tag(VmError::Reference);
             let caller_code = ctx.code_ptr();
             become throw_dispatch(
                 unsafe { caller_code.add(caller.pc) },
@@ -3473,8 +3458,6 @@ const fn table_narrow() -> [Handler; 256] {
     t[Opcode::LoadCurrentClosure as usize] = op_load_current_closure::<1> as Handler;
     t[Opcode::GreaterThanOrEqual as usize] = op_greater_than_or_equal::<1> as Handler;
     t[Opcode::AddParent as usize] = op_add_parent::<1> as Handler;
-    t[Opcode::StoreNamedPropertyNoShadowFast as usize] =
-        op_store_named_no_shadow_fast::<1> as Handler;
     t[Opcode::Wide as usize] = op_wide as Handler;
     t
 }
@@ -3577,8 +3560,6 @@ const fn table_wide() -> [Handler; 256] {
     t[Opcode::LoadCurrentClosure as usize] = op_load_current_closure::<2> as Handler;
     t[Opcode::GreaterThanOrEqual as usize] = op_greater_than_or_equal::<2> as Handler;
     t[Opcode::AddParent as usize] = op_add_parent::<2> as Handler;
-    t[Opcode::StoreNamedPropertyNoShadowFast as usize] =
-        op_store_named_no_shadow_fast::<2> as Handler;
     t
 }
 

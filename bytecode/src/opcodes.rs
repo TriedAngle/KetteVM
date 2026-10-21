@@ -224,7 +224,6 @@ define_opcodes! {
     // error, never a transition
 
 
-    StoreNamedPropertyNoShadowFast { operands: [Register, Index, Index], acc: reads, indices: [Unchecked, ConstantPool, Feedback] }, // WriteThrough semantics
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)
 
