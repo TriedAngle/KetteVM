@@ -1865,15 +1865,11 @@ extern "rust-preserve-none" fn op_store_named<'a, const STRIDE: usize>(
     let recv = regs.get(r, ctx.heap());
     // The constant-pool name is a stable interned string; the fast path
     // is allocation-free, so it stays anchored for the whole store.
-    let name = ctx.constants_ref(ctx.heap()).at(ctx.heap(), name_idx).as_name();
-    if InlineCache::try_store_fast(
-        ctx.heap(),
-        ctx.feedback_ref(ctx.heap()),
-        fb,
-        recv,
-        name,
-        acc,
-    ) {
+    let name = ctx
+        .constants_ref(ctx.heap())
+        .at(ctx.heap(), name_idx)
+        .as_name();
+    if InlineCache::try_store_fast(ctx.heap(), ctx.feedback_ref(ctx.heap()), fb, recv, name, acc) {
         next!(StoreNamedProperty, ip, regs, ctx, table, roots, float, acc)
     }
     become slow_store_named::<STRIDE>(ip, regs, acc, ctx, table, roots, float)

@@ -17,7 +17,7 @@ use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
     AccessorPair, Coercion, Compare, Convert, DenseString, EntryClass, Errors, Handle, Heap, Hint,
-    HostCtx, Key, LoadOutcome, Lookup, Object, PropertyDescriptor, Prototype, Smi, SlotName,
+    HostCtx, Key, LoadOutcome, Lookup, Object, PropertyDescriptor, Prototype, SlotName, Smi,
     StoreOutcome, StoreSemantics, Tagged, ThreadState, VM, Value, raise_runtime,
 };
 
@@ -80,7 +80,6 @@ fn add_body<'a>(
     })
 }
 
-
 fn bitwise_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -101,9 +100,15 @@ fn bitwise_body<'a>(
         Err(e) => return raise_runtime(vm, heap, state, e),
     };
     let (ai, bi) = (Convert::number_to_int32(a), Convert::number_to_uint32(b));
+    // kind: 0 = `|`, 1 = `^`, 2 = `&`, 3 = `<<`, 4 = `>>`, 5 = `>>>`
     let r: i64 = match kind {
+        0 => (ai | (bi as i32)) as i64,
+        1 => (ai ^ (bi as i32)) as i64,
+        2 => (ai & (bi as i32)) as i64,
         3 => ai.wrapping_shl(bi & 31) as i64,
-        _ => ai.wrapping_shr(bi & 31) as i64,
+        4 => ai.wrapping_shr(bi & 31) as i64,
+        // >>>: the uint32 result is always non-negative
+        _ => Convert::number_to_uint32(a).wrapping_shr(bi & 31) as i64,
     };
     Smi::new(r).into_tagged()
 }
@@ -213,7 +218,10 @@ fn apply_store_outcome_body(
     value: Handle<'_, Value>,
 ) -> Result<(), ()> {
     match outcome {
-        StoreOutcome::Transition { receiver: recv, name } => state.handle_scope(|scope| {
+        StoreOutcome::Transition {
+            receiver: recv,
+            name,
+        } => state.handle_scope(|scope| {
             match Object::add_own_property(
                 heap,
                 &scope,
@@ -316,19 +324,100 @@ pub fn store_named_tail_body<'a>(
 
 // --- arithmetic ---
 
-#[handler(Add)]
-#[cold]
-pub fn slow_box_number(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    frame.set_acc(frame.ctx().heap_mut().new_number(frame.float()));
-    reenter!(pc)
+/// Box an already-computed `f64` when the inline `try_new_float` failed.
+/// One instantiation per opcode: `reenter!` advances by the opcode's
+/// size, so `Add`/`Sub`/`Mul`/`Div`/`Negate` each need their own.
+macro_rules! box_number_slow {
+    ($op:ident, $name:ident) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            frame.set_acc(frame.ctx().heap_mut().new_number(frame.float()));
+            reenter!(pc)
+        }
+    };
 }
 
-#[handler(Sub)]
+box_number_slow!(Add, slow_box_number);
+box_number_slow!(Sub, slow_box_number_sub);
+box_number_slow!(Mul, slow_box_number_mul);
+box_number_slow!(Div, slow_box_number_div);
+box_number_slow!(Negate, slow_box_number_negate);
+
+/// The full numeric cold tails, one handler per opcode.
+macro_rules! numeric_slow {
+    ($op:ident, $name:ident, |$a:ident, $b:ident| $body:expr) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let rhs = scope.handle(frame.acc());
+                let heap = frame.ctx().heap_mut();
+                match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
+                    Ok(Some(val)) => val,
+                    Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+                    Err(e) => raise_runtime(vm, heap, state, e),
+                }
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+    ($op:ident, $name:ident, immediate, |$a:ident, $b:ident| $body:expr) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
+                let heap = frame.ctx().heap_mut();
+                match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
+                    Ok(Some(val)) => val,
+                    Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+                    Err(e) => raise_runtime(vm, heap, state, e),
+                }
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+}
+
+numeric_slow!(Sub, slow_numeric, |a, b| a - b);
+numeric_slow!(Mul, slow_mul, |a, b| a * b);
+numeric_slow!(Div, slow_div, |a, b| a / b);
+numeric_slow!(Mod, slow_mod, |a, b| a % b);
+numeric_slow!(Exp, slow_exp, |a, b| a.powf(b));
+numeric_slow!(SubImmediate, slow_numeric_immediate, immediate, |a, b| a - b);
+numeric_slow!(MulImmediate, slow_mul_immediate, immediate, |a, b| a * b);
+numeric_slow!(DivImmediate, slow_div_immediate, immediate, |a, b| a / b);
+numeric_slow!(ModImmediate, slow_mod_immediate, immediate, |a, b| a % b);
+numeric_slow!(ExpImmediate, slow_exp_immediate, immediate, |a, b| a.powf(b));
+
+#[handler(Negate)]
 #[cold]
-pub fn slow_box_number_sub(frame: Frame) -> Acc {
+pub fn slow_negate(frame: Frame) -> Acc {
     let pc = frame.pc();
-    frame.set_acc(frame.ctx().heap_mut().new_number(frame.float()));
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let arg = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        match Object::to_numeric(vm, heap, state, arg) {
+            Ok(Some(n)) => heap.new_number(-n),
+            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+            Err(e) => raise_runtime(vm, heap, state, e),
+        }
+    });
+    frame.set_acc(val);
     reenter!(pc)
 }
 
@@ -342,26 +431,6 @@ pub fn slow_add(frame: Frame) -> Acc {
         let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let rhs = scope.handle(frame.acc());
         add_body(vm, frame.ctx().heap_mut(), state, roots, lhs, rhs)
-    });
-    frame.set_acc(v);
-    reenter!(pc)
-}
-
-#[handler(Sub)]
-#[cold]
-pub fn slow_numeric(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let rhs = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
-            Ok(Some(v)) => v,
-            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
-            Err(e) => raise_runtime(vm, heap, state, e),
-        }
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -382,40 +451,119 @@ pub fn slow_add_immediate(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
-#[handler(SubImmediate)]
-#[cold]
-pub fn slow_numeric_immediate(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
-        let heap = frame.ctx().heap_mut();
-        match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
-            Ok(Some(v)) => v,
-            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
-            Err(e) => raise_runtime(vm, heap, state, e),
+// --- local arithmetic ---
+
+/// Box the `f64` the hot `AddLoc`/`SubLoc` already stored in the float
+/// register, writing it back into the destination register.
+macro_rules! box_loc_slow {
+    ($op:ident, $name:ident) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let dst = frame.signed::<0>();
+            let val = frame.ctx().heap_mut().new_number(frame.float());
+            frame.regs().set(dst, val);
+            frame.set_acc(val);
+            reenter!(pc)
         }
-    });
-    frame.set_acc(v);
-    reenter!(pc)
+    };
 }
 
-#[handler(ShiftRightImmediate)]
-#[cold]
-pub fn slow_bitwise_immediate(frame: Frame) -> Acc {
-    let pc = frame.pc();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
-        bitwise_body(vm, frame.ctx().heap_mut(), state, roots, 4, lhs, rhs)
-    });
-    frame.set_acc(v);
-    reenter!(pc)
+box_loc_slow!(AddLoc, slow_box_add_loc);
+box_loc_slow!(SubLoc, slow_box_sub_loc);
+
+/// The `AddLoc`/`SubLoc` cold tails: numeric add/sub, then write the
+/// result back into the destination register unless it threw. The
+/// sentinel is compared as a raw word through the `'static` known table,
+/// so the check needs no second heap borrow while the result is live.
+macro_rules! loc_slow {
+    ($op:ident, $name:ident, $sub:expr) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let dst = frame.signed::<0>();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let window = frame.regs();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.regs().get(dst, frame.ctx().heap()));
+                let rhs = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
+                let heap = frame.ctx().heap_mut();
+                let known = heap.known();
+                let val = if $sub {
+                    match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
+                        Ok(Some(val)) => val,
+                        Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+                        Err(e) => raise_runtime(vm, heap, state, e),
+                    }
+                } else {
+                    add_body(vm, heap, state, roots, lhs, rhs)
+                };
+                if val.raw().to_bits() != known.exception.raw().to_bits() {
+                    window.set(dst, val);
+                }
+                val
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
 }
+
+loc_slow!(AddLoc, slow_add_loc, false);
+loc_slow!(SubLoc, slow_sub_loc, true);
+
+// --- bitwise / shifts ---
+
+macro_rules! bitwise_slow {
+    ($op:ident, $name:ident, $kind:expr) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let rhs = scope.handle(frame.acc());
+                bitwise_body(vm, frame.ctx().heap_mut(), state, roots, $kind, lhs, rhs)
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+    ($op:ident, $name:ident, $kind:expr, immediate) => {
+        #[handler($op)]
+        #[cold]
+        pub fn $name(frame: Frame) -> Acc {
+            let pc = frame.pc();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let val = state.handle_scope(|scope| {
+                let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
+                bitwise_body(vm, frame.ctx().heap_mut(), state, roots, $kind, lhs, rhs)
+            });
+            frame.set_acc(val);
+            reenter!(pc)
+        }
+    };
+}
+
+bitwise_slow!(BitwiseOr, slow_bitwise_or, 0);
+bitwise_slow!(BitwiseXor, slow_bitwise_xor, 1);
+bitwise_slow!(BitwiseAnd, slow_bitwise_and, 2);
+bitwise_slow!(ShiftLeft, slow_shift_left, 3);
+bitwise_slow!(ShiftRight, slow_shift_right, 4);
+bitwise_slow!(ShiftRightLogical, slow_shift_right_logical, 5);
+bitwise_slow!(BitwiseOrImmediate, slow_bitwise_or_immediate, 0, immediate);
+bitwise_slow!(BitwiseXorImmediate, slow_bitwise_xor_immediate, 1, immediate);
+bitwise_slow!(BitwiseAndImmediate, slow_bitwise_and_immediate, 2, immediate);
+bitwise_slow!(ShiftLeftImmediate, slow_shift_left_immediate, 3, immediate);
+bitwise_slow!(ShiftRightImmediate, slow_shift_right_immediate, 4, immediate);
+bitwise_slow!(ShiftRightLogicalImmediate, slow_shift_right_logical_immediate, 5, immediate);
 
 // --- comparisons ---
 
@@ -437,13 +585,10 @@ pub fn slow_equal(frame: Frame) -> Acc {
 #[handler(CompareJump)]
 #[cold]
 pub fn slow_compare_jump(frame: Frame) -> Acc {
-    // every continuation target is captured code-relative BEFORE the
-    // compare below: it may allocate and move the code object, after
-    // which the old ip no longer pairs with the frame-header base
     let pc = frame.pc();
     let next_pc = pc
         + (if STRIDE == 2 { 2 } else { 1 })
-            + STRIDE * const { Opcode::CompareJump.operands().len() };
+        + STRIDE * const { Opcode::CompareJump.operands().len() };
     let r = frame.signed::<0>();
     let kind = frame.unsigned::<1>();
     let off = frame.signed::<2>();
@@ -586,7 +731,10 @@ pub fn slow_keyed_load(frame: Frame) -> Acc {
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match recv.as_tagged(heap).load_outcome_keyed(heap, key.as_tagged(heap)) {
+        let out = match recv
+            .as_tagged(heap)
+            .load_outcome_keyed(heap, key.as_tagged(heap))
+        {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
                 let getter = scope.handle(getter);
@@ -649,7 +797,10 @@ pub fn slow_keyed_load_reg(frame: Frame) -> Acc {
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match recv.as_tagged(heap).load_outcome_keyed(heap, key.as_tagged(heap)) {
+        let out = match recv
+            .as_tagged(heap)
+            .load_outcome_keyed(heap, key.as_tagged(heap))
+        {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
                 let getter = scope.handle(getter);
@@ -702,7 +853,10 @@ pub fn slow_keyed_load_imm(frame: Frame) -> Acc {
                 Err(e) => raise_runtime(vm, heap, state, e),
             };
         }
-        let out = match recv.as_tagged(heap).load_outcome_keyed(heap, key.as_tagged(heap)) {
+        let out = match recv
+            .as_tagged(heap)
+            .load_outcome_keyed(heap, key.as_tagged(heap))
+        {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
                 let getter = scope.handle(getter);
@@ -744,7 +898,10 @@ pub fn slow_named_load(frame: Frame) -> Acc {
                 Err(e) => raise_runtime(vm, heap, state, e),
             };
         }
-        let out = match recv.as_tagged(heap).load_outcome(heap, name.as_tagged(heap)) {
+        let out = match recv
+            .as_tagged(heap)
+            .load_outcome(heap, name.as_tagged(heap))
+        {
             Ok(LoadOutcome::Value(v)) => {
                 let v = scope.handle(v);
                 InlineCache::update_load(
@@ -756,7 +913,9 @@ pub fn slow_named_load(frame: Frame) -> Acc {
                         .feedback(&*heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
-                    recv.as_tagged(heap).as_heap_object().map(|o| scope.handle(o)),
+                    recv.as_tagged(heap)
+                        .as_heap_object()
+                        .map(|o| scope.handle(o)),
                     scope.handle(name.as_tagged(heap).erase().as_name()),
                     true,
                 );
@@ -934,10 +1093,6 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
                             return value.as_tagged(heap).erase();
                         }
                         _ => {
-                            // absent: creating a property consults the
-                            // chain (prototype setters); clean chains
-                            // store directly, dirty ones take the
-                            // ordinary named path below
                             let Some(h) = recv.as_tagged(heap).as_heap_object() else {
                                 unreachable!("classified above")
                             };
@@ -974,9 +1129,9 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
                             direct = true;
                         } else {
                             let map = scope.handle(map);
-                            direct = Prototype::indexed_store_chain_ok(
-                                heap, &scope, &recv, &map, i,
-                            ) || !recv.as_tagged(heap).chain_holds_index_name(heap, i);
+                            direct =
+                                Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i)
+                                    || !recv.as_tagged(heap).chain_holds_index_name(heap, i);
                         }
                     }
                     if !direct {
@@ -986,8 +1141,7 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
                             .cast::<Object>(heap, recv.as_tagged(heap))
                             .expect("array receiver is an object");
                         let grew = i >= obj.as_tagged(heap).length();
-                        if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value)
-                        {
+                        if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
                             return raise_runtime(vm, heap, state, e);
                         }
                         if let Some(fbv) = state.stack().frame_header(base).feedback(&*heap) {

@@ -323,10 +323,34 @@ fn op_load(frame: Frame) {
     next!()
 }
 
+#[handler(Move)]
+fn op_move(frame: Frame) {
+    let dst = frame.signed::<0>();
+    let src = frame.signed::<1>();
+    let val = frame.regs().get(src, frame.ctx().heap());
+    frame.regs().set(dst, val);
+    next!()
+}
+
 #[handler(LoadSmi)]
 fn op_load_smi(frame: Frame) {
     let imm = frame.signed::<0>();
-    frame.set_acc(Smi::new(imm as i64).into_tagged());
+    let val = Smi::new(imm as i64).into_tagged();
+    frame.set_acc(val);
+    next!()
+}
+
+#[handler(LoadZero)]
+fn op_load_zero(frame: Frame) {
+    frame.set_acc(Smi::new(0).into_tagged());
+    next!()
+}
+
+#[handler(LoadNull)]
+fn op_load_null(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let val = roots.known(heap).null.as_tagged(heap).erase();
+    frame.set_acc(val);
     next!()
 }
 
@@ -368,6 +392,42 @@ fn op_load_hole(frame: Frame) {
     let heap = frame.ctx().heap();
     let v = roots.known(heap).the_hole.as_tagged(heap).erase();
     frame.set_acc(v);
+    next!()
+}
+
+#[handler(LoadNewTarget)]
+fn op_load_new_target(frame: Frame) {
+    let val = frame
+        .ctx()
+        .stack()
+        .frame_header(frame.ctx().frame_base())
+        .new_target_slot()
+        .get(frame.ctx().heap());
+    frame.set_acc(val);
+    next!()
+}
+
+#[handler(LoadContext)]
+fn op_load_context(frame: Frame) {
+    let val = frame
+        .ctx()
+        .stack()
+        .frame_header(frame.ctx().frame_base())
+        .context_slot()
+        .get(frame.ctx().heap());
+    frame.set_acc(val);
+    next!()
+}
+
+#[handler(LoadCurrentClosure)]
+fn op_load_current_closure(frame: Frame) {
+    let val = frame
+        .ctx()
+        .stack()
+        .frame_header(frame.ctx().frame_base())
+        .callable_slot()
+        .get(frame.ctx().heap());
+    frame.set_acc(val);
     next!()
 }
 
@@ -640,17 +700,378 @@ fn op_sub_immediate(frame: Frame) {
     tail!(slow_numeric_immediate)
 }
 
+#[handler(Mul)]
+fn op_mul(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.smi_bits(), frame.acc().smi_bits())
+        && let Some(product) = (a >> 1).checked_mul(b)
+    {
+        frame.set_acc_smi(product);
+        next!()
+    }
+    if let (Some(a), Some(b)) = (lhs.as_number(heap), frame.acc().as_number(heap)) {
+        let product = a * b;
+        if let Some(s) = Smi::from_f64(product) {
+            frame.set_acc(s.into_tagged());
+            next!()
+        }
+        if let Some(v) = frame.ctx().heap_mut().try_new_float(product) {
+            frame.set_acc(v);
+            next!()
+        }
+        frame.set_float(product);
+        tail!(slow_box_number_mul)
+    }
+    tail!(slow_mul)
+}
+
+#[handler(Div)]
+fn op_div(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.smi_bits(), frame.acc().smi_bits())
+        && b != 0
+        && a % b == 0
+        && let Some(quotient) = a.checked_div(b)
+        && let Some(encoded) = quotient.checked_mul(2)
+    {
+        frame.set_acc_smi(encoded);
+        next!()
+    }
+    if let (Some(a), Some(b)) = (lhs.as_number(heap), frame.acc().as_number(heap)) {
+        let quotient = a / b;
+        if let Some(s) = Smi::from_f64(quotient) {
+            frame.set_acc(s.into_tagged());
+            next!()
+        }
+        if let Some(v) = frame.ctx().heap_mut().try_new_float(quotient) {
+            frame.set_acc(v);
+            next!()
+        }
+        frame.set_float(quotient);
+        tail!(slow_box_number_div)
+    }
+    tail!(slow_div)
+}
+
+#[handler(Mod)]
+fn op_mod(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64())
+        && b != 0
+    {
+        let val = Smi::new(a % b).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_mod)
+}
+
+#[handler(Exp)]
+fn op_exp(frame: Frame) {
+    let _ = frame.signed::<0>();
+    tail!(slow_exp)
+}
+
+#[handler(Negate)]
+fn op_negate(frame: Frame) {
+    if let Some(bits) = frame.acc().smi_bits()
+        && bits != 0
+        && let Some(neg) = bits.checked_neg()
+    {
+        frame.set_acc_smi(neg);
+        next!()
+    }
+    if let Some(a) = frame.acc().as_number(frame.ctx().heap()) {
+        let neg = -a;
+        if let Some(s) = Smi::from_f64(neg) {
+            frame.set_acc(s.into_tagged());
+            next!()
+        }
+        if let Some(v) = frame.ctx().heap_mut().try_new_float(neg) {
+            frame.set_acc(v);
+            next!()
+        }
+        frame.set_float(neg);
+        tail!(slow_box_number_negate)
+    }
+    tail!(slow_negate)
+}
+
+#[handler(MulImmediate)]
+fn op_mul_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(bits) = lhs.smi_bits()
+        && let Some(product) = (bits >> 1).checked_mul(imm as i64)
+        && let Some(encoded) = product.checked_mul(2)
+    {
+        frame.set_acc_smi(encoded);
+        next!()
+    }
+    tail!(slow_mul_immediate)
+}
+
+#[handler(DivImmediate)]
+fn op_div_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(bits) = lhs.smi_bits() {
+        let value = bits >> 1;
+        if imm != 0
+            && value % imm as i64 == 0
+            && let Some(quotient) = value.checked_div(imm as i64)
+            && let Some(encoded) = quotient.checked_mul(2)
+        {
+            frame.set_acc_smi(encoded);
+            next!()
+        }
+    }
+    tail!(slow_div_immediate)
+}
+
+#[handler(ModImmediate)]
+fn op_mod_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if imm != 0
+        && let Some(bits) = lhs.smi_bits()
+    {
+        frame.set_acc_smi(((bits >> 1) % imm as i64) << 1);
+        next!()
+    }
+    tail!(slow_mod_immediate)
+}
+
+#[handler(ExpImmediate)]
+fn op_exp_immediate(frame: Frame) {
+    let _ = (frame.signed::<0>(), frame.signed::<1>());
+    tail!(slow_exp_immediate)
+}
+
+#[handler(AddLoc)]
+fn op_add_loc(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let dst = frame.signed::<0>();
+    let src = frame.signed::<1>();
+    let lhs = frame.regs().get(dst, heap);
+    let rhs = frame.regs().get(src, heap);
+    if let (Some(a), Some(b)) = (lhs.smi_bits(), rhs.smi_bits())
+        && let Some(sum) = a.checked_add(b)
+    {
+        let val = Tagged::from_smi_bits(sum);
+        frame.regs().set(dst, val);
+        frame.set_acc(val);
+        next!()
+    }
+    if let (Some(a), Some(b)) = (lhs.as_number(heap), rhs.as_number(heap)) {
+        let sum = a + b;
+        if let Some(s) = Smi::from_f64(sum) {
+            let val = s.into_tagged();
+            frame.regs().set(dst, val);
+            frame.set_acc(val);
+            next!()
+        }
+        if let Some(val) = frame.ctx().heap_mut().try_new_float(sum) {
+            frame.regs().set(dst, val);
+            frame.set_acc(val);
+            next!()
+        }
+        frame.set_float(sum);
+        tail!(slow_box_add_loc)
+    }
+    tail!(slow_add_loc)
+}
+
+#[handler(SubLoc)]
+fn op_sub_loc(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let dst = frame.signed::<0>();
+    let src = frame.signed::<1>();
+    let lhs = frame.regs().get(dst, heap);
+    let rhs = frame.regs().get(src, heap);
+    if let (Some(a), Some(b)) = (lhs.smi_bits(), rhs.smi_bits())
+        && let Some(diff) = a.checked_sub(b)
+    {
+        let val = Tagged::from_smi_bits(diff);
+        frame.regs().set(dst, val);
+        frame.set_acc(val);
+        next!()
+    }
+    if let (Some(a), Some(b)) = (lhs.as_number(heap), rhs.as_number(heap)) {
+        let diff = a - b;
+        if let Some(s) = Smi::from_f64(diff) {
+            let val = s.into_tagged();
+            frame.regs().set(dst, val);
+            frame.set_acc(val);
+            next!()
+        }
+        if let Some(val) = frame.ctx().heap_mut().try_new_float(diff) {
+            frame.regs().set(dst, val);
+            frame.set_acc(val);
+            next!()
+        }
+        frame.set_float(diff);
+        tail!(slow_box_sub_loc)
+    }
+    tail!(slow_sub_loc)
+}
+
+// --- bitwise / shifts ---
+
+#[handler(BitwiseOr)]
+fn op_bitwise_or(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as i32 | b as i32) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_or)
+}
+
+#[handler(BitwiseXor)]
+fn op_bitwise_xor(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as i32 ^ b as i32) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_xor)
+}
+
+#[handler(BitwiseAnd)]
+fn op_bitwise_and(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as i32 & b as i32) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_and)
+}
+
+#[handler(ShiftLeft)]
+fn op_shift_left(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as i32).wrapping_shl(b as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_shift_left)
+}
+
+#[handler(ShiftRight)]
+fn op_shift_right(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as i32).wrapping_shr(b as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_shift_right)
+}
+
+#[handler(ShiftRightLogical)]
+fn op_shift_right_logical(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    if let (Some(a), Some(b)) = (lhs.to_i64(), frame.acc().to_i64()) {
+        let val = Smi::new((a as u32).wrapping_shr(b as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_shift_right_logical)
+}
+
+#[handler(BitwiseOrImmediate)]
+fn op_bitwise_or_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(a) = lhs.to_i64() {
+        let val = Smi::new((a as i32 | imm) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_or_immediate)
+}
+
+#[handler(BitwiseXorImmediate)]
+fn op_bitwise_xor_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(a) = lhs.to_i64() {
+        let val = Smi::new((a as i32 ^ imm) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_xor_immediate)
+}
+
+#[handler(BitwiseAndImmediate)]
+fn op_bitwise_and_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(a) = lhs.to_i64() {
+        let val = Smi::new((a as i32 & imm) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_bitwise_and_immediate)
+}
+
+#[handler(ShiftLeftImmediate)]
+fn op_shift_left_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(a) = lhs.to_i64() {
+        let val = Smi::new((a as i32).wrapping_shl(imm as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_shift_left_immediate)
+}
+
 #[handler(ShiftRightImmediate)]
 fn op_shift_right_immediate(frame: Frame) {
     let heap = frame.ctx().heap();
     let lhs = frame.regs().get(frame.signed::<0>(), heap);
     let imm = frame.signed::<1>();
     if let Some(a) = lhs.to_i64() {
-        let v = Smi::new((a as i32).wrapping_shr(imm as u32 & 31) as i64).into_tagged();
-        frame.set_acc(v);
+        let val = Smi::new((a as i32).wrapping_shr(imm as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
         next!()
     }
-    tail!(slow_bitwise_immediate)
+    tail!(slow_shift_right_immediate)
+}
+
+#[handler(ShiftRightLogicalImmediate)]
+fn op_shift_right_logical_immediate(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let lhs = frame.regs().get(frame.signed::<0>(), heap);
+    let imm = frame.signed::<1>();
+    if let Some(a) = lhs.to_i64() {
+        let val = Smi::new((a as u32).wrapping_shr(imm as u32 & 31) as i64).into_tagged();
+        frame.set_acc(val);
+        next!()
+    }
+    tail!(slow_shift_right_logical_immediate)
 }
 
 // --- comparisons ---
@@ -1049,10 +1470,7 @@ fn op_create_closure(frame: Frame) -> Acc {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
         let context = scope
-            .cast::<ContextObject>(
-                heap,
-                state.stack().frame_header(base).context_slot().get(heap),
-            )
+            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
             .expect("frame context slot holds a ContextObject");
         match Object::create_closure(heap, &scope, info, context) {
             Ok(obj) => obj.erase(),
@@ -1197,7 +1615,7 @@ fn op_push_context(frame: Frame) -> Acc {
     }
     let value = frame.acc();
     frame
-        .ctx()  
+        .ctx()
         .stack()
         .frame_header(base)
         .context_slot()
@@ -1210,7 +1628,10 @@ fn op_pop_context(frame: Frame) -> Acc {
     let r = frame.signed::<0>();
     let base = frame.ctx().frame_base();
     let context = frame.regs().get(r, frame.ctx().heap());
-    if context.get_as::<ContextObject>(frame.ctx().heap()).is_none() {
+    if context
+        .get_as::<ContextObject>(frame.ctx().heap())
+        .is_none()
+    {
         let _ = frame.ctx().raise_tag(VmError::Type);
         tail!(throw_dispatch)
     }
@@ -1235,10 +1656,7 @@ fn op_create_function_context(frame: Frame) -> Acc {
     let v = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
         let outer = scope
-            .cast::<ContextObject>(
-                heap,
-                state.stack().frame_header(base).context_slot().get(heap),
-            )
+            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
             .expect("frame context slot holds a ContextObject");
         let Some(count) = state
             .stack()
@@ -1299,6 +1717,7 @@ fn op_throw_reference_error_if_hole(frame: Frame) -> Acc {
 handler_table!(
     op_wide,
     op_load,
+    op_move,
     op_store,
     op_add,
     op_call_runtime,
@@ -1317,15 +1736,39 @@ handler_table!(
     op_call_function1,
     op_call_function2,
     op_load_smi,
+    op_load_zero,
     op_load_constant,
     op_load_undefined,
+    op_load_null,
     op_load_true,
     op_load_false,
     op_load_global,
     op_sub,
+    op_mul,
+    op_div,
+    op_mod,
+    op_exp,
+    op_negate,
     op_add_immediate,
     op_sub_immediate,
+    op_mul_immediate,
+    op_div_immediate,
+    op_mod_immediate,
+    op_exp_immediate,
+    op_add_loc,
+    op_sub_loc,
+    op_bitwise_or,
+    op_bitwise_xor,
+    op_bitwise_and,
+    op_shift_left,
+    op_shift_right,
+    op_shift_right_logical,
+    op_bitwise_or_immediate,
+    op_bitwise_xor_immediate,
+    op_bitwise_and_immediate,
+    op_shift_left_immediate,
     op_shift_right_immediate,
+    op_shift_right_logical_immediate,
     op_equal,
     op_compare_jump,
     op_inc_loc,
@@ -1345,6 +1788,9 @@ handler_table!(
     op_create_function_context,
     op_create_empty_array_literal,
     op_load_hole,
+    op_load_new_target,
+    op_load_context,
+    op_load_current_closure,
     op_throw_reference_error_if_hole,
 );
 
@@ -1403,7 +1849,13 @@ fn enter<'a>(
             let roots = RootsArg::from_heap(ctx.heap());
             // the fresh frame is entered at pc 0 with the accumulator
             // seeded undefined
-            let acc = Acc::set(roots.known(ctx.heap()).undefined.as_tagged(ctx.heap()).erase());
+            let acc = Acc::set(
+                roots
+                    .known(ctx.heap())
+                    .undefined
+                    .as_tagged(ctx.heap())
+                    .erase(),
+            );
             let acc = table.get(unsafe { *ip })(
                 ip,
                 regs,
