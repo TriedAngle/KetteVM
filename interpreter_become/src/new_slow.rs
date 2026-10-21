@@ -13,7 +13,7 @@
 use handler_derive::handler;
 
 use bytecode::Opcode;
-use vm_core::ic::{InlineCache, StoreOutcomeKind};
+use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
     AccessorPair, Coercion, Compare, Convert, DenseString, EntryClass, Errors, Handle, Heap, Hint,
@@ -80,8 +80,7 @@ fn add_body<'a>(
     })
 }
 
-/// The `ShiftRightImmediate` cold tail: ToNumeric both operands and the
-/// int32 shift (`kind` follows `cold::bitwise`: 3 = `<<`, 4 = `>>`).
+
 fn bitwise_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -558,8 +557,7 @@ pub fn slow_keyed_load(frame: Frame) -> Acc {
             Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        // ES 20.2.5.8 (keyed form): the `get` trap with the coerced
-        // key. No IC update: traps are dynamic.
+
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
                 Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
@@ -670,7 +668,6 @@ pub fn slow_keyed_load_reg(frame: Frame) -> Acc {
 }
 
 #[handler(LoadElementImm)]
-#[cold]
 pub fn slow_keyed_load_imm(frame: Frame) -> Acc {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
@@ -724,7 +721,6 @@ pub fn slow_keyed_load_imm(frame: Frame) -> Acc {
 }
 
 #[handler(LoadNamedProperty)]
-#[cold]
 pub fn slow_named_load(frame: Frame) -> Acc {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
@@ -741,10 +737,6 @@ pub fn slow_named_load(frame: Frame) -> Acc {
                 .callable(&*heap, base)
                 .constant_slot_name(&*heap, name_idx),
         );
-        // ES 20.2.5.8: a proxy receiver runs its `get` trap (with the
-        // proxy as `this`) instead of a descriptor walk. No IC update:
-        // traps are dynamic, a proxy map must never be cached as a
-        // field handler.
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
                 Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
@@ -787,7 +779,6 @@ pub fn slow_named_load(frame: Frame) -> Acc {
 }
 
 #[handler(LoadGlobal)]
-#[cold]
 pub fn slow_global_load(frame: Frame) -> Acc {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
@@ -861,7 +852,6 @@ pub fn slow_global_load(frame: Frame) -> Acc {
 // --- stores ---
 
 #[handler(StoreKeyedProperty)]
-#[cold]
 pub fn slow_keyed_store(frame: Frame) -> Acc {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
@@ -1036,3 +1026,75 @@ pub fn slow_keyed_store(frame: Frame) -> Acc {
     reenter!(pc)
 }
 
+#[handler(StoreNamedProperty)]
+pub fn slow_store_named(frame: Frame) -> Acc {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<1>();
+    let fb_slot = frame.unsigned::<2>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let name = scope.handle(
+            state
+                .stack()
+                .frame_header(base)
+                .constants(&*heap)
+                .at(&*heap, name_idx)
+                .erase()
+                .as_name(),
+        );
+
+        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
+            return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
+                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
+                Err(e) => raise_runtime(vm, heap, state, e),
+            };
+        }
+        if let Some(hit) = InlineCache::try_store(
+            heap,
+            &scope,
+            state
+                .stack()
+                .frame_header(base)
+                .feedback(&*heap)
+                .map(|v| scope.handle(v)),
+            fb_slot,
+            recv.erase(),
+            name,
+            value,
+        ) {
+            return match hit {
+                StoreHit::Done => value.as_tagged(heap).erase(),
+                StoreHit::Setter(setter) => {
+                    let setter = scope.handle(setter);
+                    let args = scope.stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)]);
+                    // the setter's return value is ignored (store result
+                    // semantics: the accumulator keeps the stored value)
+                    match HostCtx::enter(vm, heap, state, setter, args, None) {
+                        Ok(v) => scope.handle(v).as_tagged(heap),
+                        Err(e) => return raise_runtime(vm, heap, state, e),
+                    }
+                }
+            };
+        }
+        store_named_tail_body(
+            vm,
+            heap,
+            state,
+            roots,
+            base,
+            recv,
+            name,
+            value,
+            Some(fb_slot),
+            StoreSemantics::Shadow,
+        )
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}

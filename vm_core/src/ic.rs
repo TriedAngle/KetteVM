@@ -1152,9 +1152,16 @@ impl InlineCache {
         update_site(heap, scope, vector, slot, &map, &handler);
     }
 
+    /// The store IC's allocation-free fast path: probe the site and write
+    /// a pre-reserved field slot (or swap to a cached transition target
+    /// that already has room). It never allocates, fills the IC, or grows
+    /// the receiver, so it takes `&Heap` like any other no-safepoint read:
+    /// callers may hold heap-anchored `Tagged`s across it. Misses, setters
+    /// and growing transitions fall through to the `&mut Heap`
+    /// handle-rooted `try_store`/`update_store` path.
     #[inline]
     pub fn try_store_fast(
-        heap: &mut Heap,
+        heap: &Heap,
         vector: Option<Tagged<'_, FeedbackVector>>,
         slot: usize,
         receiver: Tagged<'_, Value>,

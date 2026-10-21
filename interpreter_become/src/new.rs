@@ -4,13 +4,12 @@ use core::cell::Cell;
 use handler_derive::{handler, handler_table};
 
 use bytecode::Opcode;
-use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe, StoreHit};
-use vm_core::proxy::Proxy;
+use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
-    Args, CallTarget, CallableInfoObject, Callee, Coercion, ContextInit, ContextObject, Convert,
-    EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
-    Interpreter, NativeIndex, Object, Register, ScopeInfo, Smi, StoreSemantics, Tagged,
-    ThreadState, VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    Args, CallTarget, CallableInfoObject, Callee, ContextInit, ContextObject, Convert, EntryFn,
+    FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter,
+    NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value, VmError, Word,
+    interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
 
 use crate::new_macros::*;
@@ -506,85 +505,27 @@ fn op_store(frame: Frame) {
 }
 
 #[handler(StoreNamedProperty)]
-fn op_store_named_property(frame: Frame) -> Acc {
-    // The IC fast path (`try_store_fast`) takes the receiver, name, and
-    // value as heap-anchored `Tagged`s alongside a `&mut Heap`, which
-    // the borrow discipline of this Ctx cannot express without a raw
-    // word re-tag; the whole (only) body lives here instead of behind a
-    // double become. (fannkuch never emits this opcode — only the
-    // runtime preludes do, at startup.)
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
+fn op_store_named_property(frame: Frame) {
+    let recv = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let name_idx = frame.unsigned::<1>();
     let fb_slot = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        let name = scope.handle(
-            state
-                .stack()
-                .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
-                .erase()
-                .as_name(),
-        );
-        // ES 20.2.5.10: a proxy receiver runs its `set` trap; no IC
-        // update (dynamic traps must not be cached), and the probe is
-        // skipped entirely so an armed site never matches a proxy map.
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => raise_runtime(vm, heap, state, e),
-            };
-        }
-        if let Some(hit) = InlineCache::try_store(
-            heap,
-            &scope,
-            state
-                .stack()
-                .frame_header(base)
-                .feedback(&*heap)
-                .map(|v| scope.handle(v)),
-            fb_slot,
-            recv.erase(),
-            name,
-            value,
-        ) {
-            return match hit {
-                StoreHit::Done => value.as_tagged(heap).erase(),
-                StoreHit::Setter(setter) => {
-                    let setter = scope.handle(setter);
-                    let args = scope.stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)]);
-                    // the setter's return value is ignored (store result
-                    // semantics: the accumulator keeps the stored value)
-                    let v = match HostCtx::enter(vm, heap, state, setter, args, None) {
-                        Ok(v) => scope.handle(v),
-                        Err(e) => return raise_runtime(vm, heap, state, e),
-                    };
-                    v.as_tagged(heap)
-                }
-            };
-        }
-        store_named_tail_body(
-            vm,
-            heap,
-            state,
-            roots,
-            base,
-            recv,
-            name,
-            value,
-            Some(fb_slot),
-            StoreSemantics::Shadow,
-        )
-    });
-    frame.set_acc(v);
-    reenter!(pc)
+    let name = frame
+        .ctx()
+        .constants_ref(frame.ctx().heap())
+        .at(frame.ctx().heap(), name_idx)
+        .as_name();
+
+    if InlineCache::try_store_fast(
+        frame.ctx().heap(),
+        frame.ctx().feedback_ref(frame.ctx().heap()),
+        fb_slot,
+        recv,
+        name,
+        frame.acc(),
+    ) {
+        next!()
+    }
+    tail!(slow_store_named)
 }
 
 #[handler(StoreKeyedProperty)]
