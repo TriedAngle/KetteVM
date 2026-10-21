@@ -225,6 +225,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand(mode: Mode, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
     let (recv, ret) = validate_sig(func)?;
     let name = &func.sig.ident;
+    let vis = &func.vis;
     let block = &func.block;
     let attrs = &func.attrs;
     let mut rw = Rewriter {
@@ -242,7 +243,7 @@ fn expand(mode: Mode, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
         #(#attrs)*
         #[rustfmt::skip]
         #[rustc_align(32)]
-        extern "rust-preserve-none" fn #name<'h, const STRIDE: usize>(
+        #vis extern "rust-preserve-none" fn #name<'h, const STRIDE: usize>(
             ip: *const u8,
             regs: Regs,
             #acc: Acc,

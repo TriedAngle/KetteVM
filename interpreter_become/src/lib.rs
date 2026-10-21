@@ -13,6 +13,11 @@ use vm_core::{
     Recv, Register, Smi, Tagged, ThreadState, VM, Value, VmError,
 };
 
+mod new;
+mod new_macros;
+mod new_slow;
+mod new_utils;
+
 pub struct BecomeInterpreter;
 
 /// The frame's register window: signed indices are anchor-relative
@@ -3785,7 +3790,5 @@ pub fn execute<'a>(
 impl Interpreter for BecomeInterpreter {
     const EXECUTE: EntryFn = execute;
 }
-
-mod new;
 
 pub use new::NewInterpreter;

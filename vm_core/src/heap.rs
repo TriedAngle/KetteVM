@@ -860,6 +860,35 @@ impl Heap {
         Some(unsafe { Tagged::<Float>::from_raw_ptr(ptr).erase() })
     }
 
+    /// Bump-only `[]` literal: reserves and initializes a fresh array
+    /// object (`js_array_map`, empty slots and elements, `length` 0 —
+    /// all well-known words) from the current TLAB. Never parks,
+    /// collects or refills — `None` when the window is exhausted,
+    /// leaving the caller free to take the general allocation path
+    /// (which may collect) after snapshotting its code-relative pc.
+    #[inline]
+    pub fn try_new_array_literal<'a>(&'a mut self) -> Option<Tagged<'a, Object>> {
+        // With GC stress every allocation must collect first: decline the
+        // fast path so the caller falls back to the general path.
+        #[cfg(feature = "stress-minor-gc")]
+        if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let init = ObjectInit {
+            map: self.known().js_array_map,
+            slots: self.known().empty_fixed_array,
+            elements: self.known().empty_fixed_array,
+            length: 0,
+        };
+        let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
+        let raw = self.tlab.try_alloc(size)?;
+        let mut ptr = raw.cast::<Object>();
+        // Safety: raw memory just reserved; no GC can run here.
+        unsafe { ptr.as_mut() }.init(self, &init);
+        // Safety: fresh strong pointer, anchored at this borrow.
+        Some(unsafe { Tagged::from_raw_ptr(ptr) })
+    }
+
     /// A number value: a Smi when the double is an in-range integer, a
     /// freshly boxed Float otherwise. `-0.0` always boxes (it must not
     /// collapse into `+0`). Takes the collector slow path (park/collect/
