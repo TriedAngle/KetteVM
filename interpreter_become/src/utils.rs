@@ -1,20 +1,14 @@
-//! Call plumbing shared by the `new` handlers: resolving a callee into a
-//! [`StagedCall`], pushing bytecode frames from a rooted window or a value
-//! slice, and applying proxies over staged windows.
-
-#![allow(dead_code)]
-
 use bytecode::Opcode;
 use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, Heap, HostCtx, Map,
-    NativeIndex, Object, Tagged, Value, VmError, raise_runtime,
+    Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope, Heap,
+    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, raise_runtime,
 };
 
 use crate::{Regs, RootsArg};
 
-use crate::new::Ctx;
+use crate::Ctx;
 
 /// The outcome of a call-site start helper.
 pub enum StagedCall<'a> {
@@ -286,6 +280,55 @@ pub fn proxy_apply_staged<'a>(
     v
 }
 
+/// Cache the synthesized-receiver map for a closure (identity-keyed),
+/// so subsequent `new` calls can allocate directly.
+fn construct_cache_record(
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    callee: Handle<'_, Object>,
+    obj: Handle<'_, Object>,
+) {
+    // The first-use cache-table allocation may collect; take it before
+    // capturing any raw words that must survive the allocations below.
+    state.construct_cache_ensure_table(heap);
+
+    // Safety: fresh synthesized-receiver word; read before any allocation
+    // below, and no collection can run until then.
+    let map: Tagged<Map> =
+        unsafe { Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw()) };
+    // find the closure's `.prototype` data-property slot
+    let proto_name = heap.known().strings.prototype.as_tagged(heap);
+    let closure_map = callee.as_tagged(heap).map(heap);
+    let mut found = None;
+    for d in closure_map.as_ref().descriptors() {
+        if d.name(heap).raw() == proto_name.raw() && !d.flags().is_accessor() {
+            found = Some(d.offset());
+            break;
+        }
+    }
+    let Some(offset) = found else { return };
+    let proto_word = callee
+        .as_tagged(heap)
+        .as_ref()
+        .slot(heap, offset)
+        .get(heap)
+        .raw();
+    if !proto_word.is_strong_ptr() {
+        return; // non-object prototype: ES falls back, stays uncached
+    }
+    let proto: Handle<'_, Value> =
+        scope.handle(unsafe { Tagged::from_value_unchecked(proto_word) });
+
+    // Allocation-free from here: read the raw words last, immediately
+    // before the (allocation-free) insert.
+    let callee_obj: Tagged<Object> =
+        unsafe { Tagged::from_value_unchecked(callee.as_tagged(heap).raw()) };
+    let proto_word: Tagged<Value> =
+        unsafe { Tagged::from_value_unchecked(proto.as_tagged(heap).raw()) };
+    state.construct_cache_insert(heap, callee_obj, proto_word, offset, map);
+}
+
 // --- construct ---
 
 /// Outcome of a `Construct` fast-path attempt.
@@ -348,7 +391,7 @@ fn construct_receiver_args<'a>(
                 let obj: Handle<'_, Object> = scope
                     .cast::<Object>(heap, obj.as_tagged(heap))
                     .expect("receiver is an object");
-                crate::slow::construct_cache_record(heap, state, &scope, callee, obj);
+                construct_cache_record(heap, state, &scope, callee, obj);
                 scope.handle(obj.as_tagged(heap).erase())
             }
         };

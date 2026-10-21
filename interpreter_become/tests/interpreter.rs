@@ -1,18 +1,16 @@
 use bytecode::{Opcode, emit};
-use interpreter_become::NewInterpreter;
+use interpreter_become::BecomeInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, FixedArray, FixedByteArray, Handle, HandleScope, Heap,
     Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, new_feedback_vector,
 };
 
-/// The new `#[handler]`-based interpreter plugs into `VM::new` like
-/// any other. The JS-runtime bootstrap already enters and dispatches
-/// through it (the first unimplemented opcode, `LoadUndefined`, traps
-/// in `op_trap`); running real programs waits on more handlers.
+/// The `#[handler]`-based interpreter plugs into `VM::new` like any
+/// other; the JS-runtime bootstrap enters and dispatches through it.
 #[test]
 fn new_interpreter_constructs() {
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     drop(vm);
 }
 
@@ -96,7 +94,7 @@ fn call_function1_ic_miss_then_hit() {
     emit(&mut outer, Opcode::Load, &[1]); // 18
     emit(&mut outer, Opcode::Return, &[]); // 20
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
@@ -119,7 +117,7 @@ fn call_method0_stages_receiver() {
     emit(&mut outer, Opcode::CallMethod0, &[0, 1, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 1, 0);
@@ -141,7 +139,7 @@ fn call_passes_window() {
     emit(&mut outer, Opcode::Call, &[0, 2, 2, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
@@ -155,7 +153,7 @@ fn call_passes_window() {
 /// Build a callable, run it, and return the result value; panics on a
 /// throw. `args[0]` is the receiver, `args[1..]` the parameters.
 fn run(program: &[u8], register_count: usize, args: &[Value]) -> Value {
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, program, register_count, 0);
@@ -326,7 +324,7 @@ fn literals_under_gc_stress() {
     emit(&mut arr, Opcode::Return, &[]);
 
     for p in [&obj, &arr] {
-        let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+        let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
         vm.arm_gc_stress();
         let mut thread = vm.attach();
         let result = thread.handle_scope(|thread, scope| {
@@ -347,7 +345,7 @@ fn load_null_handler() {
     emit(&mut p, Opcode::LoadSmi, &[1]);
     emit(&mut p, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &p, 1, 0);
@@ -410,7 +408,7 @@ fn bitwise_slow_paths() {
 /// Run a program and decode a true/false result against the well-known
 /// singleton objects.
 fn run_boolean(program: &[u8], register_count: usize, args: &[Value]) -> bool {
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread
         .handle_scope(|thread, scope| {
@@ -490,7 +488,7 @@ fn construct_handler() {
         emit(&mut outer, Opcode::Construct, &[0, 1, 0]);
         emit(&mut outer, Opcode::Return, &[]);
 
-        let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+        let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
         let mut thread = vm.attach();
         let result = thread.handle_scope(|thread, scope| {
             let inner = callable(thread, &scope, body, 1, 0);
@@ -540,7 +538,7 @@ fn rethrow_handler() {
     emit(&mut p, Opcode::LoadSmi, &[7]);
     emit(&mut p, Opcode::ReThrow, &[]);
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &p, 1, 0);
@@ -561,7 +559,7 @@ fn call_non_callable_throws() {
     emit(&mut outer, Opcode::Call, &[0, 0, 1, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, NewInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let outer = callable(thread, &scope, &outer, 1, 2);

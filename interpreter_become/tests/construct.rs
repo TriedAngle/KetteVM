@@ -1,4 +1,4 @@
-use interpreter_become::{BecomeInterpreter, NewInterpreter};
+use interpreter_become::BecomeInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -17,10 +17,8 @@ fn run_one<I: Interpreter>(label: &str, src: &str) {
     }
 }
 
-/// Every `Construct` case runs on both shells.
 fn run(label: &str, src: &str) {
     run_one::<BecomeInterpreter>(label, src);
-    run_one::<NewInterpreter>(label, src);
 }
 
 const CHECK: &str = "function check(c, m) { if (!c) { throw new Error(m); } }\n";

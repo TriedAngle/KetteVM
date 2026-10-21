@@ -110,8 +110,8 @@ const EXITS: &[&str] = &[
 /// table generation. Each listed handler fn is registered, at both
 /// strides, under the `Opcode` variant derived from its name
 /// (`op_jump_if_truthy` -> `Opcode::JumpIfTruthy`); the rest of the
-/// table is filled with `op_trap`. Emits `NEW_TABLE_NARROW` (`::<1>`)
-/// and `NEW_TABLE_WIDE` (`::<2>`), both `#[used]` statics referencing
+/// table is filled with `op_trap`. Emits `TABLE_NARROW` (`::<1>`)
+/// and `TABLE_WIDE` (`::<2>`), both `#[used]` statics referencing
 /// the `op_trap` and handler fns in the invoking scope.
 #[proc_macro]
 pub fn handler_table(input: TokenStream) -> TokenStream {
@@ -158,7 +158,7 @@ fn expand_table(names: &Punctuated<Ident, Token![,]>) -> syn::Result<TokenStream
 
         #[used]
         #[rustfmt::skip]
-        pub static NEW_TABLE_NARROW: [Handler; 256] = new_table_narrow();
+        pub static TABLE_NARROW: [Handler; 256] = new_table_narrow();
 
         #[rustfmt::skip]
         const fn new_table_wide() -> [Handler; 256] {
@@ -169,7 +169,7 @@ fn expand_table(names: &Punctuated<Ident, Token![,]>) -> syn::Result<TokenStream
 
         #[used]
         #[rustfmt::skip]
-        pub static NEW_TABLE_WIDE: [Handler; 256] = new_table_wide();
+        pub static TABLE_WIDE: [Handler; 256] = new_table_wide();
     })
 }
 
