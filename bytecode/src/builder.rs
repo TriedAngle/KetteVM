@@ -886,7 +886,6 @@ impl FnBuilder {
     }
 
     acc_terminal!(throw, Throw);
-    acc_terminal!(re_throw, ReThrow);
 
     // -- escape hatch ----------------------------------------------------------------------
 

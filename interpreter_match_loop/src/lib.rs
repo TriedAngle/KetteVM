@@ -1960,7 +1960,7 @@ fn step<'a>(
             acc.store(v);
             Flow::Sync
         }
-        Opcode::Throw | Opcode::ReThrow => {
+        Opcode::Throw => {
             state.set_pending_exception(acc.get(heap));
             Flow::Threw
         }

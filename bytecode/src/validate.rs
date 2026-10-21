@@ -146,9 +146,7 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
     }
 
     match last {
-        Some(
-            Opcode::Return | Opcode::Jump | Opcode::JumpLoop | Opcode::Throw | Opcode::ReThrow,
-        ) => {}
+        Some(Opcode::Return | Opcode::Jump | Opcode::JumpLoop | Opcode::Throw) => {}
         _ => return Err(ValidationError::MissingTerminal),
     }
 

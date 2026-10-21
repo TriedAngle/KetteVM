@@ -326,8 +326,7 @@ define_opcodes! {
     LoadElementImm { operands: [Register, UImmediate, Index], acc: writes, indices: [Unchecked, Unchecked, Feedback] },
 
     // exception handling
-    Throw { operands: [], acc: reads, indices: [] },   // acc -> pending exception
-    ReThrow { operands: [], acc: reads, indices: [] }, // acc -> pending exception
+    Throw { operands: [], acc: reads, indices: [] }, // acc -> pending exception
 
     /// `regs[r] = ToNumeric(regs[r]) ± 1` in place; acc becomes the numeric
     /// *old* value (postfix semantics). Prefix forms follow with a `Load`.

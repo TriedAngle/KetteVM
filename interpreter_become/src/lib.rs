@@ -2150,12 +2150,6 @@ fn op_throw(frame: Frame) -> Acc {
     tail!(throw_dispatch)
 }
 
-#[handler(ReThrow)]
-fn op_re_throw(frame: Frame) -> Acc {
-    frame.ctx().state().set_pending_exception(frame.acc());
-    tail!(throw_dispatch)
-}
-
 #[handler(Construct)]
 fn op_construct(frame: Frame) -> Acc {
     let pc = frame.pc();
@@ -2297,7 +2291,6 @@ handler_table!(
     op_load_current_closure,
     op_throw_reference_error_if_hole,
     op_throw,
-    op_re_throw,
     op_load_global_no_throw,
 );
 

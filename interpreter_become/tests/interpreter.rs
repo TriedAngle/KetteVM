@@ -531,12 +531,12 @@ fn keyed_store_no_shadow_handler() {
     assert_eq!(run(&p, 3, &[smi(0)]), smi(42));
 }
 
-/// `ReThrow` sets the accumulator as the pending exception and unwinds.
+/// `Throw` sets the accumulator as the pending exception and unwinds.
 #[test]
-fn rethrow_handler() {
+fn throw_handler() {
     let mut p = Vec::new();
     emit(&mut p, Opcode::LoadSmi, &[7]);
-    emit(&mut p, Opcode::ReThrow, &[]);
+    emit(&mut p, Opcode::Throw, &[]);
 
     let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
@@ -549,7 +549,7 @@ fn rethrow_handler() {
         heap.known().exception.as_tagged(heap).raw()
     };
     assert_eq!(result, Ok(exception));
-    assert!(thread.has_pending_exception(), "the rethrow must surface");
+    assert!(thread.has_pending_exception(), "the throw must surface");
 }
 
 /// A non-callable callee raises through the miss path and unwinds out.

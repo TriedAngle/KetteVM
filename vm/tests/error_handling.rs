@@ -375,18 +375,18 @@ fn exception_unwinds_to_caller() {
 }
 
 #[test]
-fn rethrow_from_finally_escapes_past_its_own_handler() {
+fn throw_from_finally_escapes_past_its_own_handler() {
     let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
     let mut thread = vm.attach();
 
-    // 0: LoadSmi 3 | 2: Throw | 3: Return | 4: ReThrow (finally handler)
-    // the handler pc 4 is outside the try region [0, 4), so the ReThrow
+    // 0: LoadSmi 3 | 2: Throw | 3: Return | 4: Throw (finally handler)
+    // the handler pc 4 is outside the try region [0, 4), so the Throw
     // finds no handler and escapes the run
     let mut program = Vec::new();
     emit(&mut program, Opcode::LoadSmi, &[3]);
     emit(&mut program, Opcode::Throw, &[]);
     emit(&mut program, Opcode::Return, &[]);
-    emit(&mut program, Opcode::ReThrow, &[]);
+    emit(&mut program, Opcode::Throw, &[]);
     emit(&mut program, Opcode::Return, &[]);
 
     let result = thread.handle_scope(|thread, scope| {
