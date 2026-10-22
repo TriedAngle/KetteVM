@@ -4,100 +4,103 @@
 //! raise paths stay cold and out of line.
 
 use core::cell::Cell;
-use core::marker::PhantomData;
 
-use crate::errors::Errors;
 use crate::heap::{Heap, Register};
 use crate::stack::{FrameMeta, Stack};
 use crate::value::{Tagged, Value};
 use crate::{
     Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, ThreadState, VM, VmError,
+    raise_runtime,
 };
 
 /// Loop back-edge ticks between safepoint polls.
 pub const SAFEPOINT_INTERVAL: u32 = 1 << 12;
 
-pub struct Ctx<'a> {
-    vm: *const VM,
-    heap: *mut Heap,
-    state: *const ThreadState,
-    /// Anchor of the frame `execute` entered: a return at this anchor ends
-    /// the execution instead of unwinding into a caller.
+pub struct Ctx<'s, 'h> {
+    vm: &'s VM,
+    state: &'s ThreadState,
+    heap: &'h mut Heap,
+    /// Anchor of the frame `execute` entered
     base_anchor: usize,
+    /// Data pointer of the current frame's bytecode (`ip - code`)
+    code: Cell<*const u8>,
     safepoints: Cell<u32>,
-    /// Machine-stack limit for the call paths (one Rust frame per JS
-    /// call): a call below this raises StackOverflow. Recomputed at
-    /// each `enter` from the current SP — nested enters only deepen it.
-    stack_limit: usize,
-    _heap: PhantomData<&'a mut Heap>,
 }
 
-impl<'a> Ctx<'a> {
-    /// Build a context for a fresh `execute` entry.
-    ///
-    /// Safety: `vm`, `heap` and `state` must stay valid and unaliased
-    /// (mutable heap) for `'a`; `base_anchor` must be the frame the
-    /// entered execution returns at.
+impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
-    pub unsafe fn new(
-        vm: &'a VM,
-        heap: &'a mut Heap,
-        state: &'a ThreadState,
-        base_anchor: usize,
-        stack_limit: usize,
-    ) -> Self {
+    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
+        let code = state
+            .stack()
+            .frame_header(base_anchor)
+            .code(&*heap)
+            .as_ptr();
         Ctx {
-            vm: vm as *const VM,
-            heap: heap as *mut Heap,
-            state: state as *const ThreadState,
+            vm,
+            state,
+            heap,
             base_anchor,
+            code: Cell::new(code),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
-            stack_limit,
-            _heap: PhantomData,
-        }
-    }
-
-    /// A nested context for a callee frame sharing this execution's
-    /// borrows and machine-stack limit (a fresh safepoint cell each).
-    ///
-    /// Safety: same borrow validity as `self`; `base_anchor` must be the
-    /// callee's frame.
-    #[inline(always)]
-    pub unsafe fn child(&self, base_anchor: usize) -> Ctx<'a> {
-        Ctx {
-            vm: self.vm,
-            heap: self.heap,
-            state: self.state,
-            base_anchor,
-            safepoints: Cell::new(SAFEPOINT_INTERVAL),
-            stack_limit: self.stack_limit,
-            _heap: PhantomData,
         }
     }
 
     #[inline(always)]
-    pub fn vm(&self) -> &'a VM {
-        unsafe { &*self.vm }
+    pub fn heap(&self) -> &Heap {
+        self.heap
     }
 
     #[inline(always)]
-    pub fn heap(&self) -> &'a Heap {
-        unsafe { &*self.heap }
+    pub fn heap_mut(&mut self) -> &mut Heap {
+        self.heap
+    }
+
+    /// Shared access to the heap for the match-loop interpreter's cold
+    /// helpers, which hold a heap reference while calling other `Ctx`
+    /// methods. This is transitional: once those call paths use exclusive
+    /// `&mut Ctx` reborrows, this accessor should be deleted.
+    ///
+    /// # Safety
+    /// The caller must uphold the interpreter's heap-access discipline;
+    /// this exists only for the match-loop shell's shared cold helpers.
+    #[inline(always)]
+    pub unsafe fn heap_shared(&self) -> &'h Heap {
+        let ptr = &*self.heap as *const Heap;
+        unsafe { &*ptr }
+    }
+
+    /// Shared access to the heap for the match-loop interpreter's cold
+    /// helpers, which hold a heap reference while calling other `Ctx`
+    /// methods. This is transitional: once those call paths use exclusive
+    /// `&mut Ctx` reborrows, this accessor should be deleted.
+    ///
+    /// # Safety
+    /// The caller must uphold the interpreter's heap-access discipline;
+    /// this exists only for the match-loop shell's shared cold helpers.
+    #[inline(always)]
+    pub unsafe fn heap_mut_shared(&self) -> &'h mut Heap {
+        let ptr = core::ptr::addr_of!(*self.heap).cast_mut();
+        unsafe { &mut *ptr }
     }
 
     #[inline(always)]
-    pub unsafe fn heap_mut(&self) -> &'a mut Heap {
-        unsafe { &mut *self.heap }
+    pub fn vm(&self) -> &'s VM {
+        self.vm
     }
 
     #[inline(always)]
-    pub fn state(&self) -> &'a ThreadState {
-        unsafe { &*self.state }
+    pub fn state(&self) -> &'s ThreadState {
+        self.state
     }
 
     #[inline(always)]
-    pub fn stack(&self) -> &'a Stack {
-        self.state().stack()
+    pub fn stack(&self) -> &'s Stack {
+        self.state.stack()
+    }
+
+    #[inline(always)]
+    pub fn frame_base(&self) -> usize {
+        self.state.frame_base()
     }
 
     #[inline(always)]
@@ -105,18 +108,58 @@ impl<'a> Ctx<'a> {
         self.base_anchor
     }
 
-    /// The current frame's language mode, from its callable info.
-    /// Generic runtime helpers that operate on behalf of the running
-    /// function use this.
+    /// Switch the current frame (after a push, pop, or unwind).
+    #[inline(always)]
+    pub fn set_frame_base(&self, base: usize) {
+        self.state.set_frame_base(base);
+    }
+
+    /// The current frame's pc origin (one load; the header chain runs
+    /// only at the refresh edges).
+    #[inline(always)]
+    pub fn code_ptr(&self) -> *const u8 {
+        self.code.get()
+    }
+
+    /// Reload the pc origin from the current frame's header — after a
+    /// point that may have collected and moved the bytecode.
+    #[inline(always)]
+    pub fn reload_code(&self) {
+        let state = self.state;
+        let heap = &*self.heap;
+        let code = state.stack().frame_header(state.frame_base()).code(heap);
+        self.code.set(code.as_ptr());
+    }
+
+    /// Switch to the frame at `base` (pop/unwind)
+    #[inline(always)]
+    pub fn switch_frame(&self, base: usize) {
+        let state = self.state;
+        let heap = &*self.heap;
+        let code = state.stack().frame_header(base).code(heap);
+        self.state.set_frame_base(base);
+        self.code.set(code.as_ptr());
+    }
+
+    /// Switch to a freshly pushed frame, whose pc origin the caller
+    /// already read from the callee's info.
+    #[inline(always)]
+    pub fn switch_frame_code(&self, base: usize, code: *const u8) {
+        self.state.set_frame_base(base);
+        self.code.set(code);
+    }
+
+    /// The current frame's language mode, read from its callable info.
+    /// Only mode-sensitive handlers (delete, store slow paths) call this;
+    /// the hot store fast paths never consult it.
     #[inline(always)]
     pub fn language_mode(&self) -> LanguageMode {
-        let state = self.state();
         debug_assert!(
-            state.is_frame_active(),
+            self.state.is_frame_active(),
             "language mode read without an active frame"
         );
-        let heap = self.heap();
-        let header = state.stack().frame_header(state.frame_base());
+        let heap: &Heap = self.heap;
+        let header = self.state.stack().frame_header(self.state.frame_base());
         let callable = header.callable(heap);
         let info = callable
             .callable_info(heap)
@@ -124,62 +167,16 @@ impl<'a> Ctx<'a> {
         info.mode()
     }
 
-    /// The current frame's anchor (the frame-pointer analogue). Frame
-    /// switches are a single store: the frame header carries every
-    /// other dispatch fact.
+    /// The current frame's feedback vector
     #[inline(always)]
-    pub fn frame_base(&self) -> usize {
-        self.state().frame_base()
-    }
-
-    /// Switch the current frame (after a push, pop, or unwind).
-    #[inline(always)]
-    pub fn set_frame_base(&self, base: usize) {
-        self.state().set_frame_base(base);
-    }
-
-    /// The caller descriptor for pushing a frame from the current one:
-    /// `pc` is the caller's resume point, `handler_pc` its exception
-    /// lookup pc.
-    #[inline(always)]
-    pub fn caller_meta(&self, pc: usize, handler_pc: usize) -> FrameMeta {
-        let base = self.frame_base();
-        FrameMeta {
-            base,
-            pc,
-            register_count: self.stack().regcount(base),
-            handler_pc,
-        }
-    }
-
-    #[inline(always)]
-    pub fn code_ptr(&self) -> *const u8 {
-        self.stack()
-            .frame_header(self.frame_base())
-            .code(self.heap())
-            .as_ptr()
-    }
-
-    #[inline(always)]
-    pub fn constants_ref<'h>(&self, heap: &'h Heap) -> Tagged<'h, FixedArray> {
-        debug_assert!(
-            self.state().is_frame_active(),
-            "constants read without a frame"
-        );
-        self.stack().frame_header(self.frame_base()).constants(heap)
-    }
-
-    /// The current frame's feedback vector, or `None` for functions
-    /// without feedback slots.
-    #[inline(always)]
-    pub fn feedback_ref<'h>(&self, heap: &'h Heap) -> Option<Tagged<'h, FeedbackVector>> {
+    pub fn feedback_ref<'f>(&self, heap: &'f Heap) -> Option<Tagged<'f, FeedbackVector>> {
         self.stack().frame_header(self.frame_base()).feedback(heap)
     }
 
-    /// The accumulator cell.
+    /// The current frame's constant pool.
     #[inline(always)]
-    pub fn acc_slot(&self) -> &Register {
-        self.state().acc_slot()
+    pub fn constants_ref<'f>(&self, heap: &'f Heap) -> Tagged<'f, FixedArray> {
+        self.stack().frame_header(self.frame_base()).constants(heap)
     }
 
     #[inline(always)]
@@ -187,33 +184,6 @@ impl<'a> Ctx<'a> {
         unsafe { self.stack().slots_ptr().add(self.frame_base()) }
     }
 
-    #[inline(always)]
-    pub fn exception_word(&self) -> Tagged<'a, Value> {
-        let heap = self.heap();
-        heap.known().exception.as_tagged(heap).erase()
-    }
-
-    #[inline(always)]
-    pub fn is_throw(&self, v: Tagged<'_, Value>) -> bool {
-        v == self.exception_word()
-    }
-
-    #[inline(always)]
-    pub fn undefined_word(&self) -> Tagged<'a, Value> {
-        let heap = self.heap();
-        heap.known().undefined.as_tagged(heap).erase()
-    }
-
-    /// The machine-stack probe for the call paths: `true` when the
-    /// current stack pointer has fallen below this execution's limit.
-    #[inline(always)]
-    pub fn stack_overflowed(&self) -> bool {
-        let probe = 0u8;
-        (&probe as *const u8 as usize) < self.stack_limit
-    }
-
-    /// One loop back-edge: `true` every `SAFEPOINT_INTERVAL` ticks or when
-    /// a collection has been requested since the last reset.
     #[inline(always)]
     pub fn safepoint_tick(&self) -> bool {
         let n = self.safepoints.get();
@@ -226,58 +196,47 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Materialize a VM error as the pending exception and return `Ok`
-    /// with the exception sentinel (the fold for `Result`-returning
-    /// helpers).
-    #[cold]
-    #[inline(never)]
-    pub fn raise(&self, err: VmError) -> Result<Tagged<'a, Value>, VmError> {
-        Ok(self.raise_tag(err))
-    }
-
-    /// The single-channel raise for Tagged-returning interpreter fns:
-    /// materialize `err`, set the pending exception, return the sentinel
-    /// word.
-    #[cold]
-    #[inline(never)]
-    pub fn raise_tag(&self, err: VmError) -> Tagged<'a, Value> {
-        // Safety: contained — the Ctx borrows are valid for the call.
-        unsafe {
-            let heap = self.heap_mut();
-            let state = self.state();
-            let ex = Errors::from_vm_error(self.vm(), heap, state, err)
-                .expect("error materialization must not fail");
-            state.set_pending_exception(ex);
-            self.exception_word()
+    #[inline(always)]
+    pub fn caller_meta(&self, pc: usize, handler_pc: usize) -> FrameMeta {
+        let base = self.frame_base();
+        FrameMeta {
+            base,
+            pc,
+            register_count: self.stack().regcount(base),
+            handler_pc,
         }
     }
 
-    /// Invoke a runtime callee over a normalized window: one staged
-    /// above `top` is rooted by bumping `top` for the call's duration.
     #[inline(always)]
-    pub fn call_runtime(&self, rt: NativeIndex, args: Args) -> Tagged<'a, Value> {
-        let f = self.vm().runtime(rt);
-        let stack = self.stack();
+    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
+        let (vm, state) = (self.vm, self.state);
+        let f = vm.runtime(rt);
+        let stack = state.stack();
         let saved = stack.top();
         let bump = stack.rooting_top(args);
         if let Some(top) = bump {
             stack.set_top(top);
         }
-        // Safety: the heap parts carry Ctx's original borrows.
-        let nctx = HostCtx::new(self.vm(), unsafe { self.heap_mut() }, self.state());
+        let nctx = HostCtx::new(vm, self.heap_mut(), state);
         let v = f(nctx, None, args);
         if bump.is_some() {
             stack.set_top(saved);
         }
         v
     }
+
+    #[inline(always)]
+    pub fn raise_tag(&mut self, err: VmError) -> Tagged<'_, Value> {
+        let (vm, state) = (self.vm, self.state);
+        raise_runtime(vm, self.heap_mut(), state, err)
+    }
 }
 
 /// The exception-dispatch result: a handler was found (its entry pc
 /// rides in `Caught` along with the exception, the current frame is the
 /// handler's) or the exception escaped this execution.
-pub enum Unwind<'a> {
-    Caught { pc: usize, ex: Tagged<'a, Value> },
+pub enum Unwind<'h> {
+    Caught { pc: usize, ex: Tagged<'h, Value> },
     Escaped,
 }
 
@@ -287,7 +246,9 @@ pub enum Unwind<'a> {
 /// and the current frame is the handler's.
 #[cold]
 #[inline(never)]
-pub fn unwind<'a>(ctx: &Ctx<'a>, fault_pc: usize) -> Unwind<'a> {
+pub fn unwind<'h>(ctx: &Ctx<'_, 'h>, fault_pc: usize) -> Unwind<'h> {
+    // Safety: unwind only reads the heap.
+    let heap = unsafe { ctx.heap_shared() };
     let mut pc = fault_pc;
     loop {
         let base = ctx.frame_base();
@@ -296,21 +257,17 @@ pub fn unwind<'a>(ctx: &Ctx<'a>, fault_pc: usize) -> Unwind<'a> {
             // finally in any frame) may observe or intercept it.
             None
         } else {
-            let callable = ctx
-                .stack()
-                .frame_header(base)
-                .callable_slot()
-                .get(ctx.heap());
+            let callable = ctx.stack().frame_header(base).callable_slot().get(heap);
             callable
                 .as_heap_object()
-                .and_then(|obj| obj.callable_info(ctx.heap()))
-                .and_then(|info| info.handlers.get(ctx.heap()))
+                .and_then(|obj| obj.callable_info(heap))
+                .and_then(|info| info.handlers.get(heap))
                 .and_then(|handlers| handlers.lookup(pc))
         };
         if let Some(handler_pc) = handled {
             let ex = ctx
                 .state()
-                .take_pending_exception_tagged(ctx.heap())
+                .take_pending_exception_tagged(heap)
                 .expect("pending exception must be set while unwinding");
             return Unwind::Caught { pc: handler_pc, ex };
         }

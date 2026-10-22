@@ -2,7 +2,7 @@
 //! per operation, used by every interpreter shell. These return a plain `Tagged<Value>` where every
 //! failure is the exception sentinel (the pending exception is set);
 //! `Result<VmError>` survives only *inside* primitive helpers and is
-//! folded to a sentinel (`Ctx::raise_tag`) at the first Tagged boundary.
+//! folded to a sentinel (`raise_runtime`) at the first Tagged boundary.
 
 use crate::convert::Convert;
 use crate::handle::{Handle, HandleScope};
@@ -17,26 +17,36 @@ use crate::prototype::Prototype;
 use crate::transition::{PropertyDescriptor, StoreOutcome, StoreSemantics};
 use crate::value::{Smi, Tagged, Value};
 use crate::{AccessorPair, Compare, EntryClass, Errors, VmError};
-use crate::{Coercion, Hint, HostCtx};
+use crate::{Coercion, Hint, HostCtx, raise_runtime};
 
 /// `Add` cold body: ToPrimitive both operands, string concatenation when
 /// either side is a string, numeric addition otherwise (ES 13.15.3).
-pub fn add<'a>(ctx: &Ctx<'a>, lhs: Tagged<'_, Value>, rhs: Tagged<'_, Value>) -> Tagged<'a, Value> {
+pub fn add<'a>(
+    ctx: &mut Ctx<'a, 'a>,
+    lhs: Tagged<'_, Value>,
+    rhs: Tagged<'_, Value>,
+) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let lhs = scope.handle(lhs);
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => return ctx.exception_word(),
+            Ok(Coercion::Threw) => {
+                let heap = unsafe { ctx.heap_shared() };
+                return heap.known().exception.as_tagged(heap).erase();
+            }
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let rhs = scope.handle(rhs);
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => return ctx.exception_word(),
+            Ok(Coercion::Threw) => {
+                let heap = unsafe { ctx.heap_shared() };
+                return heap.known().exception.as_tagged(heap).erase();
+            }
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let is_string = (
             lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some(),
@@ -45,11 +55,11 @@ pub fn add<'a>(ctx: &Ctx<'a>, lhs: Tagged<'_, Value>, rhs: Tagged<'_, Value>) ->
         if is_string.0 || is_string.1 {
             let a = match Convert::to_string(heap, &scope, lhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
             let b = match Convert::to_string(heap, &scope, rhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
             DenseString::concat(heap, &scope, a, b)
                 .as_tagged(heap)
@@ -57,11 +67,11 @@ pub fn add<'a>(ctx: &Ctx<'a>, lhs: Tagged<'_, Value>, rhs: Tagged<'_, Value>) ->
         } else {
             let a = match lhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
             let b = match rhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
             // IEEE `-0 + -0` yields +0; the spec demands -0
             let r = a + b;
@@ -77,36 +87,42 @@ pub fn add<'a>(ctx: &Ctx<'a>, lhs: Tagged<'_, Value>, rhs: Tagged<'_, Value>) ->
 
 /// `Sub`/`Mul`/`Div`/`Mod` cold body: full `numeric_op` semantics.
 pub fn numeric<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     lhs: Tagged<'_, Value>,
     rhs: Tagged<'_, Value>,
     f: fn(f64, f64) -> f64,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let a = scope.handle(lhs);
         let b = scope.handle(rhs);
         match Object::numeric_op(vm, heap, state, a, b, f) {
             Ok(Some(v)) => v,
-            Ok(None) => ctx.exception_word(),
-            Err(e) => ctx.raise_tag(e),
+            Ok(None) => {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            }
+            Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         }
     })
 }
 
 /// `Negate` cold body: ToNumeric and flip (with `-0`).
-pub fn negate<'a>(ctx: &Ctx<'a>, v: Tagged<'_, Value>) -> Tagged<'a, Value> {
+pub fn negate<'a>(ctx: &mut Ctx<'a, 'a>, v: Tagged<'_, Value>) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let v = scope.handle(v);
         match Object::to_numeric(vm, heap, state, v) {
             Ok(Some(n)) => heap.new_number(-n),
-            Ok(None) => ctx.exception_word(),
-            Err(e) => ctx.raise_tag(e),
+            Ok(None) => {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            }
+            Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         }
     })
 }
@@ -115,26 +131,36 @@ pub fn negate<'a>(ctx: &Ctx<'a>, v: Tagged<'_, Value>) -> Tagged<'a, Value> {
 /// the op. `kind`: 0 = `|`, 1 = `^`, 2 = `&`, 3 = `<<`, 4 = `>>`,
 /// 5 = `>>>`.
 pub fn bitwise<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     kind: u8,
     lhs: Tagged<'_, Value>,
     rhs: Tagged<'_, Value>,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let lhs = scope.handle(lhs);
         let rhs = scope.handle(rhs);
         let a = match Object::to_numeric(vm, heap, state, lhs) {
             Ok(Some(n)) => n,
-            Ok(None) => return ctx.exception_word(),
-            Err(e) => return ctx.raise_tag(e),
+            Ok(None) => {
+                return {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                };
+            }
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let b = match Object::to_numeric(vm, heap, state, rhs) {
             Ok(Some(n)) => n,
-            Ok(None) => return ctx.exception_word(),
-            Err(e) => return ctx.raise_tag(e),
+            Ok(None) => {
+                return {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                };
+            }
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let (ai, bi) = (Convert::number_to_int32(a), Convert::number_to_uint32(b));
         let r: i64 = match kind {
@@ -154,13 +180,13 @@ pub fn bitwise<'a>(
 /// 1 = strict `===`, 2 = `<`, 3 = `<=`, 4 = `>`, 5 = `>=`). Returns the
 /// boolean result value or the sentinel (a coercion threw).
 pub fn compare<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     cmp: u8,
     lhs: Tagged<'_, Value>,
     rhs: Tagged<'_, Value>,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let x = scope.handle(lhs);
@@ -183,18 +209,28 @@ pub fn compare<'a>(
         let hint = if loose { Hint::Default } else { Hint::Number };
         let x = if x_obj {
             match Object::to_primitive(vm, heap, state, x, hint) {
-                Ok(Coercion::Threw) => return ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    return {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    };
+                }
                 Ok(Coercion::Value(v)) => scope.handle(v),
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             }
         } else {
             x
         };
         let y = if y_obj {
             match Object::to_primitive(vm, heap, state, y, hint) {
-                Ok(Coercion::Threw) => return ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    return {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    };
+                }
                 Ok(Coercion::Value(v)) => scope.handle(v),
-                Err(e) => return ctx.raise_tag(e),
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             }
         } else {
             y
@@ -208,7 +244,7 @@ pub fn compare<'a>(
         };
         match b {
             Ok(v) => Convert::boolean(heap, v),
-            Err(e) => ctx.raise_tag(e),
+            Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         }
     })
 }
@@ -216,13 +252,13 @@ pub fn compare<'a>(
 /// `LoadNamedProperty*` cold body: proxy trap, lookup, IC fill only for
 /// plain values (getters are never cached).
 pub fn named_load<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     name_idx: usize,
     fb_slot: usize,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
@@ -237,9 +273,12 @@ pub fn named_load<'a>(
         // field handler.
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(v)) => v,
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
         let out = match recv
@@ -266,10 +305,10 @@ pub fn named_load<'a>(
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return ctx.raise_tag(e),
+                    Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
             }
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         out.as_tagged(heap).erase()
     })
@@ -278,29 +317,37 @@ pub fn named_load<'a>(
 /// `LoadKeyedProperty`/`LoadKeyedPropertyReg` cold body: property-key
 /// coercion, proxies, string receivers, getters.
 pub fn keyed_load<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     key: Tagged<'_, Value>,
     fb_slot: Option<usize>,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
         let raw_key = scope.handle(key);
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return ctx.exception_word(),
-            Err(e) => return ctx.raise_tag(e),
+            Ok(None) => {
+                return {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                };
+            }
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         // ES 20.2.5.8 (keyed form): the `get` trap with the coerced
         // key. No IC update: traps are dynamic.
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(v)) => v,
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
         let element_index = match key.as_tagged(heap).erase().classify_key(heap) {
@@ -332,10 +379,10 @@ pub fn keyed_load<'a>(
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return ctx.raise_tag(e),
+                    Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
             }
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         out.as_tagged(heap).erase()
     })
@@ -345,13 +392,13 @@ pub fn keyed_load<'a>(
 /// index as the key (string receivers, proxies, named fallback), plus
 /// the element-IC fill from the miss.
 pub fn keyed_load_imm<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     idx: usize,
     fb_slot: Option<usize>,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
@@ -372,9 +419,12 @@ pub fn keyed_load_imm<'a>(
         }
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(v)) => v,
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
         let out = match recv
@@ -387,17 +437,17 @@ pub fn keyed_load_imm<'a>(
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return ctx.raise_tag(e),
+                    Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
             }
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         out.as_tagged(heap).erase()
     })
 }
 
 pub fn keyed_store<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     key: Tagged<'_, Value>,
     value: Tagged<'_, Value>,
@@ -405,7 +455,7 @@ pub fn keyed_store<'a>(
     semantics: StoreSemantics,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
@@ -413,15 +463,23 @@ pub fn keyed_store<'a>(
         let value = scope.handle(value);
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::set(vm, heap, state, recv, raw_key, value, recv) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return ctx.exception_word(),
-            Err(e) => return ctx.raise_tag(e),
+            Ok(None) => {
+                return {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                };
+            }
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let name: Handle<'_, SlotName> = match key.as_tagged(heap).erase().classify_key(heap) {
             Ok(Key::Element(i)) => {
@@ -446,12 +504,18 @@ pub fn keyed_store<'a>(
                                 .and_then(|d| d.find(heap, i).map(|e| d.value_at(heap, e)))
                                 .and_then(|v| v.get_as::<AccessorPair>(heap));
                             let Some(pair) = pair else {
-                                return ctx.exception_word();
+                                let heap = unsafe { ctx.heap_shared() };
+                                return heap.known().exception.as_tagged(heap).erase();
                             };
                             let setter = pair.set.get(heap);
                             if setter == heap.known().undefined.as_tagged(heap) {
                                 return if ctx.language_mode().is_strict() {
-                                    ctx.raise_tag(VmError::Type)
+                                    raise_runtime(
+                                        vm,
+                                        unsafe { ctx.heap_mut_shared() },
+                                        state,
+                                        VmError::Type,
+                                    )
                                 } else {
                                     value.as_tagged(heap).erase()
                                 };
@@ -464,14 +528,22 @@ pub fn keyed_store<'a>(
                                 value,
                             ) {
                                 Ok(()) => value.as_tagged(heap).erase(),
-                                Err(()) => ctx.exception_word(),
+                                Err(()) => {
+                                    let heap = unsafe { ctx.heap_shared() };
+                                    heap.known().exception.as_tagged(heap).erase()
+                                }
                             };
                         }
                         Some(EntryClass::ReadOnly) => {
                             // sloppy-mode assignment silently ignores,
                             // strict throws (ES 10.4.5.5 PutValue step 5)
                             return if ctx.language_mode().is_strict() {
-                                ctx.raise_tag(VmError::Type)
+                                raise_runtime(
+                                    vm,
+                                    unsafe { ctx.heap_mut_shared() },
+                                    state,
+                                    VmError::Type,
+                                )
                             } else {
                                 value.as_tagged(heap).erase()
                             };
@@ -483,7 +555,12 @@ pub fn keyed_store<'a>(
                             if let Err(e) =
                                 Object::store_array_element(heap, &scope, &obj, i, &value)
                             {
-                                return ctx.raise_tag(e);
+                                return raise_runtime(
+                                    vm,
+                                    unsafe { ctx.heap_mut_shared() },
+                                    state,
+                                    e,
+                                );
                             }
                             return value.as_tagged(heap).erase();
                         }
@@ -503,7 +580,12 @@ pub fn keyed_store<'a>(
                                 if let Err(e) =
                                     Object::store_array_element(heap, &scope, &obj, i, &value)
                                 {
-                                    return ctx.raise_tag(e);
+                                    return raise_runtime(
+                                        vm,
+                                        unsafe { ctx.heap_mut_shared() },
+                                        state,
+                                        e,
+                                    );
                                 }
                                 return value.as_tagged(heap).erase();
                             }
@@ -542,7 +624,7 @@ pub fn keyed_store<'a>(
                             .expect("array receiver is an object");
                         let grew = i >= obj.as_tagged(heap).length();
                         if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
-                            return ctx.raise_tag(e);
+                            return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e);
                         }
                         if let Some(fb) = fb_slot {
                             InlineCache::update_store_element(
@@ -559,7 +641,7 @@ pub fn keyed_store<'a>(
                 }
             }
             Ok(Key::Name(key)) => scope.handle(key),
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         let outcome = match recv.as_tagged(heap).erase().store_lookup(
             heap,
@@ -570,11 +652,14 @@ pub fn keyed_store<'a>(
             ctx.language_mode(),
         ) {
             Ok(o) => o,
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
         match apply_store_outcome(ctx, recv, outcome, value) {
             Ok(()) => value.as_tagged(heap).erase(),
-            Err(()) => ctx.exception_word(),
+            Err(()) => {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            }
         }
     })
 }
@@ -583,13 +668,13 @@ pub fn keyed_store<'a>(
 /// second-tier IC re-probe), IC fill only for plain data properties
 /// (getters and absent globals are never cached).
 pub fn global_load<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     name_idx: usize,
     fb_slot: usize,
     throws: bool,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let global = heap.known().global_object;
@@ -612,12 +697,12 @@ pub fn global_load<'a>(
                 let getter = scope.handle(pair.get.get(heap));
                 if getter.as_tagged(heap) == heap.known().undefined.as_tagged(heap) {
                     // a setter-only accessor: the read yields undefined
-                    return ctx.undefined_word();
+                    return heap.known().undefined.as_tagged(heap).erase();
                 }
                 let args = scope.stage(&[global.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return ctx.raise_tag(e),
+                    Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
             }
             Lookup::NotFound => {
@@ -633,9 +718,12 @@ pub fn global_load<'a>(
                     let ex = Errors::not_defined(vm, heap, state, &text)
                         .expect("error materialization must not fail");
                     state.set_pending_exception(ex);
-                    return ctx.exception_word();
+                    return {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    };
                 } else {
-                    return ctx.undefined_word();
+                    return heap.known().undefined.as_tagged(heap).erase();
                 }
             }
         };
@@ -646,14 +734,14 @@ pub fn global_load<'a>(
 /// `StoreNamedProperty` cold body: the store IC, transitions and setter
 /// invocation (Shadow semantics).
 pub fn store_named<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     name_idx: usize,
     fb_slot: usize,
     value: Tagged<'_, Value>,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
@@ -665,9 +753,12 @@ pub fn store_named<'a>(
         // skipped entirely so an armed site never matches a proxy map.
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
 
@@ -691,7 +782,9 @@ pub fn store_named<'a>(
                     // a throwing setter routes the sentinel to the caller
                     let v = match HostCtx::enter(vm, heap, state, setter, args, None) {
                         Ok(v) => scope.handle(v),
-                        Err(e) => return ctx.raise_tag(e),
+                        Err(e) => {
+                            return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e);
+                        }
                     };
                     v.as_tagged(heap)
                 }
@@ -713,12 +806,12 @@ pub fn store_named<'a>(
 /// the IC (WriteThrough stores into parent-pair arrays that no map
 /// describes).
 pub fn store_named_no_shadow<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Tagged<'_, Value>,
     name_idx: usize,
     value: Tagged<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let recv = scope.handle(recv);
@@ -731,11 +824,12 @@ pub fn store_named_no_shadow<'a>(
 /// `StoreGlobal` cold body: the named-store tail against the global
 /// object (WriteThrough, no IC).
 pub fn store_global<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     name_idx: usize,
     value: Tagged<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let heap = unsafe { ctx.heap_mut() };
+    let vm = ctx.vm();
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let value = scope.handle(value);
@@ -751,7 +845,12 @@ pub fn store_global<'a>(
                 Lookup::NotFound
             )
         {
-            return ctx.raise_tag(VmError::Reference);
+            return raise_runtime(
+                vm,
+                unsafe { ctx.heap_mut_shared() },
+                state,
+                VmError::Reference,
+            );
         }
         store_named_tail(ctx, global, name, value, None, StoreSemantics::WriteThrough)
     })
@@ -762,7 +861,7 @@ pub fn store_global<'a>(
 /// transition is cached against the map the store produced, a setter ran
 /// before the fill).
 fn store_named_tail<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     recv: Handle<'_, Value>,
     name: Handle<'_, SlotName>,
     value: Handle<'_, Value>,
@@ -776,7 +875,7 @@ fn store_named_tail<'a>(
 }
 
 fn store_named_tail_scoped<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     scope: HandleScope<'_>,
     recv: Handle<'_, Value>,
     name: Handle<'_, SlotName>,
@@ -784,7 +883,9 @@ fn store_named_tail_scoped<'a>(
     fb_slot: Option<usize>,
     semantics: StoreSemantics,
 ) -> Tagged<'a, Value> {
-    let heap = unsafe { ctx.heap_mut() };
+    let vm = ctx.vm();
+    let heap = unsafe { ctx.heap_mut_shared() };
+    let state = ctx.state();
     // the receiver's map before the store: the state key when
     // the outcome transitions it
     let prev = recv
@@ -800,7 +901,7 @@ fn store_named_tail_scoped<'a>(
         ctx.language_mode(),
     ) {
         Ok(o) => o,
-        Err(e) => return ctx.raise_tag(e),
+        Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
     };
     let kind = match &outcome {
         StoreOutcome::Done => StoreOutcomeKind::Done,
@@ -808,7 +909,10 @@ fn store_named_tail_scoped<'a>(
         StoreOutcome::CallSetter { .. } => StoreOutcomeKind::CallSetter,
     };
     if let Err(()) = apply_store_outcome(ctx, recv, outcome, value) {
-        return ctx.exception_word();
+        return {
+            let heap = unsafe { ctx.heap_shared() };
+            heap.known().exception.as_tagged(heap).erase()
+        };
     }
     if let (Some(fb), Some(prev)) = (fb_slot, prev) {
         InlineCache::update_store(
@@ -829,13 +933,13 @@ fn store_named_tail_scoped<'a>(
 /// run as a blocking call (their return value is ignored; the
 /// accumulator keeps the stored value). `Err(())` = threw (pending set).
 pub fn apply_store_outcome(
-    ctx: &Ctx<'_>,
+    ctx: &mut Ctx<'_, '_>,
     receiver: Handle<'_, Value>,
     outcome: StoreOutcome<'_>,
     value: Handle<'_, Value>,
 ) -> Result<(), ()> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     match outcome {
         StoreOutcome::Transition {
@@ -855,12 +959,12 @@ pub fn apply_store_outcome(
                     // non-extensible receiver: silent in sloppy code,
                     // TypeError in strict (ES 10.4.5.5 PutValue step 5)
                     Ok(false) if strict => {
-                        ctx.raise_tag(VmError::Type);
+                        raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, VmError::Type);
                         Err(())
                     }
                     Ok(false) => Ok(()),
                     Err(e) => {
-                        ctx.raise_tag(e);
+                        raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e);
                         Err(())
                     }
                 }
@@ -872,10 +976,17 @@ pub fn apply_store_outcome(
                 Ok(v) => {
                     // the setter's return value is ignored: the stored
                     // value stays the expression's result
-                    if ctx.is_throw(v) { Err(()) } else { Ok(()) }
+                    if v == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
                 }
                 Err(e) => {
-                    ctx.raise_tag(e);
+                    raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e);
                     Err(())
                 }
             }
@@ -887,28 +998,31 @@ pub fn apply_store_outcome(
 /// `Construct` cold body: [[Construct]] with receiver synthesis,
 /// derived-class handling and proxy traps (ES 9.2.2).
 pub fn construct<'a>(
-    ctx: &Ctx<'a>,
+    ctx: &mut Ctx<'a, 'a>,
     callee: Tagged<'_, Value>,
     args_base: i32,
     count: usize,
 ) -> Tagged<'a, Value> {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     state.handle_scope(|scope| {
         let callee = scope.handle(callee);
         let Some(obj) = callee.as_tagged(heap).as_heap_object() else {
-            return ctx.raise_tag(VmError::Type);
+            return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, VmError::Type);
         };
         if !obj.map(heap).kind().is_constructor() {
-            return ctx.raise_tag(VmError::Type);
+            return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, VmError::Type);
         }
         let args = ctx.stack().args(ctx.frame_base(), args_base, count);
         if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
             return match Proxy::construct(vm, heap, state, callee, args, callee) {
-                Ok(Coercion::Threw) => ctx.exception_word(),
+                Ok(Coercion::Threw) => {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                }
                 Ok(Coercion::Value(v)) => v,
-                Err(e) => ctx.raise_tag(e),
+                Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
         // a derived constructor's `this` is the hole until `super()` binds
@@ -926,8 +1040,13 @@ pub fn construct<'a>(
         } else {
             match Object::create_construct_receiver_value(vm, heap, state, callee.erase()) {
                 Ok(Some(r)) => scope.handle(r),
-                Ok(None) => return ctx.exception_word(),
-                Err(e) => return ctx.raise_tag(e),
+                Ok(None) => {
+                    return {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    };
+                }
+                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             }
         };
         let mut staged: Vec<Tagged<'_, Value>> = Vec::with_capacity(count + 1);
@@ -943,15 +1062,21 @@ pub fn construct<'a>(
             Some(callee.erase()),
         ) {
             Ok(v) => scope.handle(v),
-            Err(e) => return ctx.raise_tag(e),
+            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
-        if result.as_tagged(heap) == ctx.exception_word() {
-            return ctx.exception_word();
+        if result.as_tagged(heap) == {
+            let heap = unsafe { ctx.heap_shared() };
+            heap.known().exception.as_tagged(heap).erase()
+        } {
+            return {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            };
         }
         if result.as_tagged(heap).is_primitive(heap) {
             if derived {
                 // a derived constructor returned a primitive (ES 9.2.2.1)
-                return ctx.raise_tag(VmError::Type);
+                return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, VmError::Type);
             }
             receiver.as_tagged(heap).erase()
         } else {

@@ -153,30 +153,38 @@ fn start<'b>(
             )?;
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
-            // the interpreter context: raw pointers + anchors shared by
-            // every cold body in vm_core::cold
-            let ctx = unsafe { Ctx::new(vm, heap, state, frame.base, stack_limit) };
-            dispatch(&ctx)
+            let mut ctx = Ctx::new(vm, state, heap, frame.base);
+            dispatch(&mut ctx, stack_limit)
         }
     }
+}
+
+/// A nested context for a blocking callee's dispatch: same execution,
+/// fresh anchor and safepoint counter. The caller's context stays
+/// borrowed out for the child's lifetime through the shared heap access.
+fn child_ctx<'h>(ctx: &Ctx<'h, 'h>, base_anchor: usize) -> Ctx<'h, 'h> {
+    // Safety: the caller is suspended for the child's dispatch.
+    let heap = unsafe { ctx.heap_mut_shared() };
+    Ctx::new(ctx.vm(), ctx.state(), heap, base_anchor)
 }
 
 /// Run a just-pushed callee frame to completion: the blocking-call
 /// primitive mirroring the become interpreter's call trampoline. The
 /// callee's value is returned (the exception sentinel when it threw);
 /// the caller's current frame is restored on every path.
-fn run_callee<'a>(ctx: &Ctx<'a>) -> Result<Tagged<'a, Value>, VmError> {
+fn run_callee<'h>(ctx: &mut Ctx<'h, 'h>, stack_limit: usize) -> Result<Tagged<'h, Value>, VmError> {
     let stack = ctx.stack();
     // the machine-stack guard: one Rust frame per JS call
-    if ctx.stack_overflowed() {
+    let probe = 0u8;
+    if (&probe as *const u8 as usize) < stack_limit {
         let caller = stack.pop_frame(ctx.frame_base());
         ctx.set_frame_base(caller.base);
         return Err(VmError::StackOverflow);
     }
     // a fresh context per callee (its accumulator starts undefined: the
     // push seeded the callee's slot)
-    let callee_ctx = unsafe { ctx.child(ctx.frame_base()) };
-    let value = dispatch(&callee_ctx)?;
+    let mut callee_ctx = child_ctx(ctx, ctx.frame_base());
+    let value = dispatch(&mut callee_ctx, stack_limit)?;
     // the callee's anchor `Return` left its frame pushed with the value as
     // the dispatch result: pop back into the caller
     let caller = stack.pop_frame(ctx.frame_base());
@@ -192,17 +200,23 @@ fn begin_termination(heap: &Heap, state: &ThreadState) -> Flow {
     Flow::Threw
 }
 
-fn dispatch<'a>(ctx: &Ctx<'a>) -> Result<Tagged<'a, Value>, VmError> {
+fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>, stack_limit: usize) -> Result<Tagged<'h, Value>, VmError> {
     let mut frame_base = ctx.frame_base();
-    let acc = ctx.acc_slot();
-    acc.store(ctx.undefined_word());
+    let acc = ctx.state().acc_slot();
+    acc.store(
+        unsafe { ctx.heap_shared() }
+            .known()
+            .undefined
+            .as_tagged(unsafe { ctx.heap_shared() })
+            .erase(),
+    );
 
     let mut code = code_bytes(ctx);
     let mut pc = 0usize;
 
     loop {
         let (op, ops, next_pc) = decode(code, pc);
-        let result = step(ctx, pc, next_pc, frame_base, acc, ops, op);
+        let result = step(ctx, stack_limit, pc, next_pc, frame_base, acc, ops, op);
         match result {
             Flow::Next => pc = next_pc,
             Flow::Jump(target) => pc = target,
@@ -214,9 +228,15 @@ fn dispatch<'a>(ctx: &Ctx<'a>) -> Result<Tagged<'a, Value>, VmError> {
                 frame_base = ctx.frame_base();
                 code = code_bytes(ctx);
                 pc = resume;
-                acc.store(ctx.undefined_word());
+                acc.store(
+                    unsafe { ctx.heap_shared() }
+                        .known()
+                        .undefined
+                        .as_tagged(unsafe { ctx.heap_shared() })
+                        .erase(),
+                );
             }
-            Flow::Return => return Ok(acc.get(ctx.heap())),
+            Flow::Return => return Ok(acc.get(unsafe { ctx.heap_shared() })),
             Flow::Threw => match unwind(ctx, pc) {
                 Unwind::Caught { pc: handler, ex } => {
                     acc.store(ex);
@@ -224,13 +244,19 @@ fn dispatch<'a>(ctx: &Ctx<'a>) -> Result<Tagged<'a, Value>, VmError> {
                     code = code_bytes(ctx);
                     pc = handler;
                 }
-                Unwind::Escaped => return Ok(ctx.exception_word()),
+                Unwind::Escaped => {
+                    return Ok(unsafe { ctx.heap_shared() }
+                        .known()
+                        .exception
+                        .as_tagged(unsafe { ctx.heap_shared() })
+                        .erase());
+                }
             },
         }
     }
 }
 
-fn code_bytes(ctx: &Ctx<'_>) -> &'static [u8] {
+fn code_bytes(ctx: &Ctx<'_, '_>) -> &'static [u8] {
     let (ptr, len) = {
         // the slice is re-derived after every event that can move it
         // (allocation, nested run)
@@ -243,8 +269,9 @@ fn code_bytes(ctx: &Ctx<'_>) -> &'static [u8] {
 }
 
 #[inline(always)]
-fn step<'a>(
-    ctx: &Ctx<'a>,
+fn step<'h>(
+    ctx: &mut Ctx<'h, 'h>,
+    stack_limit: usize,
     pc: usize,
     next_pc: usize,
     frame_base: usize,
@@ -253,7 +280,7 @@ fn step<'a>(
     op: Opcode,
 ) -> Flow {
     let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut() };
+    let heap = unsafe { ctx.heap_mut_shared() };
     let state = ctx.state();
     let stack = ctx.stack();
 
@@ -311,7 +338,10 @@ fn step<'a>(
                 return Flow::Next;
             }
             let v = global_load(ctx, ops.idx(0), ops.idx(1), true);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -326,7 +356,10 @@ fn step<'a>(
                 return Flow::Next;
             }
             let v = global_load(ctx, ops.idx(0), ops.idx(1), false);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -368,7 +401,10 @@ fn step<'a>(
                 ops.idx(1),
                 ops.idx(2),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -403,7 +439,10 @@ fn step<'a>(
                 acc.get(heap),
                 Some(fb),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -440,7 +479,10 @@ fn step<'a>(
                 stack.reg(heap, frame_base, key_reg),
                 Some(fb),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -456,7 +498,10 @@ fn step<'a>(
         }
         Opcode::StoreGlobal => {
             let v = store_global(ctx, ops.idx(0), acc.get(heap));
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -470,7 +515,10 @@ fn step<'a>(
                 ops.idx(2),
                 acc.get(heap),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -483,7 +531,10 @@ fn step<'a>(
                 ops.idx(1),
                 acc.get(heap),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -543,7 +594,10 @@ fn step<'a>(
                 Some(fb),
                 semantics,
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -561,7 +615,10 @@ fn step<'a>(
                 key,
                 ctx.language_mode(),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -745,8 +802,11 @@ fn step<'a>(
                             )
                         );
                         ctx.set_frame_base(frame.base);
-                        acc.store(fold!(ctx, run_callee(ctx)));
-                        if ctx.is_throw(acc.get(heap)) {
+                        acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                        if acc.get(heap) == {
+                            let heap = unsafe { ctx.heap_shared() };
+                            heap.known().exception.as_tagged(heap).erase()
+                        } {
                             return Flow::Threw;
                         }
                         return Flow::Sync;
@@ -844,8 +904,11 @@ fn step<'a>(
                     ctx.set_frame_base(frame.base);
                     // blocking call: run the callee to completion; its
                     // value becomes the caller's accumulator
-                    acc.store(fold!(ctx, run_callee(ctx)));
-                    if ctx.is_throw(acc.get(heap)) {
+                    acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                    if acc.get(heap) == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     Flow::Sync
@@ -921,8 +984,11 @@ fn step<'a>(
                     ctx.set_frame_base(frame.base);
                     // blocking call: run the callee to completion; its
                     // value becomes the caller's accumulator
-                    acc.store(fold!(ctx, run_callee(ctx)));
-                    if ctx.is_throw(acc.get(heap)) {
+                    acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                    if acc.get(heap) == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     Flow::Sync
@@ -969,8 +1035,11 @@ fn step<'a>(
                             )
                         );
                         ctx.set_frame_base(frame.base);
-                        acc.store(fold!(ctx, run_callee(ctx)));
-                        if ctx.is_throw(acc.get(heap)) {
+                        acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                        if acc.get(heap) == {
+                            let heap = unsafe { ctx.heap_shared() };
+                            heap.known().exception.as_tagged(heap).erase()
+                        } {
                             return Flow::Threw;
                         }
                         return Flow::Sync;
@@ -1033,6 +1102,7 @@ fn step<'a>(
                         stack.stage_scattered(heap, frame_base, Recv::Reg(srcs.0), srcs.1, srcs.2)
                     );
                     let v = ctx.call_runtime(rt, staged);
+                    acc.store(v);
                     InlineCache::call_update(
                         heap,
                         ctx.feedback_ref(heap),
@@ -1040,10 +1110,9 @@ fn step<'a>(
                         stack.reg(heap, frame_base, callee_reg),
                         CallRecord::Native(rt),
                     );
-                    if v.raw() == exception {
+                    if acc.get(heap).raw() == exception {
                         Flow::Threw
                     } else {
-                        acc.store(v);
                         Flow::Sync
                     }
                 }
@@ -1083,8 +1152,11 @@ fn step<'a>(
                     ctx.set_frame_base(frame.base);
                     // blocking call: run the callee to completion; its
                     // value becomes the caller's accumulator
-                    acc.store(fold!(ctx, run_callee(ctx)));
-                    if ctx.is_throw(acc.get(heap)) {
+                    acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                    if acc.get(heap) == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     Flow::Sync
@@ -1131,8 +1203,11 @@ fn step<'a>(
                             )
                         );
                         ctx.set_frame_base(frame.base);
-                        acc.store(fold!(ctx, run_callee(ctx)));
-                        if ctx.is_throw(acc.get(heap)) {
+                        acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                        if acc.get(heap) == {
+                            let heap = unsafe { ctx.heap_shared() };
+                            heap.known().exception.as_tagged(heap).erase()
+                        } {
                             return Flow::Threw;
                         }
                         return Flow::Sync;
@@ -1195,6 +1270,7 @@ fn step<'a>(
                         stack.stage_scattered(heap, frame_base, Recv::Undefined, args.0, args.1)
                     );
                     let v = ctx.call_runtime(rt, staged);
+                    acc.store(v);
                     InlineCache::call_update(
                         heap,
                         ctx.feedback_ref(heap),
@@ -1202,10 +1278,9 @@ fn step<'a>(
                         stack.reg(heap, frame_base, callee_reg),
                         CallRecord::Native(rt),
                     );
-                    if v.raw() == exception {
+                    if acc.get(heap).raw() == exception {
                         Flow::Threw
                     } else {
-                        acc.store(v);
                         Flow::Sync
                     }
                 }
@@ -1245,8 +1320,11 @@ fn step<'a>(
                     ctx.set_frame_base(frame.base);
                     // blocking call: run the callee to completion; its
                     // value becomes the caller's accumulator
-                    acc.store(fold!(ctx, run_callee(ctx)));
-                    if ctx.is_throw(acc.get(heap)) {
+                    acc.store(fold!(ctx, run_callee(ctx, stack_limit)));
+                    if acc.get(heap) == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     Flow::Sync
@@ -1278,7 +1356,10 @@ fn step<'a>(
                 ops.reg_list(1),
                 ops.reg_count(2),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1343,7 +1424,10 @@ fn step<'a>(
                 return Flow::Next;
             }
             let v = add(ctx, stack.reg(heap, frame_base, ops.reg(0)), acc.get(heap));
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1388,7 +1472,10 @@ fn step<'a>(
                     |a, b| a - b,
                 )
             };
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             stack.set_reg(frame_base, dst, v);
@@ -1414,7 +1501,10 @@ fn step<'a>(
                 acc.get(heap),
                 |a, b| a - b,
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1476,7 +1566,10 @@ fn step<'a>(
                 acc.get(heap),
                 |a, b| a * b,
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1504,7 +1597,10 @@ fn step<'a>(
                 acc.get(heap),
                 |a, b| a / b,
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1525,7 +1621,10 @@ fn step<'a>(
                 acc.get(heap),
                 |a, b| a % b,
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1557,7 +1656,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 0, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1571,7 +1673,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 1, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1585,7 +1690,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 2, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1600,7 +1708,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 3, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1615,7 +1726,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 4, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1630,7 +1744,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = bitwise(ctx, 5, a, b);
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1738,7 +1855,10 @@ fn step<'a>(
                 acc.get(heap),
                 stack.reg(heap, frame_base, ops.reg(0)),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1756,7 +1876,10 @@ fn step<'a>(
                 acc.get(heap),
                 stack.reg(heap, frame_base, ops.reg(0)),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1774,7 +1897,10 @@ fn step<'a>(
                 acc.get(heap),
                 stack.reg(heap, frame_base, ops.reg(0)),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1792,7 +1918,10 @@ fn step<'a>(
                 acc.get(heap),
                 stack.reg(heap, frame_base, ops.reg(0)),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1810,7 +1939,10 @@ fn step<'a>(
                 acc.get(heap),
                 stack.reg(heap, frame_base, ops.reg(0)),
             );
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);
@@ -1835,7 +1967,10 @@ fn step<'a>(
                 }
             } else {
                 let v = compare(ctx, cmp, acc.get(heap), other);
-                if ctx.is_throw(v) {
+                if v == {
+                    let heap = unsafe { ctx.heap_shared() };
+                    heap.known().exception.as_tagged(heap).erase()
+                } {
                     return Flow::Threw;
                 }
                 v.is_truthy(heap)
@@ -1898,7 +2033,10 @@ fn step<'a>(
                         stack.reg(heap, frame_base, reg),
                         Smi::new(imm as i64).into_tagged(),
                     );
-                    if ctx.is_throw(v) {
+                    if v == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     acc.store(v);
@@ -1922,7 +2060,10 @@ fn step<'a>(
                         Smi::new(imm as i64).into_tagged(),
                         f,
                     );
-                    if ctx.is_throw(v) {
+                    if v == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     acc.store(v);
@@ -1944,7 +2085,10 @@ fn step<'a>(
                         stack.reg(heap, frame_base, reg),
                         Smi::new(imm as i64).into_tagged(),
                     );
-                    if ctx.is_throw(v) {
+                    if v == {
+                        let heap = unsafe { ctx.heap_shared() };
+                        heap.known().exception.as_tagged(heap).erase()
+                    } {
                         return Flow::Threw;
                     }
                     acc.store(v);
@@ -1972,7 +2116,10 @@ fn step<'a>(
                 return Flow::Sync;
             }
             let v = keyed_load_imm(ctx, stack.reg(heap, frame_base, ops.reg(0)), idx, Some(fb));
-            if ctx.is_throw(v) {
+            if v == {
+                let heap = unsafe { ctx.heap_shared() };
+                heap.known().exception.as_tagged(heap).erase()
+            } {
                 return Flow::Threw;
             }
             acc.store(v);

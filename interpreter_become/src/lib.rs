@@ -5,7 +5,6 @@
 #![allow(unused_macros, unused_unsafe, unused_variables)]
 #![allow(dead_code)]
 
-use core::cell::Cell;
 use core::hint::black_box;
 use std::marker::PhantomData;
 
@@ -15,10 +14,9 @@ use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
 use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
-    Args, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert,
-    EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
-    Interpreter, LanguageMode, NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState,
-    VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
+    EntryFn, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex,
+    Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value, VmError, Word, raise_runtime,
 };
 
 mod macros;
@@ -215,7 +213,6 @@ impl<const STRIDE: usize> Ops<STRIDE> {
         }
     }
 
-    /// The instruction's opcode (skipping the `Wide` prefix).
     #[inline(always)]
     fn op(&self) -> Opcode {
         unsafe { Opcode::from_byte_unchecked(*self.ip.add(if STRIDE == 2 { 1 } else { 0 })) }
@@ -266,194 +263,6 @@ const fn base<const STRIDE: usize>() -> usize {
 /// The proc macro rewrites access to it.
 #[doc(hidden)]
 pub struct Frame;
-
-pub struct Ctx<'s, 'h> {
-    vm: &'s VM,
-    state: &'s ThreadState,
-    heap: &'h mut Heap,
-    /// Anchor of the frame `execute` entered
-    base_anchor: usize,
-    /// Data pointer of the current frame's bytecode — the pc origin
-    /// (`ip - code`). Refreshed at frame switches and after points
-    /// that may collect (reenter, the safepoint poll, the unwinder);
-    /// interior mutability, like `safepoints`.
-    code: Cell<*const u8>,
-    safepoints: Cell<u32>,
-}
-
-impl<'s, 'h> Ctx<'s, 'h> {
-    #[inline(always)]
-    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
-        let code = state
-            .stack()
-            .frame_header(base_anchor)
-            .code(&*heap)
-            .as_ptr();
-        Ctx {
-            vm,
-            state,
-            heap,
-            base_anchor,
-            code: Cell::new(code),
-            safepoints: Cell::new(SAFEPOINT_INTERVAL),
-        }
-    }
-
-    #[inline(always)]
-    pub fn heap(&self) -> &Heap {
-        self.heap
-    }
-
-    #[inline(always)]
-    pub fn heap_mut(&mut self) -> &mut Heap {
-        self.heap
-    }
-
-    #[inline(always)]
-    pub fn vm(&self) -> &'s VM {
-        self.vm
-    }
-
-    #[inline(always)]
-    pub fn state(&self) -> &'s ThreadState {
-        self.state
-    }
-
-    #[inline(always)]
-    pub fn stack(&self) -> &'s vm_core::Stack {
-        self.state.stack()
-    }
-
-    #[inline(always)]
-    pub fn frame_base(&self) -> usize {
-        self.state.frame_base()
-    }
-
-    #[inline(always)]
-    pub fn base_anchor(&self) -> usize {
-        self.base_anchor
-    }
-
-    /// Switch the current frame (after a push, pop, or unwind).
-    #[inline(always)]
-    pub fn set_frame_base(&self, base: usize) {
-        self.state.set_frame_base(base);
-    }
-
-    /// The current frame's pc origin (one load; the header chain runs
-    /// only at the refresh edges).
-    #[inline(always)]
-    pub fn code_ptr(&self) -> *const u8 {
-        self.code.get()
-    }
-
-    /// Reload the pc origin from the current frame's header — after a
-    /// point that may have collected and moved the bytecode.
-    #[inline(always)]
-    pub fn reload_code(&self) {
-        let state = self.state;
-        let heap = &*self.heap;
-        let code = state.stack().frame_header(state.frame_base()).code(heap);
-        self.code.set(code.as_ptr());
-    }
-
-    /// Switch to the frame at `base` (pop/unwind)
-    #[inline(always)]
-    pub fn switch_frame(&self, base: usize) {
-        let state = self.state;
-        let heap = &*self.heap;
-        let code = state.stack().frame_header(base).code(heap);
-        self.state.set_frame_base(base);
-        self.code.set(code.as_ptr());
-    }
-
-    /// Switch to a freshly pushed frame, whose pc origin the caller
-    /// already read from the callee's info.
-    #[inline(always)]
-    pub fn switch_frame_code(&self, base: usize, code: *const u8) {
-        self.state.set_frame_base(base);
-        self.code.set(code);
-    }
-
-    /// The current frame's language mode, read from its callable info.
-    /// Only mode-sensitive handlers (delete, store slow paths) call this;
-    /// the hot store fast paths never consult it.
-    #[inline(always)]
-    pub fn language_mode(&self) -> LanguageMode {
-        debug_assert!(self.state.is_frame_active(), "language mode read without an active frame");
-        let heap: &Heap = self.heap;
-        let header = self.state.stack().frame_header(self.state.frame_base());
-        let callable = header.callable(heap);
-        let info = callable
-            .callable_info(heap)
-            .expect("a bytecode frame's callable must have callable info");
-        info.mode()
-    }
-
-    /// The current frame's feedback vector
-    #[inline(always)]
-    pub fn feedback_ref<'f>(&self, heap: &'f Heap) -> Option<Tagged<'f, FeedbackVector>> {
-        self.stack().frame_header(self.frame_base()).feedback(heap)
-    }
-
-    /// The current frame's constant pool.
-    #[inline(always)]
-    pub fn constants_ref<'f>(&self, heap: &'f Heap) -> Tagged<'f, FixedArray> {
-        self.stack().frame_header(self.frame_base()).constants(heap)
-    }
-
-    #[inline(always)]
-    pub fn regs_ptr(&self) -> *mut Register {
-        unsafe { self.stack().slots_ptr().add(self.frame_base()) }
-    }
-
-    #[inline(always)]
-    pub fn safepoint_tick(&self) -> bool {
-        let n = self.safepoints.get();
-        if n == 0 {
-            self.safepoints.set(SAFEPOINT_INTERVAL);
-            true
-        } else {
-            self.safepoints.set(n - 1);
-            false
-        }
-    }
-
-    #[inline(always)]
-    pub fn caller_meta(&self, pc: usize, handler_pc: usize) -> FrameMeta {
-        let base = self.frame_base();
-        FrameMeta {
-            base,
-            pc,
-            register_count: self.stack().regcount(base),
-            handler_pc,
-        }
-    }
-
-    #[inline(always)]
-    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
-        let (vm, state) = (self.vm, self.state);
-        let f = vm.runtime(rt);
-        let stack = state.stack();
-        let saved = stack.top();
-        let bump = stack.rooting_top(args);
-        if let Some(top) = bump {
-            stack.set_top(top);
-        }
-        let nctx = HostCtx::new(vm, self.heap_mut(), state);
-        let v = f(nctx, None, args);
-        if bump.is_some() {
-            stack.set_top(saved);
-        }
-        v
-    }
-
-    #[inline(always)]
-    pub fn raise_tag(&mut self, err: VmError) -> Tagged<'_, Value> {
-        let (vm, state) = (self.vm, self.state);
-        raise_runtime(vm, self.heap_mut(), state, err)
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct Acc(Value);
@@ -2353,7 +2162,7 @@ fn enter<'a>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'a, Value>>,
-) -> Result<Tagged<'a, Value>, VmError> {
+) -> Result<Acc, VmError> {
     match callable.as_tagged(heap).erase().call_target(heap) {
         None => Err(VmError::Type),
         // the proxy dispatch above already intercepted these
@@ -2361,7 +2170,7 @@ fn enter<'a>(
         Some(CallTarget::Native(rt)) => {
             let f = vm.runtime(rt);
             let nctx = HostCtx::new(vm, heap, state);
-            Ok(f(nctx, new_target, args.as_args()))
+            Ok(Acc::set(f(nctx, new_target, args.as_args())))
         }
         Some(CallTarget::Bytecode {
             target,
@@ -2414,8 +2223,7 @@ fn enter<'a>(
                 roots,
                 FloatReg::new(f64::NAN),
             );
-            let Ctx { heap, .. } = ctx;
-            Ok(acc.get(heap))
+            Ok(acc)
         }
     }
 }
@@ -2435,8 +2243,8 @@ pub fn execute<'a>(
     let outer = was_active.then(|| state.frame_base());
 
     state.handle_scope(|scope| {
-        let result = enter(vm, heap, state, callable, args, new_target)?;
-        let rooted = scope.handle(result);
+        let acc = enter(vm, heap, state, callable, args, new_target)?;
+        let rooted = scope.handle(acc.get(heap));
         stack.set_top(saved_top);
         if let Some(outer) = outer {
             state.set_frame_base(outer);
