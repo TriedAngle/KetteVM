@@ -105,23 +105,23 @@ impl<'a> Ctx<'a> {
         self.base_anchor
     }
 
-    /// The current frame's language mode, from its `Code`. Generic runtime
-    /// helpers that operate on behalf of the running function use this;
-    /// mode-sensitive *handlers* carry the mode as a constant instead.
+    /// The current frame's language mode, from its callable info.
+    /// Generic runtime helpers that operate on behalf of the running
+    /// function use this.
     #[inline(always)]
     pub fn language_mode(&self) -> LanguageMode {
         let state = self.state();
-        if !state.is_frame_active() {
-            return LanguageMode::Sloppy;
-        }
+        debug_assert!(
+            state.is_frame_active(),
+            "language mode read without an active frame"
+        );
         let heap = self.heap();
-        LanguageMode::from_mode(
-            state
-                .stack()
-                .frame_header(state.frame_base())
-                .code(heap)
-                .mode(),
-        )
+        let header = state.stack().frame_header(state.frame_base());
+        let callable = header.callable(heap);
+        let info = callable
+            .callable_info(heap)
+            .expect("a bytecode frame's callable must have callable info");
+        info.mode()
     }
 
     /// The current frame's anchor (the frame-pointer analogue). Frame

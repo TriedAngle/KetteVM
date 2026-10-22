@@ -136,7 +136,7 @@ pub enum ObjectKind {
     DataHandler = 22,
     /// Sparse-array elements backing store (internal, never a receiver)
     NumberDictionary = 23,
-    /// Compiled code: instruction bytes plus the dispatch-mode id
+    /// Compiled code: the instruction bytes.
     Code = 24,
 }
 

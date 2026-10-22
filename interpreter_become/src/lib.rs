@@ -15,10 +15,10 @@ use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
 use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
-    Args, CallTarget, CallableInfoObject, Callee, Code, Compare, ContextInit, ContextObject,
-    Convert, EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
-    Interpreter, NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState, VM, Value,
-    VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
+    Args, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert,
+    EntryFn, FeedbackVector, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
+    Interpreter, LanguageMode, NativeIndex, Object, Register, ScopeInfo, Smi, Tagged, ThreadState,
+    VM, Value, VmError, Word, interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
 
 mod macros;
@@ -278,28 +278,23 @@ pub struct Ctx<'s, 'h> {
     /// that may collect (reenter, the safepoint poll, the unwinder);
     /// interior mutability, like `safepoints`.
     code: Cell<*const u8>,
-    /// The current frame's dispatch mode, resolved from its `Code`
-    /// mode at the same edges as `code`. `dispatch_frame!`/`call_enter!`
-    /// read it after switching frames; intra-frame exits keep the
-    /// threaded `TableArg` and never touch this cell.
-    table: Cell<&'static DispatchTable>,
     safepoints: Cell<u32>,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
-        let (code, table) = {
-            let code = state.stack().frame_header(base_anchor).code(&*heap);
-            (code.as_ptr(), table_for(code.mode()))
-        };
+        let code = state
+            .stack()
+            .frame_header(base_anchor)
+            .code(&*heap)
+            .as_ptr();
         Ctx {
             vm,
             state,
             heap,
             base_anchor,
             code: Cell::new(code),
-            table: Cell::new(table),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
         }
     }
@@ -360,7 +355,6 @@ impl<'s, 'h> Ctx<'s, 'h> {
         let heap = &*self.heap;
         let code = state.stack().frame_header(state.frame_base()).code(heap);
         self.code.set(code.as_ptr());
-        self.table.set(table_for(code.mode()));
     }
 
     /// Switch to the frame at `base` (pop/unwind)
@@ -371,23 +365,29 @@ impl<'s, 'h> Ctx<'s, 'h> {
         let code = state.stack().frame_header(base).code(heap);
         self.state.set_frame_base(base);
         self.code.set(code.as_ptr());
-        self.table.set(table_for(code.mode()));
     }
 
-    /// Switch to a freshly pushed frame, whose `Code` the caller already
-    /// read from the callee's info.
+    /// Switch to a freshly pushed frame, whose pc origin the caller
+    /// already read from the callee's info.
     #[inline(always)]
-    pub fn switch_frame_code(&self, base: usize, code: Tagged<'_, Code>) {
+    pub fn switch_frame_code(&self, base: usize, code: *const u8) {
         self.state.set_frame_base(base);
-        self.code.set(code.as_ptr());
-        self.table.set(table_for(code.mode()));
+        self.code.set(code);
     }
 
-    /// The current frame's dispatch mode. Only the frame-switching
-    /// exits call this; intra-frame dispatch uses the threaded table.
+    /// The current frame's language mode, read from its callable info.
+    /// Only mode-sensitive handlers (delete, store slow paths) call this;
+    /// the hot store fast paths never consult it.
     #[inline(always)]
-    pub fn table(&self) -> TableArg<'static> {
-        TableArg::new(self.table.get())
+    pub fn language_mode(&self) -> LanguageMode {
+        debug_assert!(self.state.is_frame_active(), "language mode read without an active frame");
+        let heap: &Heap = self.heap;
+        let header = self.state.stack().frame_header(self.state.frame_base());
+        let callable = header.callable(heap);
+        let info = callable
+            .callable_info(heap)
+            .expect("a bytecode frame's callable must have callable info");
+        info.mode()
     }
 
     /// The current frame's feedback vector
@@ -476,10 +476,7 @@ impl Acc {
     }
 }
 
-/// One dispatch mode: the narrow and wide handler tables for a
-/// language mode. Grouping the two strides keeps `op_wide` a field access
-/// (it used to reach for a separate global), and lets a frame carry the
-/// whole mode in one pointer.
+#[repr(C)]
 pub struct DispatchTable {
     pub narrow: [Handler; 256],
     pub wide: [Handler; 256],
@@ -498,7 +495,6 @@ impl<'h> TableArg<'h> {
         self.0.narrow[op as usize]
     }
 
-    /// The wide-stride handler for the same mode (`Wide` prefix).
     #[inline(always)]
     pub fn wide(&self, op: u8) -> Handler {
         self.0.wide[op as usize]
@@ -841,7 +837,7 @@ fn op_store(frame: Frame) {
 }
 
 #[handler(StoreNamedProperty)]
-fn op_store_named_property_sloppy(frame: Frame) {
+fn op_store_named_property(frame: Frame) {
     let recv = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
     let name_idx = frame.unsigned::<1>();
     let fb_slot = frame.unsigned::<2>();
@@ -861,35 +857,11 @@ fn op_store_named_property_sloppy(frame: Frame) {
     ) {
         next!()
     }
-    tail!(slow_store_named_sloppy)
-}
-
-#[handler(StoreNamedProperty)]
-fn op_store_named_property_strict(frame: Frame) {
-    let recv = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let name_idx = frame.unsigned::<1>();
-    let fb_slot = frame.unsigned::<2>();
-    let name = frame
-        .ctx()
-        .constants_ref(frame.ctx().heap())
-        .at(frame.ctx().heap(), name_idx)
-        .as_name();
-
-    if InlineCache::try_store_fast(
-        frame.ctx().heap(),
-        frame.ctx().feedback_ref(frame.ctx().heap()),
-        fb_slot,
-        recv,
-        name,
-        frame.acc(),
-    ) {
-        next!()
-    }
-    tail!(slow_store_named_strict)
+    tail!(slow_store_named)
 }
 
 #[handler(StoreKeyedProperty)]
-fn op_store_keyed_property_sloppy(frame: Frame) {
+fn op_store_keyed_property(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
@@ -915,41 +887,11 @@ fn op_store_keyed_property_sloppy(frame: Frame) {
             next!()
         }
     }
-    tail!(slow_keyed_store_sloppy)
-}
-
-#[handler(StoreKeyedProperty)]
-fn op_store_keyed_property_strict(frame: Frame) {
-    let heap = frame.ctx().heap();
-    let recv = frame.regs().get(frame.signed::<0>(), heap);
-    let key = frame.regs().get(frame.signed::<1>(), heap);
-    let fb = frame.unsigned::<2>();
-    if let Some(idx) = key.to_i64()
-        && idx >= 0
-    {
-        if recv
-            .store_array_element_in_place(heap, idx as usize, frame.acc())
-            .is_ok()
-        {
-            next!()
-        }
-        if let Some(v) = InlineCache::try_store_element(
-            heap,
-            frame.ctx().feedback_ref(heap),
-            fb,
-            recv,
-            idx as usize,
-            frame.acc(),
-        ) {
-            frame.set_acc(v);
-            next!()
-        }
-    }
-    tail!(slow_keyed_store_strict)
+    tail!(slow_keyed_store)
 }
 
 #[handler(StoreKeyedPropertyNoShadow)]
-fn op_store_keyed_property_no_shadow_sloppy(frame: Frame) {
+fn op_store_keyed_property_no_shadow(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
@@ -975,61 +917,22 @@ fn op_store_keyed_property_no_shadow_sloppy(frame: Frame) {
             next!()
         }
     }
-    tail!(slow_keyed_store_no_shadow_sloppy)
-}
-
-#[handler(StoreKeyedPropertyNoShadow)]
-fn op_store_keyed_property_no_shadow_strict(frame: Frame) {
-    let heap = frame.ctx().heap();
-    let recv = frame.regs().get(frame.signed::<0>(), heap);
-    let key = frame.regs().get(frame.signed::<1>(), heap);
-    let fb = frame.unsigned::<2>();
-    if let Some(idx) = key.to_i64()
-        && idx >= 0
-    {
-        if recv
-            .store_array_element_in_place(heap, idx as usize, frame.acc())
-            .is_ok()
-        {
-            next!()
-        }
-        if let Some(v) = InlineCache::try_store_element(
-            heap,
-            frame.ctx().feedback_ref(heap),
-            fb,
-            recv,
-            idx as usize,
-            frame.acc(),
-        ) {
-            frame.set_acc(v);
-            next!()
-        }
-    }
-    tail!(slow_keyed_store_no_shadow_strict)
+    tail!(slow_keyed_store_no_shadow)
 }
 
 #[handler(StoreNamedPropertyNoShadow)]
-fn op_store_named_property_no_shadow_sloppy(frame: Frame) {
-    tail!(slow_store_named_no_shadow_sloppy)
-}
-
-#[handler(StoreNamedPropertyNoShadow)]
-fn op_store_named_property_no_shadow_strict(frame: Frame) {
-    tail!(slow_store_named_no_shadow_strict)
+fn op_store_named_property_no_shadow(frame: Frame) {
+    tail!(slow_store_named_no_shadow)
 }
 
 #[handler(StoreGlobal)]
-fn op_store_global_sloppy(frame: Frame) {
-    tail!(slow_store_global_sloppy)
-}
-
-#[handler(StoreGlobal)]
-fn op_store_global_strict(frame: Frame) {
-    tail!(slow_store_global_strict)
+fn op_store_global(frame: Frame) {
+    tail!(slow_store_global)
 }
 
 #[handler(Delete)]
-fn op_delete_sloppy(frame: Frame) {
+fn op_delete(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let args = frame
@@ -1047,32 +950,7 @@ fn op_delete_sloppy(frame: Frame) {
         state,
         target,
         raw_key,
-        vm_core::LanguageMode::Sloppy,
-    );
-    frame.set_acc(v);
-    reenter!(pc)
-}
-
-#[handler(Delete)]
-fn op_delete_strict(frame: Frame) {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let args = frame
-        .ctx()
-        .state()
-        .stack()
-        .window(base, frame.signed::<0>(), frame.unsigned::<1>());
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let target = args.get_handle(frame.ctx().heap(), 0);
-    let raw_key = args.get_handle(frame.ctx().heap(), 1);
-    let v = vm_core::intrinsics::delete_property_operator(
-        vm,
-        frame.ctx().heap_mut(),
-        state,
-        target,
-        raw_key,
-        vm_core::LanguageMode::Strict,
+        mode,
     );
     frame.set_acc(v);
     reenter!(pc)
@@ -2363,8 +2241,7 @@ fn op_throw_reference_error_if_hole(frame: Frame) {
     next!()
 }
 
-handler_table! {
-  base: [
+handler_table!(
     op_wide,
     op_load,
     op_move,
@@ -2435,6 +2312,12 @@ handler_table! {
     op_load_keyed_property_reg,
     op_load_element_imm,
     op_load_named_property,
+    op_store_named_property,
+    op_store_keyed_property,
+    op_store_named_property_no_shadow,
+    op_store_keyed_property_no_shadow,
+    op_store_global,
+    op_delete,
     op_create_closure,
     op_throw,
     op_add_parent,
@@ -2454,50 +2337,12 @@ handler_table! {
     op_load_current_closure,
     op_throw_reference_error_if_hole,
     op_load_global_no_throw,
-  ],
-  modes: {
-    sloppy: [
-      op_delete_sloppy,
-      op_store_named_property_sloppy,
-      op_store_keyed_property_sloppy,
-      op_store_named_property_no_shadow_sloppy,
-      op_store_keyed_property_no_shadow_sloppy,
-      op_store_global_sloppy,
-    ],
-    strict: [
-      op_delete_strict,
-      op_store_named_property_strict,
-      op_store_keyed_property_strict,
-      op_store_named_property_no_shadow_strict,
-      op_store_keyed_property_no_shadow_strict,
-      op_store_global_strict,
-    ],
-  },
-}
+);
 
-pub static TABLE_SLOPPY: DispatchTable = DispatchTable {
-    narrow: __table_narrow_sloppy(),
-    wide: __table_wide_sloppy(),
+pub static TABLE: DispatchTable = DispatchTable {
+    narrow: __table_narrow(),
+    wide: __table_wide(),
 };
-
-pub static TABLE_STRICT: DispatchTable = DispatchTable {
-    narrow: __table_narrow_strict(),
-    wide: __table_wide_strict(),
-};
-
-/// Resolve a [`vm_core::Code`] mode id to its dispatch table. Only the
-/// frame-switching exits call this; the result is cached in `Ctx`.
-#[inline(always)]
-pub fn table_for(mode: u8) -> &'static DispatchTable {
-    match mode {
-        vm_core::MODE_STRICT => &TABLE_STRICT,
-        vm_core::MODE_SLOPPY => &TABLE_SLOPPY,
-        other => {
-            debug_assert!(false, "dispatch mode {other} has no table");
-            &TABLE_SLOPPY
-        }
-    }
-}
 
 // --- entry ---
 
@@ -2550,10 +2395,9 @@ fn enter<'a>(
             let mut ctx = Ctx::new(vm, state, heap, frame.base);
             let ip = ctx.code_ptr();
             let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            let table = ctx.table();
+            let table = TableArg::new(&TABLE);
             let roots = RootsArg::from_heap(ctx.heap());
-            // the fresh frame is entered at pc 0 with the accumulator
-            // seeded undefined
+
             let acc = Acc::set(
                 roots
                     .known(ctx.heap())
@@ -2576,7 +2420,6 @@ fn enter<'a>(
     }
 }
 
-/// `Interpreter` entry: `VM::new::<GC, BecomeInterpreter>(..)`.
 pub fn execute<'a>(
     vm: &VM,
     heap: &'a mut Heap,
@@ -2604,7 +2447,6 @@ pub fn execute<'a>(
     })
 }
 
-/// The `#[handler]`-based become interpreter.
 pub struct BecomeInterpreter;
 
 impl Interpreter for BecomeInterpreter {

@@ -22,6 +22,8 @@ where
         known.smi_map.as_tagged(heap).raw(),
         known.float_map.as_tagged(heap).raw(),
         known.array_map.as_tagged(heap).raw(),
+        known.byte_array_map.as_tagged(heap).raw(),
+        known.code_map.as_tagged(heap).raw(),
         known.dense_latin1_string_map.as_tagged(heap).raw(),
         known.dense_utf16_string_map.as_tagged(heap).raw(),
         known.object_prototype.as_tagged(heap).raw(),
@@ -90,6 +92,33 @@ where
     });
 }
 
+/// `Code` is a GC-managed object with its own map/kind: the collector must
+/// resolve its variable-length layout and keep the inline instruction bytes
+/// alive through a cycle.
+fn code_objects_survive_cycles<B: HeapBackend>()
+where
+    B::Config: Default,
+{
+    let vm = heap_tests::vm::<B>(B::Config::default());
+    let mut thread = vm.attach();
+
+    thread.handle_scope(|t, scope| {
+        let bytes = [1u8, 2, 3, 4, 5];
+        let code = t
+            .heap()
+            .allocate_handle::<vm::Code>(vm::CodeInit { bytes: &bytes }, &scope);
+
+        t.heap().collect();
+
+        let heap = &*t.heap();
+        let code = code.as_tagged(heap);
+        assert_eq!(code.header.map(heap).kind(), vm::MapKind::CODE);
+        assert_eq!(code.header.map(heap).kind().kind(), vm::ObjectKind::Code);
+        assert_eq!(code.len(), bytes.len());
+        assert_eq!(code.as_slice(), &bytes);
+    });
+}
+
 fn cycle_does_not_grow_heap<B: HeapBackend>()
 where
     B::Config: Default,
@@ -151,6 +180,7 @@ where
 for_each_backend!(
     well_known_survive_cycles,
     handles_survive_across_cycles,
+    code_objects_survive_cycles,
     cycle_does_not_grow_heap,
     gc_during_interpretation,
 );

@@ -20,13 +20,9 @@ fn callable(
 ) -> Value {
     let _the_hole = thread.heap().known().the_hole;
     let empty_context = thread.heap().known().empty_context;
-    let code = thread.heap().allocate_handle::<Code>(
-        CodeInit {
-            bytes: program,
-            mode: MODE_SLOPPY,
-        },
-        scope,
-    );
+    let code = thread
+        .heap()
+        .allocate_handle::<Code>(CodeInit { bytes: program }, scope);
     let constants = thread
         .heap()
         .allocate_handle::<FixedArray>(scope.stage(constants), scope);
@@ -42,6 +38,7 @@ fn callable(
             constants,
             register_count,
             handlers,
+            mode: MODE_SLOPPY,
         },
         scope,
     );

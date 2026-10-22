@@ -1,7 +1,7 @@
 //! Materialization: `bytecode::Program` → VM heap objects.
 //!
-//! Each compiled function becomes a `Code` (instruction bytes + dispatch
-//! mode) wrapped in a `CallableInfoObject` (constants + handler table);
+//! Each compiled function becomes a `Code` (instruction bytes) wrapped in
+//! a `CallableInfoObject` (language mode, constants, handler table);
 //! closures reference them from the constants table. Constants are converted to heap values: interned strings,
 //! `Float`s, oddball singletons, and child callable infos.
 //!
@@ -128,7 +128,6 @@ fn materialize_function<'s>(
     let code = heap.allocate_handle::<Code>(
         CodeInit {
             bytes: program.code(function),
-            mode: mode_from_strict(function.strict),
         },
         scope,
     );
@@ -152,6 +151,7 @@ fn materialize_function<'s>(
             register_count: function.register_count as usize,
             handlers,
             expected_slots: function.expected_slots as usize,
+            mode: mode_from_strict(function.strict),
         },
         scope,
     );

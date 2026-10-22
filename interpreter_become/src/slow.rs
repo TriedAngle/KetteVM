@@ -222,8 +222,6 @@ fn apply_store_outcome_body(
                     PropertyDescriptor::data(value),
                 ) {
                     Ok(true) => Ok(()),
-                    // non-extensible receiver: silent in sloppy code,
-                    // TypeError in strict (ES 10.4.5.5 PutValue step 5)
                     Ok(false) if strict => {
                         raise_runtime(vm, heap, state, VmError::Type);
                         Err(())
@@ -1194,8 +1192,6 @@ fn keyed_store_body<'a>(
                             };
                         }
                         Some(EntryClass::ReadOnly) => {
-                            // sloppy-mode assignment silently ignores,
-                            // strict throws (ES 10.4.5.5 PutValue step 5)
                             return if mode.is_strict() {
                                 raise_runtime(vm, heap, state, VmError::Type)
                             } else {
@@ -1301,40 +1297,8 @@ fn keyed_store_body<'a>(
 }
 
 #[handler(StoreKeyedProperty)]
-#[cold]
-pub fn slow_keyed_store_sloppy(frame: Frame) {
-    let mode = LanguageMode::Sloppy;
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let fb = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let val = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        keyed_store_body(
-            vm,
-            frame.ctx().heap_mut(),
-            state,
-            roots,
-            base,
-            fb,
-            recv,
-            raw_key,
-            value,
-            StoreSemantics::Shadow,
-            mode,
-        )
-    });
-    frame.set_acc(val);
-    reenter!(pc)
-}
-
-#[handler(StoreKeyedProperty)]
-#[cold]
-pub fn slow_keyed_store_strict(frame: Frame) {
-    let mode = LanguageMode::Strict;
+pub fn slow_keyed_store(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let fb = frame.unsigned::<2>();
@@ -1363,40 +1327,8 @@ pub fn slow_keyed_store_strict(frame: Frame) {
 }
 
 #[handler(StoreKeyedPropertyNoShadow)]
-#[cold]
-pub fn slow_keyed_store_no_shadow_sloppy(frame: Frame) {
-    let mode = LanguageMode::Sloppy;
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let fb = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let val = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        keyed_store_body(
-            vm,
-            frame.ctx().heap_mut(),
-            state,
-            roots,
-            base,
-            fb,
-            recv,
-            raw_key,
-            value,
-            StoreSemantics::WriteThrough,
-            mode,
-        )
-    });
-    frame.set_acc(val);
-    reenter!(pc)
-}
-
-#[handler(StoreKeyedPropertyNoShadow)]
-#[cold]
-pub fn slow_keyed_store_no_shadow_strict(frame: Frame) {
-    let mode = LanguageMode::Strict;
+pub fn slow_keyed_store_no_shadow(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let fb = frame.unsigned::<2>();
@@ -1425,84 +1357,8 @@ pub fn slow_keyed_store_no_shadow_strict(frame: Frame) {
 }
 
 #[handler(StoreNamedProperty)]
-pub fn slow_store_named_sloppy(frame: Frame) {
-    let mode = LanguageMode::Sloppy;
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let name_idx = frame.unsigned::<1>();
-    let fb_slot = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        let name = scope.handle(
-            state
-                .stack()
-                .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
-                .erase()
-                .as_name(),
-        );
-
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => raise_runtime(vm, heap, state, e),
-            };
-        }
-        if let Some(hit) = InlineCache::try_store(
-            heap,
-            &scope,
-            state
-                .stack()
-                .frame_header(base)
-                .feedback(&*heap)
-                .map(|v| scope.handle(v)),
-            fb_slot,
-            recv.erase(),
-            name,
-            value,
-            mode,
-        ) {
-            return match hit {
-                StoreHit::Done => value.as_tagged(heap).erase(),
-                StoreHit::Setter(setter) => {
-                    let setter = scope.handle(setter);
-                    let args = scope.stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)]);
-                    // the setter's return value is ignored (store result
-                    // semantics: the accumulator keeps the stored value)
-                    match HostCtx::enter(vm, heap, state, setter, args, None) {
-                        Ok(v) => scope.handle(v).as_tagged(heap),
-                        Err(e) => return raise_runtime(vm, heap, state, e),
-                    }
-                }
-            };
-        }
-        store_named_tail_body(
-            vm,
-            heap,
-            state,
-            roots,
-            base,
-            recv,
-            name,
-            value,
-            Some(fb_slot),
-            StoreSemantics::Shadow,
-            mode,
-        )
-    });
-    frame.set_acc(v);
-    reenter!(pc)
-}
-
-#[handler(StoreNamedProperty)]
-pub fn slow_store_named_strict(frame: Frame) {
-    let mode = LanguageMode::Strict;
+pub fn slow_store_named(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<1>();
@@ -1577,9 +1433,8 @@ pub fn slow_store_named_strict(frame: Frame) {
 }
 
 #[handler(StoreGlobal)]
-#[cold]
-pub fn slow_store_global_sloppy(frame: Frame) {
-    let mode = LanguageMode::Sloppy;
+pub fn slow_store_global(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<0>();
@@ -1598,51 +1453,9 @@ pub fn slow_store_global_sloppy(frame: Frame) {
                 .as_name(),
         );
         let global = scope.handle(roots.known(heap).global_object.as_tagged(heap).erase());
-        store_named_tail_body(
-            vm,
-            heap,
-            state,
-            roots,
-            base,
-            global,
-            name,
-            value,
-            None,
-            StoreSemantics::WriteThrough,
-            mode,
-        )
-    });
-    frame.set_acc(val);
-    reenter!(pc)
-}
-
-#[handler(StoreGlobal)]
-#[cold]
-pub fn slow_store_global_strict(frame: Frame) {
-    let mode = LanguageMode::Strict;
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let name_idx = frame.unsigned::<0>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let val = state.handle_scope(|scope| {
-        let value = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        let name = scope.handle(
-            state
-                .stack()
-                .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
-                .erase()
-                .as_name(),
-        );
-        let global = scope.handle(roots.known(heap).global_object.as_tagged(heap).erase());
-        // Unresolvable reference: strict throws ReferenceError (ES
-        // 9.1.1.2.6 SetMutableBinding, 6.2.5.6 PutValue step 5). Declared
-        // globals exist on the object (or its prototype chain) by the time
-        // any store runs; the sloppy handler creates the property instead.
-        if matches!(global.as_tagged(heap).lookup(heap, name.as_tagged(heap)), Lookup::NotFound) {
+        if mode.is_strict()
+            && matches!(global.as_tagged(heap).lookup(heap, name.as_tagged(heap)), Lookup::NotFound)
+        {
             return raise_runtime(vm, heap, state, VmError::Reference);
         }
         store_named_tail_body(
@@ -1664,49 +1477,8 @@ pub fn slow_store_global_strict(frame: Frame) {
 }
 
 #[handler(StoreNamedPropertyNoShadow)]
-#[cold]
-pub fn slow_store_named_no_shadow_sloppy(frame: Frame) {
-    let mode = LanguageMode::Sloppy;
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let name_idx = frame.unsigned::<1>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let val = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let value = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        let name = scope.handle(
-            state
-                .stack()
-                .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
-                .erase()
-                .as_name(),
-        );
-        store_named_tail_body(
-            vm,
-            heap,
-            state,
-            roots,
-            base,
-            recv,
-            name,
-            value,
-            None,
-            StoreSemantics::WriteThrough,
-            mode,
-        )
-    });
-    frame.set_acc(val);
-    reenter!(pc)
-}
-
-#[handler(StoreNamedPropertyNoShadow)]
-#[cold]
-pub fn slow_store_named_no_shadow_strict(frame: Frame) {
-    let mode = LanguageMode::Strict;
+pub fn slow_store_named_no_shadow(frame: Frame) {
+    let mode = frame.ctx().language_mode();
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<1>();
@@ -1780,7 +1552,6 @@ pub fn slow_add_parent(frame: Frame) {
 // --- construct ---
 
 #[handler(Construct)]
-#[cold]
 pub fn slow_construct(frame: Frame) {
     let pc = frame.pc();
     let callee_reg = frame.signed::<0>();
@@ -1844,7 +1615,6 @@ pub fn slow_construct(frame: Frame) {
         }
         if result.as_tagged(heap).is_primitive(heap) {
             if derived {
-                // a derived constructor returned a primitive (ES 9.2.2.1)
                 return raise_runtime(vm, heap, state, VmError::Type);
             }
             receiver.as_tagged(heap).erase()

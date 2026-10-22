@@ -2,26 +2,15 @@ use core::{alloc::Layout, cell::UnsafeCell};
 
 use crate::{EdgeVisitable, GcSlot, Header, Heap, HeapObject, ObjectKind, Smi, Visitor};
 
-/// A function's instruction stream plus the dispatch facts the interpreter
-/// needs when it enters the frame.
-///
-/// The frame header stores the `Code` object rather than a bare byte
-/// array, so a frame switch resolves the pc origin and the handler mode
-/// from one place. The bytes are inline (like `FixedByteArray`), which
-/// keeps `code_ptr()` on the frame-switch path address-only — no second
-/// object to dereference.
 #[repr(C)]
 pub struct Code {
     pub header: Header,
     pub size: GcSlot<Smi>,
-    /// Dispatch-mode id (`MODE_SLOPPY`, `MODE_STRICT`, ...).
-    pub mode: GcSlot<Smi>,
     pub values: [UnsafeCell<u8>; 0],
 }
 
 pub struct CodeInit<'a> {
     pub bytes: &'a [u8],
-    pub mode: u8,
 }
 
 impl Code {
@@ -54,12 +43,6 @@ impl Code {
         // Safety: `values` has `size` initialized bytes (write-once).
         unsafe { core::slice::from_raw_parts(self.data_ptr(), self.len()) }
     }
-
-    /// The dispatch-mode id. Never negative: ids are written from `u8`.
-    #[inline(always)]
-    pub fn mode(&self) -> u8 {
-        self.mode.to_smi_unchecked().value() as u8
-    }
 }
 
 impl HeapObject for Code {
@@ -75,7 +58,6 @@ impl HeapObject for Code {
         self.header.map.init(heap.known().code_map.as_tagged(heap));
         self.size
             .set(heap, host, Smi::new(config.bytes.len() as i64));
-        self.mode.set(heap, host, Smi::new(config.mode as i64));
         // Safety: `layout_for` reserved `bytes.len()` inline bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -99,6 +81,5 @@ impl EdgeVisitable for Code {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.size.as_raw());
-        visitor.visit(self.mode.as_raw());
     }
 }

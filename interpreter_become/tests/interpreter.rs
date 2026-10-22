@@ -27,13 +27,9 @@ fn callable<'s>(
     register_count: usize,
     feedback_slots: usize,
 ) -> Handle<'s, Object> {
-    let code = thread.heap().allocate_handle::<Code>(
-        CodeInit {
-            bytes: program,
-            mode: MODE_SLOPPY,
-        },
-        scope,
-    );
+    let code = thread
+        .heap()
+        .allocate_handle::<Code>(CodeInit { bytes: program }, scope);
     let constants = {
         let empty: &[Tagged<'_, Value>] = &[];
         let staged = scope.stage(empty);
@@ -46,6 +42,7 @@ fn callable<'s>(
             constants,
             register_count,
             handlers: None,
+            mode: MODE_SLOPPY,
         },
         scope,
     );

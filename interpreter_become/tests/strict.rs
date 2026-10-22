@@ -18,8 +18,8 @@ fn run<I: Interpreter>(label: &str, src: &str) {
     }
 }
 
-/// Both interpreters must agree: the become loop selects a per-mode
-/// handler table, the match loop branches on the frame's `Code.mode` in
+/// Both interpreters must agree: dispatch uses one handler table, and
+/// mode-sensitive handlers branch on the frame's callable-info mode in
 /// the shared cold paths. Same scripts, same expectations.
 fn run_both(label: &str, src: &str) {
     run::<BecomeInterpreter>(label, src);
@@ -47,7 +47,7 @@ function strictOuterAfterSloppy(o, d) {
 "#;
 
 /// `delete obj.x` on a non-configurable property: false in sloppy code,
-/// TypeError in strict code. One opcode, two dispatch-profile handlers.
+/// TypeError in strict code. One opcode, one handler reading frame mode.
 #[test]
 fn delete_refusal_follows_the_frame_mode() {
     run_both(

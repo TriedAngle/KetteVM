@@ -2,14 +2,17 @@ use core::alloc::Layout;
 
 use crate::{
     Code, DenseString, EdgeVisitable, FeedbackVector, FixedArray, GcSlot, Handle, HandlerTable,
-    Header, Heap, HeapObject, ObjectKind, OptionGcSlot, SlotName, Smi, Tagged, Value, Visitor,
+    Header, Heap, HeapObject, LanguageMode, ObjectKind, OptionGcSlot, SlotName, Smi, Tagged, Value,
+    Visitor,
 };
 
 #[repr(C)]
 pub struct CallableInfoObject {
     pub header: Header,
-    /// The function's code: instruction bytes plus the dispatch mode.
+    /// The function's instruction stream.
     pub code: GcSlot<Code>,
+    /// Language-mode id (`MODE_SLOPPY`, `MODE_STRICT`, ...).
+    pub mode: GcSlot<Smi>,
     pub constants: GcSlot<FixedArray>,
     pub register_count: GcSlot<Smi>,
     pub handlers: OptionGcSlot<HandlerTable>,
@@ -100,6 +103,7 @@ pub struct CallableInfoInit<'a> {
     pub register_count: usize,
     pub handlers: Option<Handle<'a, HandlerTable>>,
     pub expected_slots: usize,
+    pub mode: u8,
 }
 
 impl HeapObject for CallableInfoObject {
@@ -116,6 +120,7 @@ impl HeapObject for CallableInfoObject {
             .map
             .init(heap.known().callable_map.as_tagged(heap));
         self.code.set(heap, host, config.code.as_tagged(heap));
+        self.mode.set(heap, host, Smi::new(config.mode as i64));
         self.constants
             .set(heap, host, config.constants.as_tagged(heap));
         self.register_count
@@ -169,6 +174,11 @@ impl CallableInfoObject {
     pub fn frame_facts(&self) -> (usize, usize) {
         let d = self.descriptor.to_smi_unchecked().value() as u64;
         ((d & 0xffff) as usize, ((d >> 16) & 0xffff) as usize)
+    }
+
+    #[inline(always)]
+    pub fn mode(&self) -> LanguageMode {
+        LanguageMode::from_mode(self.mode.to_smi_unchecked().value() as u8)
     }
 
     pub fn set_metadata(

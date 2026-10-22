@@ -112,15 +112,14 @@ macro_rules! tail {
     };
 }
 
-/// Dispatch into the caller after a frame pop. The table is re-read from
-/// `Ctx` because the popping frame may run under a different mode.
+/// Dispatch into the caller after a frame pop. The table is threaded
+/// through every exit: one static table is shared by all modes.
 macro_rules! dispatch_frame {
     ($pc:expr, $a:expr, $x:expr, $t:ident, $k:ident, $f:ident) => {{
         let regs = unsafe { Regs::new($x.regs_ptr()) };
         let p = unsafe { $x.code_ptr().add($pc) };
-        let table = $x.table();
-        let h = table.get(unsafe { *p });
-        become h(p, regs, $a, $x, table, $k, $f)
+        let h = $t.get(unsafe { *p });
+        become h(p, regs, $a, $x, $t, $k, $f)
     }};
 }
 
@@ -168,9 +167,8 @@ macro_rules! call_enter {
                 .erase(),
         );
         let entry = $ctx.code_ptr();
-        let table = $ctx.table();
-        let h = table.get(unsafe { *entry });
-        become h(entry, regs, acc, $ctx, table, $roots, $float)
+        let h = $table.get(unsafe { *entry });
+        become h(entry, regs, acc, $ctx, $table, $roots, $float)
     }};
 }
 

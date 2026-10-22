@@ -98,8 +98,8 @@ fn require_object_coercible<'a>(
 
 /// `delete obj.key` (ES 13.5.1.2): (obj, key) -> bool, TypeError on a
 /// refused delete in strict code. The interpreter reaches this directly
-/// from `Opcode::Delete`; the strictness is the dispatch mode, not a
-/// runtime argument.
+/// from `Opcode::Delete`; the mode comes from the running frame's
+/// callable info, read once at the handler's cold edge.
 pub fn delete_property_operator<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -2039,7 +2039,6 @@ fn store_dynamic_name<'a>(
     } = nctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
-    let mode = state.language_mode(heap);
     state.handle_scope(|scope| {
         let found = rt_try!(
             vm,
@@ -2068,6 +2067,15 @@ fn store_dynamic_name<'a>(
             }
             Some(_) => return raise_runtime(vm, heap, state, VmError::Reference),
             None => {
+                // `dynamic_lookup_frame` above established that a frame is
+                // active, so the current callable's mode is valid here.
+                debug_assert!(state.is_frame_active());
+                let header = state.stack().frame_header(state.frame_base());
+                let callable = header.callable(heap);
+                let info = callable
+                    .callable_info(heap)
+                    .expect("a bytecode frame's callable must have callable info");
+                let mode = info.mode();
                 let global = heap.known().global_object.erase();
                 let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
                     let outcome = global.store_lookup(

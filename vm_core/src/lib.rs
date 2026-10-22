@@ -203,18 +203,6 @@ impl ThreadState {
         self.frame_active.get()
     }
 
-    /// The running frame's language mode, read from its `Code`. Runtime
-    /// helpers without a `Ctx` (there are a few: dynamic-name stores,
-    /// direct eval) use this rather than re-deriving it from the caller.
-    #[inline(always)]
-    pub fn language_mode(&self, heap: &Heap) -> language::LanguageMode {
-        if !self.is_frame_active() {
-            return language::LanguageMode::Sloppy;
-        }
-        let code = self.stack.frame_header(self.frame_base()).code(heap);
-        language::LanguageMode::from_mode(code.mode())
-    }
-
     #[inline(always)]
     pub fn set_frame_active(&self, active: bool) {
         self.frame_active.set(active);

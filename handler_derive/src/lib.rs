@@ -108,97 +108,49 @@ const EXITS: &[&str] = &[
     "call_enter",
 ];
 
-/// `handler_table! { base: [..], modes: { <name>: [..], .. } }` —
-/// dispatch-mode table generation.
-///
-/// * `base` lists mode-independent handlers; each is registered at both
-///   strides under the `Opcode` variant derived from its name
-///   (`op_jump_if_truthy` -> `Opcode::JumpIfTruthy`).
-/// * `modes` maps a mode name to the handlers that belong only to
-///   it. The opcode comes from the handler name with `_<name>` stripped
-///   (`op_store_named_property_strict` -> `Opcode::StoreNamedProperty`),
-///   so modes may diverge freely without a separate opcode mapping.
-///   The macro itself attaches no meaning to the names: adding one is a
-///   consumer-local change.
-///
-/// Every table starts as `op_trap` and gets the `base` entries plus its
-/// mode's entries. For each mode the macro emits
-/// `__table_{narrow,wide}_<name>` const fns; the consumer turns them into
-/// its `DispatchTable` statics.
+/// `handler_table!(op_load, op_store, ..)` — dispatch table generation.
 #[proc_macro]
 pub fn handler_table(input: TokenStream) -> TokenStream {
-    let spec = parse_macro_input!(input as TableSpec);
-    match expand_table(&spec) {
+    let names = parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
+    match expand_table(&names) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_table(spec: &TableSpec) -> syn::Result<TokenStream2> {
+fn expand_table(names: &Punctuated<Ident, Token![,]>) -> syn::Result<TokenStream2> {
     let mut narrow = Vec::new();
     let mut wide = Vec::new();
-    for name in &spec.base {
-        let op = opcode_of(name, None)?;
+    for name in names {
+        let op = opcode_of(name)?;
         narrow.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
         wide.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
     }
-    // One entry per mode-specific function: no generics, so modes may
-    // diverge freely. The opcode is the handler name with the mode's
-    // suffix removed.
-    let mut builders = Vec::new();
-    for (mode, names) in &spec.modes {
-        let suffix = format!("_{mode}");
-        let mut narrow_mode = Vec::new();
-        let mut wide_mode = Vec::new();
-        for name in names {
-            let op = opcode_of(name, Some(&suffix))?;
-            narrow_mode.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
-            wide_mode.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
+    Ok(quote! {
+        #[rustfmt::skip]
+        const fn __table_narrow() -> [Handler; 256] {
+            let mut t = [op_trap::<1> as Handler; 256];
+            #(#narrow)*
+            t
         }
-        let narrow_fn = Ident::new(&format!("__table_narrow_{mode}"), mode.span());
-        let wide_fn = Ident::new(&format!("__table_wide_{mode}"), mode.span());
-        builders.push(quote! {
-            #[allow(dead_code)]
-            #[rustfmt::skip]
-            const fn #narrow_fn() -> [Handler; 256] {
-                let mut t = [op_trap::<1> as Handler; 256];
-                #(#narrow)*
-                #(#narrow_mode)*
-                t
-            }
 
-            #[allow(dead_code)]
-            #[rustfmt::skip]
-            const fn #wide_fn() -> [Handler; 256] {
-                let mut t = [op_trap::<2> as Handler; 256];
-                #(#wide)*
-                #(#wide_mode)*
-                t
-            }
-        });
-    }
-    Ok(quote!(#(#builders)*))
+        #[rustfmt::skip]
+        const fn __table_wide() -> [Handler; 256] {
+            let mut t = [op_trap::<2> as Handler; 256];
+            #(#wide)*
+            t
+        }
+    })
 }
 
-/// `op_jump_if_truthy` -> `Opcode::JumpIfTruthy`. With a mode suffix,
-/// the suffix is required and stripped first
-/// (`op_store_named_property_sloppy` -> `Opcode::StoreNamedProperty`).
-fn opcode_of(name: &Ident, suffix: Option<&str>) -> syn::Result<Ident> {
+/// `op_jump_if_truthy` -> `Opcode::JumpIfTruthy`.
+fn opcode_of(name: &Ident) -> syn::Result<Ident> {
     let full = name.to_string();
     let Some(rest) = full.strip_prefix("op_") else {
         return Err(syn::Error::new(
             name.span(),
             "handler names must start with `op_` (they map to the like-named `Opcode` variant)",
         ));
-    };
-    let rest = match suffix {
-        Some(suffix) => rest.strip_suffix(suffix).ok_or_else(|| {
-            syn::Error::new(
-                name.span(),
-                format!("handler `{full}` must end with `{suffix}` (the mode names the opcode)"),
-            )
-        })?,
-        None => rest,
     };
     if rest.is_empty() {
         return Err(syn::Error::new(name.span(), "handler name is just `op_`"));
@@ -212,55 +164,6 @@ fn opcode_of(name: &Ident, suffix: Option<&str>) -> syn::Result<Ident> {
         camel.push_str(chars.as_str());
     }
     Ok(Ident::new(&camel, name.span()))
-}
-
-struct TableSpec {
-    base: Vec<Ident>,
-    modes: Vec<(Ident, Vec<Ident>)>,
-}
-
-impl syn::parse::Parse for TableSpec {
-    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        let mut base = Vec::new();
-        let mut modes: Vec<(Ident, Vec<Ident>)> = Vec::new();
-        while !input.is_empty() {
-            let key: Ident = input.parse()?;
-            input.parse::<Token![:]>()?;
-            match key.to_string().as_str() {
-                "base" => {
-                    let content;
-                    syn::bracketed!(content in input);
-                    let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
-                    base.extend(names);
-                }
-                "modes" => {
-                    let content;
-                    syn::braced!(content in input);
-                    while !content.is_empty() {
-                        let name: Ident = content.parse()?;
-                        content.parse::<Token![:]>()?;
-                        let list;
-                        syn::bracketed!(list in content);
-                        let names = Punctuated::<Ident, Token![,]>::parse_terminated(&list)?;
-                        modes.push((name, names.into_iter().collect()));
-                        if content.peek(Token![,]) {
-                            content.parse::<Token![,]>()?;
-                        }
-                    }
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!("unknown handler_table key `{other}`: expected `base` or `modes`"),
-                    ));
-                }
-            }
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            }
-        }
-        Ok(Self { base, modes })
-    }
 }
 
 const PARAM_NAMES: &[&str] = &[
@@ -335,8 +238,8 @@ fn expand(form: HandlerForm, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote!(float)
     };
-    // every generated fn is 32-byte aligned; the mode governs only
-    // the rewriting — the emission is one shape
+    // every generated fn is 32-byte aligned; the handler form governs
+    // only the rewriting — the emission is one shape
     Ok(quote! {
         #(#attrs)*
         #[rustfmt::skip]
@@ -551,7 +454,7 @@ impl Rewriter {
             "ctx" => no_args(method, &args).map(|_| quote!(ctx)),
             "ctx_ref" => no_args(method, &args).map(|_| quote!(&*ctx)),
 
-            // dispatch-mode only
+            // opcode-known handlers only
             "opcode_check" => {
                 if self.op.is_none() {
                     return Err(syn::Error::new(
@@ -572,8 +475,8 @@ impl Rewriter {
                 one_arg(method, args).map(|a| quote!(#method!(float, #a)))
             }
 
-            // operand decode: dispatch mode knows the opcode and can
-            // assert it; slow paths and trampolines read it from the
+            // operand decode: the opcode-known form can assert the
+            // instruction; slow paths and trampolines read it from the
             // instruction.
             "signed" | "unsigned" => {
                 no_args(method, &args)?;

@@ -201,7 +201,7 @@ impl FrameHeader {
         self.regcount.read_smi().value() as usize
     }
 
-    /// The frame's code object (instruction bytes + dispatch mode).
+    /// The frame's code object (instruction bytes).
     #[inline(always)]
     pub fn code<'h>(&self, heap: &'h Heap) -> Tagged<'h, Code> {
         // Safety: only `init_frame_header` writes this slot, always the
@@ -255,11 +255,6 @@ impl FrameHeader {
 /// size. Call argument windows store element 0 (receiver) at the lowest
 /// address of the window, so `args` slices are element-ordered and frame
 /// pushes are forward memcpys.
-///
-/// Frames are self-describing: dispatch state (code, constants,
-/// feedback, accumulator, register count) lives in the frame header
-/// itself and a call writes the caller's suspended state into the
-/// callee's header, so no parallel frame list or shadow cache exists.
 pub struct Stack {
     slots: Box<[Register]>,
     top: Cell<usize>,

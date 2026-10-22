@@ -1341,8 +1341,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     MemberRef::Private(_) => unreachable!(),
                 }
                 self.b.store(base);
-                // one opcode, two dispatch-profile handlers: sloppy
-                // returns false on a refused delete, strict throws
+                // one opcode, one handler: sloppy returns false on a
+                // refused delete, strict throws
                 self.b.delete_property(RegList::new(base, 2));
                 self.b.drop_temps(mark);
                 Ok(())
