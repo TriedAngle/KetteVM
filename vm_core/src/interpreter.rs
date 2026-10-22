@@ -5,16 +5,145 @@
 
 use core::cell::Cell;
 
+use bytecode::Opcode;
+
 use crate::heap::{Heap, Register};
 use crate::stack::{FrameMeta, Stack};
 use crate::value::{Tagged, Value};
 use crate::{
     Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, ThreadState, VM, VmError,
-    raise_runtime,
+    Word, raise_runtime,
 };
 
 /// Loop back-edge ticks between safepoint polls.
 pub const SAFEPOINT_INTERVAL: u32 = 1 << 12;
+
+/// The frame's register window: signed indices are anchor-relative
+/// slot offsets (negative = locals below the frame header, positive =
+/// parameters above it, receiver = 0).
+#[derive(Clone, Copy)]
+pub struct Regs(*mut Register);
+
+impl Regs {
+    /// # Safety
+    /// `base` is a rooted window of the running frame; no GC before the
+    /// last use of this handle or anything loaded through it.
+    #[inline(always)]
+    pub unsafe fn new(base: *mut Register) -> Regs {
+        Regs(base)
+    }
+
+    /// Safe by the register-file invariant: slots hold strong, valid
+    /// values from frame setup until the frame pops (the collector
+    /// updates them in place). The `&Heap` argument anchors the returned
+    /// value to the GC epoch, like `Register::get(heap)`.
+    #[inline(always)]
+    pub fn get<'h>(&self, i: i32, heap: &'h Heap) -> Tagged<'h, Value> {
+        let _ = heap;
+        // Safety: the invariant above.
+        unsafe { Tagged::from_value_unchecked((*self.0.offset(i as isize)).raw()) }
+    }
+
+    #[inline(always)]
+    pub fn set(&self, i: i32, v: Tagged<'_, Value>) {
+        // Safety: the window invariant covers this slot.
+        unsafe {
+            (*self.0.offset(i as isize)).store(v);
+        }
+    }
+}
+
+/// A const-stride operand cursor over one instruction's operand stream.
+/// `STRIDE` is 1 for narrow instructions and 2 for `Wide`-prefixed ones;
+/// for wide instructions `ip` points at the `Wide` prefix.
+pub struct Ops<const STRIDE: usize> {
+    ip: *const u8,
+    #[cfg(debug_assertions)]
+    op: Opcode,
+}
+
+impl<const STRIDE: usize> Ops<STRIDE> {
+    #[inline(always)]
+    pub fn new(ip: *const u8, op: Opcode) -> Ops<STRIDE> {
+        debug_assert_eq!(
+            if STRIDE == 2 {
+                unsafe { *ip.add(1) }
+            } else {
+                unsafe { *ip }
+            },
+            op as u8,
+            "handler dispatched for the wrong opcode",
+        );
+        Ops {
+            ip,
+            #[cfg(debug_assertions)]
+            op,
+        }
+    }
+
+    #[inline(always)]
+    pub fn signed<const I: usize>(&self) -> i32 {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            I < self.op.operands().len() && self.op.operands()[I].is_signed(),
+            "operand {I} of {:?} is not a signed operand",
+            self.op
+        );
+        let off = base::<STRIDE>() + I * STRIDE;
+        unsafe {
+            if STRIDE == 1 {
+                *self.ip.add(off) as i8 as i32
+            } else {
+                i16::from_le_bytes([*self.ip.add(off), *self.ip.add(off + 1)]) as i32
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn unsigned<const I: usize>(&self) -> usize {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            I < self.op.operands().len() && !self.op.operands()[I].is_signed(),
+            "operand {I} of {:?} is not an unsigned operand",
+            self.op
+        );
+        let off = base::<STRIDE>() + I * STRIDE;
+        unsafe {
+            if STRIDE == 1 {
+                *self.ip.add(off) as usize
+            } else {
+                u16::from_le_bytes([*self.ip.add(off), *self.ip.add(off + 1)]) as usize
+            }
+        }
+    }
+}
+
+#[inline(always)]
+pub const fn base<const STRIDE: usize>() -> usize {
+    if STRIDE == 2 { 2 } else { 1 }
+}
+
+/// The interpreter accumulator carried through dispatch.
+#[derive(Clone, Copy)]
+pub struct Acc(Value);
+
+impl Acc {
+    #[inline(always)]
+    pub fn set(v: Tagged<'_, Value>) -> Self {
+        Acc(v.raw())
+    }
+
+    #[inline(always)]
+    pub fn from_smi_bits(bits: i64) -> Self {
+        Acc(Value::from_bits(bits as Word))
+    }
+
+    #[inline(always)]
+    pub fn get<'h>(self, _heap: &'h Heap) -> Tagged<'h, Value> {
+        // Safety: the dispatch-chain freshness invariant.
+        unsafe { Tagged::from_value_unchecked(self.0) }
+    }
+}
 
 pub struct Ctx<'s, 'h> {
     vm: &'s VM,

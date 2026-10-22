@@ -16,37 +16,28 @@ use crate::objects::string::DenseString;
 use crate::prototype::Prototype;
 use crate::transition::{PropertyDescriptor, StoreOutcome, StoreSemantics};
 use crate::value::{Smi, Tagged, Value};
-use crate::{AccessorPair, Compare, EntryClass, Errors, VmError};
+use crate::{AccessorPair, Compare, EntryClass, Errors, Heap, ThreadState, VM, VmError};
 use crate::{Coercion, Hint, HostCtx, raise_runtime};
 
 /// `Add` cold body: ToPrimitive both operands, string concatenation when
 /// either side is a string, numeric addition otherwise (ES 13.15.3).
-pub fn add<'a>(
-    ctx: &mut Ctx<'a, 'a>,
-    lhs: Tagged<'_, Value>,
-    rhs: Tagged<'_, Value>,
+pub fn add_body<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    lhs: Handle<'_, Value>,
+    rhs: Handle<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let vm = ctx.vm();
-    let heap = unsafe { ctx.heap_mut_shared() };
-    let state = ctx.state();
     state.handle_scope(|scope| {
-        let lhs = scope.handle(lhs);
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => {
-                let heap = unsafe { ctx.heap_shared() };
-                return heap.known().exception.as_tagged(heap).erase();
-            }
+            Ok(Coercion::Threw) => return heap.known().exception.as_tagged(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let rhs = scope.handle(rhs);
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => {
-                let heap = unsafe { ctx.heap_shared() };
-                return heap.known().exception.as_tagged(heap).erase();
-            }
+            Ok(Coercion::Threw) => return heap.known().exception.as_tagged(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
         let is_string = (
             lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some(),
@@ -55,11 +46,11 @@ pub fn add<'a>(
         if is_string.0 || is_string.1 {
             let a = match Convert::to_string(heap, &scope, lhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             let b = match Convert::to_string(heap, &scope, rhs) {
                 Ok(v) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             DenseString::concat(heap, &scope, a, b)
                 .as_tagged(heap)
@@ -67,11 +58,11 @@ pub fn add<'a>(
         } else {
             let a = match lhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             let b = match rhs.as_tagged(heap).to_number(heap) {
                 Ok(v) => v,
-                Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
+                Err(e) => return raise_runtime(vm, heap, state, e),
             };
             // IEEE `-0 + -0` yields +0; the spec demands -0
             let r = a + b;

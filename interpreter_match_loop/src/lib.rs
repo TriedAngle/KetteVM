@@ -2,7 +2,7 @@ use bytecode::{Opcode, Operands, decode, jump_target};
 use vm_core::proxy::Proxy;
 
 use vm_core::cold::{
-    add, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm, keyed_store,
+    add_body, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm, keyed_store,
     named_load, numeric, store_global, store_named, store_named_no_shadow,
 };
 use vm_core::ic::{CallProbe, CallRecord, ElementHit, Hit, InlineCache, MonoProbe};
@@ -12,6 +12,8 @@ use vm_core::{
     FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, NativeIndex, Object, Recv, Register,
     ScopeInfo, Smi, StoreSemantics, Tagged, Termination, ThreadState, VM, Value, VmError,
 };
+
+pub mod new;
 
 /// The per-instruction control flow of the dispatch loop (the error
 /// channel is the exception sentinel, never a variant).
@@ -1423,7 +1425,11 @@ fn step<'h>(
                 acc.store(heap.new_number(a + b));
                 return Flow::Next;
             }
-            let v = add(ctx, stack.reg(heap, frame_base, ops.reg(0)), acc.get(heap));
+            let v = state.handle_scope(|scope| {
+                let lhs = scope.handle(stack.reg(heap, frame_base, ops.reg(0)));
+                let rhs = scope.handle(acc.get(heap));
+                add_body(vm, heap, state, lhs, rhs)
+            });
             if v == {
                 let heap = unsafe { ctx.heap_shared() };
                 heap.known().exception.as_tagged(heap).erase()
@@ -1459,11 +1465,11 @@ fn step<'h>(
                 return Flow::Sync;
             }
             let v = if op == Opcode::AddLoc {
-                add(
-                    ctx,
-                    stack.reg(heap, frame_base, dst),
-                    stack.reg(heap, frame_base, src),
-                )
+                state.handle_scope(|scope| {
+                    let lhs = scope.handle(stack.reg(heap, frame_base, dst));
+                    let rhs = scope.handle(stack.reg(heap, frame_base, src));
+                    add_body(vm, heap, state, lhs, rhs)
+                })
             } else {
                 numeric(
                     ctx,
@@ -2028,11 +2034,11 @@ fn step<'h>(
             }
             match op {
                 Opcode::AddImmediate => {
-                    let v = add(
-                        ctx,
-                        stack.reg(heap, frame_base, reg),
-                        Smi::new(imm as i64).into_tagged(),
-                    );
+                    let v = state.handle_scope(|scope| {
+                        let lhs = scope.handle(stack.reg(heap, frame_base, reg));
+                        let rhs = scope.handle(Smi::new(imm as i64).into_tagged());
+                        add_body(vm, heap, state, lhs, rhs)
+                    });
                     if v == {
                         let heap = unsafe { ctx.heap_shared() };
                         heap.known().exception.as_tagged(heap).erase()

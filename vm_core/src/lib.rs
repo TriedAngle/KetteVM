@@ -49,7 +49,7 @@ pub use heap::{
     MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
 };
 pub use interner::StringInterner;
-pub use interpreter::{Ctx, Unwind};
+pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
 pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
 pub use lookup::{Key, LoadOutcome, Lookup};
 pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
