@@ -1,7 +1,7 @@
 # KetteVM
 
 [![CI](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml)
-[![test262](https://img.shields.io/badge/test262-11828%20passing%20%2821.9%25%20of%2053910%29-brightgreen)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
+[![test262](https://img.shields.io/badge/test262-11828%20passing%20%2821.9%25%20of%2053910%29-yellow)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
 
 A fast virtual machine for dynamic languages.
 
