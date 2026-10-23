@@ -204,9 +204,9 @@ values.
 
 ## Badges
 
-The README CI badge tracks the `CI` workflow for `master` pushes. The two
-test262 badges show the actual calibrated pass counts and are updated when
-the baseline is recalibrated.
+The README CI badge tracks the `CI` workflow for `master` pushes. The
+test262 badge shows the current pass count and percentage of the corpus; it
+is updated when the baseline is recalibrated.
 
 ## Performance runs
 
