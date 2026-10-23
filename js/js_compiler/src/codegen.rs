@@ -847,7 +847,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     {
         let mark = self.b.temp_depth();
         let result = f(self);
-        self.b.drop_temps(mark);
+        self.b.legacy_drop_temps(mark);
         result
     }
 
@@ -1228,14 +1228,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             Expression::PrivateInExpression(p) => {
                 // `#x in obj`: (key, obj) -> bool — key rides the top slot
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(2);
+                let base = self.b.legacy_reserve_temps(2);
                 self.emit_private_key_load(p.left.node_id.get(), p.left.span)?;
                 self.b.store(Reg::new(base.index() + 1));
                 self.expr(&p.right)?;
                 self.b.store(base);
                 self.b
                     .call_runtime(BuiltinFn::PrivateIn, RegList::new(base, 2));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
                 Ok(())
             }
             Expression::ParenthesizedExpression(_) => {
@@ -1268,10 +1268,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             UnaryOperator::UnaryPlus => {
                 // ToNumber(arg) via `arg - 0`
                 self.expr(&u.argument)?;
-                let arg = self.b.stage_acc();
+                let arg = self.b.legacy_stage_acc();
                 self.b.load_zero();
                 self.b.raw(Opcode::Sub, &[arg.operand()]);
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
                 Ok(())
             }
             UnaryOperator::Typeof => {
@@ -1328,7 +1328,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 };
                 self.expr(object)?;
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(2);
+                let base = self.b.legacy_reserve_temps(2);
                 self.b.store(Reg::new(base.index() + 1));
                 match m {
                     MemberRef::Static(s) => {
@@ -1344,7 +1344,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 // one opcode, one handler: sloppy returns false on a
                 // refused delete, strict throws
                 self.b.delete_property(RegList::new(base, 2));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
                 Ok(())
             }
             Expression::Identifier(i) => {
@@ -1355,10 +1355,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     IdRes::Global | IdRes::Dynamic => {
                         let idx = self.b.name(i.name.as_bytes());
                         self.b.load_constant(idx);
-                        let name = self.b.stage_acc();
+                        let name = self.b.legacy_stage_acc();
                         self.b
                             .call_runtime(BuiltinFn::DeleteIdentifierSloppy, RegList::new(name, 1));
-                        self.b.drop_temp();
+                        self.b.legacy_drop_temp();
                     }
                     _ => self.b.load_false(),
                 }
@@ -1389,23 +1389,23 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             Op::Instanceof => {
                 // acc = lhs instanceof rhs: evaluate rhs first
                 self.expr(&b.right)?;
-                let r = self.b.stage_acc();
+                let r = self.b.legacy_stage_acc();
                 self.expr(&b.left)?;
                 self.b.instance_of(r);
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
                 Ok(())
             }
             Op::In => {
                 // `key in obj`: (key, obj) -> bool — key rides the top slot
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(2);
+                let base = self.b.legacy_reserve_temps(2);
                 self.expr(&b.left)?;
                 self.b.store(Reg::new(base.index() + 1));
                 self.expr(&b.right)?;
                 self.b.store(base);
                 self.b
                     .call_runtime(BuiltinFn::HasProperty, RegList::new(base, 2));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
                 Ok(())
             }
             _ => {
@@ -1442,7 +1442,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             LogicalOperator::Coalesce => return self.err(l.span, "nullish coalescing"),
         };
         self.expr(&l.left)?;
-        let t = self.b.stage_acc();
+        let t = self.b.legacy_stage_acc();
         let short = self.b.new_label();
         if truthy {
             self.b.jump_if_truthy(short);
@@ -1455,7 +1455,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         self.b.bind(short);
         self.b.load(t);
         self.b.bind(end);
-        self.b.drop_temp();
+        self.b.legacy_drop_temp();
         Ok(())
     }
 
@@ -1568,17 +1568,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // complex `lhs`, immediate `rhs`: stage lhs, then `reg OP imm`
             if let Some(imm) = int_literal(rhs) {
                 self.expr(lhs)?;
-                let t = self.b.stage_acc();
+                let t = self.b.legacy_stage_acc();
                 self.b.raw(imm_op, &[t.operand(), imm as u32]);
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
                 return Ok(());
             }
             // general: `lhs` -> temp register, `rhs` -> accumulator
             self.expr(lhs)?;
-            let t = self.b.stage_acc();
+            let t = self.b.legacy_stage_acc();
             self.expr(rhs)?;
             self.b.raw(op, &[t.operand()]);
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
             return Ok(());
         }
         // non-arithmetic operator (`acc OP reg`): comparisons/tests. When
@@ -1589,13 +1589,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             return Ok(());
         }
         self.expr(lhs)?;
-        let a = self.b.stage_acc();
+        let a = self.b.legacy_stage_acc();
         self.expr(rhs)?;
-        let b = self.b.stage_acc();
+        let b = self.b.legacy_stage_acc();
         self.b.load(a);
         self.b.raw(op, &[b.operand()]);
-        self.b.drop_temp();
-        self.b.drop_temp();
+        self.b.legacy_drop_temp();
+        self.b.legacy_drop_temp();
         Ok(())
     }
 
@@ -1610,10 +1610,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // destructuring assignment (ES 14.13.3): the RHS value, then
             // the pattern against it; the expression evaluates to the value
             self.expr(&a.right)?;
-            let v = self.b.stage_acc();
+            let v = self.b.legacy_stage_acc();
             self.emit_assign_target_pattern(&a.left, v)?;
             self.b.load(v);
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
             return Ok(());
         }
         if a.operator.is_logical() {
@@ -1713,13 +1713,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     }
                 }
                 self.expr(value)?;
-                let v = self.b.stage_acc();
+                let v = self.b.legacy_stage_acc();
                 self.emit_identifier(i)?;
-                let orig = self.b.stage_acc();
+                let orig = self.b.legacy_stage_acc();
                 self.b.load(v);
                 self.b.raw(op, &[orig.operand()]);
-                self.b.drop_temp(); // orig
-                self.b.drop_temp(); // v
+                self.b.legacy_drop_temp(); // orig
+                self.b.legacy_drop_temp(); // v
                 self.store_name(i)?;
                 Ok(())
             }
@@ -1731,13 +1731,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.prepare_property_store(m)?
                 };
                 self.expr(value)?;
-                let v = self.b.stage_acc();
+                let v = self.b.legacy_stage_acc();
                 self.emit_property_load_of(&store);
-                let orig = self.b.stage_acc();
+                let orig = self.b.legacy_stage_acc();
                 self.b.load(v);
                 self.b.raw(op, &[orig.operand()]);
-                self.b.drop_temp(); // orig
-                self.b.drop_temp(); // v
+                self.b.legacy_drop_temp(); // orig
+                self.b.legacy_drop_temp(); // v
                 self.emit_property_store(&store);
                 self.release_store(&store);
                 Ok(())
@@ -1752,15 +1752,15 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn emit_add_delta(&mut self, arith: Opcode, orig: Reg, d: Reg) {
         // acc = ToNumber(orig) OP d
         self.b.load(orig);
-        let t = self.b.stage_acc();
+        let t = self.b.legacy_stage_acc();
         self.b.load_zero();
         self.b.raw(Opcode::Sub, &[t.operand()]);
-        self.b.drop_temp(); // t
-        let lhs = self.b.stage_acc();
+        self.b.legacy_drop_temp(); // t
+        let lhs = self.b.legacy_stage_acc();
         self.b.load(d);
         self.b.raw(arith, &[lhs.operand()]);
-        self.b.drop_temp(); // lhs
-        self.b.drop_temp(); // d
+        self.b.legacy_drop_temp(); // lhs
+        self.b.legacy_drop_temp(); // d
     }
 
     fn emit_update(&mut self, u: &UpdateExpression<'_>) -> Result<(), CompileError> {
@@ -1787,16 +1787,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             self.emit_identifier(i)?;
             let mark = self.b.temp_depth();
-            let orig = self.b.stage_acc();
+            let orig = self.b.legacy_stage_acc();
             self.b.load_smi(delta as i32);
-            let d = self.b.stage_acc();
+            let d = self.b.legacy_stage_acc();
             self.emit_add_delta(arith, orig, d);
             self.store_name(i)?;
             if !u.prefix {
                 self.b.load(orig);
             }
-            self.b.drop_temp(); // orig
-            self.b.drop_temps(mark);
+            self.b.legacy_drop_temp(); // orig
+            self.b.legacy_drop_temps(mark);
             return Ok(());
         }
         if let Some(m) = simple_member_ref(&u.argument) {
@@ -1807,16 +1807,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             };
             self.emit_property_load_of(&store);
             let mark = self.b.temp_depth();
-            let orig = self.b.stage_acc();
+            let orig = self.b.legacy_stage_acc();
             self.b.load_smi(delta as i32);
-            let d = self.b.stage_acc();
+            let d = self.b.legacy_stage_acc();
             self.emit_add_delta(arith, orig, d);
             self.emit_property_store(&store);
             if !u.prefix {
                 self.b.load(orig);
             }
-            self.b.drop_temp(); // orig
-            self.b.drop_temps(mark);
+            self.b.legacy_drop_temp(); // orig
+            self.b.legacy_drop_temps(mark);
             self.release_store(&store);
             return Ok(());
         }
@@ -1885,7 +1885,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     let name_idx = self.b.name(name);
                     if has_rest {
                         self.b.load_constant(name_idx);
-                        let r = self.b.stage_acc();
+                        let r = self.b.legacy_stage_acc();
                         excl_base.get_or_insert(r);
                         excluded += 1;
                     }
@@ -1902,16 +1902,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     // native layout: (excluded..., target, source) — element
                     // 0 (the first excluded key) rides the top slot
                     self.b.create_empty_object_literal();
-                    let rest_obj = self.b.stage_acc();
+                    let rest_obj = self.b.legacy_stage_acc();
                     self.b.load(value_reg);
-                    self.b.stage_acc();
+                    self.b.legacy_stage_acc();
                     let base = excl_base.unwrap_or(rest_obj);
                     let count = excluded + 2;
                     // restage the window in element order: excluded keys
                     // ride the top (excluded[0] highest), then the target,
                     // the source at the bottom slot
                     let mark2 = self.b.temp_depth();
-                    let w = self.b.reserve_temps(count);
+                    let w = self.b.legacy_reserve_temps(count);
                     let top = w.index() + (count - 1) as i32;
                     for k in 0..excluded {
                         self.b.load(Reg::new(base.index() + k as i32));
@@ -1923,11 +1923,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.b.store(w);
                     self.b
                         .call_runtime(BuiltinFn::CopyDataProperties, RegList::new(w, count));
-                    self.b.drop_temps(mark2);
+                    self.b.legacy_drop_temps(mark2);
                     self.b.store(rest_obj);
                     self.emit_pattern_leaf(*target, rest_obj, binding)?;
-                    self.b.drop_temp(); // source
-                    self.b.drop_temp(); // rest object
+                    self.b.legacy_drop_temp(); // source
+                    self.b.legacy_drop_temp(); // rest object
                 }
                 PatProperty::Prop {
                     key,
@@ -1951,7 +1951,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                                 // exclusion set
                                 if let NameHint::Const(idx) = name_hint {
                                     self.b.load_constant(idx);
-                                    let r = self.b.stage_acc();
+                                    let r = self.b.legacy_stage_acc();
                                     excl_base.get_or_insert(r);
                                     excluded += 1;
                                 }
@@ -1976,13 +1976,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     }
                     self.emit_pattern_element(*target, *default, binding, name_hint)?;
                     if !has_rest && key_reg.is_some() {
-                        self.b.drop_temp();
+                        self.b.legacy_drop_temp();
                     }
                 }
             }
         }
         for _ in 0..excluded {
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
         }
         Ok(())
     }
@@ -1997,11 +1997,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // iterator = GetIterator(value)
         self.b
             .call_runtime(BuiltinFn::GetIterator, RegList::new(value_reg, 1));
-        let iter = self.b.stage_acc();
+        let iter = self.b.legacy_stage_acc();
         // done flag (ES 8.5.9: once done, later elements read undefined
         // without calling next again)
         self.b.load_zero();
-        let done = self.b.stage_acc();
+        let done = self.b.legacy_stage_acc();
         let mut rest: Option<PatTarget<'_, '_>> = None;
         for el in &elements {
             match el {
@@ -2025,9 +2025,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if let Some(target) = rest {
             // array ← remaining values (loop while !done)
             self.b.create_empty_array_literal();
-            let arr = self.b.stage_acc();
+            let arr = self.b.legacy_stage_acc();
             self.b.load_zero();
-            let idx = self.b.stage_acc();
+            let idx = self.b.legacy_stage_acc();
             let back = self.b.new_label();
             self.b.bind(back); // loop head
             self.b.load(done);
@@ -2035,7 +2035,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.jump_if_truthy(exit);
             self.b
                 .call_runtime(BuiltinFn::IteratorNext, RegList::new(iter, 1));
-            let result = self.b.stage_acc();
+            let result = self.b.legacy_stage_acc();
             self.b
                 .call_runtime(BuiltinFn::IteratorDone, RegList::new(result, 1));
             let have = self.b.new_label();
@@ -2053,16 +2053,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.store(idx);
             self.b.jump_loop(back);
             self.b.bind(after);
-            self.b.drop_temp(); // result
-            self.b.drop_temp(); // idx
+            self.b.legacy_drop_temp(); // result
+            self.b.legacy_drop_temp(); // idx
             // both loop exits converge here
             self.b.bind(exit);
             self.b.load(arr);
             self.emit_pattern_leaf(target, arr, binding)?;
-            self.b.drop_temp(); // arr
+            self.b.legacy_drop_temp(); // arr
         }
-        self.b.drop_temp(); // done
-        self.b.drop_temp(); // iter
+        self.b.legacy_drop_temp(); // done
+        self.b.legacy_drop_temp(); // iter
         Ok(())
     }
 
@@ -2091,10 +2091,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             if let Some(e) = key.as_expression() {
                 self.expr(e)?;
             }
-            Ok(Some(self.b.stage_acc()))
+            Ok(Some(self.b.legacy_stage_acc()))
         } else if matches!(key, PropertyKey::NumericLiteral(_)) {
             self.emit_number_key(key);
-            Ok(Some(self.b.stage_acc()))
+            Ok(Some(self.b.legacy_stage_acc()))
         } else {
             Ok(None)
         }
@@ -2111,13 +2111,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         binding: bool,
     ) -> Result<(), CompileError> {
         self.b.load_undefined();
-        let v = self.b.stage_acc();
+        let v = self.b.legacy_stage_acc();
         self.b.load(done);
         let skip_next = self.b.new_label();
         self.b.jump_if_truthy(skip_next);
         self.b
             .call_runtime(BuiltinFn::IteratorNext, RegList::new(iter, 1));
-        let result = self.b.stage_acc();
+        let result = self.b.legacy_stage_acc();
         self.b
             .call_runtime(BuiltinFn::IteratorDone, RegList::new(result, 1));
         let have = self.b.new_label();
@@ -2131,7 +2131,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             .call_runtime(BuiltinFn::IteratorValue, RegList::new(result, 1));
         self.b.store(v);
         self.b.bind(after);
-        self.b.drop_temp(); // result
+        self.b.legacy_drop_temp(); // result
         self.b.bind(skip_next);
         // array-element defaults name anonymous functions after the
         // binding identifier (ES 8.6.2: NamedEvaluation with bindingName)
@@ -2151,7 +2151,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             NameHint::None
         };
         self.emit_pattern_element_with(target, default, v, binding, hint)?;
-        self.b.drop_temp(); // v
+        self.b.legacy_drop_temp(); // v
         Ok(())
     }
 
@@ -2205,9 +2205,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         binding: bool,
         name_hint: NameHint,
     ) -> Result<(), CompileError> {
-        let v = self.b.stage_acc();
+        let v = self.b.legacy_stage_acc();
         self.emit_pattern_element_with(target, default, v, binding, name_hint)?;
-        self.b.drop_temp();
+        self.b.legacy_drop_temp();
         Ok(())
     }
 
@@ -2232,7 +2232,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             PatTarget::AssignIdent(i) => self.store_name(i),
             PatTarget::Assign(t) if assign_member_ref(t).is_some() => {
                 let m = assign_member_ref(t).unwrap();
-                let value = self.b.stage_acc();
+                let value = self.b.legacy_stage_acc();
                 let store = if is_super_member(m) {
                     self.prepare_super_store(m)?
                 } else {
@@ -2241,7 +2241,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.b.load(value);
                 self.emit_property_store(&store);
                 self.release_store(&store);
-                self.b.drop_temp(); // value
+                self.b.legacy_drop_temp(); // value
                 Ok(())
             }
             PatTarget::Binding(BindingPattern::ObjectPattern(o)) => {
@@ -2278,7 +2278,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 // preparation, the value is the accumulator
                 let key = Reg::new(obj.index() + 1);
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(3);
+                let base = self.b.legacy_reserve_temps(3);
                 self.b.store(base);
                 self.b.load(key);
                 self.b.store(Reg::new(base.index() + 1));
@@ -2286,7 +2286,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.b.store(Reg::new(base.index() + 2));
                 self.b
                     .call_runtime(BuiltinFn::PrivateSet, RegList::new(base, 3));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
             }
             // runtime(home, recv, key, value = acc, semantics: shadow)
             StoreTarget::SuperNamed {
@@ -2335,14 +2335,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 // fresh window (the prep stages obj below the key, the
                 // old layout's order)
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(2);
+                let base = self.b.legacy_reserve_temps(2);
                 self.b.load(*key);
                 self.b.store(base);
                 self.b.load(*obj);
                 self.b.store(Reg::new(base.index() + 1));
                 self.b
                     .call_runtime(BuiltinFn::PrivateGet, RegList::new(base, 2));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
             }
             // runtime(home, recv, key) -> value
             StoreTarget::SuperNamed {
@@ -2372,21 +2372,21 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         match store {
             StoreTarget::Named { obj_staged, .. } => {
                 if *obj_staged {
-                    self.b.drop_temp(); // obj
+                    self.b.legacy_drop_temp(); // obj
                 }
             }
             StoreTarget::Keyed { .. } | StoreTarget::PrivateKeyed { .. } => {
-                self.b.drop_temp(); // key
-                self.b.drop_temp(); // obj
+                self.b.legacy_drop_temp(); // key
+                self.b.legacy_drop_temp(); // obj
             }
             StoreTarget::SuperNamed { .. } => {
-                self.b.drop_temp(); // home
-                self.b.drop_temp(); // recv
+                self.b.legacy_drop_temp(); // home
+                self.b.legacy_drop_temp(); // recv
             }
             StoreTarget::SuperKeyed { .. } => {
-                self.b.drop_temp(); // home
-                self.b.drop_temp(); // key
-                self.b.drop_temp(); // recv
+                self.b.legacy_drop_temp(); // home
+                self.b.legacy_drop_temp(); // key
+                self.b.legacy_drop_temp(); // recv
             }
         }
     }
@@ -2395,9 +2395,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         match m {
             MemberRef::Private(p) => {
                 self.expr(&p.object)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.legacy_stage_acc();
                 self.emit_private_key_load(p.field.node_id.get(), p.field.span)?;
-                let k = self.b.stage_acc();
+                let k = self.b.legacy_stage_acc();
                 Ok(StoreTarget::PrivateKeyed { obj, key: k })
             }
             MemberRef::Static(s) => {
@@ -2410,7 +2410,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     });
                 }
                 self.expr(&s.object)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.legacy_stage_acc();
                 Ok(StoreTarget::Named {
                     obj,
                     name_idx,
@@ -2419,9 +2419,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             MemberRef::Computed(c) => {
                 self.expr(&c.object)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.legacy_stage_acc();
                 self.expr(&c.expression)?;
-                let k = self.b.stage_acc();
+                let k = self.b.legacy_stage_acc();
                 Ok(StoreTarget::Keyed { obj, key: k })
             }
         }
@@ -2444,7 +2444,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             return Ok(None);
         };
         self.emit_this_for(this_owner, this_depth);
-        let recv = self.b.stage_acc();
+        let recv = self.b.legacy_stage_acc();
         let (home_slot, home_depth) = match home {
             Home::Class(_, slot) => (slot, depth),
             Home::Object(_) => (0, depth),
@@ -2452,15 +2452,15 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         match m {
             MemberRef::Computed(c) => {
                 self.expr(&c.expression)?;
-                let k = self.b.stage_acc();
+                let k = self.b.legacy_stage_acc();
                 self.b.load_context_slot(home_slot, home_depth);
-                let home = self.b.stage_acc();
+                let home = self.b.legacy_stage_acc();
                 Ok(Some(StoreTarget::SuperKeyed { recv, home, key: k }))
             }
             MemberRef::Static(s) => {
                 let name_idx = self.b.name(s.property.name.as_bytes());
                 self.b.load_context_slot(home_slot, home_depth);
-                let home = self.b.stage_acc();
+                let home = self.b.legacy_stage_acc();
                 Ok(Some(StoreTarget::SuperNamed {
                     recv,
                     home,
@@ -2491,14 +2491,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             MemberRef::Private(p) => {
                 // PrivateGet: `obj.#x` — own private field or TypeError
                 let mark = self.b.temp_depth();
-                let base = self.b.reserve_temps(2);
+                let base = self.b.legacy_reserve_temps(2);
                 self.emit_private_key_load(p.field.node_id.get(), p.field.span)?;
                 self.b.store(base);
                 self.expr(&p.object)?;
                 self.b.store(Reg::new(base.index() + 1));
                 self.b
                     .call_runtime(BuiltinFn::PrivateGet, RegList::new(base, 2));
-                self.b.drop_temps(mark);
+                self.b.legacy_drop_temps(mark);
                 Ok(())
             }
             MemberRef::Computed(c) => {
@@ -2511,14 +2511,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     return Ok(());
                 }
                 self.expr(&c.object)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.legacy_stage_acc();
                 if let Some(key) = self.simple_register(&c.expression) {
                     self.b.load_keyed_property_reg(obj, key, feedback);
                 } else {
                     self.expr(&c.expression)?;
                     self.b.load_keyed_property(obj, feedback);
                 }
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
                 Ok(())
             }
             MemberRef::Static(s) => {
@@ -2533,9 +2533,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     return Ok(());
                 }
                 self.expr(&s.object)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.legacy_stage_acc();
                 self.b.load_named_property(obj, name_idx, feedback);
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
                 Ok(())
             }
         }
@@ -2570,7 +2570,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if argc <= 2 {
             let mark = self.b.temp_depth();
             let recv = load_method(self)?;
-            let callee = self.b.stage_acc();
+            let callee = self.b.legacy_stage_acc();
             let mut args = [Reg::new(0); 2];
             for (i, arg) in c.arguments.iter().enumerate() {
                 // a plain local/parameter is already in a register: read it
@@ -2587,7 +2587,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     args[i] = reg;
                 } else {
                     self.call_argument(arg)?;
-                    args[i] = self.b.stage_acc();
+                    args[i] = self.b.legacy_stage_acc();
                 }
             }
             match argc {
@@ -2604,7 +2604,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.b.call_method2(callee, recv, args[0], args[1], fb)
                 }
             }
-            self.b.drop_temps(mark);
+            self.b.legacy_drop_temps(mark);
             return Ok(());
         }
         let argc = argc as u32;
@@ -2613,7 +2613,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // the window is [args_base .. args_base+argc]: element 0 (the
         // receiver) rides the top slot, argument i sits argc-1-i slots in,
         // the callee rides above
-        let args_base = self.b.reserve_temps(argc + 2);
+        let args_base = self.b.legacy_reserve_temps(argc + 2);
         let top = args_base.index() + argc as i32;
         let callee = Reg::new(top + 1);
         self.b.store(callee);
@@ -2633,7 +2633,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         self.b.move_reg(Reg::new(top), recv);
         let fb = self.b.new_feedback();
         self.b.call(callee, RegList::new(args_base, argc + 1), fb);
-        self.b.drop_temps(mark);
+        self.b.legacy_drop_temps(mark);
         Ok(())
     }
 
@@ -2657,7 +2657,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     Some(r) => r,
                     None => {
                         g.expr(&s.object)?;
-                        g.b.stage_acc()
+                        g.b.legacy_stage_acc()
                     }
                 };
                 let feedback = g.b.new_feedback();
@@ -2671,7 +2671,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     Some(r) => r,
                     None => {
                         g.expr(&cm.object)?;
-                        g.b.stage_acc()
+                        g.b.legacy_stage_acc()
                     }
                 };
                 g.expr(&cm.expression)?;
@@ -2689,7 +2689,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if argc <= 2 {
             let mark = self.b.temp_depth();
             self.expr(&c.callee)?;
-            let callee = self.b.stage_acc();
+            let callee = self.b.legacy_stage_acc();
             let mut args = [Reg::new(0); 2];
             for (i, arg) in c.arguments.iter().enumerate() {
                 // see `emit_method_call`: read a plain local/parameter
@@ -2704,7 +2704,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     args[i] = reg;
                 } else {
                     self.call_argument(arg)?;
-                    args[i] = self.b.stage_acc();
+                    args[i] = self.b.legacy_stage_acc();
                 }
             }
             match argc {
@@ -2721,13 +2721,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.b.call_function2(callee, args[0], args[1], fb)
                 }
             }
-            self.b.drop_temps(mark);
+            self.b.legacy_drop_temps(mark);
             return Ok(());
         }
         let argc = argc as u32;
         let mark = self.b.temp_depth();
         self.expr(&c.callee)?;
-        let args_base = self.b.reserve_temps(argc + 2);
+        let args_base = self.b.legacy_reserve_temps(argc + 2);
         let top = args_base.index() + argc as i32;
         let callee = Reg::new(top + 1);
         self.b.store(callee);
@@ -2748,7 +2748,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
         let fb = self.b.new_feedback();
         self.b.call(callee, RegList::new(args_base, argc + 1), fb);
-        self.b.drop_temps(mark);
+        self.b.legacy_drop_temps(mark);
         Ok(())
     }
 
@@ -2771,7 +2771,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // method is loaded; dropping them keeps the argument window
             // contiguous with the receiver
             for _ in 0..dead_parts {
-                g.b.drop_temp();
+                g.b.legacy_drop_temp();
             }
             Ok(recv)
         })
@@ -2782,7 +2782,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let mark = self.b.temp_depth();
         self.expr(&n.callee)?;
         // window [args...] with argument 0 at the top slot, callee above
-        let args_base = self.b.reserve_temps(argc + 1);
+        let args_base = self.b.legacy_reserve_temps(argc + 1);
         let top = args_base.index() + argc as i32 - 1;
         let callee = Reg::new(top + 1);
         self.b.store(callee);
@@ -2804,7 +2804,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
         }
         self.b.construct(callee, RegList::new(args_base, argc));
-        self.b.drop_temps(mark);
+        self.b.legacy_drop_temps(mark);
         Ok(())
     }
 
@@ -2831,7 +2831,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // reserve arguments + result (+ closure/new.target registers for
         // the delegated variant) so nested temps land above
         let reserved = argc + 1 + u32::from(!direct) * 2;
-        let arg_base = self.b.reserve_temps(reserved);
+        let arg_base = self.b.legacy_reserve_temps(reserved);
         // the delegated window is (args..., closure, new_target): args
         // ride the top, closure/new.target the two bottom slots
         let arg_top = arg_base.index() + argc as i32 + i32::from(!direct) * 2 - 1;
@@ -2881,12 +2881,12 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // InitializeThisBinding: this must still be uninitialized
         let super_once_check = |g: &mut Self| {
             let mark = g.b.temp_depth();
-            let t = g.b.stage_acc();
+            let t = g.b.legacy_stage_acc();
             g.b.call_runtime(
                 BuiltinFn::ThrowSuperAlreadyCalledIfNotHole,
                 RegList::new(t, 1),
             );
-            g.b.drop_temps(mark);
+            g.b.legacy_drop_temps(mark);
         };
         match this_slot {
             Some(slot) => {
@@ -2918,8 +2918,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if self.fn_has_instance_fields(field_owner) {
             // (ctor, instance): ctor rides the top slot
             self.b.load(result);
-            let instance = self.b.stage_acc();
-            let ctor = self.b.temp();
+            let instance = self.b.legacy_stage_acc();
+            let ctor = self.b.legacy_temp();
             if direct {
                 self.b.load_current_closure();
             } else {
@@ -2931,11 +2931,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.store(ctor);
             self.b
                 .call_runtime(BuiltinFn::InitInstanceFields, RegList::new(instance, 2));
-            self.b.drop_temp(); // ctor
-            self.b.drop_temp(); // instance
+            self.b.legacy_drop_temp(); // ctor
+            self.b.legacy_drop_temp(); // instance
         }
         self.b.load(result);
-        self.b.drop_temps(mark);
+        self.b.legacy_drop_temps(mark);
         Ok(())
     }
 
@@ -2960,7 +2960,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // Pushed before the superclass evaluation (ES 15.7.14 step 8).
         let ctx_save = if slot_count > 0 {
             self.b.create_block_context(slot_count);
-            let save = self.b.temp();
+            let save = self.b.legacy_temp();
             self.b.push_context(save);
             Some(save)
         } else {
@@ -2975,17 +2975,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         for (name, slot) in privates.iter().zip(&private_slots) {
             let desc = self.b.name(name.as_bytes());
             self.b.load_constant(desc);
-            let desc_reg = self.b.stage_acc();
+            let desc_reg = self.b.legacy_stage_acc();
             self.b
                 .call_runtime(BuiltinFn::CreatePrivateName, RegList::new(desc_reg, 1));
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
             self.b.store_context_slot(*slot, 0);
         }
 
         // superclass: must be null or a constructor
         let sup = if let Some(sup) = superclass {
             self.expr(sup)?;
-            let sup = self.b.stage_acc();
+            let sup = self.b.legacy_stage_acc();
             self.b
                 .call_runtime_staged(BuiltinFn::ThrowIfNotConstructorOrNull, &[RtArg::Reg(sup)]);
             Some(sup)
@@ -2996,10 +2996,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // prototype/constructor parents; defaults are the no-extends case
         let obj_proto = self.b.constant(Constant::ObjectPrototype);
         self.b.load_constant(obj_proto);
-        let pp = self.b.stage_acc();
+        let pp = self.b.legacy_stage_acc();
         let fn_proto = self.b.constant(Constant::FunctionPrototype);
         self.b.load_constant(fn_proto);
-        let cp = self.b.stage_acc();
+        let cp = self.b.legacy_stage_acc();
         if let Some(sup) = sup {
             // null superclass → null-proto prototype; ctor parent stays
             // %Function.prototype% (objects are always truthy, so the
@@ -3026,7 +3026,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
         // prototype: a fresh ordinary object with protoParent
         self.b.create_empty_object_literal();
-        let proto = self.b.stage_acc();
+        let proto = self.b.legacy_stage_acc();
         self.b.call_runtime_staged(
             BuiltinFn::SetPrototype,
             &[RtArg::Reg(proto), RtArg::Reg(pp)],
@@ -3035,7 +3035,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // constructor closure
         let ctor_idx = self.b.constant(Constant::Callable(FunctionId(ctor.0)));
         self.b.create_closure(ctor_idx);
-        let ctor = self.b.stage_acc();
+        let ctor = self.b.legacy_stage_acc();
 
         // wiring before member installation (ES 15.7.14 steps 17–18
         // precede the element loop): computed `['constructor']` members
@@ -3071,7 +3071,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // attached to the constructor (its hidden fields slot)
         let fields_arr = if has_instance_fields {
             self.b.create_empty_array_literal();
-            Some(self.b.stage_acc())
+            Some(self.b.legacy_stage_acc())
         } else {
             None
         };
@@ -3093,14 +3093,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     if let PropertyKey::PrivateIdentifier(p) = key {
                         self.emit_private_key_load(p.node_id.get(), p.span)?;
                     }
-                    Some(self.b.stage_acc())
+                    Some(self.b.legacy_stage_acc())
                 } else {
                     self.stage_key(key, computed)?
                 };
                 let fn_idx = self.b.constant(Constant::Callable(FunctionId(fid.0)));
                 self.b.create_closure(fn_idx);
                 if is_static {
-                    let closure = self.b.stage_acc();
+                    let closure = self.b.legacy_stage_acc();
                     let name_idx = match key_reg {
                         Some(_) => None,
                         None => Some(self.name_constant(key)?),
@@ -3109,9 +3109,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 } else {
                     // append [key, initializer] to the instance field list
                     let arr = fields_arr.expect("instance fields allocate the list");
-                    let closure = self.b.stage_acc();
+                    let closure = self.b.legacy_stage_acc();
                     self.b.load_smi(field_index as i32);
-                    let i = self.b.stage_acc();
+                    let i = self.b.legacy_stage_acc();
                     match key_reg {
                         Some(k) => {
                             self.b.load(k);
@@ -3131,11 +3131,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.b.load(closure);
                     let feedback = self.b.new_feedback();
                     self.b.store_keyed_property_no_shadow(arr, i, feedback);
-                    self.b.drop_temp(); // i
-                    self.b.drop_temp(); // closure
+                    self.b.legacy_drop_temp(); // i
+                    self.b.legacy_drop_temp(); // closure
                     field_index += 2;
                     if key_reg.is_some() {
-                        self.b.drop_temp();
+                        self.b.legacy_drop_temp();
                     }
                 }
                 continue;
@@ -3195,7 +3195,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 MemberKind::Field => unreachable!("fields handled above"),
             }
             if key_reg.is_some() {
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
             }
         }
 
@@ -3236,9 +3236,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
         // LIFO pops for the static field registers (key under closure)
         for (_closure, key_reg, _) in static_fields.iter().rev() {
-            self.b.drop_temp(); // closure
+            self.b.legacy_drop_temp(); // closure
             if key_reg.is_some() {
-                self.b.drop_temp(); // key
+                self.b.legacy_drop_temp(); // key
             }
         }
 
@@ -3246,21 +3246,21 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if let Some(arr) = fields_arr {
             // (ctor, fields): ctor rides the top slot
             self.b.load(arr);
-            let arr_reg = self.b.stage_acc();
-            let ctor_reg = self.b.temp();
+            let arr_reg = self.b.legacy_stage_acc();
+            let ctor_reg = self.b.legacy_temp();
             self.b.load(ctor);
             self.b.store(ctor_reg);
             self.b
                 .call_runtime(BuiltinFn::SetClassFields, RegList::new(arr_reg, 2));
-            self.b.drop_temp(); // ctor copy
-            self.b.drop_temp(); // arr copy
-            self.b.drop_temp(); // the fields array itself
+            self.b.legacy_drop_temp(); // ctor copy
+            self.b.legacy_drop_temp(); // arr copy
+            self.b.legacy_drop_temp(); // the fields array itself
         }
 
         // pop the class context; member closures already captured it
         if let Some(save) = ctx_save {
             self.b.pop_context(save);
-            self.b.drop_temp(); // save
+            self.b.legacy_drop_temp(); // save
         }
 
         // outer binding for declarations (the class value in acc)
@@ -3270,12 +3270,12 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
 
         // LIFO: ctor, proto, cp, pp, superclass
-        self.b.drop_temp(); // ctor
-        self.b.drop_temp(); // proto
-        self.b.drop_temp(); // cp
-        self.b.drop_temp(); // pp
+        self.b.legacy_drop_temp(); // ctor
+        self.b.legacy_drop_temp(); // proto
+        self.b.legacy_drop_temp(); // cp
+        self.b.legacy_drop_temp(); // pp
         if sup.is_some() {
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
         }
         self.b.load(ctor);
         Ok(())
@@ -3294,7 +3294,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let capacity = len + (len >> 1) + 8;
             self.b.create_sized_array_literal(capacity as u32);
         }
-        let arr = self.b.stage_acc();
+        let arr = self.b.legacy_stage_acc();
         let mut i = 0u32;
         for el in &a.elements {
             match el {
@@ -3307,11 +3307,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 other => {
                     let x = other.as_expression().expect("elision/spread handled");
                     self.b.load_smi(i as i32);
-                    let idx = self.b.stage_acc();
+                    let idx = self.b.legacy_stage_acc();
                     self.expr(x)?;
                     let feedback = self.b.new_feedback();
                     self.b.store_keyed_property_no_shadow(arr, idx, feedback);
-                    self.b.drop_temp();
+                    self.b.legacy_drop_temp();
                     i += 1;
                 }
             }
@@ -3326,7 +3326,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.store_named_property(arr, name, feedback);
         }
         self.b.load(arr);
-        self.b.drop_temp();
+        self.b.legacy_drop_temp();
         Ok(())
     }
 
@@ -3337,7 +3337,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let needs_home = self.c.facts.obj_lit_home.contains(&node);
         let ctx_save = if needs_home {
             self.b.create_block_context(1);
-            let save = self.b.temp();
+            let save = self.b.legacy_temp();
             self.b.push_context(save);
             Some(save)
         } else {
@@ -3345,7 +3345,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         };
 
         self.b.create_empty_object_literal();
-        let obj = self.b.stage_acc();
+        let obj = self.b.legacy_stage_acc();
         for p in &o.properties {
             let ObjectPropertyKind::ObjectProperty(p) = p else {
                 return self.err(o.span, "spread in object literals");
@@ -3421,7 +3421,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 }
             }
             if key_reg.is_some() {
-                self.b.drop_temp();
+                self.b.legacy_drop_temp();
             }
         }
         // the home object is the literal itself; methods already captured
@@ -3432,10 +3432,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
         if let Some(save) = ctx_save {
             self.b.pop_context(save);
-            self.b.drop_temp();
+            self.b.legacy_drop_temp();
         }
         self.b.load(obj);
-        self.b.drop_temp();
+        self.b.legacy_drop_temp();
         Ok(())
     }
 }
@@ -3627,9 +3627,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                             .err(decl.span, "destructuring declaration needs an initializer");
                     };
                     self.expr(init)?;
-                    let value = self.b.stage_acc();
+                    let value = self.b.legacy_stage_acc();
                     self.emit_binding_pattern(&decl.id, value)?;
-                    self.b.drop_temp();
+                    self.b.legacy_drop_temp();
                 }
                 BindingPattern::BindingIdentifier(b) => {
                     let Some(sym) = b.symbol_id.get() else {
@@ -3669,8 +3669,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let mut loop_ctx: Option<Reg> = None;
             let ctx_save = if slots > 0 {
                 g.b.create_block_context(slots);
-                let save = g.b.temp();
-                let lc = g.b.temp();
+                let save = g.b.legacy_temp();
+                let lc = g.b.legacy_temp();
                 g.b.store(lc);
                 g.b.push_context(save);
                 loop_ctx = Some(lc);
@@ -3681,10 +3681,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // head: subject → enumerator (undefined for nullish subjects;
             // ForInNext(undefined) is immediately done)
             g.expr(&s.right)?;
-            let subject = g.b.stage_acc();
+            let subject = g.b.legacy_stage_acc();
             g.b.call_runtime(BuiltinFn::ForInEnumerate, RegList::new(subject, 1));
-            g.b.drop_temp(); // the call consumed the subject; acc = enumerator
-            let enumerator = g.b.stage_acc();
+            g.b.legacy_drop_temp(); // the call consumed the subject; acc = enumerator
+            let enumerator = g.b.legacy_stage_acc();
 
             // loop: next key or undefined
             let back = g.b.new_label();
@@ -3702,7 +3702,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             g.b.jump_if_not_undefined(have_key);
             g.b.jump(breaks);
             g.b.bind(have_key);
-            let key = g.b.stage_acc();
+            let key = g.b.legacy_stage_acc();
 
             // per iteration with a lexical head: replace the context with
             // a fresh sibling (same outer) and initialize the binding
@@ -3735,8 +3735,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 g.b.pop_context(save);
             }
 
-            g.b.drop_temp(); // key
-            g.b.drop_temp(); // enumerator
+            g.b.legacy_drop_temp(); // key
+            g.b.legacy_drop_temp(); // enumerator
             Ok(())
         })
     }
@@ -3859,8 +3859,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let mut loop_ctx: Option<Reg> = None;
             let ctx_save = if slots > 0 {
                 g.b.create_block_context(slots);
-                let save = g.b.temp();
-                let lc = g.b.temp();
+                let save = g.b.legacy_temp();
+                let lc = g.b.legacy_temp();
                 g.b.store(lc);
                 g.b.push_context(save);
                 loop_ctx = Some(lc);
@@ -3882,8 +3882,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let copies: Vec<Reg>;
             let mut iter_ctx: Option<Reg> = None;
             if per_iteration {
-                copies = (0..slots).map(|_| g.b.temp()).collect();
-                let iter_ctx_reg = g.b.temp();
+                copies = (0..slots).map(|_| g.b.legacy_temp()).collect();
+                let iter_ctx_reg = g.b.legacy_temp();
                 // the first iteration starts from a copy of the head
                 // context: values copied out, fresh sibling pushed
                 g.emit_iteration_context_copy(Some(iter_ctx_reg), slots, &copies, ctx_save);
@@ -4018,7 +4018,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let labels = self.take_labels();
         // evaluate the discriminant once into a temp
         self.expr(&s.discriminant)?;
-        let d = self.b.stage_acc();
+        let d = self.b.legacy_stage_acc();
         let breaks = self.b.new_label();
         self.breakables.push(Breakable {
             labels,
@@ -4035,10 +4035,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             match &case.test {
                 Some(test) => {
                     self.expr(test)?;
-                    let t = self.b.stage_acc();
+                    let t = self.b.legacy_stage_acc();
                     self.b.load(d);
                     self.b.equal_strict(t);
-                    self.b.drop_temp();
+                    self.b.legacy_drop_temp();
                     self.b.jump_if_truthy(bodies[i]);
                 }
                 None => default_idx = Some(i),
@@ -4063,7 +4063,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let (breaks, _) = self.end_breakable();
         self.b.bind(breaks);
         self.b.bind(end);
-        self.b.drop_temp(); // discriminant
+        self.b.legacy_drop_temp(); // discriminant
         Ok(())
     }
 
@@ -4078,7 +4078,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // the handler restores absolutely so the catch block's
             // context-slot accesses see the context of the enclosing
             // statement
-            let try_ctx = g.b.temp();
+            let try_ctx = g.b.legacy_temp();
             g.b.load_context();
             g.b.store(try_ctx);
             let t = g.b.begin_try();
@@ -4097,9 +4097,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 if let Some(param) = &h.param {
                     match &param.pattern {
                         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
-                            let value = g.b.stage_acc();
+                            let value = g.b.legacy_stage_acc();
                             g.emit_binding_pattern(&param.pattern, value)?;
-                            g.b.drop_temp();
+                            g.b.legacy_drop_temp();
                         }
                         BindingPattern::BindingIdentifier(b) => {
                             let Some(sym) = b.symbol_id.get() else {
@@ -4160,10 +4160,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             return Ok(());
         };
         self.expr(v)?;
-        let t = self.b.stage_acc();
+        let t = self.b.legacy_stage_acc();
         // acc === undefined → return this
         self.b.load_undefined();
-        let u = self.b.stage_acc();
+        let u = self.b.legacy_stage_acc();
         self.b.load(t);
         self.b.equal_strict(u);
         let is_obj = self.b.new_label();
@@ -4177,8 +4177,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         self.b.load(t);
         self.pop_frame_context();
         self.b.ret();
-        self.b.drop_temp(); // u
-        self.b.drop_temp(); // t
+        self.b.legacy_drop_temp(); // u
+        self.b.legacy_drop_temp(); // t
         Ok(())
     }
 
@@ -4256,7 +4256,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         });
         if non_simple {
             let n = params.len() as u32;
-            let staged_base = self.b.reserve_temps(n);
+            let staged_base = self.b.legacy_reserve_temps(n);
             // stage the incoming arguments (missing ones arrive as
             // undefined through frame padding)
             for i in 0..n {
@@ -4319,7 +4319,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     )?;
                 }
             }
-            self.b.drop_temps(self.b.temp_depth() - n); // staged parameter window
+            self.b.legacy_drop_temps(self.b.temp_depth() - n); // staged parameter window
         } else {
             // context-allocated parameters: copy the argument into its
             // slot (captured params and direct-eval scopes force params
@@ -4374,9 +4374,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.with_temps(|g| {
                     // (ctor, instance): ctor rides the top slot
                     g.emit_this_load_own();
-                    let instance = g.b.stage_acc();
+                    let instance = g.b.legacy_stage_acc();
                     g.b.load_current_closure();
-                    let ctor = g.b.temp();
+                    let ctor = g.b.legacy_temp();
                     g.b.store(ctor);
                     g.b.call_runtime(BuiltinFn::InitInstanceFields, RegList::new(instance, 2));
                     Ok(())
@@ -4394,9 +4394,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.with_temps(|g| {
                 // (ctor, instance): ctor rides the top slot
                 g.emit_this_load_own();
-                let instance = g.b.stage_acc();
+                let instance = g.b.legacy_stage_acc();
                 g.b.load_current_closure();
-                let ctor = g.b.temp();
+                let ctor = g.b.legacy_temp();
                 g.b.store(ctor);
                 g.b.call_runtime(BuiltinFn::InitInstanceFields, RegList::new(instance, 2));
                 Ok(())

@@ -374,6 +374,7 @@ impl<'a> FunctionGen<'a> {
     // -- expressions -------------------------------------------------------
 
     fn expr(&mut self, node: NodeId) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
         match *self.ast.node(node) {
             Node::Number(f) => {
                 // (2^53 − 1: largest exactly-representable integer)
@@ -422,20 +423,18 @@ impl<'a> FunctionGen<'a> {
             Node::Array { elements } => self.emit_array(elements),
             Node::Get { recv, name } => {
                 self.expr(recv)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.stage_acc(&temps);
                 let name = self.name_constant(name);
                 let feedback = self.b.new_feedback();
                 self.b.load_named_property(obj, name, feedback);
-                self.b.drop_temp();
                 Ok(())
             }
             Node::Index { recv, key } => {
                 self.expr(recv)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.stage_acc(&temps);
                 self.expr(key)?;
                 let feedback = self.b.new_feedback();
                 self.b.load_keyed_property(obj, feedback);
-                self.b.drop_temp();
                 Ok(())
             }
             Node::Send { recv, name, args } => self.emit_send(recv, name, args),
@@ -448,10 +447,9 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
             Node::If { .. } => {
-                let result = self.b.temp();
+                let result = temps.temp();
                 self.emit_if(node, result)?;
                 self.b.load(result);
-                self.b.drop_temp();
                 Ok(())
             }
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
@@ -473,16 +471,16 @@ impl<'a> FunctionGen<'a> {
     ) -> Result<(), CompileError> {
         let args: Vec<NodeId> = self.ast.list_items(args).to_vec();
         let argc = args.len() as u32;
-        let mark = self.b.temp_depth();
+        let temps = self.b.temp_scope();
         self.expr(recv)?;
-        let recv_reg = self.b.stage_acc();
+        let recv_reg = self.b.stage_acc(&temps);
         let name = self.name_constant(name);
         let feedback = self.b.new_feedback();
         self.b.load_named_property(recv_reg, name, feedback);
         // argument window [args_base .. args_base+argc]: element 0 (the
         // receiver) rides the top slot, argument i sits argc-1-i in; the
         // callee rides above
-        let args_base = self.b.reserve_temps(argc + 2);
+        let args_base = temps.reserve(argc + 2);
         let top = args_base.index() + argc as i32;
         let callee_reg = Reg::new(top + 1);
         self.b.store(callee_reg);
@@ -493,7 +491,6 @@ impl<'a> FunctionGen<'a> {
         self.b.move_reg(Reg::new(top), recv_reg);
         self.b
             .call_no_feedback(callee_reg, RegList::new(args_base, argc + 1));
-        self.b.drop_temps(mark);
         Ok(())
     }
 
@@ -502,11 +499,11 @@ impl<'a> FunctionGen<'a> {
     fn emit_call(&mut self, callee: NodeId, args: NodeList) -> Result<(), CompileError> {
         let args: Vec<NodeId> = self.ast.list_items(args).to_vec();
         let argc = args.len() as u32;
-        let mark = self.b.temp_depth();
+        let temps = self.b.temp_scope();
         self.expr(callee)?;
         // window [recv, args...]: element 0 rides the top slot, argument
         // i sits argc-1-i in; the callee rides above and is its own recv
-        let args_base = self.b.reserve_temps(argc + 2);
+        let args_base = temps.reserve(argc + 2);
         let top = args_base.index() + argc as i32;
         let callee_reg = Reg::new(top + 1);
         self.b.store(callee_reg);
@@ -517,7 +514,6 @@ impl<'a> FunctionGen<'a> {
         }
         self.b
             .call_no_feedback(callee_reg, RegList::new(args_base, argc + 1));
-        self.b.drop_temps(mark);
         Ok(())
     }
 
@@ -525,6 +521,7 @@ impl<'a> FunctionGen<'a> {
     /// the Self-style `NoShadow` store (holder write, own define on miss),
     /// elements the matching keyed form.
     fn emit_assign(&mut self, target: NodeId, value: NodeId) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
         match *self.ast.node(target) {
             Node::Ident(_) => {
                 self.expr(value)?;
@@ -533,24 +530,21 @@ impl<'a> FunctionGen<'a> {
             }
             Node::Get { recv, name } => {
                 self.expr(recv)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.stage_acc(&temps);
                 let name = self.name_constant(name);
                 self.expr(value)?;
                 let feedback = self.b.new_feedback();
                 self.b.store_named_property_no_shadow(obj, name, feedback);
-                self.b.drop_temp();
                 Ok(())
             }
             Node::Index { recv, key } => {
                 self.expr(recv)?;
-                let obj = self.b.stage_acc();
+                let obj = self.b.stage_acc(&temps);
                 self.expr(key)?;
-                let key = self.b.stage_acc();
+                let key = self.b.stage_acc(&temps);
                 self.expr(value)?;
                 let feedback = self.b.new_feedback();
                 self.b.store_keyed_property(obj, key, feedback);
-                self.b.drop_temp();
-                self.b.drop_temp();
                 Ok(())
             }
             _ => self.err(target, "assignment target"),
@@ -564,6 +558,7 @@ impl<'a> FunctionGen<'a> {
     /// array-kind receiver (elements only exist there), so a literal with
     /// any element slot is created as an array.
     fn emit_object(&mut self, node: NodeId) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
         let Node::Object(parts) = self.ast.node(node) else {
             unreachable!("emit_object called on an Object node");
         };
@@ -586,10 +581,9 @@ impl<'a> FunctionGen<'a> {
         } else {
             self.b.create_empty_object_literal();
         }
-        let obj = self.b.stage_acc();
+        let obj = self.b.stage_acc(&temps);
         self.emit_slots(&parts, obj)?;
         self.b.load(obj);
-        self.b.drop_temp();
         Ok(())
     }
 
@@ -631,12 +625,12 @@ impl<'a> FunctionGen<'a> {
                     key,
                     value,
                 } => {
+                    let temps = self.b.temp_scope();
                     self.expr(key)?;
-                    let key = self.b.stage_acc();
+                    let key = self.b.stage_acc(&temps);
                     self.expr(value)?;
                     let feedback = self.b.new_feedback();
                     self.b.store_keyed_property(obj, key, feedback);
-                    self.b.drop_temp();
                 }
                 _ => unreachable!("object slots are Slot nodes"),
             }
@@ -646,31 +640,32 @@ impl<'a> FunctionGen<'a> {
 
     fn emit_array(&mut self, elements: NodeList) -> Result<(), CompileError> {
         let elements: Vec<NodeId> = self.ast.list_items(elements).to_vec();
+        let temps = self.b.temp_scope();
         self.b.create_empty_array_literal();
-        let array = self.b.stage_acc();
+        let array = self.b.stage_acc(&temps);
         for (i, &element) in elements.iter().enumerate() {
+            let elem_temps = self.b.temp_scope();
             self.b.load_smi(i as i32);
-            let index = self.b.stage_acc();
+            let index = self.b.stage_acc(&elem_temps);
             self.expr(element)?;
             // literal elements are explicit layout: the store may grow
             let feedback = self.b.new_feedback();
             self.b.store_keyed_property(array, index, feedback);
-            self.b.drop_temp();
         }
         self.b.load(array);
-        self.b.drop_temp();
         Ok(())
     }
 
     // -- operators and control flow -----------------------------------------
 
     fn emit_binary(&mut self, op: BinaryOp, lhs: NodeId, rhs: NodeId) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
         match op {
             BinaryOp::And | BinaryOp::Or => {
                 // short-circuit: the lhs rides a temp; the rhs replaces it
                 // only when the lhs did not decide
                 self.expr(lhs)?;
-                let lhs_reg = self.b.stage_acc();
+                let lhs_reg = self.b.stage_acc(&temps);
                 let end = self.b.new_label();
                 if op == BinaryOp::And {
                     self.b.jump_if_falsy(end);
@@ -681,7 +676,6 @@ impl<'a> FunctionGen<'a> {
                 self.b.store(lhs_reg);
                 self.b.bind(end);
                 self.b.load(lhs_reg);
-                self.b.drop_temp();
                 Ok(())
             }
             BinaryOp::Eq
@@ -698,9 +692,9 @@ impl<'a> FunctionGen<'a> {
                 // evaluate in source order into two temps, then orient:
                 // comparisons compute `acc OP reg`, arithmetic `reg OP acc`
                 self.expr(lhs)?;
-                let lhs_reg = self.b.stage_acc();
+                let lhs_reg = self.b.stage_acc(&temps);
                 self.expr(rhs)?;
-                let rhs_reg = self.b.stage_acc();
+                let rhs_reg = self.b.stage_acc(&temps);
                 match op {
                     BinaryOp::Eq
                     | BinaryOp::Ne
@@ -739,8 +733,6 @@ impl<'a> FunctionGen<'a> {
                     }
                     BinaryOp::And | BinaryOp::Or => unreachable!("handled above"),
                 }
-                self.b.drop_temp();
-                self.b.drop_temp();
                 Ok(())
             }
         }

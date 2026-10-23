@@ -135,15 +135,17 @@ fn staged_runtime_calls_lay_out_the_window_in_order() {
     // SetFunctionName(closure = acc, name, prefix): the accumulator value
     // must be captured into slot 0 even though later loads clobber acc
     let mut b = FnBuilder::new(0);
-    b.load_name(b"fn");
-    let obj = b.stage_acc();
-    let name = b.name(b"key");
-    b.call_runtime_staged(
-        BuiltinFn::SetFunctionName,
-        &[RtArg::Acc, RtArg::Const(name), RtArg::Smi(2)],
-    );
-    b.load(obj);
-    b.drop_temp();
+    {
+        let temps = b.temp_scope();
+        b.load_name(b"fn");
+        let obj = b.stage_acc(&temps);
+        let name = b.name(b"key");
+        b.call_runtime_staged(
+            BuiltinFn::SetFunctionName,
+            &[RtArg::Acc, RtArg::Const(name), RtArg::Smi(2)],
+        );
+        b.load(obj);
+    }
     b.ret();
 
     let f = b.finish(meta()).unwrap();
@@ -312,20 +314,20 @@ fn temps_allocate_above_temp_base_and_size_the_frame() {
     let mut b = FnBuilder::new(2);
     b.set_temp_base(3); // frontend owns locals 0..3
 
-    b.load_smi(1);
-    let a = b.stage_acc(); // temp 3
-    let b_ = b.temp(); // temp 4
-    b.load_smi(2);
-    b.store(b_);
-    b.load(a);
-    b.add(b_);
-    b.store(Reg::new(0)); // a frontend local
-    b.drop_temp();
-    b.drop_temp();
+    {
+        let temps = b.temp_scope();
+        b.load_smi(1);
+        let a = b.stage_acc(&temps); // temp 3
+        let b_ = temps.temp(); // temp 4
+        b.load_smi(2);
+        b.store(b_);
+        b.load(a);
+        b.add(b_);
+        b.store(Reg::new(0)); // a frontend local
+        assert_eq!(a, Reg::new(3));
+        assert_eq!(b_, Reg::new(4));
+    }
     b.ret();
-
-    assert_eq!(a, Reg::new(3));
-    assert_eq!(b_, Reg::new(4));
 
     let f = b.finish(meta()).unwrap();
     assert_eq!(f.register_count, 5, "locals 0..3 plus temps 3,4");
@@ -334,13 +336,59 @@ fn temps_allocate_above_temp_base_and_size_the_frame() {
 }
 
 #[test]
-fn unbalanced_temps_fail_finish() {
+fn temp_scope_releases_on_early_return() {
+    fn stage_then_try(b: &mut FnBuilder, proceed: Option<()>) -> Option<Reg> {
+        let temps = b.temp_scope();
+        let t = b.stage_acc(&temps);
+        proceed?;
+        Some(t)
+    }
+
     let mut b = FnBuilder::new(0);
     b.load_zero();
-    let _t = b.stage_acc();
+    assert!(stage_then_try(&mut b, None).is_none());
+    assert_eq!(b.temp_depth(), 0, "scope released on the `?` path");
+    {
+        let temps = b.temp_scope();
+        let t = b.stage_acc(&temps);
+        assert_eq!(t, Reg::new(0));
+    }
     b.ret();
-    let err = b.finish(meta()).unwrap_err();
-    assert_eq!(err, BuildError::UnbalancedTemps);
+    b.finish(meta()).unwrap();
+}
+
+#[test]
+fn temp_scopes_nest_and_release_lifo() {
+    let mut b = FnBuilder::new(0);
+    b.load_zero();
+    {
+        let outer = b.temp_scope();
+        let a = b.stage_acc(&outer);
+        assert_eq!(a, Reg::new(0));
+        {
+            let inner = b.temp_scope();
+            let c = b.stage_acc(&inner);
+            assert_eq!(c, Reg::new(1));
+        }
+        assert_eq!(b.temp_depth(), 1, "inner scope released only its own temp");
+        let d = b.stage_acc(&outer);
+        assert_eq!(d, Reg::new(1), "the inner temp register is reusable");
+    }
+    assert_eq!(b.temp_depth(), 0, "outer scope released the rest");
+    b.ret();
+    b.finish(meta()).unwrap();
+}
+
+#[test]
+fn leaked_temp_scope_is_unbalanced_at_finish() {
+    let mut b = FnBuilder::new(0);
+    b.load_zero();
+    let scope = b.temp_scope();
+    let _t = b.stage_acc(&scope);
+    // simulate a scope that never drops; finish must still see the depth
+    std::mem::forget(scope);
+    b.ret();
+    assert_eq!(b.finish(meta()).unwrap_err(), BuildError::UnbalancedTemps);
 }
 
 #[test]
@@ -1160,21 +1208,25 @@ fn worked_example_builds_valid_bytecode() {
     b.bind(head);
     b.load(i);
     b.load_smi(10);
-    let ten = b.stage_acc();
-    b.less_than(ten);
+    {
+        let temps = b.temp_scope();
+        let ten = b.stage_acc(&temps);
+        b.less_than(ten);
+    }
     b.jump_if_falsy(exit);
     b.load(sum);
     let site = b.new_feedback();
     b.load_named_property(obj, x, site);
     b.add(sum);
     b.store(sum);
-    b.drop_temp();
     b.load(i);
     b.load_smi(1);
-    let one = b.stage_acc();
-    b.add(one);
+    {
+        let temps = b.temp_scope();
+        let one = b.stage_acc(&temps);
+        b.add(one);
+    }
     b.store(i);
-    b.drop_temp();
     b.jump_loop(head);
 
     b.bind(exit);

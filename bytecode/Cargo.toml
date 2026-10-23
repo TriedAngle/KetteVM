@@ -2,3 +2,8 @@
 name = "bytecode"
 version = "0.1.0"
 edition.workspace = true
+
+[features]
+# Temporary: the JS frontend still allocates temps through the unscoped
+# FnBuilder API. Remove once js_compiler uses TempScope.
+legacy-temps = []

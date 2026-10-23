@@ -1,3 +1,4 @@
+use core::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -23,8 +24,8 @@ impl FnBuilder {
     /// `base + len - 1`), `obj` into slot 1, and the pooled constant into
     /// slot 2, then calls.
     pub fn call_runtime_staged(&mut self, f: crate::BuiltinFn, args: &[RtArg]) {
-        let mark = self.temp_depth();
-        let base = self.reserve_temps(args.len() as u32);
+        let temps = self.temp_scope();
+        let base = temps.reserve(args.len() as u32);
         let slot = |i: usize| Reg::new(base.index() + (args.len() - 1 - i) as i32);
         if let Some(i) = args.iter().position(|a| matches!(a, RtArg::Acc)) {
             self.store(slot(i));
@@ -48,7 +49,6 @@ impl FnBuilder {
             }
         }
         self.call_runtime(f, RegList::new(base, args.len() as u32));
-        self.drop_temps(mark);
     }
 }
 
@@ -314,6 +314,52 @@ enum Ev {
 
 static BUILDER_GEN: AtomicU32 = AtomicU32::new(1);
 
+/// RAII temp scope: releases every temp allocated since creation on drop,
+/// including on `?` and early return.
+pub struct TempScope {
+    depth: *const Cell<u32>,
+    base: u32,
+    mark: u32,
+}
+
+impl TempScope {
+    /// Depth at which this scope was opened.
+    pub fn mark(&self) -> u32 {
+        self.mark
+    }
+
+    fn depth(&self) -> &Cell<u32> {
+        // SAFETY: the guard drops before the builder (see `TempScope`).
+        unsafe { &*self.depth }
+    }
+
+    /// Allocate the next temporary register.
+    pub fn temp(&self) -> Reg {
+        let depth = self.depth();
+        let index = depth.get();
+        depth.set(index + 1);
+        Reg(self.base as i32 + index as i32)
+    }
+
+    /// Allocate `n` consecutive temporaries and return the first.
+    pub fn reserve(&self, n: u32) -> Reg {
+        let base = self.temp();
+        for _ in 1..n {
+            self.temp();
+        }
+        base
+    }
+}
+
+impl Drop for TempScope {
+    fn drop(&mut self) {
+        let depth = self.depth();
+        let current = depth.get();
+        debug_assert!(current >= self.mark, "temp scopes must drop LIFO");
+        depth.set(current.min(self.mark));
+    }
+}
+
 /// Emits the bytecode of one function.
 #[derive(Debug)]
 pub struct FnBuilder {
@@ -343,7 +389,8 @@ pub struct FnBuilder {
 
     // register allocation
     temp_base: u32,
-    temp_depth: u32,
+    /// [`TempScope`] points here; the builder must not move while a scope lives.
+    temp_depth: Cell<u32>,
     /// Most negative register operand emitted (deepest local).
     min_slot: i32,
 }
@@ -368,7 +415,7 @@ impl FnBuilder {
             acc: Acc::Dead,
             last: LastOp::None,
             temp_base: 0,
-            temp_depth: 0,
+            temp_depth: Cell::new(0),
             min_slot: REGISTER_FILE_START + 1,
         }
     }
@@ -376,7 +423,7 @@ impl FnBuilder {
     /// The first register index handed out by [`FnBuilder::temp`]: set this
     /// to one past the frontend's own locals so temps never collide.
     pub fn set_temp_base(&mut self, base: u32) {
-        debug_assert_eq!(self.temp_depth, 0, "temp base set with temps live");
+        debug_assert_eq!(self.temp_depth.get(), 0, "temp base set with temps live");
         self.temp_base = base;
     }
 
@@ -443,45 +490,63 @@ impl FnBuilder {
         Feedback(slot)
     }
 
-    /// Allocate the next temporary register.
-    pub fn temp(&mut self) -> Reg {
-        let r = Reg(self.temp_base as i32 + self.temp_depth as i32);
-        self.temp_depth += 1;
-        r
-    }
-
-    /// Allocate `n` consecutive temporary registers and return the first
-    /// (`base + 1` ... follow from its index) — the shape call argument
-    /// windows need.
-    pub fn reserve_temps(&mut self, n: u32) -> Reg {
-        let base = self.temp();
-        for _ in 1..n {
-            self.temp();
+    /// Open a [`TempScope`], the only way to allocate temps.
+    pub fn temp_scope(&self) -> TempScope {
+        TempScope {
+            // SAFETY: see the `TempScope` contract.
+            depth: &self.temp_depth as *const Cell<u32>,
+            base: self.temp_base,
+            mark: self.temp_depth.get(),
         }
-        base
     }
 
-    /// Store the accumulator into a fresh temporary and return its register.
-    pub fn stage_acc(&mut self) -> Reg {
-        let t = self.temp();
+    /// Store the accumulator into a fresh temporary from `temps`.
+    pub fn stage_acc(&mut self, temps: &TempScope) -> Reg {
+        let t = temps.temp();
         self.store(t);
         t
     }
 
-    /// Release the most recently allocated temporary.
-    pub fn drop_temp(&mut self) {
-        debug_assert!(self.temp_depth > 0, "temp underflow");
-        self.temp_depth -= 1;
-    }
-
-    /// Release all temps allocated above `mark` (a saved [`FnBuilder::temp_depth`]).
-    pub fn drop_temps(&mut self, mark: u32) {
-        debug_assert!(mark <= self.temp_depth, "temp mark above current depth");
-        self.temp_depth = mark;
-    }
-
     pub fn temp_depth(&self) -> u32 {
-        self.temp_depth
+        self.temp_depth.get()
+    }
+
+    // temporary: the JS frontend still uses the unscoped API
+    #[cfg(feature = "legacy-temps")]
+    pub fn legacy_temp(&mut self) -> Reg {
+        let depth = self.temp_depth.get();
+        self.temp_depth.set(depth + 1);
+        Reg(self.temp_base as i32 + depth as i32)
+    }
+
+    #[cfg(feature = "legacy-temps")]
+    pub fn legacy_reserve_temps(&mut self, n: u32) -> Reg {
+        let base = self.legacy_temp();
+        for _ in 1..n {
+            self.legacy_temp();
+        }
+        base
+    }
+
+    #[cfg(feature = "legacy-temps")]
+    pub fn legacy_stage_acc(&mut self) -> Reg {
+        let t = self.legacy_temp();
+        self.store(t);
+        t
+    }
+
+    #[cfg(feature = "legacy-temps")]
+    pub fn legacy_drop_temp(&mut self) {
+        let depth = self.temp_depth.get();
+        debug_assert!(depth > 0, "temp underflow");
+        self.temp_depth.set(depth - 1);
+    }
+
+    #[cfg(feature = "legacy-temps")]
+    pub fn legacy_drop_temps(&mut self, mark: u32) {
+        let depth = self.temp_depth.get();
+        debug_assert!(mark <= depth, "temp mark above current depth");
+        self.temp_depth.set(mark);
     }
 
     /// Whether the fall-through path is still reachable: false after
@@ -923,7 +988,7 @@ impl FnBuilder {
     /// Resolve labels, lay out the final code (widening long jumps), and
     /// freeze the function.
     pub fn finish(mut self, meta: FunctionMeta) -> Result<Function, BuildError> {
-        if self.temp_depth != 0 {
+        if self.temp_depth.get() != 0 {
             return Err(BuildError::UnbalancedTemps);
         }
         for jump in &self.jumps {
