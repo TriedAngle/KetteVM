@@ -21,23 +21,21 @@ persistent Cargo target volume.
 - `format`: `cargo fmt --all --check` and `cargo +nightly fmt --check` in
   `interpreter_become`
 - `build`: builds every variant used by the other jobs, including match and
-  nightly become release binaries, test262 examples, match GC-stress test
-  binaries, and the `interpreter_become` test binaries
-- `test`: stable match tests and the `interpreter_become` tests
+  nightly become release binaries, test262 examples, match and become test
+  binaries, GC-stress test binaries, and the `interpreter_become` test binaries
+- `test`: stable match tests, nightly become tests, and the
+  `interpreter_become` tests
 
 `Extended checks (master)` runs on every push to `master`:
 - `test262-match`
 - `test262-become` (nightly become)
 - `gc-stress-match`
-- `gc-stress-become` (nightly become `interpreter_become` stress suite)
+- `gc-stress-become` (workspace become GC stress plus the
+  `interpreter_become` stress suite)
 
-The full `vm` workspace under `--features vm/fast` currently has five known
-`vm/tests/elements_ic.rs` failures, so that combination is not gated. Become
-coverage comes from `test262-become` and the `interpreter_become` tests.
 Benchmark-style tests (`bench`, `deltablue`, `fannkuch`, `nbody`) are excluded
-from the become GC-stress run; they still run non-stress in `test`. The match
-GC-stress run uses the workspace tests, which do not include those benchmark
-files.
+from the `interpreter_become` GC-stress run; they still run non-stress in
+`test`. The workspace GC-stress runs include the normal `vm` tests.
 
 The extended jobs run in this order and share the Cargo target cache. Each
 master job reports one check run; no duplicate commit status is posted.

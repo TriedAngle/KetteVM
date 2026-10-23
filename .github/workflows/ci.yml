@@ -72,6 +72,12 @@ jobs:
           cargo +nightly build --release -p vm --features fast --locked
           cargo +nightly build --release -p vm --example test262 --features fast --locked
 
+      - name: Build tests (nightly become)
+        run: cargo +nightly test --workspace --locked --no-run --features vm/fast
+
+      - name: Build GC-stress tests (nightly become)
+        run: cargo +nightly test --workspace --locked --no-run --features vm/stress-minor-gc,vm/fast
+
       - name: Build interpreter_become tests
         working-directory: interpreter_become
         run: |
@@ -96,6 +102,9 @@ jobs:
 
       - name: Test (stable match)
         run: cargo test --workspace --locked
+
+      - name: Test (nightly become)
+        run: cargo +nightly test --workspace --locked --features vm/fast
 
       - name: Test (interpreter_become)
         working-directory: interpreter_become

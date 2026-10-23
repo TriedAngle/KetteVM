@@ -118,7 +118,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: GC stress (nightly become)
+      - name: GC stress (workspace become)
+        run: cargo +nightly test --workspace --locked --features vm/stress-minor-gc,vm/fast
+
+      - name: GC stress (interpreter_become package)
         working-directory: interpreter_become
         # Benchmark-style tests are excluded from GC stress; they still run
         # non-stress in the `test` job.

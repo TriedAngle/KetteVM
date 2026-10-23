@@ -145,6 +145,7 @@ fn compare_body<'a>(
         };
         let b = match cmp {
             0 => Compare::equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
+            1 => Ok(Compare::strict_equal(heap, x.as_tagged(heap), y.as_tagged(heap))),
             2 => Compare::less_than(heap, x.as_tagged(heap), y.as_tagged(heap)),
             3 => Compare::less_than_or_equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
             4 => Compare::greater_than(heap, x.as_tagged(heap), y.as_tagged(heap)),
