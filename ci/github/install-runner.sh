@@ -115,8 +115,10 @@ Next:
   docker build -t kettevm-ci:1 .github/ci
   docker tag kettevm-ci:1 localhost:5000/kettevm-ci:1
   docker push localhost:5000/kettevm-ci:1
+  docker volume create kettevm-cargo-target
+  docker run --rm -v kettevm-cargo-target:/target alpine chown -R 1501:1501 /target
   ./ci/github/update-test262.sh
 
-The runner needs the local registry, the published image, and the
-kettevm-test262 volume before jobs can run.
+The runner needs the local registry, the published image, the shared Cargo
+target volume, and the kettevm-test262 volume before jobs can run.
 EOF

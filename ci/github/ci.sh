@@ -15,6 +15,7 @@ cargo fmt --all --check
 )
 
 cargo test --workspace --locked
+cargo +nightly test --workspace --locked --features vm/fast
 cargo test --workspace --locked --features vm/stress-minor-gc
 cargo build --release -p vm --locked
 cargo +nightly build --release -p vm --features fast --locked
@@ -28,17 +29,21 @@ cargo +nightly build --release -p vm --features fast --locked
 # cargo clippy --workspace --all-targets -- -D warnings
 
 if [[ "${CI_TEST262:-0}" == 1 ]]; then
-    docker run --rm \
-        --user "$(id -u):$(id -g)" \
-        -e CARGO_HOME=/tmp/cargo \
-        -e HOME=/tmp \
-        -e TEST262_DIR=/test262 \
-        -e TEST262_MIN_PASS="${TEST262_MIN_PASS:-}" \
-        -e TEST262_MAX_PANIC="${TEST262_MAX_PANIC:-}" \
-        -e KETTEVM_JOBS="${KETTEVM_JOBS:-}" \
-        -v "$root:$root" \
-        -w "$root" \
-        -v kettevm-test262:/test262:ro \
-        kettevm-ci:1 \
-        ./ci/github/test262.sh
+    read -r -a engines <<< "${TEST262_ENGINES:-match become}"
+    for engine in "${engines[@]}"; do
+        docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e CARGO_HOME=/tmp/cargo \
+            -e HOME=/tmp \
+            -e TEST262_DIR=/test262 \
+            -e TEST262_ENGINE="$engine" \
+            -e TEST262_MIN_PASS="${TEST262_MIN_PASS:-}" \
+            -e TEST262_MAX_PANIC="${TEST262_MAX_PANIC:-}" \
+            -e KETTEVM_JOBS="${KETTEVM_JOBS:-}" \
+            -v "$root:$root" \
+            -w "$root" \
+            -v kettevm-test262:/test262:ro \
+            kettevm-ci:1 \
+            ./ci/github/test262.sh
+    done
 fi

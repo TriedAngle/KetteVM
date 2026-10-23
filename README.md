@@ -1,6 +1,8 @@
 # KetteVM
 
-[![CI](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml)
+[![CI](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml)
+[![test262 match](https://img.shields.io/badge/test262%20match-11745%20passing-brightgreen)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
+[![test262 become](https://img.shields.io/badge/test262%20become-11828%20passing-brightgreen)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
 
 A fast virtual machine for dynamic languages.
 
@@ -30,11 +32,13 @@ Combine with the fast interpreter:
 
 ## CI
 
-CI runs on the project's self-hosted runner. Regression checks run on every
-PR; the full test262 suite runs on every `master` push, can be triggered
-manually for a PR, and is required for merging. See
-[.github/CI.md](.github/CI.md) for the runner setup,
-test262 baseline, and local equivalents:
+CI runs on the project's self-hosted runner. The `CI` workflow runs `format`,
+`build`, and `test` on every PR and on `master`. Extended checks
+(`test262-match`, `test262-become`, `gc-stress-match`, `gc-stress-become`)
+run automatically on `master` and can be triggered for a PR with the
+**Extended checks (PR)** workflow; they are required for merging. See
+[.github/CI.md](.github/CI.md) for the runner setup, test262 baseline, and
+local equivalents:
 
-    ./ci/github/ci.sh              # regression checks
-    CI_TEST262=1 ./ci/github/ci.sh # also run test262
+    ./ci/github/ci.sh              # format, build, and tests
+    CI_TEST262=1 ./ci/github/ci.sh # also run test262 for both engines

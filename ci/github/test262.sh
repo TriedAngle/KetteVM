@@ -12,8 +12,17 @@ cd "$root"
 test262="${TEST262_DIR:-/test262}"
 baseline_file="$root/.github/test262-baseline"
 log="$root/test262.log"
+engine="${TEST262_ENGINE:-match}"
 # The baseline in .github/test262-baseline was calibrated with 64 workers.
 export KETTEVM_JOBS="${KETTEVM_JOBS:-64}"
+
+case "$engine" in
+    match | become) ;;
+    *)
+        echo "TEST262_ENGINE must be 'match' or 'become', got '$engine'" >&2
+        exit 2
+        ;;
+esac
 
 if [[ ! -f "$test262/harness/sta.js" || ! -f "$test262/harness/assert.js" || ! -d "$test262/test" ]]; then
     echo "test262 corpus not found at $test262" >&2
@@ -23,11 +32,11 @@ fi
 
 min_pass="${TEST262_MIN_PASS:-}"
 if [[ -z "$min_pass" ]]; then
-    min_pass="$(awk -F= '/^min_pass=/{print $2; exit}' "$baseline_file")"
+    min_pass="$(awk -F= '$1 == "min_pass" { print $2; exit }' "$baseline_file")"
 fi
 max_panic="${TEST262_MAX_PANIC:-}"
 if [[ -z "$max_panic" ]]; then
-    max_panic="$(awk -F= '/^max_panic=/{print $2; exit}' "$baseline_file")"
+    max_panic="$(awk -F= '$1 == "max_panic" { print $2; exit }' "$baseline_file")"
 fi
 : "${min_pass:?missing min_pass in $baseline_file}"
 : "${max_panic:?missing max_panic in $baseline_file}"
@@ -42,8 +51,14 @@ else
     echo "test262 corpus: $test262 (not a git checkout)"
 fi
 
+if [[ "$engine" == "become" ]]; then
+    cargo_cmd=(cargo +nightly run --release --locked -p vm --example test262 --features fast --)
+else
+    cargo_cmd=(cargo run --release --locked -p vm --example test262 --)
+fi
+
 set +e
-cargo run --release --locked -p vm --example test262 -- \
+"${cargo_cmd[@]}" \
     "$test262/harness/sta.js" \
     "$test262/harness/assert.js" \
     "$test262/test" >"$log" 2>&1
@@ -55,7 +70,7 @@ set -e
 sed -n '/^total:/,/^skipped panic:/p' "$log" || true
 failure_lines="$(grep -cE '^  (FAIL|PANIC) ' "$log" || true)"
 if (( failure_lines > 100 )); then
-    echo "test262: showing first 100 of $failure_lines failures; full log is the test262-log artifact"
+    echo "test262[$engine]: showing first 100 of $failure_lines failures; full log is the test262[$engine]-log artifact"
 fi
 grep -E '^  (FAIL|PANIC) ' "$log" | head -n 100 || true
 
@@ -65,28 +80,28 @@ total="$(awk '/^total:/{print $2; exit}' "$log")"
 fail="$(awk '/^fail:/{print $2; exit}' "$log")"
 
 if [[ -z "$pass" || -z "$panic" || -z "$total" || -z "$fail" ]]; then
-    echo "::error::test262 runner did not produce a summary (exit $runner_status)"
+    echo "::error::test262[$engine] runner did not produce a summary (exit $runner_status)"
     tail -n 100 "$log" || true
     exit "${runner_status:-1}"
 fi
 
 echo
-echo "test262: total=$total pass=$pass fail=$fail panic=$panic"
-echo "test262: baseline min_pass=$min_pass max_panic=$max_panic"
+echo "test262[$engine]: total=$total pass=$pass fail=$fail panic=$panic"
+echo "test262[$engine]: baseline min_pass=$min_pass max_panic=$max_panic"
 
 if (( total == 0 )); then
-    echo "::error::test262 ran zero tests"
+    echo "::error::test262[$engine] ran zero tests"
     exit 1
 fi
 if (( pass < min_pass )); then
-    echo "::error::test262 pass count $pass is below baseline $min_pass"
+    echo "::error::test262[$engine] pass count $pass is below baseline $min_pass"
     exit 1
 fi
 if (( panic > max_panic )); then
-    echo "::error::test262 panic count $panic exceeds baseline $max_panic"
+    echo "::error::test262[$engine] panic count $panic exceeds baseline $max_panic"
     exit 1
 fi
 
 if (( runner_status != 0 )); then
-    echo "test262 runner exited $runner_status (known failures/panics); pass-count gate passed"
+    echo "test262[$engine] runner exited $runner_status (known failures/panics); pass-count gate passed"
 fi

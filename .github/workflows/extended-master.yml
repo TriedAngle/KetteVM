@@ -1,0 +1,130 @@
+name: Extended checks (master)
+
+# Runs automatically on every push to master. These jobs report their own
+# check runs; no extra commit status is posted, so each check appears once.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-master-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: /target
+
+jobs:
+  test262-match:
+    name: test262-match
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 30
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+        - kettevm-test262:/test262:ro
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run test262 (match)
+        env:
+          TEST262_ENGINE: match
+        run: ./ci/github/test262.sh
+
+      - name: Upload test262 log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-match-log-${{ github.sha }}
+          path: test262.log
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  test262-become:
+    name: test262-become
+    needs: test262-match
+    if: always()
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 30
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+        - kettevm-test262:/test262:ro
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run test262 (nightly become)
+        env:
+          TEST262_ENGINE: become
+        run: ./ci/github/test262.sh
+
+      - name: Upload test262 log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-become-log-${{ github.sha }}
+          path: test262.log
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  gc-stress-match:
+    name: gc-stress-match
+    needs: test262-become
+    if: always()
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 30
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: GC stress (match)
+        run: cargo test --workspace --locked --features vm/stress-minor-gc
+
+  gc-stress-become:
+    name: gc-stress-become
+    needs: gc-stress-match
+    if: always()
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 30
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: GC stress (nightly become)
+        working-directory: interpreter_become
+        # Benchmark-style tests are excluded from GC stress; they still run
+        # non-stress in the `test` job.
+        run: |
+          cargo +nightly test --release --locked --features stress-minor-gc -- \
+            --skip bench \
+            --skip deltablue \
+            --skip fannkuch \
+            --skip nbody

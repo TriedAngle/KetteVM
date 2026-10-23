@@ -14,15 +14,16 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TARGET_DIR: /target
+
 jobs:
-  regression:
-    name: regression
+  format:
+    name: format
     runs-on: [self-hosted, kettevm-ci]
-    timeout-minutes: 20
+    timeout-minutes: 10
     container:
       image: localhost:5000/kettevm-ci:1
-      # Must match the ghrunner UID/GID in .github/ci/Dockerfile and
-      # ci/github/install-runner.sh.
       options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
     steps:
       - uses: actions/checkout@v4
@@ -37,23 +38,65 @@ jobs:
         working-directory: interpreter_become
         run: cargo +nightly fmt --check
 
-      - name: Test (stable)
+  build:
+    name: build
+    needs: format
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 40
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        # Shared Cargo target cache. The build job warms every variant so the
+        # test and extended-check jobs only have to run the binaries.
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build release (match)
+        run: |
+          cargo build --release -p vm --locked
+          cargo build --release -p vm --example test262 --locked
+
+      - name: Build tests (match)
+        run: cargo test --workspace --locked --no-run
+
+      - name: Build GC-stress tests (match)
+        run: cargo test --workspace --locked --no-run --features vm/stress-minor-gc
+
+      - name: Build release (nightly become)
+        run: |
+          cargo +nightly build --release -p vm --features fast --locked
+          cargo +nightly build --release -p vm --example test262 --features fast --locked
+
+      - name: Build interpreter_become tests
+        working-directory: interpreter_become
+        run: |
+          cargo +nightly test --release --locked --no-run
+          cargo +nightly test --release --locked --features stress-minor-gc --no-run
+
+  test:
+    name: test
+    needs: build
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 20
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Test (stable match)
         run: cargo test --workspace --locked
 
-      - name: Test (minor-GC stress)
-        run: cargo test --workspace --locked --features vm/stress-minor-gc
-
-      - name: Build (stable release)
-        run: cargo build --release -p vm --locked
-
-      - name: Build (nightly fast interpreter)
-        run: cargo +nightly build --release -p vm --features fast --locked
-
-      - name: Test (nightly interpreter_become)
+      - name: Test (interpreter_become)
         working-directory: interpreter_become
         run: cargo +nightly test --release --locked
-
-      # Clippy is not clean yet (2 errors + many warnings). Enable this once
-      # the existing findings are fixed:
-      # - name: Clippy
-      #   run: cargo clippy --workspace --all-targets -- -D warnings
