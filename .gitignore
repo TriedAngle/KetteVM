@@ -1,9 +1,11 @@
 # Rust build output, at any depth
 target/
+target-become/
 
-# Lockfile, at any depth
-Cargo.lock
 tmp/
+# CI logs (uploaded as artifacts)
+test262.log
+perf-results.md
 # Local benchmark results (regenerated per run)
 benchmarks/BENCHMARKS.md
 .vscode

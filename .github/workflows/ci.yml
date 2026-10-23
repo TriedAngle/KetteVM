@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: regression
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 20
+    container:
+      image: kettevm-ci:1
+      # Must match the ghrunner UID/GID in .github/ci/Dockerfile and
+      # ci/github/install-runner.sh.
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Format (workspace)
+        run: cargo fmt --all --check
+
+      - name: Format (interpreter_become)
+        working-directory: interpreter_become
+        run: cargo +nightly fmt --check
+
+      - name: Test (stable)
+        run: cargo test --workspace --locked
+
+      - name: Test (minor-GC stress)
+        run: cargo test --workspace --locked --features vm/stress-minor-gc
+
+      - name: Build (stable release)
+        run: cargo build --release -p vm --locked
+
+      - name: Build (nightly fast interpreter)
+        run: cargo +nightly build --release -p vm --features fast --locked
+
+      - name: Test (nightly interpreter_become)
+        working-directory: interpreter_become
+        run: cargo +nightly test --release --locked
+
+      # Clippy is not clean yet (2 errors + many warnings). Enable this once
+      # the existing findings are fixed:
+      # - name: Clippy
+      #   run: cargo clippy --workspace --all-targets -- -D warnings

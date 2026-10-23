@@ -1,0 +1,14 @@
+# test262 gate for KetteVM.
+#
+# The runner has many known failures, so CI does not require a clean run.
+# It requires at least `min_pass` tests to pass, and no more than
+# `max_panic` caught panics. Update these intentionally when coverage or the
+# corpus changes.
+#
+# Calibrated against test262 main:
+#   d53ebc8b1931d9f1541e43d59650776e4b766248
+# with KETTEVM_JOBS=64:
+#   total=53910 pass=11745 fail=15531 panic=45
+corpus_commit=d53ebc8b1931d9f1541e43d59650776e4b766248
+min_pass=11745
+max_panic=45

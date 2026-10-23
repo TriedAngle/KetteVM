@@ -1,0 +1,52 @@
+name: Performance
+
+# Manual-only for now. The benchmark harness is intentionally not a required
+# PR check: it is noisy on a shared machine. Add thresholds/regression checks
+# here once a stable baseline exists.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: bench
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 45
+    container:
+      image: kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build (stable match-loop interpreter)
+        run: cargo build --release -p vm --locked
+
+      - name: Build (nightly fast interpreter)
+        run: cargo +nightly build --release -p vm --features fast --locked --target-dir target-become
+
+      - name: Run benchmark harness
+        run: |
+          set -euo pipefail
+          ./benchmarks/bench.sh \
+            target/release/kettevm \
+            target-become/release/kettevm \
+            | tee perf-results.md
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: perf-results.md
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 30
