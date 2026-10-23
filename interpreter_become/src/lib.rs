@@ -19,6 +19,7 @@ use vm_core::{
     Object, Ops, Regs, ScopeInfo, Smi, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
 };
 
+pub mod register_probe;
 mod macros;
 mod slow;
 mod utils;

@@ -172,12 +172,7 @@ fn step<'h, const STRIDE: usize>(
         Opcode::Load => *ip = op_load::<STRIDE>(ctx, *ip, *regs, acc),
         Opcode::Store => *ip = op_store::<STRIDE>(ctx, *ip, *regs, *acc),
         Opcode::Add => *ip = op_add::<STRIDE>(ctx, *ip, *regs, acc, exit),
-        Opcode::Wide => {
-            if STRIDE == 2 {
-                unreachable!("Wide Wide is not emitted");
-            }
-            step::<2>(ctx, ip, regs, acc, exit, frame_base);
-        }
+        Opcode::Wide => step::<2>(ctx, ip, regs, acc, exit, frame_base),
         Opcode::Call => *ip = op_call::<STRIDE>(ctx, *ip, regs, acc, exit, frame_base),
         Opcode::Return => *ip = op_return(ctx, *ip, regs, exit, frame_base),
         _ => unimplemented!("opcode {op:?} is not part of the new-interpreter sketch"),
