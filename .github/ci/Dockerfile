@@ -1,7 +1,9 @@
 # CI image for KetteVM.
 #
-# Build on the runner host:
+# Build and publish to the local registry on the runner host:
 #   docker build -t kettevm-ci:1 .github/ci
+#   docker tag kettevm-ci:1 localhost:5000/kettevm-ci:1
+#   docker push localhost:5000/kettevm-ci:1
 #
 # The UID/GID must match the dedicated `ghrunner` host user created by
 # ci/github/install-runner.sh. GitHub runs job containers as the image's

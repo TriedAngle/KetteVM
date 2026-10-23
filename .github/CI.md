@@ -8,7 +8,8 @@ workspace and the CI image.
 - Test262 workflow (master + manual PR): `.github/workflows/test262.yml`
 - Performance workflow (manual): `.github/workflows/perf.yml`
 - Runner label: `kettevm-ci`
-- CI image: `kettevm-ci:1` from `.github/ci/Dockerfile`
+- CI image: `localhost:5000/kettevm-ci:1` from `.github/ci/Dockerfile`
+- Registry: local `registry:2` container named `kettevm-registry`, bound to `127.0.0.1:5000`
 - Runner user: `ghrunner` (UID/GID 1501)
 
 ## What runs
@@ -67,13 +68,21 @@ run to be that fast, a persistent cargo target cache can be added later.
 Run these on the runner host:
 
 ```bash
-# 1. Build the job image (as a user that can access Docker).
-docker build -t kettevm-ci:1 .github/ci
+# 1. Start the local image registry (once; restarts on boot).
+docker run -d --restart=unless-stopped --name kettevm-registry \
+  -p 127.0.0.1:5000:5000 \
+  -v kettevm-registry-data:/var/lib/registry \
+  registry:2
 
-# 2. Create/fill the test262 volume (no sudo needed).
+# 2. Build and publish the job image.
+docker build -t kettevm-ci:1 .github/ci
+docker tag kettevm-ci:1 localhost:5000/kettevm-ci:1
+docker push localhost:5000/kettevm-ci:1
+
+# 3. Create/fill the test262 volume (no sudo needed).
 ./ci/github/update-test262.sh
 
-# 3. Install and register the runner. This re-execs with sudo and prompts
+# 4. Install and register the runner. This re-execs with sudo and prompts
 #    for a registration token.
 ./ci/github/install-runner.sh
 ```
@@ -94,9 +103,17 @@ journalctl -u 'actions.runner.*' -f
 ```
 
 After changing `.github/ci/Dockerfile` (Rust version, system packages, UID,
-...), rebuild `kettevm-ci:1` on the runner host; jobs pick up the new image
-automatically. The image is intentionally built on the host rather than in CI
-so the job container never needs the Docker socket.
+...), rebuild and publish the image on the runner host:
+
+```bash
+docker build -t kettevm-ci:1 .github/ci
+docker tag kettevm-ci:1 localhost:5000/kettevm-ci:1
+docker push localhost:5000/kettevm-ci:1
+```
+
+Jobs pull `localhost:5000/kettevm-ci:1` from the local registry. The image is
+intentionally built on the host rather than in CI so the job container never
+needs the Docker socket.
 
 ## Trusted PRs vs. outside PRs
 

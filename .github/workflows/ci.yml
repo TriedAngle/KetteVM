@@ -20,7 +20,7 @@ jobs:
     runs-on: [self-hosted, kettevm-ci]
     timeout-minutes: 20
     container:
-      image: kettevm-ci:1
+      image: localhost:5000/kettevm-ci:1
       # Must match the ghrunner UID/GID in .github/ci/Dockerfile and
       # ci/github/install-runner.sh.
       options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges

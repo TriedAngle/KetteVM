@@ -113,8 +113,10 @@ Runner registered as "$RUNNER_NAME" with label "$RUNNER_LABELS".
 
 Next:
   docker build -t kettevm-ci:1 .github/ci
+  docker tag kettevm-ci:1 localhost:5000/kettevm-ci:1
+  docker push localhost:5000/kettevm-ci:1
   ./ci/github/update-test262.sh
 
-The runner needs the kettevm-ci image and the kettevm-test262 volume to
-exist before jobs can run.
+The runner needs the local registry, the published image, and the
+kettevm-test262 volume before jobs can run.
 EOF
