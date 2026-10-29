@@ -1317,28 +1317,33 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         self.store_symbol(sym, name)
     }
 
-    fn is_const_ident(&self, ident: &IdentifierReference<'_>) -> bool {
-        let Some(rid) = ident.reference_id.get() else {
-            return false;
-        };
-        self.c
-            .scoping
-            .get_reference(rid)
-            .symbol_id()
-            .is_some_and(|sym| {
-                self.c
-                    .scoping
-                    .symbol_flags(sym)
-                    .contains(SymbolFlags::ConstVariable)
-            })
+    fn ident_symbol_flags(&self, ident: &IdentifierReference<'_>) -> Option<SymbolFlags> {
+        let rid = ident.reference_id.get()?;
+        let sym = self.c.scoping.get_reference(rid).symbol_id()?;
+        Some(self.c.scoping.symbol_flags(sym))
+    }
+
+    /// A named function expression's own name is an immutable binding.
+    fn is_immutable_ident(&self, ident: &IdentifierReference<'_>) -> bool {
+        self.ident_symbol_flags(ident).is_some_and(|flags| {
+            flags.intersects(SymbolFlags::ConstVariable | SymbolFlags::FunctionExpression)
+        })
     }
 
     /// Store the accumulator into an identifier assignment target.
     fn store_name(&mut self, ident: &IdentifierReference<'_>) -> Result<(), CompileError> {
-        let is_const = self.is_const_ident(ident);
+        let flags = self.ident_symbol_flags(ident);
+        let is_const = flags.is_some_and(|f| f.contains(SymbolFlags::ConstVariable));
+        let is_nfe = flags.is_some_and(|f| f.contains(SymbolFlags::FunctionExpression));
+        // Sloppy assignment to a named function expression's own name is
+        // silently ignored; strict mode throws like a const assignment.
+        if is_nfe && !self.c.facts.functions[self.fid.0 as usize].strict {
+            return Ok(());
+        }
+        let is_immutable = is_const || is_nfe;
         match self.identifier_resolution(ident)? {
             IdRes::Global => {
-                if is_const {
+                if is_immutable {
                     self.b.call_runtime_staged(BuiltinFn::ThrowConstAssign, &[]);
                 } else {
                     let idx = self.b.name(ident.name.as_bytes());
@@ -1354,7 +1359,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 );
             }
             IdRes::Slot(slot, depth) => {
-                if is_const {
+                if is_immutable {
                     self.load_slot(slot, depth);
                     self.b.call_runtime_staged(BuiltinFn::ThrowConstAssign, &[]);
                 } else {
@@ -2119,7 +2124,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         BinaryOperator::Addition | BinaryOperator::Subtraction
                     )
                     && let Expression::Identifier(lhs) = &b.left
-                    && !self.is_const_ident(i)
+                    && !self.is_immutable_ident(i)
                     && self.simple_identifier_register(lhs).map(|r| r.operand())
                         == Some(dst.operand())
                     && let Some(src) = self.simple_register(&b.right)
@@ -2175,7 +2180,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 if let (Some(dst), Some(src)) = (
                     self.simple_identifier_register(i),
                     self.simple_register(value),
-                ) && !self.is_const_ident(i)
+                ) && !self.is_immutable_ident(i)
                 {
                     match op {
                         Opcode::Add => {
@@ -2242,7 +2247,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(i) = &u.argument {
             // a plain local updates in place: `IncLoc`/`DecLoc` do the
             // ToNumeric + step and leave the numeric old value in acc
-            if !self.is_const_ident(i)
+            if !self.is_immutable_ident(i)
                 && let Some(reg) = self.simple_identifier_register(i)
             {
                 let op = match u.operator {
