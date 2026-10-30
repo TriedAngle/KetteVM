@@ -270,8 +270,15 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- Number ----------------------------------------------------------
         let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
-        let (number_fn, number_proto) =
-            Object::install_constructor(thread, &scope, idx.number, "Number", object_prototype)?;
+        let number_zero: Handle<'_, Value> = scope.handle(Smi::new(0).into_tagged());
+        let (number_fn, number_proto) = Object::install_wrapper_constructor(
+            thread,
+            &scope,
+            idx.number,
+            "Number",
+            object_prototype,
+            number_zero,
+        )?;
         Object::install_method(thread, &scope, number_proto, "valueOf", idx.number_value_of)?;
         Object::install_method(
             thread,
@@ -335,8 +342,16 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let _ = number_fn;
 
         // ---- Boolean ----------------------------------------------------------
-        let (_, boolean_proto) =
-            Object::install_constructor(thread, &scope, idx.boolean, "Boolean", object_prototype)?;
+        let boolean_false: Handle<'_, Value> =
+            scope.handle(known.false_object.get(thread.heap()).erase());
+        let (_, boolean_proto) = Object::install_wrapper_constructor(
+            thread,
+            &scope,
+            idx.boolean,
+            "Boolean",
+            object_prototype,
+            boolean_false,
+        )?;
         Object::install_method(
             thread,
             &scope,
@@ -367,8 +382,14 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         }
 
         // ---- String -----------------------------------------------------------
-        let (_, string_proto) =
-            Object::install_constructor(thread, &scope, idx.string, "String", object_prototype)?;
+        let (_, string_proto) = Object::install_wrapper_constructor(
+            thread,
+            &scope,
+            idx.string,
+            "String",
+            object_prototype,
+            wks_empty,
+        )?;
         Object::install_method(thread, &scope, string_proto, "valueOf", idx.string_value_of)?;
         Object::install_method(
             thread,

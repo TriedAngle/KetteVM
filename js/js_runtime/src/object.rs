@@ -299,11 +299,12 @@ fn own_property(
     key: Handle<'_, SlotName>,
     key_value: Handle<'_, Value>,
 ) -> Result<OwnProperty, VmError> {
-    if let Some(s) = DenseString::from_receiver(heap, receiver.as_tagged(heap)) {
-        return Ok(match s.as_ref().own_key(heap, key.as_tagged(heap)) {
-            Some(StringOwn::Index(_)) => OwnProperty::Found { enumerable: true },
-            Some(StringOwn::Length(_)) => OwnProperty::Found { enumerable: false },
-            None => OwnProperty::Missing,
+    if let Some(s) = DenseString::from_receiver(heap, receiver.as_tagged(heap))
+        && let Some(own) = s.as_ref().own_key(heap, key.as_tagged(heap))
+    {
+        return Ok(match own {
+            StringOwn::Index(_) => OwnProperty::Found { enumerable: true },
+            StringOwn::Length(_) => OwnProperty::Found { enumerable: false },
         });
     }
     if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
@@ -488,12 +489,11 @@ pub fn object_get_own_property_descriptor<'a>(
         // the &mut heap borrow below does not overlap the target/key reads.
         let target_v = unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) };
         let key_v = unsafe { Tagged::<Value>::from_value_unchecked(key.raw()) };
-        let desc = if DenseString::from_receiver(heap, target_v).is_some() {
-            // String exotic: ToObject exposes `length` and index own props
-            DenseString::own_descriptor(heap, &scope, target_v, key_v)
-        } else {
-            Object::ordinary_own_descriptor(heap, &scope, target_v, key_v)
-        };
+        // String exotic own keys (`length`, in-range indices) take
+        // precedence; a String wrapper may also carry ordinary own
+        // descriptors, so fall through when the key is neither.
+        let desc = DenseString::own_descriptor(heap, &scope, target_v, key_v)
+            .or_else(|| Object::ordinary_own_descriptor(heap, &scope, target_v, key_v));
         // root the oddball singletons once for the descriptor fields
         let true_v = scope.handle(vm.known().true_object.get(heap).erase());
         let false_v = scope.handle(vm.known().false_object.get(heap).erase());

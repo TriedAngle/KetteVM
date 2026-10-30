@@ -118,20 +118,55 @@ impl Object {
         name: &str,
         proto_parent: Handle<'_, Object>,
     ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
+        Self::install_constructor_with(thread, scope, index, name, proto_parent, None)
+    }
+
+    /// Like [`Object::install_constructor`], but the prototype object is
+    /// itself a `PRIMITIVE_WRAPPER` carrying `value` in slot 0
+    pub fn install_wrapper_constructor<'s>(
+        thread: &mut Thread,
+        scope: &'s HandleScope<'_>,
+        index: NativeIndex,
+        name: &str,
+        proto_parent: Handle<'_, Object>,
+        value: Handle<'_, Value>,
+    ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
+        Self::install_constructor_with(thread, scope, index, name, proto_parent, Some(value))
+    }
+
+    fn install_constructor_with<'s>(
+        thread: &mut Thread,
+        scope: &'s HandleScope<'_>,
+        index: NativeIndex,
+        name: &str,
+        proto_parent: Handle<'_, Object>,
+        wrapper: Option<Handle<'_, Value>>,
+    ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
         let name_str = thread.intern(scope, name);
         let fn_obj = Self::native_constructor(thread.heap(), scope, index)?;
 
         // prototype object: fresh extendable object chained to proto_parent
+        // (wrapper prototypes also carry their primitive in slot 0)
+        let kind = match wrapper {
+            Some(_) => MapKind::OBJECT
+                .union(MapKind::EXTENDABLE)
+                .union(MapKind::PRIMITIVE_WRAPPER),
+            None => MapKind::OBJECT.union(MapKind::EXTENDABLE),
+        };
         let map = thread.heap().allocate_handle::<Map>(
             MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
+                kind,
+                value_slot_count: usize::from(wrapper.is_some()),
                 descriptors: &[],
                 prototype: proto_parent.erase(),
             },
             scope,
         );
-        let proto = scope.handle(thread.heap().new_object(scope, map, HandleSlice::EMPTY));
+        let heap = thread.heap();
+        let proto = scope.handle(match wrapper {
+            Some(v) => heap.new_object(scope, map, scope.stage(&[v.as_tagged(heap)])),
+            None => heap.new_object(scope, map, HandleSlice::EMPTY),
+        });
 
         // proto.constructor = fn; fn.prototype = proto
         // (built-in methods/constructor properties are non-enumerable, ES 20+)
