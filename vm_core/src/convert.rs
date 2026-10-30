@@ -113,9 +113,9 @@ impl<'a> Tagged<'a, Value> {
     }
 
     /// ES 7.1.13 ToObject for the primitive kinds that expose a distinct
-    /// prototype: the prototype of a number/string/boolean primitive is the
-    /// matching builtin prototype (symbols have no exposed prototype in this
-    /// VM). `None` for objects and for the no-prototype primitives.
+    /// prototype: the prototype of a number/string/boolean/symbol primitive
+    /// is the matching builtin prototype. `None` for objects and for the
+    /// no-prototype primitives.
     #[inline]
     pub fn primitive_prototype(self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         let known = heap.known();
@@ -125,6 +125,8 @@ impl<'a> Tagged<'a, Value> {
             Some(known.string_prototype.get(heap).erase())
         } else if self == known.true_object.get(heap) || self == known.false_object.get(heap) {
             Some(known.boolean_prototype.get(heap).erase())
+        } else if self.get_as::<Symbol>(heap).is_some() {
+            Some(known.symbol_prototype.get(heap).erase())
         } else {
             None
         }
@@ -241,9 +243,9 @@ impl Convert {
     }
 
     /// ES 7.1.13 ToObject for the primitive kinds that expose a distinct
-    /// prototype: the prototype of a number/string/boolean primitive is the
-    /// matching builtin prototype (symbols have no exposed prototype in this
-    /// VM). `None` for objects and for the no-prototype primitives.
+    /// prototype: the prototype of a number/string/boolean/symbol primitive
+    /// is the matching builtin prototype. `None` for objects and for the
+    /// no-prototype primitives.
     #[inline]
     pub fn primitive_prototype<'a>(
         heap: &'a Heap,
@@ -256,6 +258,8 @@ impl Convert {
             Some(known.string_prototype.get(heap).erase())
         } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
             Some(known.boolean_prototype.get(heap).erase())
+        } else if v.get_as::<Symbol>(heap).is_some() {
+            Some(known.symbol_prototype.get(heap).erase())
         } else {
             None
         }

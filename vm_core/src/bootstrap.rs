@@ -68,13 +68,16 @@ pub struct WellKnown {
     pub type_error_map: GcSlot<Map>,
     pub reference_error_map: GcSlot<Map>,
     pub range_error_map: GcSlot<Map>,
+    pub syntax_error_map: GcSlot<Map>,
     /// Wrapper maps for boxed primitives (slots[0] = the primitive value);
     pub number_wrapper_map: GcSlot<Map>,
     pub boolean_wrapper_map: GcSlot<Map>,
     pub string_wrapper_map: GcSlot<Map>,
+    pub symbol_wrapper_map: GcSlot<Map>,
     pub number_prototype: GcSlot<Object>,
     pub boolean_prototype: GcSlot<Object>,
     pub string_prototype: GcSlot<Object>,
+    pub symbol_prototype: GcSlot<Object>,
     // prototypes
     /// `%Object.prototype%`: root of the ordinary-object prototype hierarchy.
     pub object_prototype: GcSlot<Object>,
@@ -114,6 +117,8 @@ pub struct WellKnown {
     pub to_primitive_symbol: GcSlot<Symbol>,
     /// The `@@iterator` well-known symbol (internal: no Symbol global yet)
     pub iterator_symbol: GcSlot<Symbol>,
+    /// The `@@toStringTag` well-known symbol
+    pub to_string_tag_symbol: GcSlot<Symbol>,
     /// Inline-cache state sentinel (never user-visible): a feedback slot
     /// holding it permanently takes the slow path
     pub megamorphic_symbol: GcSlot<Symbol>,
@@ -291,12 +296,15 @@ impl WellKnown {
             type_error_map: smi_slot::<Map>(),
             reference_error_map: smi_slot::<Map>(),
             range_error_map: smi_slot::<Map>(),
+            syntax_error_map: smi_slot::<Map>(),
             number_wrapper_map: smi_slot::<Map>(),
             boolean_wrapper_map: smi_slot::<Map>(),
             string_wrapper_map: smi_slot::<Map>(),
+            symbol_wrapper_map: smi_slot::<Map>(),
             number_prototype: smi_slot::<Object>(),
             boolean_prototype: smi_slot::<Object>(),
             string_prototype: smi_slot::<Object>(),
+            symbol_prototype: smi_slot::<Object>(),
             object_prototype: smi_slot::<Object>(),
             array_prototype: smi_slot::<Object>(),
             date_instance_map: smi_slot::<Map>(),
@@ -312,6 +320,7 @@ impl WellKnown {
             class_constructor_map: smi_slot::<Map>(),
             to_primitive_symbol: smi_slot::<Symbol>(),
             iterator_symbol: smi_slot::<Symbol>(),
+            to_string_tag_symbol: smi_slot::<Symbol>(),
             megamorphic_symbol: smi_slot::<Symbol>(),
             prototype_transition_symbol: smi_slot::<Symbol>(),
             holey_transition_symbol: smi_slot::<Symbol>(),
@@ -379,12 +388,15 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.type_error_map.as_raw());
         visitor.visit(self.reference_error_map.as_raw());
         visitor.visit(self.range_error_map.as_raw());
+        visitor.visit(self.syntax_error_map.as_raw());
         visitor.visit(self.number_wrapper_map.as_raw());
         visitor.visit(self.boolean_wrapper_map.as_raw());
         visitor.visit(self.string_wrapper_map.as_raw());
+        visitor.visit(self.symbol_wrapper_map.as_raw());
         visitor.visit(self.number_prototype.as_raw());
         visitor.visit(self.boolean_prototype.as_raw());
         visitor.visit(self.string_prototype.as_raw());
+        visitor.visit(self.symbol_prototype.as_raw());
         visitor.visit(self.object_prototype.as_raw());
         visitor.visit(self.array_prototype.as_raw());
         visitor.visit(self.date_instance_map.as_raw());
@@ -400,6 +412,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.class_constructor_map.as_raw());
         visitor.visit(self.to_primitive_symbol.as_raw());
         visitor.visit(self.iterator_symbol.as_raw());
+        visitor.visit(self.to_string_tag_symbol.as_raw());
         visitor.visit(self.megamorphic_symbol.as_raw());
         visitor.visit(self.prototype_transition_symbol.as_raw());
         visitor.visit(self.holey_transition_symbol.as_raw());
@@ -775,7 +788,9 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     let error_map = alloc_parent_map(
         heap,
         &scope,
-        MapKind::OBJECT.union(MapKind::EXTENDABLE),
+        MapKind::OBJECT
+            .union(MapKind::EXTENDABLE)
+            .union(MapKind::ERROR),
         error_prototype,
     );
 
@@ -812,6 +827,9 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known
         .iterator_symbol
         .init_tagged(Symbol::new(heap, &scope, b"Symbol.iterator").as_tagged(heap));
+    known
+        .to_string_tag_symbol
+        .init_tagged(Symbol::new(heap, &scope, b"Symbol.toStringTag").as_tagged(heap));
     // IC state sentinel (never user-visible): a feedback slot holding it
     // permanently takes the slow path
     known
@@ -906,9 +924,14 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known.type_error_map.init(error_map.as_tagged(heap));
     known.reference_error_map.init(error_map.as_tagged(heap));
     known.range_error_map.init(error_map.as_tagged(heap));
+    known.syntax_error_map.init(error_map.as_tagged(heap));
     known.number_wrapper_map.init(error_map.as_tagged(heap));
     known.boolean_wrapper_map.init(error_map.as_tagged(heap));
     known.string_wrapper_map.init(error_map.as_tagged(heap));
+    known.symbol_wrapper_map.init(error_map.as_tagged(heap));
+    known
+        .symbol_prototype
+        .init(object_prototype.as_tagged(heap));
     known.exception_map.init(exception_map.as_tagged(heap));
     known.js_array_map.init(js_array_map.as_tagged(heap));
 

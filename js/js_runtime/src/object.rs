@@ -5,24 +5,131 @@ use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Object,
-    PropertyDescriptor, Prototype, SlotName, Smi, StringOwn, Tagged, ThreadState, VM, Value,
-    VmError, WellKnown,
+    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, MapKind,
+    Object, PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Symbol, Tagged,
+    ThreadState, VM, Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
-/// Stub: `Object.prototype.toString` returns "[object Object]".
+/// `"[object <tag>]"`, freshly allocated (not interned: the tag may be user text).
+fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tagged<'a, Value> {
+    DenseString::from_utf8(heap, scope, &format!("[object {tag}]"))
+        .as_tagged(heap)
+        .erase()
+}
+
+/// ES 7.2.2 IsArray, including proxy targets (revoked proxies throw).
+fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Result<bool, VmError> {
+    loop {
+        let Some(object) = value.as_heap_object() else {
+            return Ok(false);
+        };
+        let kind = object.map(heap).kind();
+        if kind.is_array() {
+            return Ok(true);
+        }
+        if !kind.is_proxy() {
+            return Ok(false);
+        }
+        let Some(proxy) = value.get_as::<ProxyObject>(heap) else {
+            return Ok(false);
+        };
+        let (target, handler) = proxy.parts(heap);
+        if handler == heap.known().null.get(heap) {
+            return Err(VmError::Type);
+        }
+        value = target;
+    }
+}
+
+/// Builtin tag for the ToObject'd receiver (ES 20.1.3.6 steps 5-14).
+fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Result<&'static str, VmError> {
+    if is_array(heap, receiver)? {
+        return Ok("Array");
+    }
+    let Some(object) = receiver.as_heap_object() else {
+        return Ok("Object");
+    };
+    let kind = object.map(heap).kind();
+    // [[Call]]: includes callable proxies (a proxy around a function).
+    if kind.is_callable() {
+        return Ok("Function");
+    }
+    if kind.is_error() {
+        return Ok("Error");
+    }
+    if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
+        // Wrappers carry the primitive in slots[0]; wrapper prototypes are
+        // wrappers too (ES 20.3.3, 20.4.3, 20.5.3).
+        let value = object.slots(heap).at(heap, 0);
+        let known = heap.known();
+        if value.is_smi() || value.get_as::<Float>(heap).is_some() {
+            return Ok("Number");
+        }
+        if value.get_as::<DenseString>(heap).is_some() {
+            return Ok("String");
+        }
+        if value == known.true_object.get(heap) || value == known.false_object.get(heap) {
+            return Ok("Boolean");
+        }
+        // Symbols/BigInts have no builtin-tag step; their prototypes supply
+        // @@toStringTag.
+    }
+    if kind.contains(MapKind::DATE) {
+        return Ok("Date");
+    }
+    Ok("Object")
+}
+
+/// `Object.prototype.toString` (ES 20.1.3.6).
 pub fn object_to_string<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
+    args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
     state.handle_scope(|scope| {
-        let s = vm.interner().intern_str(heap, &scope, "[object Object]");
-        s.as_tagged(heap).erase()
+        let receiver = scope.handle(args.get(heap, 0));
+        let value = receiver.as_tagged(heap);
+        if value == vm.known().undefined.get(heap) {
+            return tag_string(heap, &scope, "Undefined");
+        }
+        if value == vm.known().null.get(heap) {
+            return tag_string(heap, &scope, "Null");
+        }
+        // ToObject(this): box primitives so the @@toStringTag lookup (and
+        // any getter's receiver) sees the wrapper, as the spec requires.
+        let object = if value.is_primitive(heap) {
+            match box_primitive(vm, heap, &scope, receiver) {
+                Some(object) => scope.handle(object.as_tagged(heap).erase()),
+                None => return tag_string(heap, &scope, "Object"),
+            }
+        } else {
+            receiver
+        };
+        let default_tag = match builtin_tag(heap, object.as_tagged(heap)) {
+            Ok(tag) => tag,
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        // Let tag be ? Get(O, @@toStringTag).
+        let symbol = scope.handle(vm.known().to_string_tag_symbol.get(heap).erase());
+        let tag = match rt_try!(
+            vm,
+            heap,
+            state,
+            Object::get_property(vm, heap, state, object, object, symbol, false)
+        ) {
+            Coercion::Threw => return vm.known().exception.get(heap).erase(),
+            Coercion::Value(tag) => scope.handle(tag),
+        };
+        let tag = tag
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .map(|tag| tag.to_rust_string(heap))
+            .unwrap_or_else(|| default_tag.to_string());
+        tag_string(heap, &scope, &tag)
     })
 }
 
@@ -43,12 +150,11 @@ pub fn object_constructor<'a>(
     }
     let nullish = arg.as_tagged(heap).is_nullish(heap);
     state.handle_scope(|scope| {
-        // String/Number/Boolean primitives become their wrapper objects.
+        // String/Number/Boolean/Symbol primitives become their wrapper
+        // objects (ES 20.1.1.1 step 3).
         if !nullish && let Some(boxed) = box_primitive(vm, heap, &scope, arg) {
             return boxed.as_tagged(heap).erase();
         }
-        // Symbols have no wrapper map in this VM yet; keep the old call
-        // behavior (TypeError) instead of silently returning an object.
         if !is_construct && !nullish {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
@@ -79,6 +185,8 @@ fn box_primitive<'s>(
             known.number_wrapper_map.get(heap)
         } else if value == known.true_object.get(heap) || value == known.false_object.get(heap) {
             known.boolean_wrapper_map.get(heap)
+        } else if value.get_as::<Symbol>(heap).is_some() {
+            known.symbol_wrapper_map.get(heap)
         } else {
             return None;
         }

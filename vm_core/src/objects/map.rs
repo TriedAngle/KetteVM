@@ -390,6 +390,8 @@ impl MapKind {
     pub const CLASS_CONSTRUCTOR: MapKind = MapKind(1 << 13);
     /// Date instances carry a [[DateValue]] in their first value slot.
     pub const DATE: MapKind = MapKind(1 << 26);
+    /// Error instances carry [[ErrorData]] (the `"Error"` builtin tag).
+    pub const ERROR: MapKind = MapKind(1 << 27);
 
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
@@ -571,6 +573,11 @@ impl MapKind {
     #[inline(always)]
     pub const fn is_class_constructor(self) -> bool {
         self.0 & Self::CLASS_CONSTRUCTOR.0 != 0
+    }
+
+    #[inline(always)]
+    pub const fn is_error(self) -> bool {
+        self.0 & Self::ERROR.0 != 0
     }
 }
 

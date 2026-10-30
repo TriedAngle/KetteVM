@@ -29,7 +29,7 @@ use date::{
 };
 use error::{
     error_constructor, error_to_string, range_error_constructor, reference_error_constructor,
-    type_error_constructor,
+    syntax_error_constructor, type_error_constructor,
 };
 use function::{
     BIND_PRELUDE, function_apply, function_bind, function_call, function_constructor,
@@ -55,8 +55,9 @@ use string::{string_constructor, string_to_string, string_value_of};
 use symbol::symbol_constructor;
 
 use vm_core::{
-    EdgeVisitable, Float, Handle, HandleSlice, Map, MapInit, MapKind, NativeIndex, Object,
-    PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Tagged, VM, Value, Visitor, VmError,
+    DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
+    NativeIndex, Object, PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Tagged, Thread, VM,
+    Value, Visitor, VmError,
 };
 
 pub struct JSRuntime;
@@ -95,6 +96,7 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         string_to_string: vm.register_runtime(string_to_string),
         reference_error: vm.register_runtime(reference_error_constructor),
         range_error: vm.register_runtime(range_error_constructor),
+        syntax_error: vm.register_runtime(syntax_error_constructor),
         function_to_string: vm.register_runtime(function_to_string),
         object_to_string: vm.register_runtime(object_to_string),
         number: vm.register_runtime(number_constructor),
@@ -178,6 +180,7 @@ pub struct BuiltinIndices {
     pub string_to_string: NativeIndex,
     pub reference_error: NativeIndex,
     pub range_error: NativeIndex,
+    pub syntax_error: NativeIndex,
     pub function_to_string: NativeIndex,
     pub object_to_string: NativeIndex,
     pub number: NativeIndex,
@@ -252,6 +255,57 @@ pub struct BuiltinIndices {
     pub array_sort: NativeIndex,
 }
 
+/// Install one NativeError class: constructor, prototype, and [[ErrorData]] map.
+fn install_error_class<'s>(
+    thread: &mut Thread,
+    scope: &'s HandleScope<'_>,
+    index: NativeIndex,
+    class: &str,
+    parent: Handle<'_, Object>,
+) -> Result<(Handle<'s, Object>, Handle<'s, Map>), VmError> {
+    let (_, prototype) = Object::install_constructor(thread, scope, index, class, parent)?;
+    let name = thread.intern(scope, class);
+    // Safety: fresh interned word, rooted below before the define.
+    let name: Handle<'_, DenseString> = scope.handle(name.as_tagged(thread.heap()));
+    let name_key = scope.handle(thread.heap().known().strings.name.get(thread.heap()));
+    Object::define_own_property(
+        thread.heap(),
+        scope,
+        prototype,
+        name_key,
+        PropertyDescriptor::data(name.erase()),
+    )?;
+    let message_key = scope.handle(thread.heap().known().strings.message.get(thread.heap()));
+    let empty = scope.handle(
+        thread
+            .heap()
+            .known()
+            .strings
+            .empty
+            .get(thread.heap())
+            .erase(),
+    );
+    Object::define_own_property(
+        thread.heap(),
+        scope,
+        prototype,
+        message_key,
+        PropertyDescriptor::data(empty),
+    )?;
+    let map = thread.heap().allocate_handle::<Map>(
+        MapInit {
+            kind: MapKind::OBJECT
+                .union(MapKind::EXTENDABLE)
+                .union(MapKind::ERROR),
+            value_slot_count: 0,
+            descriptors: &[],
+            prototype: prototype.erase(),
+        },
+        scope,
+    );
+    Ok((prototype, map))
+}
+
 /// Build the builtin objects and install them on the global object.
 pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError> {
     vm.set_eval_compiler(js_compiler::compile_js);
@@ -264,7 +318,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let wks_empty: Handle<'_, Value> = scope.handle(wks.empty.get(heap).erase());
         let wks_length: Handle<'_, SlotName> = scope.handle(wks.length.get(heap));
         let wks_name: Handle<'_, SlotName> = scope.handle(wks.name.get(heap));
-        let wks_message: Handle<'_, SlotName> = scope.handle(wks.message.get(heap));
         let wks_constructor: Handle<'_, SlotName> = scope.handle(wks.constructor.get(heap));
         let wks_prototype: Handle<'_, SlotName> = scope.handle(wks.prototype.get(heap));
 
@@ -413,136 +466,40 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             known.string_wrapper_map.init(map);
         }
 
-        // ---- Error / TypeError / ReferenceError ---------------------------------
-        let (_, error_proto) =
-            Object::install_constructor(thread, &scope, idx.error, "Error", object_prototype)?;
-        let error_name = thread.intern(&scope, "Error");
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            error_proto,
-            wks_name,
-            PropertyDescriptor::data(error_name.erase()),
-        )?;
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            error_proto,
-            wks_message,
-            PropertyDescriptor::data(wks_empty),
-        )?;
+        // ---- Error / TypeError / ReferenceError / RangeError / SyntaxError ------
+        let (error_proto, error_map) =
+            install_error_class(thread, &scope, idx.error, "Error", object_prototype)?;
+        known.error_map.init(error_map.as_tagged(thread.heap()));
         Object::install_method(thread, &scope, error_proto, "toString", idx.error_to_string)?;
 
-        // the bootstrap error_map chains to a placeholder prototype;
-        // repoint it at the real Error.prototype
-        {
-            let heap = thread.heap();
+        let (_, type_error_map) =
+            install_error_class(thread, &scope, idx.type_error, "TypeError", error_proto)?;
+        known
+            .type_error_map
+            .init(type_error_map.as_tagged(thread.heap()));
 
-            let map = heap.allocate::<Map>(MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: error_proto.erase(),
-            });
-            known.error_map.init(map);
-        }
-
-        let (_, type_error_proto) =
-            Object::install_constructor(thread, &scope, idx.type_error, "TypeError", error_proto)?;
-        let type_error_name = thread.intern(&scope, "TypeError");
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            type_error_proto,
-            wks_name,
-            PropertyDescriptor::data(type_error_name.erase()),
-        )?;
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            type_error_proto,
-            wks_message,
-            PropertyDescriptor::data(wks_empty),
-        )?;
-        {
-            let heap = thread.heap();
-
-            let map = heap.allocate::<Map>(MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: type_error_proto.erase(),
-            });
-            known.type_error_map.init(map);
-        }
-
-        let (_, reference_error_proto) = Object::install_constructor(
+        let (_, reference_error_map) = install_error_class(
             thread,
             &scope,
             idx.reference_error,
             "ReferenceError",
             error_proto,
         )?;
-        let reference_error_name = thread.intern(&scope, "ReferenceError");
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            reference_error_proto,
-            wks_name,
-            PropertyDescriptor::data(reference_error_name.erase()),
-        )?;
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            reference_error_proto,
-            wks_message,
-            PropertyDescriptor::data(wks_empty),
-        )?;
-        {
-            let heap = thread.heap();
+        known
+            .reference_error_map
+            .init(reference_error_map.as_tagged(thread.heap()));
 
-            let map = heap.allocate::<Map>(MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: reference_error_proto.erase(),
-            });
-            known.reference_error_map.init(map);
-        }
+        let (_, range_error_map) =
+            install_error_class(thread, &scope, idx.range_error, "RangeError", error_proto)?;
+        known
+            .range_error_map
+            .init(range_error_map.as_tagged(thread.heap()));
 
-        let (_, range_error_proto) = Object::install_constructor(
-            thread,
-            &scope,
-            idx.range_error,
-            "RangeError",
-            error_proto,
-        )?;
-        let range_error_name = thread.intern(&scope, "RangeError");
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            range_error_proto,
-            wks_name,
-            PropertyDescriptor::data(range_error_name.erase()),
-        )?;
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            range_error_proto,
-            wks_message,
-            PropertyDescriptor::data(wks_empty),
-        )?;
-        {
-            let heap = thread.heap();
-
-            let map = heap.allocate::<Map>(MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: range_error_proto.erase(),
-            });
-            known.range_error_map.init(map);
-        }
+        let (_, syntax_error_map) =
+            install_error_class(thread, &scope, idx.syntax_error, "SyntaxError", error_proto)?;
+        known
+            .syntax_error_map
+            .init(syntax_error_map.as_tagged(thread.heap()));
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
         let function_prototype = scope.handle(known.function_prototype.get(thread.heap()));
@@ -1186,6 +1143,67 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             symbol_name,
             PropertyDescriptor::data(symbol_fn.erase()),
         )?;
+
+        // %Symbol.prototype% is ordinary; Symbol instances use the wrapper
+        // map below with [[SymbolData]] in slot 0.
+        let symbol_prototype_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let symbol_prototype = roots.create_handle(thread.heap().new_object(
+            &scope,
+            symbol_prototype_map,
+            HandleSlice::EMPTY,
+        ));
+        let symbol_wrapper_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT
+                    .union(MapKind::EXTENDABLE)
+                    .union(MapKind::PRIMITIVE_WRAPPER),
+                value_slot_count: 1,
+                descriptors: &[],
+                prototype: symbol_prototype.erase(),
+            },
+            &scope,
+        );
+        {
+            let heap = thread.heap();
+            known
+                .symbol_prototype
+                .init(symbol_prototype.as_tagged(heap));
+            known
+                .symbol_wrapper_map
+                .init(symbol_wrapper_map.as_tagged(heap));
+        }
+        // Symbol.prototype is non-writable, non-enumerable, non-configurable.
+        let prototype_name = thread.intern(&scope, "prototype");
+        // Safety: fresh interned word, rooted below before the define.
+        let prototype_name = scope.handle(prototype_name.as_tagged(thread.heap()));
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            symbol_fn,
+            prototype_name,
+            PropertyDescriptor::Data {
+                value: symbol_prototype.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        )?;
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            symbol_prototype,
+            wks_constructor,
+            PropertyDescriptor::method(symbol_fn.erase()),
+        )?;
+
         let iterator_symbol: Handle<'_, vm_core::Symbol> =
             scope.handle(known.iterator_symbol.get(thread.heap()));
         let iter_name = thread.intern(&scope, "iterator");
@@ -1197,6 +1215,34 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             symbol_fn,
             iter_name,
             PropertyDescriptor::data(iterator_symbol.erase()),
+        )?;
+        let to_string_tag_symbol: Handle<'_, vm_core::Symbol> =
+            scope.handle(known.to_string_tag_symbol.get(thread.heap()));
+        let to_string_tag_name = thread.intern(&scope, "toStringTag");
+        // Safety: fresh interned word, rooted below before the define.
+        let to_string_tag_name = scope.handle(to_string_tag_name.as_tagged(thread.heap()));
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            symbol_fn,
+            to_string_tag_name,
+            PropertyDescriptor::data(to_string_tag_symbol.erase()),
+        )?;
+        // Symbol.prototype[@@toStringTag] = "Symbol".
+        let to_string_tag_key: Handle<'_, SlotName> =
+            scope.handle(to_string_tag_symbol.as_tagged(thread.heap()));
+        let symbol_tag = thread.intern(&scope, "Symbol");
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            symbol_prototype,
+            to_string_tag_key,
+            PropertyDescriptor::Data {
+                value: symbol_tag.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
         )?;
 
         // ---- Proxy ------------------------------------------------------------

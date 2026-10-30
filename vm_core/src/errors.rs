@@ -1,5 +1,5 @@
 use crate::{
-    DenseString, Handle, HandleSlice, Heap, Object, PropertyDescriptor, Tagged, Value, VmError,
+    DenseString, Handle, HandleSlice, Heap, Map, Object, PropertyDescriptor, Tagged, Value, VmError,
 };
 
 use crate::{ThreadState, VM};
@@ -8,6 +8,23 @@ use crate::{ThreadState, VM};
 pub struct Errors;
 
 impl Errors {
+    /// The instance map for a VM error class (all carry `MapKind::ERROR`).
+    pub fn map_for<'a>(vm: &VM, heap: &'a Heap, class: &str) -> Tagged<'a, Map> {
+        let known = vm.known();
+        let map = match class {
+            "TypeError" => known.type_error_map.get(heap),
+            "ReferenceError" => known.reference_error_map.get(heap),
+            "RangeError" => known.range_error_map.get(heap),
+            "SyntaxError" => known.syntax_error_map.get(heap),
+            _ => known.error_map.get(heap),
+        };
+        debug_assert!(
+            map.as_ref().kind().is_error(),
+            "VM error maps must carry MapKind::ERROR"
+        );
+        map
+    }
+
     /// Materialize a VM error as an ECMAScript error object.
     ///
     /// The returned value is anchored to the heap borrow; callers store it
@@ -61,12 +78,7 @@ impl Errors {
             let message_value = vm.interner().intern_str(heap, &scope, message);
 
             // per-class maps carry the right prototype chain (.constructor etc.)
-            let map = match class {
-                "TypeError" => vm.known().type_error_map.get(heap),
-                "ReferenceError" => vm.known().reference_error_map.get(heap),
-                "RangeError" => vm.known().range_error_map.get(heap),
-                _ => vm.known().error_map.get(heap),
-            };
+            let map = Self::map_for(vm, heap, class);
             let obj = heap
                 .new_object(&scope, scope.handle(map), HandleSlice::EMPTY)
                 .as_handle(&scope);
