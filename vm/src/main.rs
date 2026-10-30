@@ -6,6 +6,37 @@ use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, Thread, VM};
 use vm::{DenseString, Float, Heap, JavascriptCompiler, SlotName, Smi, Tagged, Value};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Language {
+    Javascript,
+    Kette,
+    Infer,
+}
+
+impl Language {
+    fn of(path: &str) -> Option<Self> {
+        match Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("js") => Some(Self::Javascript),
+            Some("ktt") => Some(Self::Kette),
+            _ => None,
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "js" | "javascript" => Some(Self::Javascript),
+            "ktt" | "kette" => Some(Self::Kette),
+            "auto" | "infer" => Some(Self::Infer),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     trace::init();
     let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
@@ -18,65 +49,45 @@ fn main() {
     let mut thread = vm.attach();
 
     let mut files = Vec::new();
-    let mut then_repl = false;
-    for arg in std::env::args().skip(1) {
+    let mut repl_language = None;
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
         if arg == "--repl" {
-            then_repl = true;
+            let language = args.peek().and_then(|next| Language::parse(next));
+            repl_language = Some(match language {
+                Some(language) => {
+                    args.next();
+                    language
+                }
+                None => Language::Infer,
+            });
+        } else if let Some(name) = arg.strip_prefix("--repl=") {
+            repl_language = Some(Language::parse(name).unwrap_or_else(|| {
+                eprintln!("kettevm: unknown REPL language '{name}' (expected js or kette)");
+                std::process::exit(1);
+            }));
         } else {
             files.push(arg);
         }
     }
-    let all_js = !files.is_empty()
-        && files.iter().all(|f| {
-            Path::new(f)
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("js"))
-        });
-    if all_js {
-        run_js_group(&mut thread, &files);
-    } else {
-        for path in &files {
-            run_file(&mut thread, path);
-            if thread.vm().is_shutdown() {
-                return;
-            }
-        }
-    }
-    if (files.is_empty() || then_repl) && !thread.vm().is_shutdown() {
-        repl(&mut thread);
-    }
-}
-
-/// Multiple `.js` files share one top-level scope (browser `<script>`
-/// semantics: top-level `var`s and function declarations are visible to
-/// the later files), so they are concatenated into a single script run.
-fn run_js_group(thread: &mut Thread, paths: &[String]) {
-    let mut parts = Vec::with_capacity(paths.len());
-    for path in paths {
-        match std::fs::read_to_string(path) {
-            Ok(src) => parts.push(src),
-            Err(e) => {
-                eprintln!("kettevm: cannot read {path}: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-    let joined = parts.join("\n");
-    match thread.run_source(
-        &joined,
-        js_compiler::compile_js,
-        js_compiler::SourceMode::Script,
-    ) {
-        Ok(_) => {
-            if report_uncaught(thread) {
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("{e} (in {})", paths.join(", "));
+    if repl_language == Some(Language::Infer) {
+        repl_language = files.last().and_then(|path| Language::of(path));
+        if repl_language.is_none() {
+            eprintln!("kettevm: --repl needs a language; use --repl js or --repl kette");
             std::process::exit(1);
         }
+    }
+
+    for path in &files {
+        run_file(&mut thread, path);
+        if thread.vm().is_shutdown() {
+            return;
+        }
+    }
+    if let Some(language) = repl_language
+        && !thread.vm().is_shutdown()
+    {
+        repl(&mut thread, language);
     }
 }
 
@@ -89,15 +100,10 @@ fn run_file(thread: &mut Thread, path: &str) {
             std::process::exit(1);
         }
     };
-    match std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("js") => run_with::<JavascriptCompiler>(thread, &src, path),
-        Some("ktt") => run_with::<KetteCompiler>(thread, &src, path),
-        _ => {
+    match Language::of(path) {
+        Some(Language::Javascript) => run_with::<JavascriptCompiler>(thread, &src, path),
+        Some(Language::Kette) => run_with::<KetteCompiler>(thread, &src, path),
+        Some(Language::Infer) | None => {
             eprintln!("kettevm: cannot tell the language of {path} (expected .js or .ktt)");
             std::process::exit(1);
         }
@@ -119,7 +125,7 @@ fn run_with<C: Compiler>(thread: &mut Thread, src: &str, path: &str) {
     }
 }
 
-fn repl(thread: &mut Thread) {
+fn repl(thread: &mut Thread, language: Language) {
     let stdin = std::io::stdin();
     loop {
         if thread.vm().is_shutdown() {
@@ -143,7 +149,12 @@ fn repl(thread: &mut Thread) {
         if line == ".exit" {
             break;
         }
-        match thread.eval_repl::<JavascriptCompiler>(line) {
+        let result = match language {
+            Language::Javascript => thread.eval_repl::<JavascriptCompiler>(line),
+            Language::Kette => thread.eval_repl::<KetteCompiler>(line),
+            Language::Infer => unreachable!("infer is resolved before the REPL starts"),
+        };
+        match result {
             Ok(v) => {
                 if report_uncaught(thread) {
                     continue;

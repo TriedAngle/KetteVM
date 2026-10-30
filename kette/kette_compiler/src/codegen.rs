@@ -12,8 +12,8 @@
 //! the callee itself as `self` — the call is the `value` send.
 
 use bytecode::{
-    CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, Program, Reg, RegList,
-    ScopeLayout, ScopeLocal,
+    BuiltinFn, CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta,
+    GlobalDeclarations, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
@@ -124,10 +124,11 @@ pub fn generate(ast: &Ast, resolved: &Resolved) -> Result<Program, CompileError>
         object_fids[object.0 as usize] = Some(i as u32 + 1);
     }
 
+    let root_scope = resolved.scope_of(root).expect("root owns the script scope");
     let mut program = Program::with_capacity(objects.len() + 1);
     {
-        let scope = resolved.scope_of(root).expect("root owns the script scope");
-        let mut generator = FunctionGen::new(ast, resolved, scope, root, 0, &object_fids);
+        let mut generator =
+            FunctionGen::new(ast, resolved, root_scope, root_scope, root, 0, &object_fids);
         generator.generate()?;
         program.add_function(generator.finish());
     }
@@ -142,8 +143,15 @@ pub fn generate(ast: &Ast, resolved: &Resolved) -> Result<Program, CompileError>
             .params
             .map(|params| ast.list_items(params).len())
             .unwrap_or(0);
-        let mut generator =
-            FunctionGen::new(ast, resolved, scope, parts.body, param_count, &object_fids);
+        let mut generator = FunctionGen::new(
+            ast,
+            resolved,
+            scope,
+            root_scope,
+            parts.body,
+            param_count,
+            &object_fids,
+        );
         generator.generate()?;
         program.add_function(generator.finish());
     }
@@ -155,6 +163,8 @@ struct FunctionGen<'a> {
     ast: &'a Ast,
     resolved: &'a Resolved,
     scope: ScopeId,
+    /// the script scope; its declarations are global object properties
+    root_scope: ScopeId,
     body: NodeId,
     /// per scope decl: context-allocated because a nested object captures it
     captured: Vec<bool>,
@@ -178,6 +188,7 @@ impl<'a> FunctionGen<'a> {
         ast: &'a Ast,
         resolved: &'a Resolved,
         scope: ScopeId,
+        root_scope: ScopeId,
         body: NodeId,
         param_count: usize,
         object_fids: &'a [Option<u32>],
@@ -210,6 +221,7 @@ impl<'a> FunctionGen<'a> {
             ast,
             resolved,
             scope,
+            root_scope,
             body,
             captured,
             reg_of,
@@ -246,6 +258,22 @@ impl<'a> FunctionGen<'a> {
         self.b.name(self.ast.symbol(name))
     }
 
+    /// Every script-level declaration as a global `var` binding. Kette has
+    /// no function declarations, so the function half is always empty.
+    fn global_declarations(&self) -> GlobalDeclarations {
+        let mut vars: Vec<Box<[u8]>> = Vec::new();
+        for decl in &self.resolved.scope(self.root_scope).decls {
+            let name = self.ast.symbol(decl.name);
+            if !vars.iter().any(|existing| &existing[..] == name) {
+                vars.push(name.into());
+            }
+        }
+        GlobalDeclarations {
+            vars: vars.into_boxed_slice(),
+            funcs: Box::new([]),
+        }
+    }
+
     // -- locals ------------------------------------------------------------
 
     fn load_decl(&mut self, decl: usize) {
@@ -266,7 +294,27 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
+    /// Script-level declarations are global object properties (var-like),
+    /// not slots of the script context.
+    fn resolves_to_root(&self, node: NodeId) -> bool {
+        match self.resolved.resolution(node) {
+            Some(Resolution::Local { scope, .. } | Resolution::Capture { scope, .. }) => {
+                scope == self.root_scope
+            }
+            Some(Resolution::Global) | None => false,
+        }
+    }
+
     fn load_ident(&mut self, node: NodeId) {
+        if self.resolves_to_root(node) {
+            let Node::Ident(sym) = *self.ast.node(node) else {
+                unreachable!("identifier nodes carry a symbol");
+            };
+            let idx = self.name_constant(sym);
+            let feedback = self.b.new_feedback();
+            self.b.load_global(idx, feedback);
+            return;
+        }
         match self.resolved.resolution(node) {
             Some(Resolution::Local { decl, .. }) => self.load_decl(decl as usize),
             Some(Resolution::Capture { decl, depth, .. }) => {
@@ -284,6 +332,15 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn store_ident(&mut self, node: NodeId) {
+        if self.resolves_to_root(node) {
+            let Node::Ident(sym) = *self.ast.node(node) else {
+                unreachable!("identifier nodes carry a symbol");
+            };
+            let idx = self.name_constant(sym);
+            let feedback = self.b.new_feedback();
+            self.b.store_global(idx, feedback);
+            return;
+        }
         match self.resolved.resolution(node) {
             Some(Resolution::Local { decl, .. }) => self.store_decl(decl as usize),
             Some(Resolution::Capture { decl, depth, .. }) => {
@@ -321,6 +378,16 @@ impl<'a> FunctionGen<'a> {
         }));
         self.b.create_function_context(ctx_info);
         self.b.push_context(self.ctx_save);
+        if self.scope == self.root_scope {
+            // Script declarations become global object properties. The
+            // declaration list creates them (as `undefined`) before the
+            // body runs, so strict global stores have a binding to write.
+            let idx = self
+                .b
+                .constant(Constant::GlobalDeclarations(self.global_declarations()));
+            self.b
+                .call_runtime_staged(BuiltinFn::DeclareGlobals, &[RtArg::Const(idx)]);
+        }
         self.b.load_undefined();
         self.b.store(self.completion);
 
@@ -359,11 +426,17 @@ impl<'a> FunctionGen<'a> {
 
     fn emit_stmt(&mut self, stmt: NodeId, sink: Reg) -> Result<(), CompileError> {
         match *self.ast.node(stmt) {
-            Node::Let { init, .. } => {
+            Node::Let { name, init } => {
                 self.expr(init)?;
-                let decl = self.next_let;
-                self.next_let += 1;
-                self.store_decl(decl);
+                if self.scope == self.root_scope {
+                    let idx = self.name_constant(name);
+                    let feedback = self.b.new_feedback();
+                    self.b.store_global(idx, feedback);
+                } else {
+                    let decl = self.next_let;
+                    self.next_let += 1;
+                    self.store_decl(decl);
+                }
                 Ok(())
             }
             Node::ExprStmt { expr } => {

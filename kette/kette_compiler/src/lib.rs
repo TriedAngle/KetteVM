@@ -46,9 +46,9 @@ pub fn compile_ast(ast: &mut Ast) -> Result<Program, CompileError> {
 /// Kette frontend entry point: parse `source` and lower it to bytecode,
 /// mapping failures into the language-neutral [`FrontendError`].
 pub fn compile_kette(source: &str, mode: SourceMode) -> Result<Program, FrontendError> {
-    if mode != SourceMode::Script {
+    if !matches!(mode, SourceMode::Script | SourceMode::Repl) {
         return Err(FrontendError::compile(
-            "kette: only script mode is implemented",
+            "kette: only script and repl mode are implemented",
         ));
     }
     let mut parser = Parser::new(Utf8SliceStream::new(source));

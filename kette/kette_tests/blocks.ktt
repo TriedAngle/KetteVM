@@ -1,7 +1,3 @@
-// Blocks are closures. `{ |params| body }` is a lambda, `{ body }` is a
-// zero-arg block; a block's value is its last expression. Blocks capture
-// the lexicals around them.
-//
 // Run:  cargo run -q -p vm -- kette/kette_tests/blocks.ktt
 // Check: kette/kette_tests/check.py
 
