@@ -274,15 +274,28 @@ fn global_load_fast<'a>(
     fb_slot: usize,
     global: Tagged<'a, Value>,
 ) -> GlobalLoadFast<'a> {
-    match InlineCache::try_load_global_lexical(heap, vector, fb_slot) {
-        Some(GlobalLexicalHit::Value(v)) => return GlobalLoadFast::Value(v),
-        Some(GlobalLexicalHit::Uninitialized) => return GlobalLoadFast::Uninitialized,
-        None => {}
+    let hit = match InlineCache::probe_mono(heap, vector, fb_slot, global) {
+        MonoProbe::Value(v) => Some(LoadHit::Value(v)),
+        MonoProbe::Handler(obj, handler) => InlineCache::apply_mono(heap, obj, handler),
+        MonoProbe::Poly {
+            obj,
+            map,
+            pairs,
+            start,
+        } => InlineCache::try_load_resume(heap, obj, map, pairs, start),
+        MonoProbe::Miss | MonoProbe::NotReceiver => None,
+    };
+    if let Some(hit) = hit {
+        match hit {
+            LoadHit::Value(v) => return GlobalLoadFast::Value(v),
+            LoadHit::Getter(getter) => return GlobalLoadFast::Getter(getter),
+            _ => {}
+        }
     }
-    match InlineCache::try_load(heap, vector, fb_slot, global) {
-        Some(LoadHit::Value(v)) => GlobalLoadFast::Value(v),
-        Some(LoadHit::Getter(getter)) => GlobalLoadFast::Getter(getter),
-        _ => GlobalLoadFast::Miss,
+    match InlineCache::try_load_global_lexical(heap, vector, fb_slot) {
+        Some(GlobalLexicalHit::Value(v)) => GlobalLoadFast::Value(v),
+        Some(GlobalLexicalHit::Uninitialized) => GlobalLoadFast::Uninitialized,
+        None => GlobalLoadFast::Miss,
     }
 }
 
@@ -548,12 +561,6 @@ fn op_store_global(frame: Frame) {
     let heap = frame.ctx().heap();
     let fb = frame.unsigned::<1>();
     let value = frame.acc();
-    if let Some(v) =
-        InlineCache::try_store_global_lexical(heap, frame.ctx().feedback_ref(heap), fb, value)
-    {
-        frame.set_acc(v);
-        next!()
-    }
     let name_idx = frame.unsigned::<0>();
     let name = frame
         .ctx()
@@ -571,6 +578,12 @@ fn op_store_global(frame: Frame) {
         value,
     ) {
         frame.set_acc(value);
+        next!()
+    }
+    if let Some(v) =
+        InlineCache::try_store_global_lexical(heap, frame.ctx().feedback_ref(heap), fb, value)
+    {
+        frame.set_acc(v);
         next!()
     }
     tail!(slow_store_global)

@@ -128,6 +128,134 @@ assert.sameValue(seenFast, 2, "push fast path setter called");
 assert.sameValue(hasOwn(grown, "1"), false, "push fast path does not create own index");
 delete Array.prototype[1];
 
+// ---- Array.prototype.pop (23.1.3.22) ----
+
+var popped = [1, 2, 3];
+assert.sameValue(popped.pop(), 3, "pop return");
+assert.sameValue(popped.length, 2, "pop length");
+assert.sameValue(hasOwn(popped, "2"), false, "pop deletes last");
+assert.sameValue(popped[1], 2, "pop leaves earlier elements");
+
+var emptyPop = [];
+assert.sameValue(emptyPop.pop(), undefined, "pop empty return");
+assert.sameValue(emptyPop.length, 0, "pop empty length");
+
+var popReuse = [1, 2];
+assert.sameValue(popReuse.pop(), 2, "pop reuse return");
+popReuse.push(3);
+assert.sameValue(popReuse.length, 2, "pop then push length");
+assert.sameValue(popReuse[1], 3, "pop then push value");
+
+var popRegrow = [1, 2];
+assert.sameValue(popRegrow.pop(), 2, "pop regrow return");
+popRegrow.length = 2;
+assert.sameValue(popRegrow.length, 2, "pop regrow length");
+assert.sameValue(hasOwn(popRegrow, "1"), false, "pop regrow keeps hole");
+
+var popGeneric = { length: 2, 0: "a", 1: "b" };
+assert.sameValue(Array.prototype.pop.call(popGeneric), "b", "pop generic return");
+assert.sameValue(popGeneric.length, 1, "pop generic length");
+assert.sameValue(hasOwn(popGeneric, "1"), false, "pop generic deletes last");
+
+var popFraction = { length: 1.5, 0: "a" };
+assert.sameValue(Array.prototype.pop.call(popFraction), "a", "pop fractional length");
+assert.sameValue(popFraction.length, 0, "pop fractional length write");
+
+var popNegative = { length: -1 };
+assert.sameValue(Array.prototype.pop.call(popNegative), undefined, "pop negative length");
+assert.sameValue(popNegative.length, 0, "pop negative length write");
+
+var popNaN = { length: NaN };
+assert.sameValue(Array.prototype.pop.call(popNaN), undefined, "pop NaN length");
+assert.sameValue(popNaN.length, 0, "pop NaN length write");
+
+assert.throws(TypeError, function () { Array.prototype.pop.call(null); }, "pop null");
+assert.throws(TypeError, function () { Array.prototype.pop.call(undefined); }, "pop undefined");
+assert.throws(TypeError, function () { Array.prototype.pop.call("abc"); }, "pop string");
+assert.sameValue(Array.prototype.pop.call(42), undefined, "pop number receiver");
+assert.sameValue(Array.prototype.pop.call(true), undefined, "pop boolean receiver");
+
+var popHoley = [1, , 3];
+popHoley.length = 2;
+Array.prototype[1] = "proto";
+assert.sameValue(popHoley.pop(), "proto", "pop hole through prototype");
+assert.sameValue(popHoley.length, 1, "pop hole length");
+assert.sameValue(hasOwn(popHoley, "1"), false, "pop hole does not create own index");
+delete Array.prototype[1];
+
+var popNonConfig = [1];
+Object.defineProperty(popNonConfig, "0", { configurable: false });
+assert.throws(TypeError, function () { popNonConfig.pop(); }, "pop non-configurable element");
+assert.sameValue(popNonConfig.length, 1, "pop non-configurable keeps length");
+assert.sameValue(popNonConfig[0], 1, "pop non-configurable keeps element");
+
+var popReadonlyLength = [1, 2];
+Object.defineProperty(popReadonlyLength, "length", { writable: false });
+assert.throws(TypeError, function () { popReadonlyLength.pop(); }, "pop read-only length");
+assert.sameValue(popReadonlyLength.length, 2, "pop read-only length unchanged");
+assert.sameValue(hasOwn(popReadonlyLength, "1"), false, "pop deletes before length write");
+
+var popEmptyReadonly = [];
+Object.defineProperty(popEmptyReadonly, "length", { writable: false });
+assert.throws(TypeError, function () { popEmptyReadonly.pop(); }, "pop empty read-only length");
+assert.sameValue(popEmptyReadonly.length, 0, "pop empty read-only length unchanged");
+
+var popGetterCalls = 0;
+var popGetter = { length: 2 };
+Object.defineProperty(popGetter, "1", {
+    get: function () { popGetterCalls++; return 7; },
+    configurable: true,
+});
+assert.sameValue(Array.prototype.pop.call(popGetter), 7, "pop element getter");
+assert.sameValue(popGetterCalls, 1, "pop element getter called once");
+assert.sameValue(popGetter.length, 1, "pop element getter length");
+
+var popLengthSeen = -1;
+var popSetter = { length: 1, 0: "x" };
+Object.defineProperty(popSetter, "length", {
+    get: function () { return 1; },
+    set: function (value) { popLengthSeen = value; },
+    configurable: true,
+});
+assert.sameValue(Array.prototype.pop.call(popSetter), "x", "pop length setter return");
+assert.sameValue(popLengthSeen, 0, "pop length setter receives new length");
+
+var popGetterOnlyLength = { length: 1, 0: "x" };
+Object.defineProperty(popGetterOnlyLength, "length", {
+    get: function () { return 1; },
+    configurable: true,
+});
+assert.throws(TypeError, function () {
+    Array.prototype.pop.call(popGetterOnlyLength);
+}, "pop set on getter-only length");
+
+var popBig = { length: 4294967296, 4294967295: "last" };
+assert.sameValue(Array.prototype.pop.call(popBig), "last", "pop large length return");
+assert.sameValue(popBig.length, 4294967295, "pop large length update");
+assert.sameValue(hasOwn(popBig, "4294967295"), false, "pop large length delete");
+
+var popProxyLog = [];
+var popProxyTarget = { length: 2, 0: "a", 1: "b" };
+var popProxy = new Proxy(popProxyTarget, {
+    get: function (target, key) {
+        popProxyLog.push("get " + key);
+        return target[key];
+    },
+    deleteProperty: function (target, key) {
+        popProxyLog.push("delete " + key);
+        return delete target[key];
+    },
+    set: function (target, key, value) {
+        popProxyLog.push("set " + key + "=" + value);
+        target[key] = value;
+        return true;
+    },
+});
+assert.sameValue(Array.prototype.pop.call(popProxy), "b", "pop proxy return");
+assert.sameValue(popProxyTarget.length, 1, "pop proxy length");
+assert.sameValue(hasOwn(popProxyTarget, "1"), false, "pop proxy deletes index");
+assert.sameValue(popProxyLog.join("|"), "get length|get 1|delete 1|set length=1", "pop proxy order");
+
 // ---- non-extensible receivers (10.1.6.1) ----
 
 var sealed = [];

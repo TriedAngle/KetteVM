@@ -352,8 +352,11 @@ impl<'s> Lookup<'s> {
 }
 
 impl Object {
-    /// ES `[[Get]]`: may run getters and proxy `get` traps. On a miss,
-    /// `throws_on_miss` raises a ReferenceError (contextual loads).
+    /// `[[Get]] ( propertyKey, receiver )`
+    /// [ES 10.1.8](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-get-p-receiver)
+    /// [ES 10.5.8](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-get-p-receiver)
+    /// Reads a property, running getters and proxy traps. `throws_on_miss`
+    /// raises a ReferenceError for contextual loads.
     pub fn get_property<'h>(
         vm: &'h VM,
         heap: &'h mut Heap,
@@ -453,10 +456,15 @@ impl Object {
         }
     }
 
-    /// ES `[[Set]]`: may run setters and proxy `set`/`defineProperty` traps.
-    /// - Strict-mode rejections raise here, so `Flow::Threw` always means a pending exception.
-    /// - `Shadow` defines on the receiver when the hit is inherited;
-    /// - `WriteThrough` writes the inherited slot. `contextual` marks a
+    /// `[[Set]] ( propertyKey, value, receiver )`
+    /// [ES 10.1.9](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-set-p-v-receiver)
+    /// [ES 10.5.9](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-set-p-v-receiver)
+    /// [ES 7.3.4](https://tc39.es/ecma262/#sec-set-o-p-v-throw)
+    /// Writes a property, running setters and proxy traps. Strict rejection
+    /// raises as `Set(..., true)`.
+    /// `Shadow` defines inherited hits on the receiver; `WriteThrough` writes
+    /// the inherited slot. `contextual` marks identifier stores, so a strict
+    /// global miss raises ReferenceError.
     #[allow(clippy::too_many_arguments)]
     pub fn set_property(
         vm: &VM,
@@ -612,7 +620,10 @@ impl Object {
         })
     }
 
-    /// ES `[[HasProperty]]`: existence-only; proxy `has` traps run, accessors never do.
+    /// `[[HasProperty]] ( propertyKey )`
+    /// [ES 10.1.7](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-hasproperty-p)
+    /// [ES 10.5.7](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-hasproperty-p)
+    /// Reports property existence; proxy traps run, accessors never do.
     pub fn has_property<'h>(
         vm: &VM,
         heap: &'h mut Heap,
@@ -635,9 +646,51 @@ impl Object {
             }
         })
     }
-}
 
-impl Object {
+    /// `[[Delete]] ( propertyKey )`
+    /// [ES 10.1.10](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-delete-p)
+    /// [ES 10.5.10](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-delete-p)
+    /// Deletes a property; proxy traps run and non-configurable keys are refused.
+    pub fn delete_property(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        target: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+    ) -> Result<Flow<bool>, VmError> {
+        state.handle_scope(|scope| {
+            if target.as_tagged(heap).is_nullish(heap) {
+                return Err(VmError::Type);
+            }
+            if Proxy::is_proxy(heap, target.as_tagged(heap)) {
+                return match Proxy::delete(vm, heap, state, target, key)? {
+                    Coercion::Threw => Ok(Flow::Threw),
+                    Coercion::Value(v) => {
+                        let v = scope.handle(v);
+                        Ok(Flow::Value(v.as_tagged(heap).is_truthy(heap)))
+                    }
+                };
+            }
+            // String exotic own properties ("length"/indices) are
+            // non-configurable, for primitives and String wrappers alike
+            // (ES 10.4.3.4); every other primitive property deletes as absent.
+            if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
+                && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
+            {
+                return Ok(Flow::Value(false));
+            }
+            if target.as_tagged(heap).is_primitive(heap) {
+                return Ok(Flow::Value(true));
+            }
+            let receiver = scope
+                .cast::<Object>(heap, target.as_tagged(heap))
+                .expect("non-primitive receivers are objects");
+            Ok(Flow::Value(Self::delete_own_property(
+                heap, &scope, receiver, key,
+            )?))
+        })
+    }
+
     /// `[[GetOwnProperty]]` as a raw descriptor: side-effect free.
     pub fn ordinary_own_descriptor<'s>(
         heap: &Heap,

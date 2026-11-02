@@ -189,66 +189,16 @@ pub fn delete_property_operator<'a>(
         let key = scope.handle(key);
         // proxies run their `deleteProperty` trap (ES 20.2.5.4); the
         // returned boolean flows through the strict handling below
-        let ok = if Proxy::is_proxy(heap, target.as_tagged(heap)) {
-            match rt_try!(
-                vm,
-                heap,
-                state,
-                Proxy::delete(vm, heap, state, target, key.erase())
-            ) {
-                Coercion::Threw => {
-                    return vm.known().exception.get(heap).erase();
-                }
-                Coercion::Value(v) => {
-                    let v = scope.handle(v);
-                    v.as_tagged(heap).is_truthy(heap)
-                }
-            }
-        } else {
-            rt_try!(
-                vm,
-                heap,
-                state,
-                delete_property_core(heap, vm.known(), &scope, target, key.erase())
-            )
+        let ok = match Object::delete_property(vm, heap, state, target, key.erase()) {
+            Ok(Flow::Value(ok)) => ok,
+            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         };
         if strict && !ok {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
         Convert::boolean(heap, ok)
     })
-}
-
-fn delete_property_core(
-    heap: &mut Heap,
-    roots: &WellKnown,
-    scope: &HandleScope<'_>,
-    target: Handle<'_, Value>,
-    key: Handle<'_, Value>,
-) -> Result<bool, VmError> {
-    // ToObject (ES 7.2.3): a null/undefined base throws
-    let nullish = target.as_tagged(heap).ptr_eq(roots.null.get(heap).erase())
-        || target
-            .as_tagged(heap)
-            .ptr_eq(roots.undefined.get(heap).erase());
-    if nullish {
-        return Err(VmError::Type);
-    }
-    // String exotic own properties ("length"/indices) are non-configurable,
-    // for primitives and String wrappers alike (ES 10.4.3.4); every other
-    // primitive property deletes as absent (true).
-    if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
-        && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
-    {
-        return Ok(false);
-    }
-    if target.as_tagged(heap).is_primitive(heap) {
-        return Ok(true);
-    }
-    let receiver = scope
-        .cast::<Object>(heap, target.as_tagged(heap))
-        .expect("non-primitive receivers are objects");
-    Object::delete_own_property(heap, scope, receiver, key)
 }
 
 /// Sloppy `delete x` on an unresolved name (ES 13.5.1.2 step 5 →
@@ -263,20 +213,19 @@ fn delete_identifier_sloppy<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    let ok = rt_try!(
-        vm,
-        heap,
-        state,
-        state.handle_scope(|scope| {
-            let name = scope.handle(args.get(heap, 0));
-            if crate::global_lexical_has(heap, name.as_tagged(heap)) {
-                return Ok(false);
-            }
-            let global = scope.handle(vm.known().global_object.get(heap).erase());
-            let name = scope.handle(args.get(heap, 0));
-            delete_property_core(heap, vm.known(), &scope, global, name)
-        })
-    );
+    let ok = match state.handle_scope(|scope| {
+        let name = scope.handle(args.get(heap, 0));
+        if crate::global_lexical_has(heap, name.as_tagged(heap)) {
+            return Ok(Flow::Value(false));
+        }
+        let global = scope.handle(vm.known().global_object.get(heap).erase());
+        let name = scope.handle(args.get(heap, 0));
+        Object::delete_property(vm, heap, state, global, name)
+    }) {
+        Ok(Flow::Value(ok)) => ok,
+        Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+        Err(err) => return raise_runtime(vm, heap, state, err),
+    };
     Convert::boolean(heap, ok)
 }
 

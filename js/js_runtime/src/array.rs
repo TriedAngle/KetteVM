@@ -4,8 +4,8 @@
 use vm_core::HostCtx;
 use vm_core::proxy::Flow;
 use vm_core::{
-    Args, Coercion, Convert, DenseString, Float, Handle, HandleSlice, Heap, LanguageMode, Object,
-    Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
+    Args, Coercion, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap,
+    LanguageMode, Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -94,8 +94,10 @@ pub fn array_push<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    if let Some(v) = array_push_fast(heap, args) {
-        return v;
+    match array_push_fast(heap, state, args) {
+        Some(Ok(len)) => return Smi::new(len as i64).into_tagged(),
+        Some(Err(err)) => return raise_runtime(vm, heap, state, err),
+        None => {}
     }
     state.handle_scope(|scope| {
         let this = args.get_handle(heap, 0);
@@ -175,31 +177,51 @@ pub fn array_push<'a>(
     })
 }
 
-/// One argument, receiver already an array with spare capacity: append with
-/// no allocation and no handle scope. Returns `None` for anything else.
-#[inline(always)]
-fn array_push_fast<'a>(heap: &Heap, args: Args) -> Option<Tagged<'a, Value>> {
+/// Allocation Free Array push fast path if space is remaining.
+/// Returns `None` when the generic `[[Set]]` algorithm is required.
+#[inline]
+fn array_push_fast(
+    heap: &mut Heap,
+    state: &ThreadState,
+    args: Args,
+) -> Option<Result<usize, VmError>> {
     if args.len() != 2 {
         return None;
     }
-    let receiver = args.get_handle(heap, 0);
-    let arg = args.get_handle(heap, 1);
-    let r = receiver.as_tagged(heap);
-    let obj = r.as_heap_object()?;
-    if !obj.as_ref().is_array(heap) {
-        return None;
-    }
-    let len = obj.as_ref().length();
-    let elements = obj.as_ref().elements_array(heap)?;
-    if len >= elements.len() || !fast_path_exact(heap, obj, len) {
-        return None;
-    }
-    elements.as_ref().set(heap, len, arg.as_tagged(heap));
-    obj.as_ref()
-        .length
-        .set(heap, r.erase(), Smi::new((len + 1) as i64));
-    Prototype::element_mutated(heap, obj);
-    Some(Smi::new((len + 1) as i64).into_tagged())
+    let len = {
+        let receiver = args.get_handle(heap, 0);
+        let r = receiver.as_tagged(heap);
+        let obj = r.as_heap_object()?;
+        if !obj.as_ref().is_array(heap) {
+            return None;
+        }
+        let len = obj.as_ref().length();
+        if !fast_path_exact(heap, obj, len) {
+            return None;
+        }
+        if let Some(elements) = obj.as_ref().elements_array(heap)
+            && len < elements.len()
+        {
+            let arg = args.get_handle(heap, 1);
+            elements.as_ref().set(heap, len, arg.as_tagged(heap));
+            obj.as_ref()
+                .length
+                .set(heap, r.erase(), Smi::new((len + 1) as i64));
+            Prototype::element_mutated(heap, obj);
+            return Some(Ok(len + 1));
+        }
+        len
+    };
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = receiver.as_tagged(heap).as_heap_object()?;
+        let receiver_obj = scope.handle(obj);
+        let arg = args.get_handle(heap, 1);
+        match Object::store_array_element(heap, &scope, &receiver_obj, len, &arg) {
+            Ok(()) => Some(Ok(len + 1)),
+            Err(err) => Some(Err(err)),
+        }
+    })
 }
 
 /// Whether a direct element store matches `Set(obj, index, item, true)`.
@@ -230,8 +252,9 @@ fn has_own_element(heap: &Heap, obj: Tagged<'_, Object>, index: usize) -> bool {
     }
 }
 
-/// `Array.prototype.pop` (ES 23.1.3.22): remove the last element, shorten
-/// `length`, and punch a hole so the store releases the value.
+/// `Array.prototype.pop ( )`
+/// [ES 23.1.3.22](https://tc39.es/ecma262/#sec-array.prototype.pop)
+/// Removes and returns the last element of an array-like receiver.
 pub fn array_pop<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -241,40 +264,143 @@ pub fn array_pop<'a>(
         vm, heap, state, ..
     } = nctx;
     state.handle_scope(|scope| {
+        if let Some(v) = array_pop_fast(heap, &scope, args) {
+            return v.as_tagged(heap);
+        }
+
         let receiver = args.get_handle(heap, 0);
-        let Some(obj) = scope.cast::<Object>(heap, receiver.as_tagged(heap)) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-        let is_array = obj.as_tagged(heap).is_array(heap);
-        if !is_array {
+        if receiver.as_tagged(heap).is_nullish(heap) {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
-        let this = obj.as_tagged(heap);
-        let len = this.as_ref().length();
-        if len == 0 {
+        // ToObject (ES 7.1.20); boxing can allocate, so the receiver stays
+        // rooted in the arguments until the wrapper exists.
+        let obj = if receiver.as_tagged(heap).is_primitive(heap) {
+            match box_primitive(vm, heap, &scope, receiver) {
+                Some(obj) => obj.erase(),
+                // TODO: ToObject for primitive kinds the VM cannot box yet.
+                None => return raise_runtime(vm, heap, state, VmError::Type),
+            }
+        } else {
+            scope.handle(receiver.as_tagged(heap))
+        };
+
+        // LengthOfArrayLike (ES 7.3.18): Get(obj, "length") then ToLength.
+        let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
+        let length_value = match Object::get_property(vm, heap, state, obj, obj, length_key, false)
+        {
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let length = match Object::to_numeric(vm, heap, state, length_value) {
+            Ok(Some(n)) => {
+                const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+                if n.is_nan() || n <= 0.0 {
+                    0
+                } else if n >= MAX_SAFE_INTEGER {
+                    MAX_SAFE_INTEGER as u64
+                } else {
+                    n.trunc() as u64
+                }
+            }
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+
+        if length == 0 {
+            let zero = scope.handle(Smi::new(0).into_tagged());
+            match Object::set_property(
+                vm,
+                heap,
+                state,
+                obj,
+                obj,
+                length_key,
+                zero,
+                StoreSemantics::Shadow,
+                false,
+                LanguageMode::Strict,
+            ) {
+                Ok(Flow::Value(_)) => {}
+                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            }
             return vm.known().undefined.get(heap).erase();
         }
-        let last = len - 1;
-        let value = this
-            .as_ref()
-            .element_value(heap, last)
-            .unwrap_or_else(|| vm.known().undefined.get(heap).erase());
-        if let Some(dict) = this.as_ref().element_dictionary(heap) {
-            dict.as_ref().delete(heap, last);
-        } else {
-            let elements = this.as_ref().elements(heap);
-            if elements.is_strong_ptr() && last < elements.as_ref().len() {
-                elements
-                    .as_ref()
-                    .set(heap, last, vm.known().the_hole.get(heap).erase());
-            }
+
+        let new_length = length - 1;
+        let new_length_value = scope.handle(Smi::new(new_length as i64).into_tagged());
+        // ToString(newLen), interned: named keys compare by pointer.
+        let index = match Object::to_property_key(vm, heap, state, new_length_value) {
+            Ok(Some(key)) => scope.handle(key.erase()),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let element = match Object::get_property(vm, heap, state, obj, obj, index, false) {
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        match Object::delete_property(vm, heap, state, obj, index) {
+            Ok(Flow::Value(true)) => {}
+            Ok(Flow::Value(false)) => return raise_runtime(vm, heap, state, VmError::Type),
+            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         }
-        this.as_ref()
-            .length
-            .set(heap, this.erase(), Smi::new(last as i64));
-        Prototype::element_mutated(heap, this);
-        value
+        match Object::set_property(
+            vm,
+            heap,
+            state,
+            obj,
+            obj,
+            length_key,
+            new_length_value,
+            StoreSemantics::Shadow,
+            false,
+            LanguageMode::Strict,
+        ) {
+            Ok(Flow::Value(_)) => {}
+            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        }
+        element.as_tagged(heap)
     })
+}
+
+/// Direct `pop` for a dense array with a writable length: the last element
+/// is a configurable data property, so punching a hole and shrinking the
+/// length cannot run user code or allocate. Returns `None` for anything that
+/// needs the generic algorithm.
+#[inline]
+fn array_pop_fast<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    args: Args,
+) -> Option<Handle<'s, Value>> {
+    let receiver = args.get_handle(heap, 0);
+    let obj = receiver.as_tagged(heap).as_heap_object()?;
+    if !obj.as_ref().is_array(heap) || !obj.as_ref().map(heap).length_writable(heap) {
+        return None;
+    }
+    let len = obj.as_ref().length();
+    if len == 0 {
+        return Some(scope.handle(heap.known().undefined.get(heap).erase()));
+    }
+    let last = len - 1;
+    let elements = obj.as_ref().elements_array(heap)?;
+    if last >= elements.len() || elements.at(heap, last) == heap.known().the_hole.get(heap).erase()
+    {
+        return None;
+    }
+    let value = scope.handle(elements.at(heap, last));
+    elements
+        .as_ref()
+        .set(heap, last, heap.known().the_hole.get(heap).erase());
+    obj.as_ref()
+        .length
+        .set(heap, obj.erase(), Smi::new(last as i64));
+    Prototype::element_mutated(heap, obj);
+    Some(value)
 }
 
 /// `Array.prototype.values` / `Array.prototype[@@iterator]`
