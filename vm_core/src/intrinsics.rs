@@ -1790,6 +1790,7 @@ fn construct_super_construct<'a>(
         let derived = callee
             .as_tagged(heap)
             .as_heap_object()
+            .filter(|obj| !obj.map(heap).kind().is_native())
             .and_then(|obj| obj.callable_info(heap))
             .is_some_and(|info| info.function_kind().is_derived_class_constructor());
         let Some(callee) = scope.cast::<Object>(heap, callee.as_tagged(heap)) else {
@@ -1801,6 +1802,9 @@ fn construct_super_construct<'a>(
         let (receiver, allocated) = if derived {
             (scope.handle(vm.known().the_hole.get(heap).erase()), false)
         } else {
+            // TODO: native constructors allocate their own receiver, so this
+            // synthesized object is unused (and Array reads
+            // `new.target.prototype` again).
             match Object::create_construct_receiver_value(vm, heap, state, new_target.erase()) {
                 // the receiver must stay rooted across the callee call:
                 // a primitive return falls back to it after the call

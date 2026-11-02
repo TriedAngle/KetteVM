@@ -125,6 +125,15 @@ impl Map {
         unsafe { &*self.data_ptr().add(i) }
     }
 
+    /// Whether the array `length` descriptor is writable.
+    pub fn length_writable(&self, heap: &Heap) -> bool {
+        let name = heap.known().strings.length.get(heap);
+        self.descriptors()
+            .iter()
+            .find(|d| d.name(heap).ptr_eq(name))
+            .is_some_and(|d| d.flags().is_writable())
+    }
+
     pub fn find_transition<'a>(
         &self,
         heap: &'a Heap,
@@ -348,7 +357,7 @@ pub enum ElementsKind {
     PackedDouble = 2,
     /// TODO: unboxed double backing with hole gaps.
     HoleyDouble = 3,
-    /// TODO: `NumberDictionary` backing for sparse arrays.
+    /// Dictionary backing (`NumberDictionary`) for sparse arrays.
     Dictionary = 4,
 }
 
@@ -615,6 +624,10 @@ impl SlotFlags {
 
     pub const fn is_writable(self) -> bool {
         self.0 & Self::WRITABLE.0 != 0
+    }
+
+    pub const fn without_writable(self) -> Self {
+        Self(self.0 & !Self::WRITABLE.0)
     }
 
     pub const fn is_configurable(self) -> bool {

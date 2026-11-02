@@ -517,6 +517,12 @@ fn define_internal_h<'s>(
             {
                 return Ok(Flow::Value(false));
             }
+            let array = scope
+                .cast::<Object>(heap, obj.as_tagged(heap))
+                .expect("array checked above");
+            let old_len = array.as_tagged(heap).length();
+            let writable = array.as_tagged(heap).map(heap).length_writable(heap);
+
             if let Some(value) = partial.value {
                 let n = Object::to_numeric(vm, heap, state, value)?;
                 let Some(n) = n else {
@@ -526,14 +532,39 @@ fn define_internal_h<'s>(
                 if len as f64 != n {
                     return Err(VmError::OutOfBounds);
                 }
-                let array = scope
-                    .cast::<Object>(heap, obj.as_tagged(heap))
-                    .expect("array checked above");
-                return Object::set_array_length(heap, scope, &array, len as usize)
-                    .map(Flow::Value);
+                let new_len = len as usize;
+                if new_len < old_len {
+                    if !writable {
+                        return Ok(Flow::Value(false));
+                    }
+                    let shrunk = Object::set_array_length(heap, scope, &array, new_len)?;
+                    if partial.writable == Some(false) {
+                        Object::make_array_length_readonly(heap, scope, &array);
+                    }
+                    return Ok(Flow::Value(shrunk));
+                }
+                if partial.writable == Some(true) && !writable {
+                    return Ok(Flow::Value(false));
+                }
+                if new_len != old_len {
+                    if !writable {
+                        return Ok(Flow::Value(false));
+                    }
+                    Object::set_array_length(heap, scope, &array, new_len)?;
+                }
+                if partial.writable == Some(false) {
+                    Object::make_array_length_readonly(heap, scope, &array);
+                }
+                return Ok(Flow::Value(true));
             }
-            // Attribute-only changes fall through to the generic
-            // descriptor machinery below.
+
+            if partial.writable == Some(true) && !writable {
+                return Ok(Flow::Value(false));
+            }
+            if partial.writable == Some(false) {
+                Object::make_array_length_readonly(heap, scope, &array);
+            }
+            return Ok(Flow::Value(true));
         }
     }
     // Element defines route through the ordinary [[DefineOwnProperty]]:

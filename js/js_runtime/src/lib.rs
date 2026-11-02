@@ -738,7 +738,13 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             array_fn,
             wks_prototype,
-            PropertyDescriptor::data(array_prototype.erase()),
+            // ES 23.1.2.5: non-writable, non-enumerable, non-configurable.
+            PropertyDescriptor::Data {
+                value: array_prototype.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         let array_name = thread.intern(&scope, "Array");
         // Safety: fresh interned word, rooted below before the define.

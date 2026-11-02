@@ -448,54 +448,16 @@ impl Object {
         }
 
         if grows {
-            let obj = receiver.as_tagged(heap);
-            let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
-            let (normalize, capacity) = {
-                let new_capacity = (new_len + (new_len >> 1) + 16).max(elements.len());
-                if i - elements.len() >= 1024 {
-                    (true, new_capacity)
-                } else if new_capacity > 1000 {
-                    let mut used = 0usize;
-                    for k in 0..elements.len() {
-                        if elements.at(heap, k) != heap.known().the_hole.get(heap) {
-                            used += 1;
-                        }
-                    }
-                    let dict_words =
-                        NumberDictionary::compute_capacity(used) * NumberDictionary::ENTRY_SIZE;
-                    (3 * dict_words <= new_capacity, new_capacity)
-                } else {
-                    (false, new_capacity)
-                }
-            };
-            if normalize {
-                Self::normalize_elements(heap, scope, receiver);
-                return Self::store_dictionary_element(heap, scope, receiver, i, value);
-            }
-            let keep = logical_len.min(
-                receiver
-                    .as_tagged(heap)
-                    .elements_array(heap)
-                    .map(|e| e.len())
-                    .unwrap_or(0),
-            );
-            let elements = heap.allocate_hole_array(capacity).as_handle(scope);
-            {
-                let obj = receiver.as_tagged(heap);
-                let old = obj.elements_array(heap).ok_or(VmError::Type)?;
-                let new = elements.as_tagged(heap);
-                for k in 0..keep {
-                    new.set(heap, k, old.at(heap, k));
-                }
-                new.set(heap, i, value.as_tagged(heap));
-            }
-            let obj = receiver.as_tagged(heap);
-            obj.elements
-                .set(heap, obj.erase(), elements.as_tagged(heap));
-            if is_array && new_len > logical_len {
-                obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
-            }
-            Prototype::element_mutated(heap, obj);
+            Self::grow_elements(
+                heap,
+                scope,
+                receiver,
+                i,
+                value,
+                new_len,
+                logical_len,
+                is_array,
+            )?;
         } else {
             let obj = receiver.as_tagged(heap);
             let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
@@ -507,6 +469,67 @@ impl Object {
             }
             Prototype::element_mutated(heap, obj);
         }
+        Ok(())
+    }
+
+    fn grow_elements(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        receiver: &Handle<'_, Object>,
+        i: usize,
+        value: &Handle<'_, Value>,
+        new_len: usize,
+        logical_len: usize,
+        is_array: bool,
+    ) -> Result<(), VmError> {
+        let obj = receiver.as_tagged(heap);
+        let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
+        let (normalize, capacity) = {
+            let new_capacity = (new_len + (new_len >> 1) + 16).max(elements.len());
+            if i - elements.len() >= 1024 {
+                (true, new_capacity)
+            } else if new_capacity > 1000 {
+                let mut used = 0usize;
+                for k in 0..elements.len() {
+                    if elements.at(heap, k) != heap.known().the_hole.get(heap) {
+                        used += 1;
+                    }
+                }
+                let dict_words =
+                    NumberDictionary::compute_capacity(used) * NumberDictionary::ENTRY_SIZE;
+                (3 * dict_words <= new_capacity, new_capacity)
+            } else {
+                (false, new_capacity)
+            }
+        };
+        if normalize {
+            Self::normalize_elements(heap, scope, receiver);
+            return Self::store_dictionary_element(heap, scope, receiver, i, value);
+        }
+        let keep = logical_len.min(
+            receiver
+                .as_tagged(heap)
+                .elements_array(heap)
+                .map(|e| e.len())
+                .unwrap_or(0),
+        );
+        let elements = heap.allocate_hole_array(capacity).as_handle(scope);
+        {
+            let obj = receiver.as_tagged(heap);
+            let old = obj.elements_array(heap).ok_or(VmError::Type)?;
+            let new = elements.as_tagged(heap);
+            for k in 0..keep {
+                new.set(heap, k, old.at(heap, k));
+            }
+            new.set(heap, i, value.as_tagged(heap));
+        }
+        let obj = receiver.as_tagged(heap);
+        obj.elements
+            .set(heap, obj.erase(), elements.as_tagged(heap));
+        if is_array && new_len > logical_len {
+            obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
+        }
+        Prototype::element_mutated(heap, obj);
         Ok(())
     }
 
@@ -776,6 +799,30 @@ impl Object {
             .length
             .set(heap, obj.erase(), Smi::new(new_len as i64));
         Ok(true)
+    }
+
+    /// Clear [[Writable]] on the array `length` native accessor, keeping its
+    /// getter/setter.
+    pub fn make_array_length_readonly(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        receiver: &Handle<'_, Object>,
+    ) {
+        let name = scope.handle(heap.known().strings.length.get(heap));
+        let map = receiver.as_tagged(heap).map(heap);
+        let Some((index, descriptor)) = map
+            .descriptors()
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.name(heap).ptr_eq(name.as_tagged(heap)))
+        else {
+            return;
+        };
+        let flags = descriptor.flags().without_writable();
+        if flags == descriptor.flags() {
+            return;
+        }
+        Transition::replace_native_accessor_flags(heap, scope, *receiver, name, index, flags);
     }
 
     pub fn normalize_elements(

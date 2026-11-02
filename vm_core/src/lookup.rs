@@ -508,11 +508,18 @@ impl Object {
                             call_setter(vm, heap, state, &scope, receiver, value, setter)
                         }
                     }
-                    Hit::NativeAccessor { holder, info, .. } => {
+                    Hit::NativeAccessor {
+                        holder,
+                        info,
+                        flags,
+                        ..
+                    } => {
                         if !holder.erase().ptr_eq(receiver.as_tagged(heap)) {
                             // Native accessors present as data properties:
                             // an inherited write defines on the receiver.
                             define_on_receiver(vm, heap, state, &scope, receiver, key, value)
+                        } else if !flags.is_writable() {
+                            Ok(Flow::Value(SetApplied::Rejected))
                         } else {
                             let setter = info.setter();
                             native_accessor_set(vm, heap, state, &scope, setter, receiver, value)

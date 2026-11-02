@@ -1,9 +1,10 @@
 use core::alloc::Layout;
 
 use crate::{
-    AccessorPair, AllocToken, Compare, DETAILS_CONFIGURABLE, ElementsKind, FixedArray, Handle,
-    HandleScope, Heap, Key, Map, MapInit, MapKind, MaybeWeak, Message, Object, Prototype,
-    SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    AccessorInfo, AccessorPair, AllocToken, Compare, DETAILS_CONFIGURABLE, ElementsKind,
+    FixedArray, Handle, HandleScope, Heap, Key, Map, MapInit, MapKind, MaybeWeak, Message, Object,
+    Prototype, SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray,
+    WeakFixedArrayInit,
 };
 
 /// Store semantics:
@@ -61,6 +62,17 @@ impl<'s> SiblingChange<'s> {
 
 pub struct Transition;
 
+/// The descriptor value a transition target should carry for its replaced
+/// or appended row.
+enum DescriptorValue<'s> {
+    /// Data row: a slot offset chosen by the transition.
+    Data,
+    /// Accessor row: a freshly allocated getter/setter pair.
+    Accessor(Handle<'s, Value>, Handle<'s, Value>),
+    /// Native accessor row: keep the existing accessor-info value.
+    Native(Handle<'s, Value>),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Change {
     /// Append a new last descriptor.
@@ -70,18 +82,23 @@ pub enum Change {
 }
 
 impl Transition {
-    pub fn target<'s>(
+    fn target<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         parent: impl for<'a> Fn(&'a Heap) -> Tagged<'a, Map>,
         name: Handle<SlotName>,
         flags: SlotFlags,
-        pair: Option<(Handle<'_, Value>, Handle<'_, Value>)>,
+        row: DescriptorValue<'s>,
         change: Change,
     ) -> Handle<'s, Map> {
-        debug_assert_eq!(flags.is_accessor(), pair.is_some());
+        debug_assert_eq!(flags.is_accessor(), !matches!(row, DescriptorValue::Data));
         loop {
-            let pair_values = pair.map(|(get, set)| (get.as_tagged(heap), set.as_tagged(heap)));
+            let pair_values = match &row {
+                DescriptorValue::Accessor(get, set) => {
+                    Some((get.as_tagged(heap), set.as_tagged(heap)))
+                }
+                _ => None,
+            };
             if let Some(target) =
                 parent(heap).find_transition(heap, name.as_tagged(heap), flags, pair_values)
             {
@@ -119,13 +136,13 @@ impl Transition {
 
             let map_layout = Map::layout_for(descriptor_count + appends);
             let pairs_layout = WeakFixedArray::<Value>::layout_for(pairs_len + 2);
-            let total = match pair.is_some() {
-                true => AllocToken::total_for(&[
+            let total = match &row {
+                DescriptorValue::Accessor(..) => AllocToken::total_for(&[
                     Layout::new::<AccessorPair>(),
                     map_layout,
                     pairs_layout,
                 ]),
-                false => AllocToken::total_for(&[map_layout, pairs_layout]),
+                _ => AllocToken::total_for(&[map_layout, pairs_layout]),
             };
 
             let attempt = heap.allocate_token_enter_heap(total, |token, heap| {
@@ -138,11 +155,12 @@ impl Transition {
                 }
 
                 let name_word = name.as_tagged(heap);
-                let row_value = match pair {
-                    Some((get, set)) => {
-                        scope.handle(token.allocate::<AccessorPair>((get, set)).erase())
+                let row_value = match &row {
+                    DescriptorValue::Accessor(get, set) => {
+                        scope.handle(token.allocate::<AccessorPair>((*get, *set)).erase())
                     }
-                    None => scope.handle(Smi::new(row_offset as i64)),
+                    DescriptorValue::Native(value) => scope.handle(value.as_tagged(heap)),
+                    DescriptorValue::Data => scope.handle(Smi::new(row_offset as i64)),
                 };
 
                 let mut descriptors: Vec<(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>)> =
@@ -196,6 +214,36 @@ impl Transition {
                 return child;
             }
         }
+    }
+
+    /// Replace a native-accessor row's flags while keeping its accessor-info
+    /// value (array `length` writability).
+    pub fn replace_native_accessor_flags(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        receiver: Handle<'_, Object>,
+        name: Handle<'_, SlotName>,
+        index: usize,
+        flags: SlotFlags,
+    ) {
+        let map = receiver.as_tagged(heap).map(heap);
+        let value = scope.handle(map.descriptors()[index].value.get(heap));
+        let target = Self::target(
+            heap,
+            scope,
+            |heap| receiver.as_tagged(heap).map(heap),
+            name,
+            flags,
+            DescriptorValue::Native(value),
+            Change::Replace { index },
+        );
+        let host = receiver.as_tagged(heap).erase();
+        Prototype::shape_changed(heap, receiver.as_tagged(heap).map(heap));
+        receiver
+            .as_tagged(heap)
+            .header
+            .map
+            .set(heap, host, target.as_tagged(heap));
     }
 
     pub fn sibling_target<'s>(
@@ -563,7 +611,7 @@ impl Transition {
                     |heap| receiver.as_tagged(heap).map(heap),
                     name,
                     flags,
-                    None,
+                    DescriptorValue::Data,
                     change,
                 );
                 if grow {
@@ -583,7 +631,7 @@ impl Transition {
                     |heap| receiver.as_tagged(heap).map(heap),
                     name,
                     flags,
-                    Some((get, set)),
+                    DescriptorValue::Accessor(get, set),
                     change,
                 );
                 Self::swap_map(heap, receiver, name, flags, Some((get, set)));
@@ -743,6 +791,8 @@ enum DefineAction<'s> {
     WriteDataSlot { value: Handle<'s, Value> },
     /// Replace the descriptor with the new one (data or accessor).
     Redefine { desc: PropertyDescriptor<'s> },
+    /// Change flags on a native accessor while keeping its accessor info.
+    NativeAccessor { flags: SlotFlags },
 }
 
 impl Object {
@@ -755,6 +805,11 @@ impl Object {
     ) -> Result<bool, VmError> {
         // elements are the only home of canonical indices
         if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+            if Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i).is_none()
+                && !can_add_element(heap, receiver.as_tagged(heap), i)
+            {
+                return Ok(false);
+            }
             return Self::define_element(heap, scope, receiver, i, desc);
         }
         debug_assert!(
@@ -814,11 +869,18 @@ impl Object {
         desc: PropertyDescriptor<'_>,
     ) -> Result<bool, VmError> {
         if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
-            if let Some(current) =
-                Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i)
-                && !element_define_valid(heap, &current, &desc)
-            {
-                return Ok(false);
+            let current = Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i);
+            match current {
+                Some(current) => {
+                    if !element_define_valid(heap, &current, &desc) {
+                        return Ok(false);
+                    }
+                }
+                None => {
+                    if !can_add_element(heap, receiver.as_tagged(heap), i) {
+                        return Ok(false);
+                    }
+                }
             }
             return Self::define_element(heap, scope, receiver, i, desc);
         }
@@ -838,6 +900,7 @@ impl Object {
             validate_define(
                 heap,
                 receiver.as_tagged(heap),
+                name.as_tagged(heap),
                 cur_flags,
                 cur_desc_value,
                 desc,
@@ -933,6 +996,9 @@ fn element_define_valid(
     if configurable(current) {
         return true;
     }
+    if configurable(desc) {
+        return false;
+    }
     match (current, desc) {
         (
             D::Data {
@@ -948,9 +1014,9 @@ fn element_define_valid(
                 ..
             },
         ) => {
-            cw == nw
-                && ce == ne
-                && (*cw || Compare::same_value(heap, cv.as_tagged(heap), nv.as_tagged(heap)))
+            ce == ne
+                && (*cw
+                    || (!*nw && Compare::same_value(heap, cv.as_tagged(heap), nv.as_tagged(heap))))
         }
         (
             D::Accessor {
@@ -974,6 +1040,18 @@ fn element_define_valid(
     }
 }
 
+/// ES 10.4.2.1 steps 2-3 and 10.1.6.1 step 2: a new element needs an
+/// extensible receiver and, for arrays, a writable `length`.
+fn can_add_element(heap: &Heap, receiver: Tagged<'_, Object>, index: usize) -> bool {
+    if receiver.is_array(heap)
+        && index >= receiver.length()
+        && !receiver.map(heap).length_writable(heap)
+    {
+        return false;
+    }
+    receiver.is_extendable(heap)
+}
+
 impl Object {
     fn apply_define(
         heap: &mut Heap,
@@ -991,6 +1069,11 @@ impl Object {
             }
             DefineAction::Redefine { desc } => {
                 Transition::define(heap, scope, receiver, name, desc, Change::Replace { index })
+            }
+            DefineAction::NativeAccessor { flags } => {
+                Transition::replace_native_accessor_flags(
+                    heap, scope, receiver, name, index, flags,
+                );
             }
         }
     }
@@ -1099,6 +1182,7 @@ impl Object {
 fn validate_define<'a, 's>(
     heap: &'a Heap,
     receiver: Tagged<'a, Object>,
+    name: Tagged<'a, SlotName>,
     cur_flags: SlotFlags,
     cur_desc_value: Handle<'s, Value>,
     desc: PropertyDescriptor<'s>,
@@ -1108,6 +1192,37 @@ fn validate_define<'a, 's>(
     if cur_flags.is_accessor() {
         if cur_configurable {
             return Some(DefineAction::Redefine { desc });
+        }
+        if cur_desc_value
+            .as_tagged(heap)
+            .get_as::<AccessorInfo>(heap)
+            .is_some()
+        {
+            let PropertyDescriptor::Data {
+                value,
+                writable,
+                enumerable,
+                configurable,
+            } = desc
+            else {
+                return None;
+            };
+            if configurable || enumerable != cur_flags.is_enumerable() {
+                return None;
+            }
+            let current = receiver.array_length(heap, name)?;
+            if !Compare::same_value(heap, value.as_tagged(heap), current) {
+                return None;
+            }
+            if writable == cur_flags.is_writable() {
+                return Some(DefineAction::Nothing);
+            }
+            if !writable && cur_flags.is_writable() {
+                return Some(DefineAction::NativeAccessor {
+                    flags: cur_flags.without_writable(),
+                });
+            }
+            return None;
         }
         let PropertyDescriptor::Accessor {
             get,
@@ -1121,8 +1236,7 @@ fn validate_define<'a, 's>(
         if configurable || enumerable != cur_flags.is_enumerable() {
             return None;
         }
-        // A native accessor (the array-length field) has no pair halves and
-        // is not redefinable as a user accessor; reject rather than panic.
+        // Native accessors are handled above; this is a user accessor pair.
         let Some(cur_pair) = cur_desc_value.as_tagged(heap).get_as::<AccessorPair>(heap) else {
             return None;
         };

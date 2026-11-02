@@ -170,7 +170,7 @@ pub fn object_constructor<'a>(
 }
 
 /// ToObject for the primitive wrapper kinds this VM has maps for.
-fn box_primitive<'s>(
+pub fn box_primitive<'s>(
     vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,

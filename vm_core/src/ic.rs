@@ -1067,7 +1067,9 @@ impl InlineCache {
         }
         let holey = payload & STORE_HOLEY != 0;
         let append = index == obj.length();
-        if index > obj.length() || (append && payload & STORE_GROW == 0) {
+        if index > obj.length()
+            || (append && (payload & STORE_GROW == 0 || !map.length_writable(heap)))
+        {
             return None;
         }
         let elements = obj.elements(heap);
