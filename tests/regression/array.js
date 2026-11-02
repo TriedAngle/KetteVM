@@ -256,6 +256,308 @@ assert.sameValue(popProxyTarget.length, 1, "pop proxy length");
 assert.sameValue(hasOwn(popProxyTarget, "1"), false, "pop proxy deletes index");
 assert.sameValue(popProxyLog.join("|"), "get length|get 1|delete 1|set length=1", "pop proxy order");
 
+// ---- Array iterator next (23.1.5.2.1) ----
+
+var iterator = [10, 20].values();
+var step = iterator.next();
+assert.sameValue(step.value, 10, "iterator first value");
+assert.sameValue(step.done, false, "iterator first done");
+step = iterator.next();
+assert.sameValue(step.value, 20, "iterator second value");
+assert.sameValue(step.done, false, "iterator second done");
+step = iterator.next();
+assert.sameValue(step.value, undefined, "iterator exhausted value");
+assert.sameValue(step.done, true, "iterator exhausted done");
+step = iterator.next();
+assert.sameValue(step.value, undefined, "iterator stays exhausted");
+assert.sameValue(step.done, true, "iterator stays done");
+
+var growArray = [1];
+var growIt = growArray.values();
+assert.sameValue(growIt.next().value, 1, "iterator regrow first");
+assert.sameValue(growIt.next().done, true, "iterator regrow exhausted");
+growArray.push(2);
+assert.sameValue(growIt.next().done, true, "iterator does not resume after done");
+
+var holeIter = [1, , 3].values();
+Array.prototype[1] = "proto";
+assert.sameValue(holeIter.next().value, 1, "iterator hole before");
+assert.sameValue(holeIter.next().value, "proto", "iterator hole reads prototype");
+assert.sameValue(holeIter.next().value, 3, "iterator hole after");
+delete Array.prototype[1];
+
+var arrayLikeIter = Array.prototype.values.call({ length: 2, 0: "a", 1: "b" });
+assert.sameValue(arrayLikeIter.next().value, "a", "iterator array-like first");
+assert.sameValue(arrayLikeIter.next().value, "b", "iterator array-like second");
+assert.sameValue(arrayLikeIter.next().done, true, "iterator array-like done");
+
+var dynamicLike = { length: 1, 0: "a" };
+var dynamicIter = Array.prototype.values.call(dynamicLike);
+assert.sameValue(dynamicIter.next().value, "a", "iterator dynamic first");
+dynamicLike.length = 2;
+dynamicLike[1] = "b";
+assert.sameValue(dynamicIter.next().value, "b", "iterator rereads length");
+assert.sameValue(dynamicIter.next().done, true, "iterator dynamic done");
+
+var stringIter = Array.prototype.values.call("ab");
+assert.sameValue(stringIter.next().value, "a", "iterator string first");
+assert.sameValue(stringIter.next().value, "b", "iterator string second");
+assert.sameValue(stringIter.next().done, true, "iterator string done");
+
+var numberIter = Array.prototype.values.call(42);
+assert.sameValue(numberIter.next().done, true, "iterator number empty");
+
+assert.throws(TypeError, function () { Array.prototype.values.call(null); }, "iterator values null");
+assert.throws(TypeError, function () { Array.prototype.values.call(undefined); }, "iterator values undefined");
+
+var realIter = [1].values();
+var realNext = Object.getPrototypeOf(realIter).next;
+assert.throws(TypeError, function () { realNext.call({}); }, "iterator next plain object");
+assert.throws(TypeError, function () { realNext.call("abc"); }, "iterator next primitive string");
+
+var throwingArray = [];
+throwingArray.length = 1;
+Object.defineProperty(throwingArray, "0", {
+    get: function () { throw new Error("boom"); },
+    configurable: true,
+});
+var throwingIter = throwingArray.values();
+assert.throws(Error, function () { throwingIter.next(); }, "iterator element getter throws");
+assert.sameValue(throwingIter.next().done, true, "iterator advances before element get");
+
+// ---- Iterator @@iterator (27.1.3.3.18) ----
+
+var iterSelf = [1].values();
+assert.sameValue(iterSelf[Symbol.iterator](), iterSelf, "iterator returns itself");
+var iterProto = Object.getPrototypeOf(iterSelf);
+var iterBase = Object.getPrototypeOf(iterProto);
+assert.sameValue(hasOwn(iterProto, Symbol.iterator), false, "array iterator does not own @@iterator");
+assert.sameValue(hasOwn(iterBase, Symbol.iterator), true, "iterator prototype owns @@iterator");
+assert.sameValue(iterBase[Symbol.iterator].call(5), 5, "iterator method returns primitive receiver");
+
+// ---- Array.prototype.join (23.1.3.18) ----
+
+assert.sameValue([1, 2, 3].join(), "1,2,3", "join default separator");
+assert.sameValue([1, 2, 3].join("-"), "1-2-3", "join custom separator");
+assert.sameValue([1, , 3].join("-"), "1--3", "join hole");
+assert.sameValue([1, undefined, null].join("-"), "1--", "join undefined and null");
+assert.sameValue([].join(), "", "join empty");
+
+var joinSeparator = { toString: function () { return ":"; } };
+assert.sameValue([1, 2].join(joinSeparator), "1:2", "join coerces separator");
+assert.throws(TypeError, function () { [1].join(Symbol()); }, "join symbol separator");
+
+var joinElement = { toString: function () { return "x"; } };
+assert.sameValue([joinElement, 2].join("-"), "x-2", "join coerces element");
+assert.throws(TypeError, function () { [Symbol()].join(); }, "join symbol element");
+
+var joinGeneric = { length: 2, 0: "a", 1: "b" };
+assert.sameValue(Array.prototype.join.call(joinGeneric, "-"), "a-b", "join generic object");
+assert.sameValue(Array.prototype.join.call("abc", "-"), "a-b-c", "join string receiver");
+assert.sameValue(Array.prototype.join.call(42), "", "join number receiver");
+assert.throws(TypeError, function () { Array.prototype.join.call(null); }, "join null");
+assert.throws(TypeError, function () { Array.prototype.join.call(undefined); }, "join undefined");
+
+var joinHoley = [1, , 3];
+Array.prototype[1] = "p";
+assert.sameValue(joinHoley.join("-"), "1-p-3", "join reads prototype");
+delete Array.prototype[1];
+
+var joinGetterCalls = 0;
+var joinGetter = { length: 2 };
+Object.defineProperty(joinGetter, "0", {
+    get: function () { joinGetterCalls++; return "g"; },
+    configurable: true,
+});
+assert.sameValue(Array.prototype.join.call(joinGetter, "-"), "g-", "join getter");
+assert.sameValue(joinGetterCalls, 1, "join getter called once");
+
+// ---- Array.prototype.toString (23.1.3.36) ----
+
+assert.sameValue([1, 2, 3].toString(), "1,2,3", "toString default join");
+assert.sameValue([].toString(), "", "toString empty");
+var toStringCustom = [1, 2];
+toStringCustom.join = function () { return "custom"; };
+assert.sameValue(toStringCustom.toString(), "custom", "toString uses join");
+var toStringJoinable = {
+    length: 2,
+    0: "a",
+    1: "b",
+    join: function () { return "joined"; },
+};
+assert.sameValue(Array.prototype.toString.call(toStringJoinable), "joined", "toString calls join");
+assert.sameValue(Array.prototype.toString.call({ length: 2, 0: "a", 1: "b" }), "[object Object]",
+    "toString falls back to object tag");
+assert.sameValue(Array.prototype.toString.call({ join: 5 }), "[object Object]",
+    "toString non-callable join");
+assert.sameValue(Array.prototype.toString.call(true), "[object Boolean]",
+    "toString boolean receiver");
+assert.sameValue(Array.prototype.toString.call("ab"), "[object String]",
+    "toString string receiver");
+assert.sameValue(Array.prototype.toString.call(42), "[object Number]",
+    "toString number receiver");
+assert.throws(TypeError, function () { Array.prototype.toString.call(null); }, "toString null");
+assert.throws(TypeError, function () { Array.prototype.toString.call(undefined); }, "toString undefined");
+
+// ---- Array.prototype.sort (23.1.3.30) ----
+
+var sortDefault = [3, 1, 2];
+assert.sameValue(sortDefault.sort(), sortDefault, "sort returns receiver");
+assert.sameValue(sortDefault.join(","), "1,2,3", "sort default order");
+
+var sortNumeric = [10, 2, 1];
+sortNumeric.sort(function (a, b) { return a - b; });
+assert.sameValue(sortNumeric.join(","), "1,2,10", "sort numeric comparator");
+
+var sortHoles = [3, , 1, undefined, 2];
+sortHoles.sort();
+assert.sameValue(sortHoles.length, 5, "sort keeps length");
+assert.sameValue(sortHoles.join(","), "1,2,3,,", "sort undefined before holes");
+assert.sameValue(hasOwn(sortHoles, "1"), true, "sort fills defined slot");
+assert.sameValue(hasOwn(sortHoles, "4"), false, "sort leaves tail hole");
+
+var sortLike = { length: 3, 0: "c", 1: "a", 2: "b" };
+Array.prototype.sort.call(sortLike);
+assert.sameValue(sortLike.length, 3, "sort array-like length");
+assert.sameValue(sortLike[0] + sortLike[1] + sortLike[2], "abc", "sort array-like values");
+
+var sortStable = [{ k: 1, v: "a" }, { k: 0, v: "b" }, { k: 1, v: "c" }, { k: 0, v: "d" }];
+sortStable.sort(function (a, b) { return a.k - b.k; });
+assert.sameValue(
+    sortStable[0].v + sortStable[1].v + sortStable[2].v + sortStable[3].v,
+    "bdac",
+    "sort is stable"
+);
+
+var sortProto = [3, , 1];
+Array.prototype[1] = 5;
+sortProto.sort();
+assert.sameValue(sortProto.join(","), "1,3,5", "sort reads prototype hole");
+delete Array.prototype[1];
+
+var sortThrows = [2, 1];
+assert.throws(Error, function () {
+    sortThrows.sort(function () { throw new Error("boom"); });
+}, "sort propagates comparator exception");
+
+var sortSymbol = [2, 1];
+assert.throws(TypeError, function () {
+    sortSymbol.sort(function () { return Symbol(); });
+}, "sort comparator symbol");
+
+assert.throws(TypeError, function () { Array.prototype.sort.call(null); }, "sort null");
+assert.throws(TypeError, function () { Array.prototype.sort.call(undefined); }, "sort undefined");
+
+// ---- Array.prototype.map (23.1.3.21) ----
+
+var mapInput = [1, 2, 3];
+var mapSeen = [];
+var mapOutput = mapInput.map(function (value, index, array) {
+    mapSeen.push(index + ":" + array.length);
+    return value * 2;
+});
+assert.sameValue(mapOutput !== mapInput, true, "map creates a new array");
+assert.sameValue(mapOutput.join(","), "2,4,6", "map values");
+assert.sameValue(mapSeen.join(","), "0:3,1:3,2:3", "map callback arguments");
+
+var mapThis = [1].map(function () { return this.x; }, { x: 7 });
+assert.sameValue(mapThis[0], 7, "map thisArg");
+
+var mapHoles = [1, , 3].map(function (value) { return value * 2; });
+assert.sameValue(mapHoles.length, 3, "map hole length");
+assert.sameValue(hasOwn(mapHoles, "1"), false, "map preserves holes");
+assert.sameValue(mapHoles[0], 2, "map hole before");
+assert.sameValue(mapHoles[2], 6, "map hole after");
+
+var mapGeneric = { length: 2, 0: "a", 1: "b" };
+var mapGenericResult = Array.prototype.map.call(mapGeneric, function (value) {
+    return value + "!";
+});
+assert.sameValue(mapGenericResult.join(","), "a!,b!", "map generic object");
+
+var mapString = Array.prototype.map.call("ab", function (value) { return value; });
+assert.sameValue(mapString.join(","), "a,b", "map string receiver");
+
+var mapMutation = [1, 2];
+var mapMutationResult = mapMutation.map(function (value, index, array) {
+    if (index === 0) {
+        array[1] = 9;
+    }
+    return value;
+});
+assert.sameValue(mapMutationResult.join(","), "1,9", "map observes mutations when visited");
+
+assert.throws(TypeError, function () { [1].map(5); }, "map non-callable callback");
+assert.throws(TypeError, function () { Array.prototype.map.call(null, function () {}); }, "map null receiver");
+assert.throws(Error, function () {
+    [1].map(function () { throw new Error("map"); });
+}, "map callback exception");
+
+var hugeMapCalls = 0;
+assert.throws(RangeError, function () {
+    Array.prototype.map.call({ length: 4294967296 }, function () { hugeMapCalls += 1; });
+}, "map rejects array length above 2^32 - 1");
+assert.sameValue(hugeMapCalls, 0, "map length guard runs before callbacks");
+
+var hugeSlice = { length: 4294967296 };
+assert.throws(RangeError, function () {
+    Array.prototype.slice.call(hugeSlice, 0, 4294967296);
+}, "slice rejects result length above 2^32 - 1");
+
+// ---- Array.prototype.reduce (23.1.3.24) ----
+
+assert.sameValue([1, 2, 3].reduce(function (a, b) { return a + b; }), 6, "reduce sum");
+assert.sameValue([1, 2, 3].reduce(function (a, b) { return a + b; }, 10), 16, "reduce initial");
+assert.sameValue([, , 3].reduce(function (a, b) { return a + b; }), 3, "reduce skips holes");
+assert.sameValue([].reduce(function () { return 1; }, 10), 10, "reduce empty initial");
+assert.throws(TypeError, function () { [].reduce(function () {}); }, "reduce empty without initial");
+
+var reduceSeen = [];
+var reduceValue = [1, 2].reduce(function (accumulator, value, index, array) {
+    reduceSeen.push(accumulator + ":" + value + ":" + index + ":" + array.length);
+    return accumulator + value;
+}, 10);
+assert.sameValue(reduceValue, 13, "reduce callback value");
+assert.sameValue(reduceSeen.join(","), "10:1:0:2,11:2:1:2", "reduce callback arguments");
+
+var reduceGeneric = { length: 2, 0: 2, 1: 3 };
+assert.sameValue(Array.prototype.reduce.call(reduceGeneric, function (a, b) {
+    return a * b;
+}, 1), 6, "reduce generic object");
+
+assert.throws(TypeError, function () { [1].reduce(5); }, "reduce non-callable callback");
+assert.throws(TypeError, function () { Array.prototype.reduce.call(null, function () {}); }, "reduce null receiver");
+assert.throws(Error, function () {
+    [1, 2].reduce(function () { throw new Error("reduce"); });
+}, "reduce callback exception");
+
+var reduceMutation = [1, 2];
+var reduceMutationResult = reduceMutation.reduce(function (accumulator, value, index, array) {
+    if (index === 0) {
+        array[1] = 9;
+    }
+    return accumulator + value;
+}, 10);
+assert.sameValue(reduceMutationResult, 20, "reduce observes mutations when visited");
+
+// ---- Array.isArray (23.1.2.3) ----
+
+assert.sameValue(Array.isArray([]), true, "isArray array");
+assert.sameValue(Array.isArray({}), false, "isArray object");
+assert.sameValue(Array.isArray("ab"), false, "isArray string");
+assert.sameValue(Array.isArray(null), false, "isArray null");
+assert.sameValue(Array.isArray(), false, "isArray missing");
+
+var proxyArray = new Proxy([], {});
+assert.sameValue(Array.isArray(proxyArray), true, "isArray proxy array");
+var nestedProxyArray = new Proxy(proxyArray, {});
+assert.sameValue(Array.isArray(nestedProxyArray), true, "isArray nested proxy array");
+assert.sameValue(Array.isArray(new Proxy({}, {})), false, "isArray proxy object");
+
+var revocableArray = Proxy.revocable([], {});
+revocableArray.revoke();
+assert.throws(TypeError, function () { Array.isArray(revocableArray.proxy); }, "isArray revoked proxy");
+
 // ---- non-extensible receivers (10.1.6.1) ----
 
 var sealed = [];

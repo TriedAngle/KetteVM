@@ -98,6 +98,9 @@ pub struct WellKnown {
     pub global_object: GcSlot<Object>,
     /// The intrinsic `eval` function used to recognize direct eval calls.
     pub eval_function: GcSlot<Object>,
+    /// `%Object.prototype.toString%` intrinsic, kept even if the property
+    /// is overwritten or deleted.
+    pub object_to_string: GcSlot<Object>,
     /// Loaded script contexts and their name index.
     pub script_context_table: GcSlot<ScriptContextTable>,
     /// Initial map of `%Object.prototype%`: every fresh `{}` gets it
@@ -130,7 +133,7 @@ pub struct WellKnown {
     pub number_dictionary_map: GcSlot<Map>,
     /// Map of array-iterator objects (slots: [iterated array, next index])
     pub array_iterator_map: GcSlot<Map>,
-    /// %ArrayIteratorPrototype% (holds `next` and @@iterator)
+    /// %ArrayIteratorPrototype% (holds `next`)
     pub array_iterator_prototype: GcSlot<Object>,
     /// Map of iterator-result objects `{ value, done }` (w+, e+, c+)
     pub iterator_result_map: GcSlot<Map>,
@@ -192,7 +195,9 @@ define_well_known_strings! {
     prototype => "prototype",
     constructor => "constructor",
     to_string => "toString",
+    to_iso_string => "toISOString",
     value_of => "valueOf",
+    join => "join",
     next => "next",
     done => "done",
     value => "value",
@@ -313,6 +318,7 @@ impl WellKnown {
             function_prototype: smi_slot::<Object>(),
             global_object: smi_slot::<Object>(),
             eval_function: smi_slot::<Object>(),
+            object_to_string: smi_slot::<Object>(),
             script_context_table: smi_slot::<ScriptContextTable>(),
             object_initial_map: smi_slot::<Map>(),
             function_map: smi_slot::<Map>(),
@@ -405,6 +411,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.function_prototype.as_raw());
         visitor.visit(self.global_object.as_raw());
         visitor.visit(self.eval_function.as_raw());
+        visitor.visit(self.object_to_string.as_raw());
         visitor.visit(self.script_context_table.as_raw());
         visitor.visit(self.object_initial_map.as_raw());
         visitor.visit(self.function_map.as_raw());

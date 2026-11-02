@@ -5,11 +5,62 @@ use vm_core::HostCtx;
 use vm_core::proxy::Flow;
 use vm_core::{
     Args, Coercion, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap,
-    LanguageMode, Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
+    LanguageMode, Object, PropertyDescriptor, Prototype, Smi, StoreSemantics, Tagged, ThreadState,
+    VM, Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
-use crate::object::box_primitive;
+use crate::object::is_array;
+
+const ARRAY_ITERATOR_KIND_KEY: i64 = 0;
+const ARRAY_ITERATOR_KIND_VALUE: i64 = 1;
+const ARRAY_ITERATOR_KIND_KEY_VALUE: i64 = 2;
+
+enum IndexedValue<'s> {
+    Absent,
+    Present(Handle<'s, Value>),
+    Threw,
+}
+
+/// Get `obj[index]`, using a direct own-element read when possible.
+fn get_indexed_value<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    obj: Handle<'_, Value>,
+    index: u64,
+) -> Result<IndexedValue<'s>, VmError> {
+    if let Some(o) = obj.as_tagged(heap).as_heap_object()
+        && let Some(value) = o.element_value(heap, index as usize)
+    {
+        return Ok(IndexedValue::Present(scope.handle(value)));
+    }
+    // TODO: handle the 2^53 max length/key.
+    let key = match Object::to_property_key(
+        vm,
+        heap,
+        state,
+        scope.handle(Smi::new(index as i64).into_tagged()),
+    ) {
+        Ok(Some(key)) => scope.handle(key),
+        Ok(None) => return Ok(IndexedValue::Threw),
+        Err(err) => return Err(err),
+    };
+    let present = match Object::has_property(vm, heap, state, obj, key.erase()) {
+        Ok(Coercion::Value(v)) => scope.handle(v),
+        Ok(Coercion::Threw) => return Ok(IndexedValue::Threw),
+        Err(err) => return Err(err),
+    };
+    if !present.as_tagged(heap).is_truthy(heap) {
+        return Ok(IndexedValue::Absent);
+    }
+    match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
+        Ok(Coercion::Value(v)) => Ok(IndexedValue::Present(scope.handle(v))),
+        Ok(Coercion::Threw) => Ok(IndexedValue::Threw),
+        Err(err) => Err(err),
+    }
+}
 
 /// `Array ( ...values )`
 /// [ES 23.1.1.1](https://tc39.es/ecma262/#sec-array-constructor-array)
@@ -101,32 +152,16 @@ pub fn array_push<'a>(
     }
     state.handle_scope(|scope| {
         let this = args.get_handle(heap, 0);
-        let obj = if this.as_tagged(heap).is_primitive(heap) {
-            match box_primitive(vm, heap, &scope, this) {
-                Some(o) => o.erase(),
-                None => return raise_runtime(vm, heap, state, VmError::Type),
-            }
-        } else {
-            this
+        let obj = match Convert::to_object(vm, heap, &scope, this) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         };
 
         let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
-        let length_value = match Object::get_property(vm, heap, state, obj, obj, length_key, false)
-        {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let length_number = match Object::to_numeric(vm, heap, state, length_value) {
-            Ok(Some(n)) => n,
+        let mut length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(length)) => length,
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        const MAX_SAFE: f64 = 9007199254740991.0;
-        let mut length = if length_number.is_nan() || length_number <= 0.0 {
-            0u64
-        } else {
-            length_number.min(MAX_SAFE) as u64
         };
         let arg_count = args.len().saturating_sub(1) as u64;
         if length.saturating_add(arg_count) > (1u64 << 53) - 1 {
@@ -269,40 +304,15 @@ pub fn array_pop<'a>(
         }
 
         let receiver = args.get_handle(heap, 0);
-        if receiver.as_tagged(heap).is_nullish(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        // ToObject (ES 7.1.20); boxing can allocate, so the receiver stays
-        // rooted in the arguments until the wrapper exists.
-        let obj = if receiver.as_tagged(heap).is_primitive(heap) {
-            match box_primitive(vm, heap, &scope, receiver) {
-                Some(obj) => obj.erase(),
-                // TODO: ToObject for primitive kinds the VM cannot box yet.
-                None => return raise_runtime(vm, heap, state, VmError::Type),
-            }
-        } else {
-            scope.handle(receiver.as_tagged(heap))
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         };
 
         // LengthOfArrayLike (ES 7.3.18): Get(obj, "length") then ToLength.
         let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
-        let length_value = match Object::get_property(vm, heap, state, obj, obj, length_key, false)
-        {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let length = match Object::to_numeric(vm, heap, state, length_value) {
-            Ok(Some(n)) => {
-                const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-                if n.is_nan() || n <= 0.0 {
-                    0
-                } else if n >= MAX_SAFE_INTEGER {
-                    MAX_SAFE_INTEGER as u64
-                } else {
-                    n.trunc() as u64
-                }
-            }
+        let length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(length)) => length,
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
@@ -417,25 +427,27 @@ pub fn array_values<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let is_array = receiver
-            .as_tagged(heap)
-            .as_heap_object()
-            .is_some_and(|o| o.as_ref().is_array(heap));
-        if !is_array {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
         let map = scope.handle(vm.known().array_iterator_map.get(heap));
         heap.new_object(
             &scope,
             map,
-            scope.stage(&[receiver.as_tagged(heap), Smi::new(0).into_tagged()]),
+            scope.stage(&[
+                obj.as_tagged(heap),
+                Smi::new(0).into_tagged(),
+                Smi::new(ARRAY_ITERATOR_KIND_VALUE).into_tagged(),
+            ]),
         )
         .erase()
     })
 }
 
-/// `%ArrayIteratorPrototype%.next` (ES 23.1.5.2.1): one step over the
-/// iterated array, producing `{ value, done }`.
+/// `%ArrayIteratorPrototype%.next ( )`
+/// [ES 23.1.5.2.1](https://tc39.es/ecma262/#sec-%arrayiteratorprototype%.next)
+/// Advances an array iterator and returns `{ value, done }`.
 pub fn array_iterator_next<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -446,55 +458,108 @@ pub fn array_iterator_next<'a>(
     } = nctx;
     let receiver = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
-        let (array, index) = {
-            let Some(obj) = receiver.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            let slots = obj.as_ref().slots(heap);
-            if slots.len() < 2 {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            }
-            (scope.handle(slots.at(heap, 0)), slots.at(heap, 1).raw())
-        };
-        let Some(index) = Smi::decode(index) else {
+        let Some(iterator) = receiver.as_tagged(heap).as_heap_object() else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
-        let len = array
+        let iterator = scope.handle(iterator);
+        if !iterator
             .as_tagged(heap)
-            .as_heap_object()
-            .map(|o| o.as_ref().length())
-            .unwrap_or(0);
-        let done = index.value() as usize >= len;
-        let (value, done_value) = if done {
-            (
-                scope.handle(vm.known().undefined.get(heap).erase()),
-                scope.handle(vm.known().true_object.get(heap).erase()),
-            )
-        } else {
-            // element reads see holes as undefined
-            let v = scope.handle(
-                array
-                    .as_tagged(heap)
-                    .as_heap_object()
-                    .and_then(|o| o.as_ref().element_value(heap, index.value() as usize))
-                    .unwrap_or_else(|| vm.known().undefined.get(heap).erase()),
-            );
-            (v, scope.handle(vm.known().false_object.get(heap).erase()))
-        };
-        // advance the index slot
+            .map(heap)
+            .ptr_eq(vm.known().array_iterator_map.get(heap))
         {
-            let Some(obj) = receiver.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let (array, index, kind) = {
+            let slots = iterator.as_tagged(heap).slots(heap);
+            if slots.len() < 3 {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+            (
+                scope.handle(slots.at(heap, 0)),
+                slots.at(heap, 1).raw(),
+                slots.at(heap, 2).raw(),
+            )
+        };
+        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+
+        let (result, done) = if array.as_tagged(heap).ptr_eq(undefined.as_tagged(heap)) {
+            (undefined, true)
+        } else {
+            let Some(index) = Smi::decode(index) else {
                 return raise_runtime(vm, heap, state, VmError::Type);
             };
-            let slots = obj.as_ref().slots(heap);
-            slots.set(heap, 1, Smi::new(index.value() + 1).into_tagged());
+            let Some(kind) = Smi::decode(kind).map(|s| s.value()) else {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            };
+            let index = index.value() as u64;
+            let length = match Object::length_of_array_like(vm, heap, state, &scope, array) {
+                Ok(Some(length)) => length,
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if index >= length {
+                iterator
+                    .as_tagged(heap)
+                    .slots(heap)
+                    .set(heap, 0, undefined.as_tagged(heap));
+                (undefined, true)
+            } else {
+                iterator.as_tagged(heap).slots(heap).set(
+                    heap,
+                    1,
+                    Smi::new((index + 1) as i64).into_tagged(),
+                );
+                let index_number = Smi::new(index as i64).into_tagged();
+                let result = match kind {
+                    ARRAY_ITERATOR_KIND_KEY => scope.handle(index_number),
+                    ARRAY_ITERATOR_KIND_VALUE | ARRAY_ITERATOR_KIND_KEY_VALUE => {
+                        let index_key = match Object::to_property_key(
+                            vm,
+                            heap,
+                            state,
+                            scope.handle(index_number),
+                        ) {
+                            Ok(Some(key)) => scope.handle(key.erase()),
+                            Ok(None) => return vm.known().exception.get(heap).erase(),
+                            Err(err) => return raise_runtime(vm, heap, state, err),
+                        };
+                        let value = match Object::get_property(
+                            vm, heap, state, array, array, index_key, false,
+                        ) {
+                            Ok(Coercion::Value(v)) => scope.handle(v),
+                            Ok(Coercion::Threw) => {
+                                return vm.known().exception.get(heap).erase();
+                            }
+                            Err(err) => return raise_runtime(vm, heap, state, err),
+                        };
+                        if kind == ARRAY_ITERATOR_KIND_VALUE {
+                            value
+                        } else {
+                            let pair = heap
+                                .new_array(
+                                    &scope,
+                                    scope.stage(&[index_number, value.as_tagged(heap)]),
+                                )
+                                .as_handle(&scope);
+                            scope.handle(pair.as_tagged(heap).erase())
+                        }
+                    }
+                    _ => return raise_runtime(vm, heap, state, VmError::Type),
+                };
+                (result, false)
+            }
         };
         let map = scope.handle(vm.known().iterator_result_map.get(heap));
+        let done_value = scope.handle(if done {
+            vm.known().true_object.get(heap).erase()
+        } else {
+            vm.known().false_object.get(heap).erase()
+        });
         heap.new_object(
             &scope,
             map,
             scope.stage(&[
-                value.as_tagged(heap).erase(),
+                result.as_tagged(heap).erase(),
                 done_value.as_tagged(heap).erase(),
             ]),
         )
@@ -502,7 +567,9 @@ pub fn array_iterator_next<'a>(
     })
 }
 
-/// `%ArrayIteratorPrototype%[@@iterator]`: returns the receiver.
+/// `Iterator.prototype [ %Symbol.iterator% ] ( )`
+/// [ES 27.1.3.3.18](https://tc39.es/ecma262/#sec-iterator.prototype-%symbol.iterator%)
+/// Returns the receiver.
 pub fn array_iterator_symbol_iterator<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -518,9 +585,9 @@ pub fn array_iterator_symbol_iterator<'a>(
     arg
 }
 
-/// `Array.prototype.join(separator)` (ES 23.1.3.18): ToString each element
-/// in index order, separated by `separator` (default `","`). Holes,
-/// `undefined`, and `null` render as the empty string.
+/// `Array.prototype.join ( separator )`
+/// [ES 23.1.3.18](https://tc39.es/ecma262/#sec-array.prototype.join)
+/// Joins array-like elements with `separator`, using `","` by default.
 pub fn array_join<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -534,8 +601,161 @@ pub fn array_join<'a>(
     join_impl(vm, heap, state, receiver, separator)
 }
 
-/// `Array.prototype.toString` (ES 23.1.3.36): `join` with the default
-/// separator; any arguments are ignored.
+/// `Array.prototype.map ( callback [ , thisArg ] )`
+/// [ES 23.1.3.21](https://tc39.es/ecma262/#sec-array.prototype.map)
+/// Maps each present array-like element into a new array.
+pub fn array_map<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(len)) => len,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let callback = args.get_handle(heap, 1);
+        if !callback.as_tagged(heap).is_callable(heap) {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        // ArrayCreate(ES 23.1.3.33) rejects lengths above 2^32 - 1.
+        if len > u32::MAX as u64 {
+            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+        }
+        let this_arg = if args.len() > 2 {
+            args.get_handle(heap, 2)
+        } else {
+            scope.handle(vm.known().undefined.get(heap).erase())
+        };
+        let exception = scope.handle(vm.known().exception.get(heap).erase());
+
+        // TODO: ArraySpeciesCreate (ES 23.1.3.34) once species is supported.
+        let result = heap.new_array(&scope, HandleSlice::EMPTY).as_handle(&scope);
+        for k in 0..len {
+            let value = match get_indexed_value(vm, heap, state, &scope, obj, k) {
+                Ok(IndexedValue::Absent) => continue,
+                Ok(IndexedValue::Present(value)) => value,
+                Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            let call_args = scope.stage(&[
+                this_arg.as_tagged(heap),
+                value.as_tagged(heap),
+                Smi::new(k as i64).into_tagged(),
+                obj.as_tagged(heap),
+            ]);
+            let mapped = match HostCtx::enter(vm, heap, state, callback, call_args, None) {
+                Ok(value) => scope.handle(value),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if mapped.as_tagged(heap) == exception.as_tagged(heap) {
+                return exception.as_tagged(heap);
+            }
+            if let Err(err) =
+                Object::store_array_element(heap, &scope, &result, k as usize, &mapped)
+            {
+                return raise_runtime(vm, heap, state, err);
+            }
+        }
+        if let Err(err) = Object::set_array_length(heap, &scope, &result, len as usize) {
+            return raise_runtime(vm, heap, state, err);
+        }
+        result.as_tagged(heap).erase()
+    })
+}
+
+/// `Array.prototype.reduce ( callback [ , initialValue ] )`
+/// [ES 23.1.3.24](https://tc39.es/ecma262/#sec-array.prototype.reduce)
+/// Reduces present array-like elements from left to right.
+pub fn array_reduce<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(len)) => len,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let callback = args.get_handle(heap, 1);
+        if !callback.as_tagged(heap).is_callable(heap) {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let mut k = 0u64;
+
+        let mut accumulator = if args.len() > 2 {
+            scope.handle(args.get_handle(heap, 2).as_tagged(heap))
+        } else {
+            let mut first: Option<Handle<'_, Value>> = None;
+            while k < len && first.is_none() {
+                match get_indexed_value(vm, heap, state, &scope, obj, k) {
+                    Ok(IndexedValue::Absent) => {}
+                    Ok(IndexedValue::Present(value)) => first = Some(value),
+                    Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
+                    Err(err) => return raise_runtime(vm, heap, state, err),
+                }
+                k += 1;
+            }
+            let Some(value) = first else {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            };
+            value
+        };
+
+        while k < len {
+            let value = match get_indexed_value(vm, heap, state, &scope, obj, k) {
+                Ok(IndexedValue::Absent) => {
+                    k += 1;
+                    continue;
+                }
+                Ok(IndexedValue::Present(value)) => value,
+                Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            let call_args = scope.stage(&[
+                undefined.as_tagged(heap),
+                accumulator.as_tagged(heap),
+                value.as_tagged(heap),
+                Smi::new(k as i64).into_tagged(),
+                obj.as_tagged(heap),
+            ]);
+            let result = match HostCtx::enter(vm, heap, state, callback, call_args, None) {
+                Ok(value) => scope.handle(value),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if result.as_tagged(heap) == exception.as_tagged(heap) {
+                return exception.as_tagged(heap);
+            }
+            accumulator = result;
+            k += 1;
+        }
+        accumulator.as_tagged(heap).erase()
+    })
+}
+
+/// `Array.prototype.toString ( )`
+/// [ES 23.1.3.36](https://tc39.es/ecma262/#sec-array.prototype.tostring)
+/// Calls the receiver's `join`, falling back to `%Object.prototype.toString%`.
 pub fn array_to_string<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -545,7 +765,32 @@ pub fn array_to_string<'a>(
         vm, heap, state, ..
     } = nctx;
     let receiver = args.get_handle(heap, 0);
-    join_impl(vm, heap, state, receiver, None)
+    state.handle_scope(|scope| {
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let join_key = scope.handle(vm.known().strings.join.get(heap).erase());
+        let join = match Object::get_property(vm, heap, state, obj, obj, join_key, false) {
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let func = if join.as_tagged(heap).is_callable(heap) {
+            join
+        } else {
+            scope.handle(vm.known().object_to_string.get(heap).erase())
+        };
+        let call_args = scope.stage(&[obj.as_tagged(heap).erase()]);
+        let outcome = match HostCtx::enter(vm, heap, state, func, call_args, None) {
+            Ok(value) => Ok(scope.handle(value)),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(value) => value.as_tagged(heap).erase(),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
+    })
 }
 
 fn join_impl<'a>(
@@ -556,14 +801,17 @@ fn join_impl<'a>(
     separator: Option<Handle<'_, Value>>,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
-        let is_array = receiver
-            .as_tagged(heap)
-            .as_heap_object()
-            .is_some_and(|o| o.as_ref().is_array(heap));
-        if !is_array {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        // separator = ToString(separator); absent/undefined defaults to ","
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+
+        let length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(length)) => length,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+
         let sep = match separator {
             Some(h) if h.as_tagged(heap) != vm.known().undefined.get(heap) => {
                 match Object::to_string(vm, heap, state, h) {
@@ -580,29 +828,34 @@ fn join_impl<'a>(
             }
             _ => ",".to_string(),
         };
-        // length is read once, then elements are Get in index order
-        let len = receiver
-            .as_tagged(heap)
-            .as_heap_object()
-            .map(|o| o.as_ref().length())
-            .unwrap_or(0);
+
         let mut out = String::new();
-        for i in 0..len {
+        for i in 0..length {
             if i > 0 {
                 out.push_str(&sep);
             }
-            let Some(v) = receiver
-                .as_tagged(heap)
-                .as_heap_object()
-                .and_then(|o| o.as_ref().element_value(heap, i))
-            else {
-                continue;
+            let index = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(i as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key.erase()),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
             };
-            if v == vm.known().undefined.get(heap) || v == vm.known().null.get(heap) {
+            let element = match Object::get_property(vm, heap, state, obj, obj, index, false) {
+                Ok(Coercion::Value(v)) => scope.handle(v),
+                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            let element_value = element.as_tagged(heap);
+            if element_value == vm.known().undefined.get(heap)
+                || element_value == vm.known().null.get(heap)
+            {
                 continue;
             }
-            let h = scope.handle(v);
-            match Object::to_string(vm, heap, state, h) {
+            match Object::to_string(vm, heap, state, element) {
                 Ok(Some(s)) => {
                     let s = scope.handle(s);
                     if let Some(d) = s.as_tagged(heap).get_as::<DenseString>(heap) {
@@ -619,21 +872,23 @@ fn join_impl<'a>(
     })
 }
 
+/// `Array.isArray ( arg )`
+/// [ES 23.1.2.3](https://tc39.es/ecma262/#sec-array.isarray)
+/// [ES 7.2.2](https://tc39.es/ecma262/#sec-isarray)
+/// Returns true when `arg` is an Array, following Proxy targets.
 pub fn array_is_array<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
-        vm: _,
-        heap,
-        state: _,
-        ..
+        vm, heap, state, ..
     } = nctx;
     let arg = args.get(heap, 1);
-    let is_array = arg
-        .as_heap_object()
-        .is_some_and(|o| o.as_ref().is_array(heap));
+    let is_array = match is_array(heap, arg) {
+        Ok(is_array) => is_array,
+        Err(err) => return raise_runtime(vm, heap, state, err),
+    };
     Convert::boolean(heap, is_array)
 }
 
@@ -663,10 +918,9 @@ fn slice_bound(
     }
 }
 
-/// `Array.prototype.slice(start, end)` (ES 23.1.3.28): a new array with
-/// the `[start, end)` elements, holes preserved. An absent/undefined bound
-/// is the fast path (no coercion; `slice()` clones the whole backing
-/// store).
+/// `Array.prototype.slice ( start, end )`
+/// [ES 23.1.3.28](https://tc39.es/ecma262/#sec-array.prototype.slice)
+/// Copies the `[start, end)` range into a new array, preserving holes.
 pub fn array_slice<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -677,14 +931,16 @@ pub fn array_slice<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let Some(obj) = receiver.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        if !obj.as_ref().is_array(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        let obj = scope.handle(obj);
-        let len = obj.as_tagged(heap).length() as f64;
+        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(len)) => len,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let len_f = len as f64;
 
         let start = match slice_bound(
             vm,
@@ -702,52 +958,90 @@ pub fn array_slice<'a>(
             heap,
             state,
             (args.len() > 2).then(|| args.get_handle(heap, 2)),
-            len,
+            len_f,
         ) {
             Ok(Some(v)) => v,
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         let start = if start < 0.0 {
-            (len + start).max(0.0)
+            (len_f + start).max(0.0)
         } else {
-            start.min(len)
+            start.min(len_f)
         };
         let end = if end < 0.0 {
-            (len + end).max(0.0)
+            (len_f + end).max(0.0)
         } else {
-            end.min(len)
+            end.min(len_f)
         };
-        let count = (end - start).max(0.0) as usize;
-        let start = start as usize;
+        let count = (end - start).max(0.0) as u64;
+        let start = start as u64;
+        // ArrayCreate(ES 23.1.3.33) rejects lengths above 2^32 - 1.
+        if count > u32::MAX as u64 {
+            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+        }
 
-        // one gather pass, then a single bulk FixedArray allocation
-        let hole = vm.known().the_hole.get(heap).erase().raw();
-        let mut values: Vec<Tagged<'_, Value>> = Vec::with_capacity(count);
-        let mut has_hole = false;
-        for i in start..start + count {
-            match obj.as_tagged(heap).element_value(heap, i) {
-                Some(v) => values.push(v),
-                None => {
-                    // Safety: old-gen singleton word.
-                    values.push(unsafe { Tagged::<Value>::from_value_unchecked(hole) });
-                    has_hole = true;
-                }
+        // TODO: ArraySpeciesCreate (ES 23.1.3.34) once species is supported.
+        let result = heap.new_array(&scope, HandleSlice::EMPTY).as_handle(&scope);
+        for n in 0..count {
+            let from = start + n;
+            // TODO: handle the 2^53 max length/key.
+            let from_key = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(from as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            let present = match Object::has_property(vm, heap, state, obj, from_key.erase()) {
+                Ok(Coercion::Value(v)) => scope.handle(v),
+                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if !present.as_tagged(heap).is_truthy(heap) {
+                continue;
+            }
+            let value =
+                match Object::get_property(vm, heap, state, obj, obj, from_key.erase(), false) {
+                    Ok(Coercion::Value(v)) => scope.handle(v),
+                    Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+                    Err(err) => return raise_runtime(vm, heap, state, err),
+                };
+            let to_key = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(n as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            match Object::define_own_property(
+                heap,
+                &scope,
+                result,
+                to_key,
+                PropertyDescriptor::data(value),
+            ) {
+                Ok(true) => {}
+                Ok(false) => return raise_runtime(vm, heap, state, VmError::Type),
+                Err(err) => return raise_runtime(vm, heap, state, err),
             }
         }
-        let staged = scope.stage(&values);
-        let arr = heap.new_array(&scope, staged).as_handle(&scope);
-        if has_hole {
-            Object::promote_holey(heap, &scope, &arr);
+        if let Err(err) = Object::set_array_length(heap, &scope, &result, count as usize) {
+            return raise_runtime(vm, heap, state, err);
         }
-        arr.as_tagged(heap).erase()
+        result.as_tagged(heap).erase()
     })
 }
 
-/// `Array.prototype.sort(comparefn)` (ES 23.1.3.30): in-place, stable.
-/// Holes move last, `undefined` before them without invoking `comparefn`;
-/// the default comparator is the elements' `ToString` order. Returns the
-/// receiver.
+/// `Array.prototype.sort ( comparator )`
+/// [ES 23.1.3.30](https://tc39.es/ecma262/#sec-array.prototype.sort)
+/// Sorts array-like elements in place with Rust's stable driftsort, keeping holes at the end.
 pub fn array_sort<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -757,15 +1051,7 @@ pub fn array_sort<'a>(
         vm, heap, state, ..
     } = nctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
-        let Some(obj) = receiver.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-        if !obj.as_ref().is_array(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        let obj = scope.handle(obj);
-        // an explicit `undefined` comparator means the default one
+        // Comparator validation happens before ToObject (ES step 1).
         let cmpfn = if args.len() > 1 {
             let c = args.get(heap, 1);
             if c != vm.known().undefined.get(heap) {
@@ -779,30 +1065,58 @@ pub fn array_sort<'a>(
         } else {
             None
         };
-        let undefined = vm.known().undefined.get(heap).erase().raw();
-        let exception = vm.known().exception.get(heap).erase().raw();
-        let len = obj.as_tagged(heap).length();
 
-        // Root every element up front. The sort can allocate (`ToString`
-        // for the default keys, user code for a comparator); a collection
-        // would invalidate raw words, but handles are updated in place by
-        // the GC, so they stay valid throughout.
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
+            Ok(Some(len)) => len,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+        let exception = scope.handle(vm.known().exception.get(heap).erase());
+
+        // SortIndexedProperties with skip-holes: read present values in
+        // index order, keeping `undefined` separate so it stays at the end.
         let mut elems: Vec<Handle<'_, Value>> = Vec::new();
         let mut undefined_count = 0usize;
         for i in 0..len {
-            match obj.as_tagged(heap).element_value(heap, i) {
-                None => {}
-                Some(v) if v.raw() == undefined => undefined_count += 1,
-                Some(v) => elems.push(scope.handle(v)),
+            // TODO: handle the 2^53 max length/key.
+            let key = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(i as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            let present = match Object::has_property(vm, heap, state, obj, key.erase()) {
+                Ok(Coercion::Value(v)) => scope.handle(v),
+                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if !present.as_tagged(heap).is_truthy(heap) {
+                continue;
+            }
+            let value = match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
+                Ok(Coercion::Value(v)) => scope.handle(v),
+                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            if value.as_tagged(heap) == undefined.as_tagged(heap) {
+                undefined_count += 1;
+            } else {
+                elems.push(value);
             }
         }
-        let count = elems.len();
 
         match &cmpfn {
             None => {
-                // default comparator. When every element is already a
-                // string, compare the rooted DenseStrings in place — no key
-                // materialization at all.
                 let all_strings = elems
                     .iter()
                     .all(|h| h.as_tagged(heap).get_as::<DenseString>(heap).is_some());
@@ -811,22 +1125,17 @@ pub fn array_sort<'a>(
                         cmp_dense_strings(heap, a.as_tagged(heap), b.as_tagged(heap))
                     });
                 } else {
-                    // materialize each element's ToString once (rooted),
-                    // then sort the (value, key) pairs directly by key
+                    // Materialize each ToString once (rooted), then sort the
+                    // (value, key) pairs directly by key.
                     let mut pairs: Vec<(Handle<'_, Value>, Handle<'_, Value>)> =
-                        Vec::with_capacity(count);
+                        Vec::with_capacity(elems.len());
                     for h in elems.iter() {
                         let key = match Object::to_string(vm, heap, state, *h) {
-                            Ok(Some(s)) => s,
-                            Ok(None) => {
-                                // Safety: old-gen singleton word.
-                                return unsafe { Tagged::<Value>::from_value_unchecked(exception) };
-                            }
+                            Ok(Some(s)) => scope.handle(s),
+                            Ok(None) => return vm.known().exception.get(heap).erase(),
                             Err(err) => return raise_runtime(vm, heap, state, err),
                         };
-                        let kh = scope
-                            .handle(unsafe { Tagged::<Value>::from_value_unchecked(key.raw()) });
-                        pairs.push((*h, kh));
+                        pairs.push((*h, key));
                     }
                     pairs.sort_by(|a, b| {
                         cmp_dense_strings(heap, a.1.as_tagged(heap), b.1.as_tagged(heap))
@@ -840,30 +1149,23 @@ pub fn array_sort<'a>(
                     if threw.get() {
                         return core::cmp::Ordering::Equal;
                     }
-                    // a fresh scope per comparison reclaims its slots
                     state.handle_scope(|cscope| {
                         let x = a.as_tagged(heap);
                         let y = b.as_tagged(heap);
-                        let call_args = cscope.stage(&[
-                            // Safety: old-gen singleton word.
-                            unsafe { Tagged::<Value>::from_value_unchecked(undefined) },
-                            x,
-                            y,
-                        ]);
-                        let v = match HostCtx::enter(vm, heap, state, *cmp, call_args, None) {
-                            Ok(v) => v,
-                            Err(_) => {
+                        let call_args = cscope.stage(&[undefined.as_tagged(heap), x, y]);
+                        let result = match HostCtx::enter(vm, heap, state, *cmp, call_args, None) {
+                            Ok(v) => cscope.handle(v),
+                            Err(err) => {
+                                raise_runtime(vm, heap, state, err);
                                 threw.set(true);
                                 return core::cmp::Ordering::Equal;
                             }
                         };
-                        if v.raw() == exception {
+                        if result.as_tagged(heap) == exception.as_tagged(heap) {
                             threw.set(true);
                             return core::cmp::Ordering::Equal;
                         }
-                        // Safety: fresh word, no allocation since the read.
-                        let arg = unsafe { Tagged::<Value>::from_value_unchecked(v.raw()) };
-                        match Object::to_numeric(vm, heap, state, cscope.handle(arg)) {
+                        match Object::to_numeric(vm, heap, state, result) {
                             Ok(Some(n)) => {
                                 if n < 0.0 {
                                     core::cmp::Ordering::Less
@@ -873,7 +1175,12 @@ pub fn array_sort<'a>(
                                     core::cmp::Ordering::Equal
                                 }
                             }
-                            _ => {
+                            Ok(None) => {
+                                threw.set(true);
+                                core::cmp::Ordering::Equal
+                            }
+                            Err(err) => {
+                                raise_runtime(vm, heap, state, err);
                                 threw.set(true);
                                 core::cmp::Ordering::Equal
                             }
@@ -881,78 +1188,69 @@ pub fn array_sort<'a>(
                     })
                 });
                 if threw.get() {
-                    // Safety: old-gen singleton word.
-                    return unsafe { Tagged::<Value>::from_value_unchecked(exception) };
+                    return vm.known().exception.get(heap).erase();
                 }
             }
         }
 
-        // write back: a tight direct loop into the elements backing store
-        // when it has room; per-element stores only when it must grow
-        let total = count + undefined_count;
-        let capacity = obj
-            .as_tagged(heap)
-            .as_ref()
-            .elements_array(heap)
-            .map(|e| e.len())
-            .unwrap_or(0);
-        if total <= capacity {
-            let elements = obj
-                .as_tagged(heap)
-                .as_ref()
-                .elements_array(heap)
-                .expect("capacity > 0");
-            for (j, h) in elems.iter().enumerate() {
-                // Safety: rooted handle re-read under the shared borrow.
-                let v = h.as_tagged(heap);
-                elements.as_ref().set(heap, j, v);
-            }
-            for j in count..total {
-                // Safety: old-gen singleton word.
-                elements.as_ref().set(heap, j, unsafe {
-                    Tagged::<Value>::from_value_unchecked(undefined)
-                });
-            }
-        } else {
-            for (j, h) in elems.iter().enumerate() {
-                if let Err(e) = Object::store_array_element(heap, &scope, &obj, j, h) {
-                    return raise_runtime(vm, heap, state, e);
-                }
-            }
-            for j in count..total {
-                let h = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(undefined) });
-                if let Err(e) = Object::store_array_element(heap, &scope, &obj, j, &h) {
-                    return raise_runtime(vm, heap, state, e);
-                }
+        // undefined values go after all defined values, before holes.
+        for _ in 0..undefined_count {
+            elems.push(undefined);
+        }
+        let item_count = elems.len() as u64;
+
+        // Set(O, ToString(j), sortedList[j], true).
+        for (j, value) in elems.iter().enumerate() {
+            // TODO: handle the 2^53 max length/key.
+            let key = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(j as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key).erase(),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            match Object::set_property(
+                vm,
+                heap,
+                state,
+                obj,
+                obj,
+                key,
+                *value,
+                StoreSemantics::Shadow,
+                false,
+                LanguageMode::Strict,
+            ) {
+                Ok(Flow::Value(_)) => {}
+                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
             }
         }
-        // the remainder become holes (or removed dictionary entries)
-        if total < len {
-            if let Some(dict) = obj.as_tagged(heap).element_dictionary(heap) {
-                let mut doomed: Vec<usize> = Vec::new();
-                dict.as_ref().for_each_entry(heap, |k, _, _| {
-                    if k >= total {
-                        doomed.push(k);
-                    }
-                });
-                for k in doomed {
-                    dict.as_ref().delete(heap, k);
-                }
-            } else {
-                let hole = vm.known().the_hole.get(heap).erase().raw();
-                if let Some(elements) = obj.as_tagged(heap).elements_array(heap) {
-                    for j in total..len.min(elements.len()) {
-                        // Safety: old-gen singleton word.
-                        elements.as_ref().set(heap, j, unsafe {
-                            Tagged::<Value>::from_value_unchecked(hole)
-                        });
-                    }
-                }
-                Object::promote_holey(heap, &scope, &obj);
+
+        // Delete the remaining indices so holes are preserved.
+        for j in item_count..len {
+            // TODO: handle the 2^53 max length/key.
+            let key = match Object::to_property_key(
+                vm,
+                heap,
+                state,
+                scope.handle(Smi::new(j as i64).into_tagged()),
+            ) {
+                Ok(Some(key)) => scope.handle(key).erase(),
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+            match Object::delete_property(vm, heap, state, obj, key) {
+                Ok(Flow::Value(true)) => {}
+                Ok(Flow::Value(false)) => return raise_runtime(vm, heap, state, VmError::Type),
+                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
             }
         }
-        Prototype::element_mutated(heap, obj.as_tagged(heap));
-        obj.as_tagged(heap).erase()
+        obj.as_tagged(heap)
     })
 }
 

@@ -731,10 +731,7 @@ pub fn date_to_json<'a>(
         {
             return vm.known().null.get(heap).erase();
         }
-        let name = vm
-            .interner()
-            .intern_str(heap, &scope, "toISOString")
-            .erase();
+        let name = scope.handle(vm.known().strings.to_iso_string.get(heap).erase());
         let method = match Object::get_property(vm, heap, state, object, object, name, false) {
             Ok(Coercion::Value(value)) => scope.handle(value),
             Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),

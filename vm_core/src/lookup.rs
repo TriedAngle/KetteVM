@@ -647,6 +647,38 @@ impl Object {
         })
     }
 
+    /// LengthOfArrayLike (ES 7.3.18) with fast paths for arrays and strings.
+    pub fn length_of_array_like<'a>(
+        vm: &'a VM,
+        heap: &'a mut Heap,
+        state: &'a ThreadState,
+        scope: &HandleScope<'_>,
+        obj: Handle<'_, Value>,
+    ) -> Result<Option<u64>, VmError> {
+        if let Some(o) = obj.as_tagged(heap).as_heap_object()
+            && o.as_ref().is_array(heap)
+        {
+            return Ok(Some(o.as_ref().length() as u64));
+        }
+        if let Some(s) = DenseString::from_receiver(heap, obj.as_tagged(heap)) {
+            return Ok(Some(s.len() as u64));
+        }
+        // TODO: typed-array fast path once [[TypedArrayName]] exists.
+        let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
+        let length_value = match Self::get_property(vm, heap, state, obj, obj, length_key, false) {
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let length = match Self::to_numeric(vm, heap, state, length_value) {
+            // TODO: handle the 2^53 max length/key.
+            Ok(Some(n)) => n as u64,
+            Ok(None) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(Some(length))
+    }
+
     /// `[[Delete]] ( propertyKey )`
     /// [ES 10.1.10](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-delete-p)
     /// [ES 10.5.10](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-delete-p)

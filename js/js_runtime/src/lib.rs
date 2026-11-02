@@ -20,7 +20,8 @@ pub mod symbol;
 
 use array::{
     array_constructor, array_is_array, array_iterator_next, array_iterator_symbol_iterator,
-    array_join, array_pop, array_push, array_slice, array_sort, array_to_string, array_values,
+    array_join, array_map, array_pop, array_push, array_reduce, array_slice, array_sort,
+    array_to_string, array_values,
 };
 use boolean::{boolean_constructor, boolean_to_string, boolean_value_of};
 use date::{
@@ -117,6 +118,8 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         array_values: vm.register_runtime(array_values),
         array_push: vm.register_runtime(array_push),
         array_pop: vm.register_runtime(array_pop),
+        array_map: vm.register_runtime(array_map),
+        array_reduce: vm.register_runtime(array_reduce),
         math_log: vm.register_runtime(math_log),
         math_pow: vm.register_runtime(math_pow),
         number_to_fixed: vm.register_runtime(number_to_fixed),
@@ -201,6 +204,8 @@ pub struct BuiltinIndices {
     pub array_values: NativeIndex,
     pub array_push: NativeIndex,
     pub array_pop: NativeIndex,
+    pub array_map: NativeIndex,
+    pub array_reduce: NativeIndex,
     pub math_log: NativeIndex,
     pub math_pow: NativeIndex,
     pub number_to_fixed: NativeIndex,
@@ -612,12 +617,18 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- Object.prototype.toString/hasOwnProperty/propertyIsEnumerable ------
         let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
-        Object::install_method(
-            thread,
+        let object_to_string_fn =
+            Object::native_function(thread.heap(), &scope, idx.object_to_string)?;
+        known
+            .object_to_string
+            .init(object_to_string_fn.as_tagged(thread.heap()));
+        let object_to_string_name = scope.handle(known.strings.to_string.get(thread.heap()));
+        Object::define_own_property(
+            thread.heap(),
             &scope,
             object_prototype,
-            "toString",
-            idx.object_to_string,
+            object_to_string_name,
+            PropertyDescriptor::method(object_to_string_fn.erase()),
         )?;
         Object::install_method(
             thread,
@@ -759,6 +770,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         Object::install_method(thread, &scope, array_prototype, "push", idx.array_push)?;
         Object::install_method(thread, &scope, array_prototype, "pop", idx.array_pop)?;
+        Object::install_method(thread, &scope, array_prototype, "map", idx.array_map)?;
+        Object::install_method(thread, &scope, array_prototype, "reduce", idx.array_reduce)?;
         Object::install_method(thread, &scope, array_prototype, "join", idx.array_join)?;
         Object::install_method(thread, &scope, array_prototype, "slice", idx.array_slice)?;
         Object::install_method(thread, &scope, array_prototype, "sort", idx.array_sort)?;
@@ -878,13 +891,42 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         // ---- Array iteration (the iterator protocol minimum) ---------------------
-        // %ArrayIteratorPrototype%: next + @@iterator (returns the receiver)
-        let map = thread.heap().allocate_handle::<Map>(
+        // %IteratorPrototype%: @@iterator (returns the receiver)
+        let iterator_proto_map = thread.heap().allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
                 descriptors: &[],
                 prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let iterator_prototype = scope.handle(thread.heap().new_object(
+            &scope,
+            iterator_proto_map,
+            HandleSlice::EMPTY,
+        ));
+        let sym_iterator_iter =
+            Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator)?;
+        let iterator_name: Handle<'_, SlotName> = {
+            let heap = thread.heap();
+            scope.handle(known.iterator_symbol.get(heap))
+        };
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            iterator_prototype,
+            iterator_name,
+            PropertyDescriptor::method(sym_iterator_iter.erase()),
+        )?;
+
+        // %ArrayIteratorPrototype%: next
+        let map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: iterator_prototype.erase(),
             },
             &scope,
         );
@@ -897,26 +939,11 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "next",
             idx.array_iterator_next,
         )?;
-        let sym_iterator_iter =
-            Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator)?;
-        let iterator_name: Handle<'_, SlotName> = {
-            let heap = thread.heap();
-            scope.handle(known.iterator_symbol.get(heap))
-        };
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            array_iterator_prototype,
-            iterator_name,
-            PropertyDescriptor::method(sym_iterator_iter.erase()),
-        )?;
 
         // Array.prototype.values === Array.prototype[Symbol.iterator]: a
         // runtime returning a fresh array-iterator object
         let values_fn = Object::native_function(thread.heap(), &scope, idx.array_values)?;
-        let values_name = thread.intern(&scope, "values");
-        // Safety: fresh interned word, rooted below before the defines.
-        let values_name = scope.handle(values_name.as_tagged(thread.heap()));
+        let values_name = scope.handle(known.strings.values.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -932,18 +959,18 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::method(values_fn.erase()),
         )?;
 
-        // array-iterator map: slots [iterated array, next index], prototype
-        // %ArrayIteratorPrototype%
+        // array-iterator map: slots [iterated array, next index, kind],
+        // prototype %ArrayIteratorPrototype%
         let array_iterator_map = roots.create_handle(thread.heap().allocate::<Map>(MapInit {
             kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-            value_slot_count: 2,
+            value_slot_count: 3,
             descriptors: &[],
             prototype: array_iterator_prototype.erase(),
         }));
 
         // iterator-result map: { value, done } both {w+, e+, c+}
-        let value_name = thread.intern(&scope, "value");
-        let done_name = thread.intern(&scope, "done");
+        let value_name = scope.handle(known.strings.value.get(thread.heap()));
+        let done_name = scope.handle(known.strings.done.get(thread.heap()));
         let flags = SlotFlags::WRITABLE
             .union(SlotFlags::CONFIGURABLE)
             .union(SlotFlags::ENUMERABLE);
@@ -953,19 +980,10 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let iterator_result_map =
             thread
                 .heap()
-                .allocate_token_enter_heap(Map::layout_for(2), |token, heap| {
-                    // Safety: fresh interned words re-read under the anchor.
+                .allocate_token_enter_heap(Map::layout_for(2), |token, _heap| {
                     let descriptors: [(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>); 2] = [
-                        (
-                            scope.handle(value_name.as_tagged(heap).erase().as_name()),
-                            flags,
-                            scope.handle(Smi::new(0).into_tagged()),
-                        ),
-                        (
-                            scope.handle(done_name.as_tagged(heap).erase().as_name()),
-                            flags,
-                            scope.handle(Smi::new(1).into_tagged()),
-                        ),
+                        (value_name, flags, scope.handle(Smi::new(0).into_tagged())),
+                        (done_name, flags, scope.handle(Smi::new(1).into_tagged())),
                     ];
                     roots.create_handle(token.allocate::<Map>(MapInit {
                         kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
@@ -1187,9 +1205,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
                 .init(symbol_wrapper_map.as_tagged(heap));
         }
         // Symbol.prototype is non-writable, non-enumerable, non-configurable.
-        let prototype_name = thread.intern(&scope, "prototype");
-        // Safety: fresh interned word, rooted below before the define.
-        let prototype_name = scope.handle(prototype_name.as_tagged(thread.heap()));
+        let prototype_name = scope.handle(known.strings.prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1292,7 +1308,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             wks_length,
             PropertyDescriptor::non_enumerable(two),
         )?;
-        let revocable_name = thread.intern(&scope, "revocable");
+        let revocable_name = scope.handle(known.strings.revocable.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1300,8 +1316,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             wks_name,
             PropertyDescriptor::non_enumerable(revocable_name.erase()),
         )?;
-        // Safety: fresh interned word, rooted below before the define.
-        let revocable_name = scope.handle(revocable_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,

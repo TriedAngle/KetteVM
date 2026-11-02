@@ -6,7 +6,7 @@ use vm_core::proxy::Proxy;
 
 use vm_core::{
     Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, MapKind,
-    Object, PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Symbol, Tagged,
+    Object, PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Tagged,
     ThreadState, VM, Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
@@ -19,7 +19,7 @@ fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tag
 }
 
 /// ES 7.2.2 IsArray, including proxy targets (revoked proxies throw).
-fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Result<bool, VmError> {
+pub fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Result<bool, VmError> {
     loop {
         let Some(object) = value.as_heap_object() else {
             return Ok(false);
@@ -176,25 +176,7 @@ pub fn box_primitive<'s>(
     scope: &'s HandleScope<'_>,
     arg: Handle<'_, Value>,
 ) -> Option<Handle<'s, Object>> {
-    let known = vm.known();
-    let map = {
-        let value = arg.as_tagged(heap);
-        if value.get_as::<DenseString>(heap).is_some() {
-            known.string_wrapper_map.get(heap)
-        } else if value.is_smi() || value.get_as::<Float>(heap).is_some() {
-            known.number_wrapper_map.get(heap)
-        } else if value == known.true_object.get(heap) || value == known.false_object.get(heap) {
-            known.boolean_wrapper_map.get(heap)
-        } else if value.get_as::<Symbol>(heap).is_some() {
-            known.symbol_wrapper_map.get(heap)
-        } else {
-            return None;
-        }
-    };
-    let map = scope.handle(map);
-    let value = scope.handle(arg.as_tagged(heap));
-    let object = heap.new_object(scope, map, scope.stage(&[value.as_tagged(heap)]));
-    Some(scope.handle(object))
+    Convert::to_object(vm, heap, scope, arg).ok()
 }
 
 pub fn object_get_prototype_of<'a>(

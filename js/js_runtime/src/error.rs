@@ -61,12 +61,7 @@ pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, 
                 Err(err) => return raise_runtime(vm, heap, state, err),
             })
         } else {
-            scope.handle(
-                vm.interner()
-                    .intern_str(heap, &scope, "")
-                    .as_tagged(heap)
-                    .erase(),
-            )
+            scope.handle(vm.known().strings.empty.get(heap).erase())
         };
         let map = Errors::map_for(vm, heap, class);
 
@@ -105,7 +100,7 @@ pub fn error_to_string<'a>(
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
 
-        let name_key = vm.interner().intern_str(heap, &scope, "name");
+        let name_key = scope.handle(vm.known().strings.name.get(heap));
         let name = match rt_try!(
             vm,
             heap,
@@ -115,7 +110,7 @@ pub fn error_to_string<'a>(
             Coercion::Value(v) => scope.handle(v),
             Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),
         };
-        let message_key = vm.interner().intern_str(heap, &scope, "message");
+        let message_key = scope.handle(vm.known().strings.message.get(heap));
         let message = match rt_try!(
             vm,
             heap,

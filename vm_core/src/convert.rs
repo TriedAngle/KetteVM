@@ -1,5 +1,6 @@
 use crate::{
-    DenseString, Float, Handle, HandleScope, Heap, StringData, Symbol, Tagged, Value, VmError,
+    DenseString, Float, Handle, HandleScope, Heap, Object, StringData, Symbol, Tagged, VM, Value,
+    VmError,
 };
 
 /// ToPrimitive hint (ES 7.1.1).
@@ -134,6 +135,45 @@ impl<'a> Tagged<'a, Value> {
 }
 
 impl Convert {
+    /// ES 7.1.20 ToObject: wrap primitives, return objects unchanged.
+    pub fn to_object<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        value: Handle<'_, Value>,
+    ) -> Result<Handle<'s, Object>, VmError> {
+        if value.as_tagged(heap).is_nullish(heap) {
+            return Err(VmError::Type);
+        }
+        if !value.as_tagged(heap).is_primitive(heap) {
+            let obj = value
+                .as_tagged(heap)
+                .as_heap_object()
+                .expect("non-primitive values are objects");
+            return Ok(scope.handle(obj));
+        }
+        let known = vm.known();
+        let map = {
+            let v = value.as_tagged(heap);
+            if v.get_as::<DenseString>(heap).is_some() {
+                known.string_wrapper_map.get(heap)
+            } else if v.is_smi() || v.get_as::<Float>(heap).is_some() {
+                known.number_wrapper_map.get(heap)
+            } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
+                known.boolean_wrapper_map.get(heap)
+            } else if v.get_as::<Symbol>(heap).is_some() {
+                known.symbol_wrapper_map.get(heap)
+            } else {
+                // TODO: BigInt and any future primitive wrapper kinds.
+                return Err(VmError::Type);
+            }
+        };
+        let map = scope.handle(map);
+        let value = scope.handle(value.as_tagged(heap));
+        let object = heap.new_object(scope, map, scope.stage(&[value.as_tagged(heap)]));
+        Ok(scope.handle(object))
+    }
+
     /// ES 7.1.6 ToInt32 applied to a number: truncate, reduce mod 2^32,
     /// map the upper half to negatives. NaN and ±∞ are +0.
     pub fn number_to_int32(n: f64) -> i32 {

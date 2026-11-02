@@ -170,9 +170,8 @@ impl Object {
 
         // proto.constructor = fn; fn.prototype = proto
         // (built-in methods/constructor properties are non-enumerable, ES 20+)
-        let constructor_str = thread.intern(scope, "constructor");
-        // Safety: fresh interned word, rooted below before any allocation.
-        let constructor_name = scope.handle(constructor_str.as_tagged(thread.heap()));
+        let constructor_name =
+            scope.handle(thread.heap().known().strings.constructor.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -180,9 +179,8 @@ impl Object {
             constructor_name,
             PropertyDescriptor::method(fn_obj.erase()),
         )?;
-        let prototype_str = thread.intern(scope, "prototype");
-        // Safety: fresh interned word, rooted below before any allocation.
-        let prototype_name = scope.handle(prototype_str.as_tagged(thread.heap()));
+        let prototype_name =
+            scope.handle(thread.heap().known().strings.prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,
