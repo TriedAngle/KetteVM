@@ -1,5 +1,3 @@
-//! ES 22.1: the String constructor and prototype methods.
-
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::raise_runtime;
@@ -7,7 +5,7 @@ use vm_core::{Args, DenseString, Handle, Symbol, Tagged, Value, WrapperKind};
 
 /// `String ( value )`
 /// [ES 22.1.1.1](https://tc39.es/ecma262/#sec-string-constructor-string-value)
-/// Returns the string for `value`; under `new` it wraps that String.
+/// Converts `value` to a string (describing Symbols); under `new` it wraps it.
 pub fn string_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
@@ -16,7 +14,6 @@ pub fn string_constructor<'a>(
     let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let arg = scope.handle(args.get(heap, 1));
-        // `String(sym)` is SymbolDescriptiveString (ES 22.1.1.1 step 2.a)
         if new_target.is_none()
             && let Some(sym) = arg.as_tagged(heap).get_as::<Symbol>(heap)
         {
@@ -50,34 +47,33 @@ pub fn string_constructor<'a>(
     })
 }
 
+/// `String.prototype.valueOf ( )`
+/// [ES 22.1.3.35](https://tc39.es/ecma262/#sec-string.prototype.valueof)
+/// Returns the [[StringData]] of the receiver.
 pub fn string_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    let arg = args.get(heap, 0);
-    match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-        .wrapper_value(heap, vm.known(), WrapperKind::String)
-        .map(|v| v.raw())
-    {
-        Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    }
+    ctx.handle_scope(|vm, heap, state, scope| {
+        let v = match args
+            .get(heap, 0)
+            .wrapper_value(heap, vm.known(), WrapperKind::String)
+        {
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        v.as_tagged(heap).erase()
+    })
 }
 
+/// `String.prototype.toString ( )`
+/// [ES 22.1.3.29](https://tc39.es/ecma262/#sec-string.prototype.tostring)
+/// Returns the [[StringData]] of the receiver.
 pub fn string_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    let arg = args.get(heap, 0);
-    match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-        .wrapper_value(heap, vm.known(), WrapperKind::String)
-        .map(|v| v.raw())
-    {
-        Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    }
+    string_value_of(ctx, None, args)
 }

@@ -1386,6 +1386,33 @@ impl Object {
         Self::has_proto_in_chain(heap, proto, target)
     }
 
+    /// `OrdinaryCreateFromConstructor ( newTarget, fallbackProto, slots )`
+    /// [ES 10.1.14](https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor)
+    /// `Ok(None)` means the `prototype` lookup threw.
+    pub fn create_from_constructor<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        new_target: Handle<'_, Value>,
+        map: Handle<'_, Map>,
+        slots: HandleSlice<'_>,
+    ) -> Result<Option<Handle<'s, Object>>, VmError> {
+        let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
+        let proto =
+            Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;
+        let proto = match proto {
+            Coercion::Threw => return Ok(None),
+            Coercion::Value(v) => scope.handle(v),
+        };
+        let obj = scope.handle(heap.new_object(scope, map, slots));
+        // a non-object `newTarget.prototype` falls back to the map's own one
+        if let Some(proto) = scope.cast::<Object>(heap, proto.as_tagged(heap)) {
+            Object::set_prototype(heap, scope, obj, proto.erase())?;
+        }
+        Ok(Some(obj))
+    }
+
     pub fn create_construct_receiver_value<'a>(
         vm: &VM,
         heap: &'a mut Heap,
@@ -1393,24 +1420,17 @@ impl Object {
         new_target: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
-            let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
-            let proto =
-                Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;
-            let proto = match proto {
-                Coercion::Threw => return Ok(None),
-                Coercion::Value(v) => scope.handle(v),
-            };
-            // non-object prototypes fall back to the ordinary prototype
-            let proto = scope.cast::<Object>(heap, proto.as_tagged(heap));
-            let known = heap.known();
-            let map = scope.handle(known.object_initial_map.get(heap));
-            let obj = heap
-                .new_object(&scope, map, HandleSlice::EMPTY)
-                .as_handle(&scope);
-            if let Some(proto) = proto {
-                Object::set_prototype(heap, &scope, obj, proto.erase())?;
-            }
-            Ok(Some(obj.as_tagged(heap).erase()))
+            let map = scope.handle(heap.known().object_initial_map.get(heap));
+            let obj = Self::create_from_constructor(
+                vm,
+                heap,
+                state,
+                &scope,
+                new_target,
+                map,
+                HandleSlice::EMPTY,
+            )?;
+            Ok(obj.map(|obj| obj.as_tagged(heap).erase()))
         })
     }
 }

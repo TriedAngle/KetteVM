@@ -4,9 +4,9 @@ use crate::{
     AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
     CodeInit, ContextInit, ContextObject, EdgeVisitable, FixedArray, GcSlot, Handle, HandleData,
     HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind, NameToIndexHashTable,
-    NameToIndexHashTableInit, NativeIndex, Object, ObjectInit, ScopeInfo, ScopeInfoInit,
-    ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi, StringInterner, Symbol,
-    Tagged, Value, Visitor,
+    NameToIndexHashTableInit, NativeIndex, Object, ObjectInit, PropertyDescriptor, ScopeInfo,
+    ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi,
+    StringInterner, Symbol, Tagged, Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -69,6 +69,8 @@ pub struct WellKnown {
     pub reference_error_map: GcSlot<Map>,
     pub range_error_map: GcSlot<Map>,
     pub syntax_error_map: GcSlot<Map>,
+    pub eval_error_map: GcSlot<Map>,
+    pub uri_error_map: GcSlot<Map>,
     /// Wrapper maps for boxed primitives (slots[0] = the primitive value);
     pub number_wrapper_map: GcSlot<Map>,
     pub boolean_wrapper_map: GcSlot<Map>,
@@ -87,8 +89,6 @@ pub struct WellKnown {
     /// slot holding the epoch-milliseconds Float (prototype %Date.prototype%).
     pub date_instance_map: GcSlot<Map>,
     pub date_prototype: GcSlot<Object>,
-    /// `%Error.prototype%`: parent of all error instance maps.
-    pub error_prototype: GcSlot<Object>,
     /// `%Function.prototype%` (ES 19.2.3): the canonical empty function — a
     /// callable, non-constructable function whose `[[Prototype]]` is
     /// `%Object.prototype%`; the `[[Prototype]]` of ordinary function objects.
@@ -192,6 +192,7 @@ define_well_known_strings! {
     length => "length",
     name => "name",
     message => "message",
+    cause => "cause",
     prototype => "prototype",
     constructor => "constructor",
     to_string => "toString",
@@ -213,6 +214,7 @@ define_well_known_strings! {
     function => "function",
     symbol => "symbol",
     undefined => "undefined",
+    error => "Error",
     null => "null",
     true_ => "true",
     false_ => "false",
@@ -302,6 +304,8 @@ impl WellKnown {
             reference_error_map: smi_slot::<Map>(),
             range_error_map: smi_slot::<Map>(),
             syntax_error_map: smi_slot::<Map>(),
+            eval_error_map: smi_slot::<Map>(),
+            uri_error_map: smi_slot::<Map>(),
             number_wrapper_map: smi_slot::<Map>(),
             boolean_wrapper_map: smi_slot::<Map>(),
             string_wrapper_map: smi_slot::<Map>(),
@@ -314,7 +318,6 @@ impl WellKnown {
             array_prototype: smi_slot::<Object>(),
             date_instance_map: smi_slot::<Map>(),
             date_prototype: smi_slot::<Object>(),
-            error_prototype: smi_slot::<Object>(),
             function_prototype: smi_slot::<Object>(),
             global_object: smi_slot::<Object>(),
             eval_function: smi_slot::<Object>(),
@@ -395,6 +398,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.reference_error_map.as_raw());
         visitor.visit(self.range_error_map.as_raw());
         visitor.visit(self.syntax_error_map.as_raw());
+        visitor.visit(self.eval_error_map.as_raw());
+        visitor.visit(self.uri_error_map.as_raw());
         visitor.visit(self.number_wrapper_map.as_raw());
         visitor.visit(self.boolean_wrapper_map.as_raw());
         visitor.visit(self.string_wrapper_map.as_raw());
@@ -407,7 +412,6 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.array_prototype.as_raw());
         visitor.visit(self.date_instance_map.as_raw());
         visitor.visit(self.date_prototype.as_raw());
-        visitor.visit(self.error_prototype.as_raw());
         visitor.visit(self.function_prototype.as_raw());
         visitor.visit(self.global_object.as_raw());
         visitor.visit(self.eval_function.as_raw());
@@ -791,6 +795,20 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         object_prototype,
     );
     let error_prototype = alloc_object(heap, &scope, error_prototype_map);
+    let name_key = scope.handle(known.strings.name.get(heap));
+    let message_key = scope.handle(known.strings.message.get(heap));
+    let error_name = scope.handle(known.strings.error.get(heap));
+    let empty = scope.handle(known.strings.empty.get(heap));
+    for (key, value) in [(name_key, error_name.erase()), (message_key, empty.erase())] {
+        Object::define_own_property(
+            heap,
+            &scope,
+            error_prototype,
+            key,
+            PropertyDescriptor::method(value),
+        )
+        .expect("bootstrap: error prototype properties must be definable");
+    }
 
     let error_map = alloc_parent_map(
         heap,
@@ -922,7 +940,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known
         .date_instance_map
         .init(date_instance_map.as_tagged(heap));
-    known.error_prototype.init(error_prototype.as_tagged(heap));
     known
         .function_prototype
         .init(function_prototype.as_tagged(heap));
@@ -932,6 +949,8 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known.reference_error_map.init(error_map.as_tagged(heap));
     known.range_error_map.init(error_map.as_tagged(heap));
     known.syntax_error_map.init(error_map.as_tagged(heap));
+    known.eval_error_map.init(error_map.as_tagged(heap));
+    known.uri_error_map.init(error_map.as_tagged(heap));
     known.number_wrapper_map.init(error_map.as_tagged(heap));
     known.boolean_wrapper_map.init(error_map.as_tagged(heap));
     known.string_wrapper_map.init(error_map.as_tagged(heap));

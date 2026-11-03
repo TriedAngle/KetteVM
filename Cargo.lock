@@ -1000,7 +1000,6 @@ name = "vm"
 version = "0.1.0"
 dependencies = [
  "bytecode",
- "dummy_heap",
  "heap_api",
  "interpreter",
  "js_compiler",

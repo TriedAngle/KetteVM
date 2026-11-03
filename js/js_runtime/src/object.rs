@@ -5,9 +5,9 @@ use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, MapKind,
-    Object, PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Tagged,
-    ThreadState, VM, Value, VmError, WellKnown,
+    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind, Object,
+    PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Tagged, ThreadState, VM,
+    Value, VmError, WellKnown, WrapperKind,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -60,20 +60,15 @@ fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Result<&'static str,
     }
     if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
         // Wrappers carry the primitive in slots[0]; wrapper prototypes are
-        // wrappers too (ES 20.3.3, 20.4.3, 20.5.3).
+        // wrappers too (ES 20.3.3, 20.4.3, 20.5.3). Symbols/BigInts have no
+        // builtin-tag step; their prototypes supply @@toStringTag.
         let value = object.slots(heap).at(heap, 0);
-        let known = heap.known();
-        if value.is_smi() || value.get_as::<Float>(heap).is_some() {
-            return Ok("Number");
-        }
-        if value.get_as::<DenseString>(heap).is_some() {
-            return Ok("String");
-        }
-        if value == known.true_object.get(heap) || value == known.false_object.get(heap) {
-            return Ok("Boolean");
-        }
-        // Symbols/BigInts have no builtin-tag step; their prototypes supply
-        // @@toStringTag.
+        return Ok(match WrapperKind::classify(heap, heap.known(), value) {
+            Some(WrapperKind::Number) => "Number",
+            Some(WrapperKind::String) => "String",
+            Some(WrapperKind::Boolean) => "Boolean",
+            None => "Object",
+        });
     }
     if kind.contains(MapKind::DATE) {
         return Ok("Date");
@@ -100,9 +95,10 @@ pub fn object_to_string<'a>(
         // ToObject(this): box primitives so the @@toStringTag lookup (and
         // any getter's receiver) sees the wrapper, as the spec requires.
         let object = if value.is_primitive(heap) {
-            match box_primitive(vm, heap, &scope, receiver) {
-                Some(object) => scope.handle(object.as_tagged(heap).erase()),
-                None => return tag_string(heap, &scope, "Object"),
+            match Convert::to_object(vm, heap, &scope, receiver) {
+                Ok(object) => scope.handle(object.as_tagged(heap).erase()),
+                // TODO: BigInt wrappers are unimplemented.
+                Err(_) => return tag_string(heap, &scope, "Object"),
             }
         } else {
             receiver
@@ -148,7 +144,8 @@ pub fn object_constructor<'a>(
     state.handle_scope(|scope| {
         // String/Number/Boolean/Symbol primitives become their wrapper
         // objects (ES 20.1.1.1 step 3).
-        if !nullish && let Some(boxed) = box_primitive(vm, heap, &scope, arg) {
+        // TODO: BigInt wrappers are unimplemented, so they fall through.
+        if !nullish && let Ok(boxed) = Convert::to_object(vm, heap, &scope, arg) {
             return boxed.as_tagged(heap).erase();
         }
         if !is_construct && !nullish {
@@ -163,16 +160,6 @@ pub fn object_constructor<'a>(
         )
         .erase()
     })
-}
-
-/// ToObject for the primitive wrapper kinds this VM has maps for.
-pub fn box_primitive<'s>(
-    vm: &VM,
-    heap: &mut Heap,
-    scope: &'s HandleScope<'_>,
-    arg: Handle<'_, Value>,
-) -> Option<Handle<'s, Object>> {
-    Convert::to_object(vm, heap, scope, arg).ok()
 }
 
 pub fn object_get_prototype_of<'a>(

@@ -1,6 +1,6 @@
 use crate::{
     DenseString, Float, Handle, HandleScope, Heap, Object, StringData, Symbol, Tagged, VM, Value,
-    VmError,
+    VmError, WrapperKind,
 };
 
 /// ToPrimitive hint (ES 7.1.1).
@@ -57,10 +57,8 @@ impl<'a> Tagged<'a, Value> {
             // -0.0 compares equal to 0.0; NaN compares unequal to everything
             return x != 0.0 && !x.is_nan();
         }
-        if let Some(s) = self.get_as::<DenseString>(heap) {
-            return !s.is_empty();
-        }
-        true
+        // "" is the only falsey value left; everything else is truthy.
+        !self.is_empty_string(heap)
     }
 
     pub fn to_number(self, heap: &Heap) -> Result<f64, VmError> {
@@ -120,17 +118,14 @@ impl<'a> Tagged<'a, Value> {
     #[inline]
     pub fn primitive_prototype(self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         let known = heap.known();
-        if self.is_smi() || self.get_as::<Float>(heap).is_some() {
-            Some(known.number_prototype.get(heap).erase())
-        } else if self.get_as::<DenseString>(heap).is_some() {
-            Some(known.string_prototype.get(heap).erase())
-        } else if self == known.true_object.get(heap) || self == known.false_object.get(heap) {
-            Some(known.boolean_prototype.get(heap).erase())
-        } else if self.get_as::<Symbol>(heap).is_some() {
-            Some(known.symbol_prototype.get(heap).erase())
-        } else {
-            None
+        if self.get_as::<Symbol>(heap).is_some() {
+            return Some(known.symbol_prototype.get(heap).erase());
         }
+        Some(match WrapperKind::classify(heap, known, self)? {
+            WrapperKind::Number => known.number_prototype.get(heap).erase(),
+            WrapperKind::Boolean => known.boolean_prototype.get(heap).erase(),
+            WrapperKind::String => known.string_prototype.get(heap).erase(),
+        })
     }
 }
 
@@ -153,20 +148,13 @@ impl Convert {
             return Ok(scope.handle(obj));
         }
         let known = vm.known();
-        let map = {
-            let v = value.as_tagged(heap);
-            if v.get_as::<DenseString>(heap).is_some() {
-                known.string_wrapper_map.get(heap)
-            } else if v.is_smi() || v.get_as::<Float>(heap).is_some() {
-                known.number_wrapper_map.get(heap)
-            } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
-                known.boolean_wrapper_map.get(heap)
-            } else if v.get_as::<Symbol>(heap).is_some() {
-                known.symbol_wrapper_map.get(heap)
-            } else {
-                // TODO: BigInt and any future primitive wrapper kinds.
-                return Err(VmError::Type);
-            }
+        let map = if let Some(kind) = WrapperKind::classify(heap, known, value.as_tagged(heap)) {
+            kind.wrapper_map(heap, known)
+        } else if value.as_tagged(heap).get_as::<Symbol>(heap).is_some() {
+            known.symbol_wrapper_map.get(heap)
+        } else {
+            // TODO: BigInt and any future primitive wrapper kinds.
+            return Err(VmError::Type);
         };
         let map = scope.handle(map);
         let value = scope.handle(value.as_tagged(heap));
@@ -280,29 +268,6 @@ impl Convert {
             || v.get_as::<Float>(heap).is_some()
             || v.get_as::<DenseString>(heap).is_some()
             || v.get_as::<Symbol>(heap).is_some()
-    }
-
-    /// ES 7.1.13 ToObject for the primitive kinds that expose a distinct
-    /// prototype: the prototype of a number/string/boolean/symbol primitive
-    /// is the matching builtin prototype. `None` for objects and for the
-    /// no-prototype primitives.
-    #[inline]
-    pub fn primitive_prototype<'a>(
-        heap: &'a Heap,
-        v: Tagged<'a, Value>,
-    ) -> Option<Tagged<'a, Value>> {
-        let known = heap.known();
-        if v.is_smi() || v.get_as::<Float>(heap).is_some() {
-            Some(known.number_prototype.get(heap).erase())
-        } else if v.get_as::<DenseString>(heap).is_some() {
-            Some(known.string_prototype.get(heap).erase())
-        } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
-            Some(known.boolean_prototype.get(heap).erase())
-        } else if v.get_as::<Symbol>(heap).is_some() {
-            Some(known.symbol_prototype.get(heap).erase())
-        } else {
-            None
-        }
     }
 
     /// ES ToString on a primitive (no ToPrimitive recursion: the input is

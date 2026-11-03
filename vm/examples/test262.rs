@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dummy_heap::{DummyHeap, DummyHeapConfig};
+use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::ScriptError;
 
 /// Features whose syntax/runtime is not implemented at all: flagged
@@ -333,18 +333,14 @@ fn run_test_inner(
     } else {
         format!("{harness}\n{includes}\n{src}\n")
     };
-    // realm isolation: every test runs in a fresh VM (INTERPRETING.md)
-    // the dummy heap: allocation-only, no GC machinery, no sweeper
-    // thread — exactly right for one-shot short-lived test realms. The
-    // block is small enough that its per-test mmap/munmap stays cheap
-    // (a 64 MiB block per test storms the kernel's page tables under
-    // parallel runs).
-    let vm = vm::VM::new::<DummyHeap, vm::DefaultInterpreter>(DummyHeapConfig {
-        heap_size: 8 * 1024 * 1024,
-    })
-    .expect("vm")
-    .add::<vm::JSRuntime>()
-    .expect("vm");
+    // realm isolation: every test runs in a fresh VM (INTERPRETING.md).
+    // The real collector keeps allocation-heavy tests (long loop bodies that
+    // throw and catch thousands of errors) alive; a bump-only heap would
+    // simply exhaust its reservation.
+    let vm = vm::VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .expect("vm")
+        .add::<vm::JSRuntime>()
+        .expect("vm");
     vm.arm_gc_stress();
     let mut thread = vm.attach();
     match thread.eval::<vm::JavascriptCompiler>(&code) {

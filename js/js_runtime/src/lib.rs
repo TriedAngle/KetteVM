@@ -29,8 +29,9 @@ use date::{
     date_to_json, date_to_string, date_value_of,
 };
 use error::{
-    error_constructor, error_to_string, range_error_constructor, reference_error_constructor,
-    syntax_error_constructor, type_error_constructor,
+    error_constructor, error_is_error, error_to_string, eval_error_constructor,
+    range_error_constructor, reference_error_constructor, syntax_error_constructor,
+    type_error_constructor, uri_error_constructor,
 };
 use function::{
     BIND_PRELUDE, function_apply, function_bind, function_call, function_constructor,
@@ -98,6 +99,8 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         reference_error: vm.register_runtime(reference_error_constructor),
         range_error: vm.register_runtime(range_error_constructor),
         syntax_error: vm.register_runtime(syntax_error_constructor),
+        eval_error: vm.register_runtime(eval_error_constructor),
+        uri_error: vm.register_runtime(uri_error_constructor),
         function_to_string: vm.register_runtime(function_to_string),
         object_to_string: vm.register_runtime(object_to_string),
         number: vm.register_runtime(number_constructor),
@@ -108,6 +111,7 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         boolean_to_string: vm.register_runtime(boolean_to_string),
         error: vm.register_runtime(error_constructor),
         type_error: vm.register_runtime(type_error_constructor),
+        error_is_error: vm.register_runtime(error_is_error),
         error_to_string: vm.register_runtime(error_to_string),
         object: vm.register_runtime(object_constructor),
         object_create: vm.register_runtime(object_create),
@@ -184,6 +188,8 @@ pub struct BuiltinIndices {
     pub reference_error: NativeIndex,
     pub range_error: NativeIndex,
     pub syntax_error: NativeIndex,
+    pub eval_error: NativeIndex,
+    pub uri_error: NativeIndex,
     pub function_to_string: NativeIndex,
     pub object_to_string: NativeIndex,
     pub number: NativeIndex,
@@ -194,6 +200,7 @@ pub struct BuiltinIndices {
     pub boolean_to_string: NativeIndex,
     pub error: NativeIndex,
     pub type_error: NativeIndex,
+    pub error_is_error: NativeIndex,
     pub error_to_string: NativeIndex,
     pub object: NativeIndex,
     pub object_create: NativeIndex,
@@ -267,8 +274,9 @@ fn install_error_class<'s>(
     index: NativeIndex,
     class: &str,
     parent: Handle<'_, Object>,
-) -> Result<(Handle<'s, Object>, Handle<'s, Map>), VmError> {
-    let (_, prototype) = Object::install_constructor(thread, scope, index, class, parent)?;
+) -> Result<(Handle<'s, Object>, Handle<'s, Object>, Handle<'s, Map>), VmError> {
+    let (constructor, prototype) =
+        Object::install_constructor(thread, scope, index, class, parent)?;
     let name = thread.intern(scope, class);
     // Safety: fresh interned word, rooted below before the define.
     let name: Handle<'_, DenseString> = scope.handle(name.as_tagged(thread.heap()));
@@ -308,7 +316,7 @@ fn install_error_class<'s>(
         },
         scope,
     );
-    Ok((prototype, map))
+    Ok((constructor, prototype, map))
 }
 
 /// Build the builtin objects and install them on the global object.
@@ -322,7 +330,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let heap = thread.heap();
         let wks_empty: Handle<'_, Value> = scope.handle(wks.empty.get(heap).erase());
         let wks_length: Handle<'_, SlotName> = scope.handle(wks.length.get(heap));
-        let wks_name: Handle<'_, SlotName> = scope.handle(wks.name.get(heap));
         let wks_constructor: Handle<'_, SlotName> = scope.handle(wks.constructor.get(heap));
         let wks_prototype: Handle<'_, SlotName> = scope.handle(wks.prototype.get(heap));
 
@@ -477,18 +484,18 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         }
 
         // ---- Error / TypeError / ReferenceError / RangeError / SyntaxError ------
-        let (error_proto, error_map) =
+        let (error_fn, error_proto, error_map) =
             install_error_class(thread, &scope, idx.error, "Error", object_prototype)?;
         known.error_map.init(error_map.as_tagged(thread.heap()));
         Object::install_method(thread, &scope, error_proto, "toString", idx.error_to_string)?;
 
-        let (_, type_error_map) =
+        let (_, _, type_error_map) =
             install_error_class(thread, &scope, idx.type_error, "TypeError", error_proto)?;
         known
             .type_error_map
             .init(type_error_map.as_tagged(thread.heap()));
 
-        let (_, reference_error_map) = install_error_class(
+        let (_, _, reference_error_map) = install_error_class(
             thread,
             &scope,
             idx.reference_error,
@@ -499,17 +506,31 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             .reference_error_map
             .init(reference_error_map.as_tagged(thread.heap()));
 
-        let (_, range_error_map) =
+        let (_, _, range_error_map) =
             install_error_class(thread, &scope, idx.range_error, "RangeError", error_proto)?;
         known
             .range_error_map
             .init(range_error_map.as_tagged(thread.heap()));
 
-        let (_, syntax_error_map) =
+        let (_, _, syntax_error_map) =
             install_error_class(thread, &scope, idx.syntax_error, "SyntaxError", error_proto)?;
         known
             .syntax_error_map
             .init(syntax_error_map.as_tagged(thread.heap()));
+
+        let (_, _, eval_error_map) =
+            install_error_class(thread, &scope, idx.eval_error, "EvalError", error_proto)?;
+        known
+            .eval_error_map
+            .init(eval_error_map.as_tagged(thread.heap()));
+
+        let (_, _, uri_error_map) =
+            install_error_class(thread, &scope, idx.uri_error, "URIError", error_proto)?;
+        known
+            .uri_error_map
+            .init(uri_error_map.as_tagged(thread.heap()));
+
+        Object::install_method(thread, &scope, error_fn, "isError", idx.error_is_error)?;
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
         let function_prototype = scope.handle(known.function_prototype.get(thread.heap()));
@@ -1325,14 +1346,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             wks_length,
             PropertyDescriptor::non_enumerable(two),
         )?;
+        Object::set_builtin_name(thread, &scope, proxy_fn, "Proxy")?;
         let proxy_name = thread.intern(&scope, "Proxy");
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            proxy_fn,
-            wks_name,
-            PropertyDescriptor::non_enumerable(proxy_name.erase()),
-        )?;
         // Safety: fresh interned word, rooted below before the define.
         let proxy_name = scope.handle(proxy_name.as_tagged(thread.heap()));
         Object::define_own_property(
@@ -1353,14 +1368,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             wks_length,
             PropertyDescriptor::non_enumerable(two),
         )?;
+        Object::set_builtin_name(thread, &scope, revocable_fn, "revocable")?;
         let revocable_name = scope.handle(known.strings.revocable.get(thread.heap()));
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            revocable_fn,
-            wks_name,
-            PropertyDescriptor::non_enumerable(revocable_name.erase()),
-        )?;
         Object::define_own_property(
             thread.heap(),
             &scope,

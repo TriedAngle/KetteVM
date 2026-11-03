@@ -1,11 +1,11 @@
 use crate::materialize::Materialize;
 use crate::{
-    Coercion, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit,
-    MapKind, NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value,
-    VmError, WellKnown,
+    DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
+    NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value, VmError,
+    WellKnown,
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum WrapperKind {
     Number,
     Boolean,
@@ -13,6 +13,19 @@ pub enum WrapperKind {
 }
 
 impl WrapperKind {
+    /// The wrapper kind of a primitive value, if it has one.
+    pub fn classify(heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> Option<WrapperKind> {
+        if v.is_smi() || v.get_as::<Float>(heap).is_some() {
+            Some(WrapperKind::Number)
+        } else if v.get_as::<DenseString>(heap).is_some() {
+            Some(WrapperKind::String)
+        } else if v == roots.true_object.get(heap) || v == roots.false_object.get(heap) {
+            Some(WrapperKind::Boolean)
+        } else {
+            None
+        }
+    }
+
     /// The intrinsic initial map holding this wrapper kind's
     /// `%X.prototype%` as its prototype.
     pub fn wrapper_map<'a>(self, heap: &'a Heap, roots: &'a WellKnown) -> Tagged<'a, Map> {
@@ -20,17 +33,6 @@ impl WrapperKind {
             WrapperKind::Number => roots.number_wrapper_map.get(heap),
             WrapperKind::Boolean => roots.boolean_wrapper_map.get(heap),
             WrapperKind::String => roots.string_wrapper_map.get(heap),
-        }
-    }
-
-    #[inline]
-    fn matches(self, heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> bool {
-        match self {
-            WrapperKind::Number => v.is_smi() || v.get_as::<Float>(heap).is_some(),
-            WrapperKind::Boolean => {
-                v == roots.true_object.get(heap) || v == roots.false_object.get(heap)
-            }
-            WrapperKind::String => v.get_as::<DenseString>(heap).is_some(),
         }
     }
 }
@@ -278,27 +280,11 @@ impl Object {
         value: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
-            let prototype_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
-            let prototype = match Object::get_property(
-                vm,
-                heap,
-                state,
-                new_target,
-                new_target,
-                prototype_name,
-                false,
-            )? {
-                Coercion::Threw => return Ok(None),
-                Coercion::Value(v) => scope.handle(v),
-            };
             let map = scope.handle(kind.wrapper_map(heap, vm.known()));
+            let slots = scope.stage(&[value.as_tagged(heap)]);
             let obj =
-                scope.handle(heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap)])));
-            // A non-object `newTarget.prototype` falls back to the intrinsic one.
-            if let Some(prototype) = scope.cast::<Object>(heap, prototype.as_tagged(heap)) {
-                Object::set_prototype(heap, &scope, obj, prototype.erase())?;
-            }
-            Ok(Some(obj.as_tagged(heap).erase()))
+                Object::create_from_constructor(vm, heap, state, &scope, new_target, map, slots)?;
+            Ok(obj.map(|obj| obj.as_tagged(heap).erase()))
         })
     }
 }
@@ -316,7 +302,7 @@ impl<'a> Tagged<'a, Value> {
         roots: &WellKnown,
         kind: WrapperKind,
     ) -> Result<Tagged<'a, Value>, VmError> {
-        if kind.matches(heap, roots, self) {
+        if WrapperKind::classify(heap, roots, self) == Some(kind) {
             return Ok(self);
         }
         let Some(obj) = self.as_heap_object() else {
@@ -327,7 +313,7 @@ impl<'a> Tagged<'a, Value> {
             return Err(VmError::Type);
         }
         let value = obj.slots(heap).at(heap, 0);
-        if kind.matches(heap, roots, value) {
+        if WrapperKind::classify(heap, roots, value) == Some(kind) {
             Ok(value)
         } else {
             Err(VmError::Type)

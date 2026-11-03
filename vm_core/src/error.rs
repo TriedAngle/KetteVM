@@ -87,18 +87,6 @@ pub enum Message {
 }
 
 impl VmError {
-    /// Name of the ECMAScript error class this VM error materializes as §20.5.3.2
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Arity | Self::Type | Self::NotExtensible | Self::Message(_) => "TypeError",
-            Self::Overflow | Self::OutOfBounds | Self::InvalidTime | Self::StackOverflow => {
-                "RangeError"
-            }
-            Self::Reference => "ReferenceError",
-            Self::Syntax => "SyntaxError",
-        }
-    }
-
     /// Default message used when materializing this error as an object.
     pub const fn message(self) -> &'static str {
         match self {

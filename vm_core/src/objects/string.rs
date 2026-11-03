@@ -154,6 +154,15 @@ pub struct DenseString {
     pub data: [UnsafeCell<u8>; 0],
 }
 
+impl<'a> Tagged<'a, Value> {
+    /// Whether the value is the empty string (a non-string is not empty).
+    #[inline]
+    pub fn is_empty_string(self, heap: &Heap) -> bool {
+        self.get_as::<DenseString>(heap)
+            .is_some_and(|s| s.is_empty())
+    }
+}
+
 impl DenseString {
     /// The backing string of a String primitive or String wrapper (slot 0 of
     /// a `PRIMITIVE_WRAPPER` whose value is a string); `None` otherwise.
