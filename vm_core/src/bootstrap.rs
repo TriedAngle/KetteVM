@@ -76,6 +76,10 @@ pub struct WellKnown {
     pub boolean_wrapper_map: GcSlot<Map>,
     pub string_wrapper_map: GcSlot<Map>,
     pub symbol_wrapper_map: GcSlot<Map>,
+    /// Bound-function maps (slots `[target, boundThis, boundArgs]`); the
+    /// bound prototype is the target's, applied per instance.
+    pub bound_function_map: GcSlot<Map>,
+    pub bound_constructor_map: GcSlot<Map>,
     pub number_prototype: GcSlot<Object>,
     pub boolean_prototype: GcSlot<Object>,
     pub string_prototype: GcSlot<Object>,
@@ -310,6 +314,8 @@ impl WellKnown {
             boolean_wrapper_map: smi_slot::<Map>(),
             string_wrapper_map: smi_slot::<Map>(),
             symbol_wrapper_map: smi_slot::<Map>(),
+            bound_function_map: smi_slot::<Map>(),
+            bound_constructor_map: smi_slot::<Map>(),
             number_prototype: smi_slot::<Object>(),
             boolean_prototype: smi_slot::<Object>(),
             string_prototype: smi_slot::<Object>(),
@@ -404,6 +410,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.boolean_wrapper_map.as_raw());
         visitor.visit(self.string_wrapper_map.as_raw());
         visitor.visit(self.symbol_wrapper_map.as_raw());
+        visitor.visit(self.bound_function_map.as_raw());
+        visitor.visit(self.bound_constructor_map.as_raw());
         visitor.visit(self.number_prototype.as_raw());
         visitor.visit(self.boolean_prototype.as_raw());
         visitor.visit(self.string_prototype.as_raw());
@@ -955,6 +963,8 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known.boolean_wrapper_map.init(error_map.as_tagged(heap));
     known.string_wrapper_map.init(error_map.as_tagged(heap));
     known.symbol_wrapper_map.init(error_map.as_tagged(heap));
+    known.bound_function_map.init(error_map.as_tagged(heap));
+    known.bound_constructor_map.init(error_map.as_tagged(heap));
     known
         .symbol_prototype
         .init(object_prototype.as_tagged(heap));

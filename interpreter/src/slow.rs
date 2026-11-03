@@ -1536,6 +1536,15 @@ pub fn slow_construct(frame: Frame) {
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
+        if obj.map(heap).kind().is_bound() {
+            let forwarded: Vec<Handle<'_, Value>> = (0..args.len())
+                .map(|index| args.get_handle(heap, index))
+                .collect();
+            return match HostCtx::enter_bound(vm, heap, state, callee, &forwarded, Some(callee)) {
+                Ok(value) => Acc::set(value),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
+            };
+        }
         // a derived constructor's `this` is the hole until `super()` binds
         // it; ordinary and base-class constructors synthesize the receiver
         let derived = obj.map(heap).kind().is_class_constructor()

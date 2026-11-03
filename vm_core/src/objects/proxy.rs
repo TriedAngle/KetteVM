@@ -1006,59 +1006,8 @@ fn construct_h<'a>(
     match get_trap(vm, heap, state, scope, &handler, Trap::Construct)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
         TrapLookup::None => {
-            // forward: the full target [[Construct]] — synthesize the
-            // receiver from new.target (the hole for derived class
-            // constructors), run, and prefer an object result
-            let derived = target
-                .as_tagged(heap)
-                .as_heap_object()
-                .and_then(|obj| {
-                    obj.header
-                        .map
-                        .get(heap)
-                        .kind()
-                        .is_class_constructor()
-                        .then(|| obj.callable_info(heap))
-                })
-                .flatten()
-                .is_some_and(|info| info.function_kind().is_derived_class_constructor());
-            let receiver = if derived {
-                scope.handle(heap.known().the_hole.get(heap).erase())
-            } else {
-                let Some(receiver) =
-                    Object::create_construct_receiver_value(vm, heap, state, *new_target)?
-                else {
-                    return Ok(Coercion::Threw);
-                };
-                scope.handle(receiver)
-            };
-            let mut all: Vec<Tagged<'_, Value>> = Vec::with_capacity(args.len() + 1);
-            all.push(receiver.as_tagged(heap).erase());
-            for h in args {
-                all.push(h.as_tagged(heap).erase());
-            }
-            let staged = scope.stage(&all);
-            let result = scope.handle(HostCtx::enter(
-                vm,
-                heap,
-                state,
-                target,
-                staged,
-                Some(*new_target),
-            )?);
-            let exception = heap.known().exception.get(heap);
-            if result.as_tagged(heap) == exception {
-                return Ok(Coercion::Threw);
-            }
-            let cond_18 = result.as_tagged(heap).is_primitive(heap);
-            if cond_18 {
-                if derived {
-                    // a derived constructor may only return objects
-                    return Err(VmError::Type);
-                }
-                return Ok(Coercion::Value(receiver.as_tagged(heap)));
-            }
-            Ok(Coercion::Value(result.as_tagged(heap)))
+            // forward: the full target [[Construct]]
+            Object::construct_forward(vm, heap, state, target, args, *new_target)
         }
         TrapLookup::Trap(t) => {
             // args: (target, argumentsList, newTarget)

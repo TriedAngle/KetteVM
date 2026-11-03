@@ -34,8 +34,7 @@ use error::{
     type_error_constructor, uri_error_constructor,
 };
 use function::{
-    BIND_PRELUDE, function_apply, function_bind, function_call, function_constructor,
-    function_to_string,
+    function_apply, function_bind, function_call, function_constructor, function_to_string,
 };
 use global::{console_log, eval_runtime, is_nan, performance_now, print};
 use math::{
@@ -568,6 +567,29 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::method(function_fn.erase()),
         )?;
 
+        {
+            let heap = thread.heap();
+            let function_prototype = scope.handle(known.function_prototype.get(heap));
+            let kind = MapKind::OBJECT
+                .union(MapKind::EXTENDABLE)
+                .union(MapKind::CALLABLE)
+                .union(MapKind::BOUND);
+            let bound_map = heap.allocate::<Map>(MapInit {
+                kind,
+                value_slot_count: 3,
+                descriptors: &[],
+                prototype: function_prototype.erase(),
+            });
+            known.bound_function_map.init(bound_map);
+            let bound_constructor_map = heap.allocate::<Map>(MapInit {
+                kind: kind.union(MapKind::CONSTRUCTOR),
+                value_slot_count: 3,
+                descriptors: &[],
+                prototype: function_prototype.erase(),
+            });
+            known.bound_constructor_map.init(bound_constructor_map);
+        }
+
         // ---- Function.prototype toString/call/apply/bind ------------------------
         Object::install_method(
             thread,
@@ -598,16 +620,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "bind",
             idx.function_bind,
         )?;
-        // bind is a JS closure (see BIND_PRELUDE); compile and run it once
-        // here, capturing the empty context
-        Object::run_prelude(
-            thread,
-            &scope,
-            BIND_PRELUDE,
-            "bind prelude",
-            js_compiler::compile_js,
-        )?;
-        // likewise the proxy revoke closure (see REVOKE_PRELUDE)
+        // the proxy revoke closure (see REVOKE_PRELUDE)
         Object::run_prelude(
             thread,
             &scope,

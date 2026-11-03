@@ -401,6 +401,7 @@ impl MapKind {
     pub const DATE: MapKind = MapKind(1 << 26);
     /// Error instances carry [[ErrorData]] (the `"Error"` builtin tag).
     pub const ERROR: MapKind = MapKind(1 << 27);
+    pub const BOUND: MapKind = MapKind(1 << 28);
 
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
@@ -587,6 +588,11 @@ impl MapKind {
     #[inline(always)]
     pub const fn is_error(self) -> bool {
         self.0 & Self::ERROR.0 != 0
+    }
+
+    #[inline(always)]
+    pub const fn is_bound(self) -> bool {
+        self.0 & Self::BOUND.0 != 0
     }
 }
 

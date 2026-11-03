@@ -21,6 +21,8 @@ pub enum StagedCall<'a> {
     Native { rt: NativeIndex, staged: Args },
     /// a proxy apply over a staged window
     Proxy { callee_reg: i32, staged: Args },
+    /// a bound function over a staged window
+    Bound { callee_reg: i32, staged: Args },
 }
 
 /// Push a callee frame (facts from a `CallTarget::Bytecode` destructure
@@ -90,7 +92,7 @@ pub fn call_target_miss<'a>(
                 InlineCache::call_update(heap, feedback, fb, callee, CallRecord::Bytecode(*info));
             }
         }
-        None | Some(CallTarget::Proxy(_)) => {}
+        None | Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => {}
     }
     target
 }
@@ -114,6 +116,7 @@ pub fn resolve_target<'a>(
     match target {
         None => Err(VmError::Type),
         Some(CallTarget::Proxy(_)) => Ok(StagedCall::Proxy { callee_reg, staged }),
+        Some(CallTarget::Bound { .. }) => Ok(StagedCall::Bound { callee_reg, staged }),
         Some(CallTarget::Native(rt)) => Ok(StagedCall::Native { rt, staged }),
         Some(CallTarget::Bytecode {
             target,
@@ -274,6 +277,34 @@ pub fn proxy_apply_staged<'a>(
         match Proxy::apply(vm, x.heap_mut(), state, callee, staged) {
             Ok(Coercion::Threw) => Acc::set(roots.exception.get(x.heap()).erase()),
             Ok(Coercion::Value(v)) => Acc::set(v),
+            Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
+        }
+    });
+    stack.set_top(saved_top);
+    v
+}
+
+pub fn bound_apply_staged<'a>(
+    x: &'a mut Ctx<'_, '_>,
+    roots: RootsArg<'_>,
+    regs: Regs,
+    callee_reg: i32,
+    staged: Args,
+) -> Acc {
+    let vm = x.vm();
+    let state = x.state();
+    let stack = state.stack();
+    let saved_top = stack.top();
+    if let Some(top) = stack.rooting_top(staged) {
+        stack.set_top(top);
+    }
+    let v = state.handle_scope(|scope| {
+        let callee = scope.handle(regs.get(callee_reg, x.heap()));
+        let forwarded: Vec<Handle<'_, Value>> = (1..staged.len())
+            .map(|index| staged.get_handle(x.heap(), index))
+            .collect();
+        match HostCtx::enter_bound(vm, x.heap_mut(), state, callee, &forwarded, None) {
+            Ok(value) => Acc::set(value),
             Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
         }
     });

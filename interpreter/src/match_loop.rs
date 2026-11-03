@@ -8,8 +8,8 @@ use vm_core::interpreter::{base, unwind};
 
 use crate::RootsArg;
 use crate::utils::{
-    ConstructStart, StagedCall, call_scatter_start, call_window_start, construct_native,
-    construct_start, proxy_apply_staged, resolve_target,
+    ConstructStart, StagedCall, bound_apply_staged, call_scatter_start, call_window_start,
+    construct_native, construct_start, proxy_apply_staged, resolve_target,
 };
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
@@ -164,7 +164,8 @@ fn start<'b>(
 ) -> Result<Tagged<'b, Value>, VmError> {
     match callable.as_tagged(heap).erase().call_target(heap) {
         None => Err(VmError::Type),
-        Some(CallTarget::Proxy(_)) => Err(VmError::Type),
+        // proxy and bound-function calls are intercepted before `execute`
+        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
             let f = vm.runtime(rt);
             let nctx = HostCtx::new(vm, heap, state);
@@ -514,6 +515,10 @@ macro_rules! call_enter {
             }
             Ok(StagedCall::Proxy { callee_reg, staged }) => {
                 let v = proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged);
+                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
+            }
+            Ok(StagedCall::Bound { callee_reg, staged }) => {
+                let v = bound_apply_staged($ctx, $roots, $regs, callee_reg, staged);
                 reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
             }
         }

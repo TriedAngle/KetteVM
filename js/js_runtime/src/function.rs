@@ -1,172 +1,24 @@
-//! ES 20.2: the Function constructor, Function.prototype
-//! toString/call/apply/bind, and the bind-closure prelude.
+//! ES 20.2: the Function constructor and Function.prototype
+//! toString/call/apply/bind.
 
 use vm_core::Coercion;
 use vm_core::HostCtx;
 use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Object, Smi,
-    Tagged, Value, VmError, WellKnown,
+    Args, ContextObject, DenseString, Errors, Handle, HandleScope, HandleSlice, Heap, Object,
+    PropertyDescriptor, Smi, Tagged, ThreadState, VM, Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
-/// Stub: `Function.prototype.toString` returns a stable marker string
-/// (test262 A2.2 compares it against itself, not against real source).
-pub fn function_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    state.handle_scope(|scope| {
-        // fresh interned word, consumed with no allocation delay
-        vm.interner()
-            .intern_str(heap, &scope, "function () { [native code] }")
-            .as_tagged(heap)
-            .erase()
-    })
-}
-
-/// `Function.prototype.call(thisArg, ...args)` (ES 20.2.3.1): invoke the
-/// receiver (args[0], per the receiver-first runtime calling convention)
-/// with `thisArg` as `this`.
-pub fn function_call<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    let f = args.get_handle(heap, 0);
-    if !f.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
-    }
-    let fwd = ctx.state.stack().slice(args.slice_from(1));
-    match HostCtx::enter(vm, heap, state, f, fwd, None).map(|v| v.raw()) {
-        Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-        Err(err) => raise_runtime(vm, heap, state, err),
-    }
-}
-
-/// `Function.prototype.apply(thisArg, argsArray)` (ES 20.2.3.2): invoke
-/// the receiver with `thisArg` as `this` and the array-like spread as
-/// arguments.
-pub fn function_apply<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    let f = args.get_handle(heap, 0);
-    if !f.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
-    }
-    // the args window is rooted for the call; re-read at the point of use
-    let this_arg = args.get_handle(heap, 1);
-    let array = (args.len() > 2).then(|| args.get_handle(heap, 2));
-    state.handle_scope(|scope| {
-        let staged = scope.stage(&spread_apply_args(
-            heap,
-            vm.known(),
-            this_arg.as_tagged(heap),
-            array.map(|a| a.as_tagged(heap)),
-        ));
-        match HostCtx::enter(vm, heap, state, f, staged, None).map(|v| v.raw()) {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => raise_runtime(vm, heap, state, err),
-        }
-    })
-}
-
-/// `Function.prototype.bind(thisArg, ...prepend)` (ES 20.2.3.5): the
-/// bound function is the JS closure template installed by BIND_PRELUDE,
-/// called with (target, thisArg, prepend-array).
-pub fn function_bind<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
-    let f = args.get(heap, 0);
-    if !f.is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
-    }
-    let raw_f = f.raw();
-    // the args window is rooted for the call; re-read at the point of use
-    let raw_this_arg = args.get(heap, 1).raw();
-    let prepend: Vec<Value> = (2..args.len()).map(|i| args.get(heap, i).raw()).collect();
-    state.handle_scope(|scope| {
-        // everything below allocates (interning, the [[Get]] for
-        // __makeBound, the prepend array, the call): keep the raw inputs
-        // rooted and re-read at the point of use
-        // Safety: fresh argument words, rooted below before any allocation.
-        let f = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw_f) });
-        let this_arg = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw_this_arg) });
-        // Function.prototype.__makeBound (installed by BIND_PRELUDE)
-        let name = vm
-            .interner()
-            .intern_str(heap, &scope, "__makeBound")
-            .erase();
-        let proto = scope.handle(vm.known().function_prototype.get(heap).erase());
-        let make_bound = match rt_try!(
-            vm,
-            heap,
-            state,
-            Object::get_property(vm, heap, state, proto, proto, name, false)
-        ) {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            // Safety: fresh word from the lookup, rooted immediately.
-            Coercion::Value(v) => scope.handle(v),
-        };
-        let staged = scope.stage(
-            &prepend
-                .iter()
-                .map(|v| unsafe { Tagged::<Value>::from_value_unchecked(*v) })
-                .collect::<Vec<_>>(),
-        );
-        let array = scope.handle(heap.new_array(&scope, staged).erase());
-        // args[0] is the receiver (undefined for the plain call)
-        // Safety: fresh rooted-slot words staged for the call.
-        let staged = scope.stage(&[
-            vm.known().undefined.get(heap).erase(),
-            f.as_tagged(heap).erase(),
-            this_arg.as_tagged(heap).erase(),
-            array.as_tagged(heap).erase(),
-        ]);
-        match HostCtx::enter(vm, heap, state, make_bound, staged, None).map(|v| v.raw()) {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
-    })
-}
-
-/// The bound-function template: a plain JS closure over (target, bound
-/// this, prepend array). The runtime `function_bind` builds the prepend
-/// array and delegates here — the runtime registry holds stateless fn
-/// pointers, so the closure state must live in a JS closure.
-pub const BIND_PRELUDE: &str = r#"
-Function.prototype.__makeBound = function (f, t, p) {
-  return function (...rest) {
-    var all = [];
-    for (var i = 0; i < p.length; i++) all[all.length] = p[i];
-    for (var j = 0; j < rest.length; j++) all[all.length] = rest[j];
-    return f.apply(t, all);
-  };
-};
-"#;
-
-/// `Function(p0, p1, ..., body)` (ES 20.2.1.1): the dynamic constructor.
-/// Builds `function (p0, p1, ...) { body }` and evaluates it in the global
-/// scope (approximated with the caller's context; the direct-eval pipeline
-/// provides the parsing).
+/// `Function ( ...parameterArgs, bodyArg )`
+/// [ES 20.2.1.1](https://tc39.es/ecma262/#sec-function-p1-p2-pn-body)
+/// Builds and evaluates `function (parameters) { body }`.
 pub fn function_constructor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx { vm, heap, state } = ctx;
-    let argv: Vec<_> = (1..args.len()).map(|i| args.get_handle(heap, i)).collect();
     state.handle_scope(|scope| {
         // root the caller context before the allocating ToString loop below
         let context = scope.handle(
@@ -174,24 +26,31 @@ pub fn function_constructor<'a>(
                 .current_context(heap)
                 .unwrap_or_else(|| vm.known().empty_context.get(heap).erase()),
         );
-        // ToString all arguments (user toString may run)
-        let mut parts: Vec<String> = Vec::with_capacity(argv.len());
-        for a in argv {
-            let s = scope.handle(match Convert::to_string(heap, &scope, a).map(|v| v.raw()) {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            });
-            parts.push(
-                s.as_tagged(heap)
-                    .get_as::<DenseString>(heap)
-                    .map(|x| x.to_rust_string(heap))
-                    .unwrap_or_default(),
-            );
+        let mut parts: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
+        for i in 1..args.len() {
+            let arg = args.get_handle(heap, i);
+            let text =
+                if i + 1 == args.len() && arg.as_tagged(heap) == vm.known().undefined.get(heap) {
+                    String::new()
+                } else {
+                    let text = match Object::to_string(vm, heap, state, arg) {
+                        Ok(Some(text)) => scope.handle(text),
+                        Ok(None) => return vm.known().exception.get(heap).erase(),
+                        Err(err) => return raise_runtime(vm, heap, state, err),
+                    };
+                    text.as_tagged(heap)
+                        .get_as::<DenseString>(heap)
+                        .map(|s| s.to_rust_string(heap))
+                        .unwrap_or_default()
+                };
+            parts.push(text);
         }
         let (params, body) = match parts.split_last() {
             Some((body, params)) => (params.join(", "), body.clone()),
             None => (String::new(), String::new()),
         };
+        // TODO: the dynamic function is parsed in the caller's context; the
+        // spec parses it in the global scope (ES 20.2.1.1 step 8).
         let source = format!("(function ({params}) {{\n{body}\n}})");
         let program = match js_compiler::compile_js(&source, bytecode::SourceMode::Eval) {
             Ok(program) => program,
@@ -200,7 +59,7 @@ pub fn function_constructor<'a>(
                     vm,
                     heap,
                     state,
-                    Errors::from_vm_error(vm, heap, state, VmError::Type)
+                    Errors::from_vm_error(vm, heap, state, VmError::Syntax)
                 );
                 state.set_pending_exception(ex);
                 return vm.known().exception.get(heap).erase();
@@ -215,49 +74,283 @@ pub fn function_constructor<'a>(
             state,
             Materialize::closure_vm(vm, heap, state, &scope, &program, context)
         );
-        match HostCtx::enter(vm, heap, state, closure.erase(), HandleSlice::EMPTY, None)
-            .map(|v| v.raw())
-        {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
+        let result =
+            match HostCtx::enter(vm, heap, state, closure.erase(), HandleSlice::EMPTY, None) {
+                Ok(result) => scope.handle(result),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            };
+        result.as_tagged(heap).erase()
     })
 }
 
-/// Spread the `apply` argument window: `[thisArg, elements...]` read
-/// array-like from `array` (holes and out-of-range indices read as
-/// undefined; a missing/nullish array yields just the receiver).
-fn spread_apply_args<'a>(
-    heap: &'a Heap,
-    roots: &WellKnown,
-    this_arg: Tagged<'a, Value>,
-    array: Option<Tagged<'a, Value>>,
-) -> Vec<Tagged<'a, Value>> {
-    let mut out = vec![this_arg];
-    let Some(array) = array else {
-        return out;
+/// `Function.prototype.toString ( )`
+/// [ES 20.2.3.5](https://tc39.es/ecma262/#sec-function.prototype.tostring)
+/// Returns a NativeFunction-syntax source string for a callable receiver.
+pub fn function_to_string<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    let function = args.get_handle(heap, 0);
+    if !function.as_tagged(heap).is_callable(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    // TODO: step 2 ([[SourceText]]) is not modelled, so user functions also
+    // get the implementation-defined NativeFunction form.
+    state.handle_scope(|scope| {
+        let name_key = scope.handle(vm.known().strings.name.get(heap));
+        let name = match Object::ordinary_own_descriptor(
+            heap,
+            &scope,
+            function.as_tagged(heap),
+            name_key.as_tagged(heap).erase(),
+        ) {
+            Some(PropertyDescriptor::Data { value, .. }) => value
+                .as_tagged(heap)
+                .get_as::<DenseString>(heap)
+                .map(|s| s.to_rust_string(heap)),
+            _ => None,
+        };
+        let source = match name {
+            Some(name) => format!("function {name}() {{ [native code] }}"),
+            None => "function () { [native code] }".to_string(),
+        };
+        DenseString::from_utf8(heap, &scope, &source)
+            .as_tagged(heap)
+            .erase()
+    })
+}
+
+/// `Function.prototype.call ( thisArg, ...args )`
+/// [ES 20.2.3.3](https://tc39.es/ecma262/#sec-function.prototype.call)
+/// Invokes the callable receiver with `thisArg` and the forwarded arguments.
+pub fn function_call<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    let function = args.get_handle(heap, 0);
+    if !function.as_tagged(heap).is_callable(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    // args[0] is the receiver, so the tail is exactly (thisArg, ...args)
+    let forwarded = state.stack().slice(args.slice_from(1));
+    state.handle_scope(|scope| {
+        let result = match HostCtx::enter(vm, heap, state, function, forwarded, None) {
+            Ok(result) => scope.handle(result),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        result.as_tagged(heap).erase()
+    })
+}
+
+/// `Function.prototype.apply ( thisArg, argArray )`
+/// [ES 20.2.3.1](https://tc39.es/ecma262/#sec-function.prototype.apply)
+/// Invokes the callable receiver with `thisArg` and the elements of `argArray`.
+pub fn function_apply<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    let function = args.get_handle(heap, 0);
+    if !function.as_tagged(heap).is_callable(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    let this_arg = args.get_handle(heap, 1);
+    let arg_array = args.get_handle(heap, 2);
+    state.handle_scope(|scope| {
+        let elements = if arg_array.as_tagged(heap).is_nullish(heap) {
+            Vec::new()
+        } else {
+            match create_list_from_array_like(vm, heap, state, &scope, arg_array) {
+                Ok(Some(elements)) => elements,
+                Ok(None) => return vm.known().exception.get(heap).erase(),
+                Err(err) => return raise_runtime(vm, heap, state, err),
+            }
+        };
+        let mut call_args = Vec::with_capacity(elements.len() + 1);
+        call_args.push(this_arg.as_tagged(heap));
+        call_args.extend(elements.iter().map(|element| element.as_tagged(heap)));
+        let call_args = scope.stage(&call_args);
+        let result = match HostCtx::enter(vm, heap, state, function, call_args, None) {
+            Ok(result) => scope.handle(result),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        result.as_tagged(heap).erase()
+    })
+}
+
+/// `CreateListFromArrayLike ( obj )`
+/// [ES 7.3.19](https://tc39.es/ecma262/#sec-createlistfromarraylike)
+/// Reads indices `0 .. LengthOfArrayLike(obj)`. `Ok(None)` means user code threw.
+fn create_list_from_array_like<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    object: Handle<'_, Value>,
+) -> Result<Option<Vec<Handle<'s, Value>>>, VmError> {
+    if object.as_tagged(heap).is_primitive(heap) {
+        return Err(VmError::Type);
+    }
+    let length = match Object::length_of_array_like(vm, heap, state, scope, object) {
+        Ok(Some(length)) => length,
+        Ok(None) => return Ok(None),
+        Err(err) => return Err(err),
     };
-    let undefined = roots.undefined.get(heap).erase();
-    if array == undefined || array == roots.null.get(heap) {
-        return out;
+    let mut elements = Vec::with_capacity(length as usize);
+    for index in 0..length {
+        let index = scope.handle(Smi::new(index as i64).into_tagged());
+        let key = match Object::to_property_key(vm, heap, state, index) {
+            Ok(Some(key)) => scope.handle(key),
+            Ok(None) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let element =
+            match Object::get_property(vm, heap, state, object, object, key.erase(), false) {
+                Ok(Coercion::Value(value)) => scope.handle(value),
+                Ok(Coercion::Threw) => return Ok(None),
+                Err(err) => return Err(err),
+            };
+        elements.push(element);
     }
-    let len = array
-        .as_heap_object()
-        .map(|o| {
-            o.as_ref()
-                .array_length(heap, roots.strings.length.get(heap))
-                .and_then(|v| Smi::decode(v.raw()).map(|s| s.value() as usize))
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
-    out.reserve(len);
-    for i in 0..len {
-        out.push(
-            array
-                .as_heap_object()
-                .and_then(|o| o.as_ref().element_value(heap, i))
-                .unwrap_or(undefined),
+    Ok(Some(elements))
+}
+
+/// `Function.prototype.bind ( thisArg, ...args )`
+/// [ES 20.2.3.2](https://tc39.es/ecma262/#sec-function.prototype.bind)
+/// Returns a bound function with `thisArg` and the leading arguments fixed.
+pub fn function_bind<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    let target = args.get_handle(heap, 0);
+    if !target.as_tagged(heap).is_callable(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    let this_arg = args.get_handle(heap, 1);
+    let prepend: Vec<Handle<'_, Value>> = (2..args.len())
+        .map(|index| args.get_handle(heap, index))
+        .collect();
+    let bound_count = prepend.len();
+    state.handle_scope(|scope| {
+        let Some(target_object) = target.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        let constructable = target_object.map(heap).kind().is_constructor();
+        // BoundFunctionCreate: the [[Prototype]] is the target's
+        let prototype = scope.handle(target_object.as_ref().prototype(heap));
+        let staged = scope.stage(
+            &prepend
+                .iter()
+                .map(|value| value.as_tagged(heap))
+                .collect::<Vec<_>>(),
         );
+        let bound_args = scope.handle(heap.new_array(&scope, staged));
+        let map = scope.handle(if constructable {
+            vm.known().bound_constructor_map.get(heap)
+        } else {
+            vm.known().bound_function_map.get(heap)
+        });
+        let slots = scope.stage(&[
+            target.as_tagged(heap),
+            this_arg.as_tagged(heap),
+            bound_args.as_tagged(heap).erase(),
+        ]);
+        let bound = scope.handle(heap.new_object(&scope, map, slots));
+        if let Err(err) = Object::set_prototype(heap, &scope, bound, prototype) {
+            return raise_runtime(vm, heap, state, err);
+        }
+        copy_bound_name_and_length(vm, heap, state, &scope, bound.erase(), target, bound_count)
+    })
+}
+
+/// `Function.prototype.bind ( thisArg, ...args )` steps 4-10
+/// [ES 20.2.3.2](https://tc39.es/ecma262/#sec-function.prototype.bind)
+/// Copies `target`'s `length` (minus the bound argument count) and its
+/// `"bound " + name` onto `bound`, the freshly created bound function.
+/// Returns `bound`, or the exception sentinel when a lookup threw.
+fn copy_bound_name_and_length<'a>(
+    vm: &VM,
+    heap: &'a mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    bound: Handle<'_, Value>,
+    target: Handle<'_, Value>,
+    bound_count: usize,
+) -> Tagged<'a, Value> {
+    let Some(bound_object) = scope.cast::<Object>(heap, bound.as_tagged(heap)) else {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    };
+    let length_key = scope.handle(vm.known().strings.length.get(heap));
+    let mut length = 0.0;
+    // TODO: HasOwnProperty must run the getOwnPropertyDescriptor trap when the
+    // target is a proxy; this reads its ordinary own descriptor instead.
+    let has_length = Object::ordinary_own_descriptor(
+        heap,
+        scope,
+        target.as_tagged(heap),
+        length_key.as_tagged(heap).erase(),
+    )
+    .is_some();
+    if has_length {
+        let target_length = match Object::get_property(
+            vm,
+            heap,
+            state,
+            target,
+            target,
+            length_key.erase(),
+            false,
+        ) {
+            Ok(Coercion::Value(value)) => scope.handle(value),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        if let Some(number) = target_length.as_tagged(heap).as_number(heap) {
+            // ToIntegerOrInfinity, then the bound arguments are subtracted
+            length = if number.is_nan() { 0.0 } else { number.trunc() };
+            if length != f64::INFINITY {
+                length = (length - bound_count as f64).max(0.0);
+            }
+        }
     }
-    out
+    let length_value = scope.handle(heap.new_number(length));
+    if let Err(err) = Object::define_own_property(
+        heap,
+        scope,
+        bound_object,
+        length_key,
+        PropertyDescriptor::non_enumerable(length_value.erase()),
+    ) {
+        return raise_runtime(vm, heap, state, err);
+    }
+    let name_key = scope.handle(vm.known().strings.name.get(heap));
+    let target_name =
+        match Object::get_property(vm, heap, state, target, target, name_key.erase(), false) {
+            Ok(Coercion::Value(value)) => scope.handle(value),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+    // SetFunctionName(F, targetName, "bound"); a non-string name adds nothing
+    let name = match target_name.as_tagged(heap).get_as::<DenseString>(heap) {
+        Some(name) => format!("bound {}", name.to_rust_string(heap)),
+        None => "bound ".to_string(),
+    };
+    let name = DenseString::from_utf8(heap, scope, &name);
+    if let Err(err) = Object::define_own_property(
+        heap,
+        scope,
+        bound_object,
+        name_key,
+        PropertyDescriptor::non_enumerable(name.erase()),
+    ) {
+        return raise_runtime(vm, heap, state, err);
+    }
+    bound.as_tagged(heap).erase()
 }

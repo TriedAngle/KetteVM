@@ -5,6 +5,10 @@ never use unsafe unless explicetely allowed, if you think unsafe is solving a pr
 `Tagged<'h, T>` takes `h` to statically proof no directly borrowed value to the heap is crossing a gc safepoint.
 purpesfully violating this by passing around plain `Value` or `Word` and using `unsafe` destroys this proof and may kill values across gc-safepoints if the heap moves the value. Functions that are allocation free but require heap access (for example to reference more heap values) should thus always use an immutable Heap borrow. If a scope needs to call a function that requires a mutable heap borrow, it must most often root these values to handles or use all the Tagged<'h, T> before (preferred if possible).
 
+# Breaking Changes & Backwards Compatibility
+this is a fresh codebase, legacy code is no concern, do not keep old/dead code around or try to integrate or keep backwards compatibility on broken things.
+we strive for perfection not for legacy.
+
 # Code Conventions
 ## Helper Functions
 avoid writing helper functions with only 1-2 line bodies.

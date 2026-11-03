@@ -313,6 +313,13 @@ pub enum CallTarget<'a> {
     Native(NativeIndex),
     /// A callable proxy: `[[Call]]` dispatches through the `apply` trap.
     Proxy(Tagged<'a, Object>),
+    /// A bound function (ES 10.4.2): slots are
+    /// `[target, boundThis, boundArgs]` and both entry points forward.
+    Bound {
+        target: Tagged<'a, Value>,
+        bound_this: Tagged<'a, Value>,
+        bound_args: Tagged<'a, Value>,
+    },
 }
 
 impl<'a> Tagged<'a, Value> {
@@ -372,6 +379,14 @@ impl<'a> Tagged<'a, Value> {
         let kind = obj.map(heap).kind();
         if kind.is_proxy() {
             return Some(CallTarget::Proxy(obj));
+        }
+        if kind.is_bound() {
+            let slots = obj.slots(heap);
+            return Some(CallTarget::Bound {
+                target: slots.at(heap, 0),
+                bound_this: slots.at(heap, 1),
+                bound_args: slots.at(heap, 2),
+            });
         }
         if !kind.is_callable() {
             return None;
@@ -1411,6 +1426,84 @@ impl Object {
             Object::set_prototype(heap, scope, obj, proto.erase())?;
         }
         Ok(Some(obj))
+    }
+
+    /// The forwarding tail of a `[[Construct]]` (proxy without a `construct`
+    /// trap, bound functions): synthesize the receiver from `newTarget` — the
+    /// hole for derived class constructors — run the target's `[[Construct]]`
+    /// with `args`, and prefer an object result.
+    pub fn construct_forward<'a>(
+        vm: &VM,
+        heap: &'a mut Heap,
+        state: &ThreadState,
+        target: Handle<'_, Value>,
+        args: &[Handle<'_, Value>],
+        new_target: Handle<'_, Value>,
+    ) -> Result<Coercion<'a>, VmError> {
+        let is_bound = target
+            .as_tagged(heap)
+            .as_heap_object()
+            .is_some_and(|function| function.map(heap).kind().is_bound());
+        if is_bound {
+            return state.handle_scope(|scope| {
+                let value = scope.handle(HostCtx::enter_bound(
+                    vm,
+                    heap,
+                    state,
+                    target,
+                    args,
+                    Some(new_target),
+                )?);
+                Ok(
+                    if value.as_tagged(heap) == heap.known().exception.get(heap) {
+                        Coercion::Threw
+                    } else {
+                        Coercion::Value(value.as_tagged(heap))
+                    },
+                )
+            });
+        }
+        state.handle_scope(|scope| {
+            let derived = target
+                .as_tagged(heap)
+                .as_heap_object()
+                .filter(|obj| obj.map(heap).kind().is_class_constructor())
+                .and_then(|obj| obj.callable_info(heap))
+                .is_some_and(|info| info.function_kind().is_derived_class_constructor());
+            let receiver = if derived {
+                scope.handle(heap.known().the_hole.get(heap).erase())
+            } else {
+                let Some(receiver) =
+                    Self::create_construct_receiver_value(vm, heap, state, new_target)?
+                else {
+                    return Ok(Coercion::Threw);
+                };
+                scope.handle(receiver)
+            };
+            let mut all: Vec<Tagged<'_, Value>> = Vec::with_capacity(args.len() + 1);
+            all.push(receiver.as_tagged(heap));
+            all.extend(args.iter().map(|arg| arg.as_tagged(heap)));
+            let staged = scope.stage(&all);
+            let result = scope.handle(HostCtx::enter(
+                vm,
+                heap,
+                state,
+                target,
+                staged,
+                Some(new_target),
+            )?);
+            if result.as_tagged(heap) == heap.known().exception.get(heap) {
+                return Ok(Coercion::Threw);
+            }
+            if result.as_tagged(heap).is_primitive(heap) {
+                if derived {
+                    // a derived constructor may only return objects
+                    return Err(VmError::Type);
+                }
+                return Ok(Coercion::Value(receiver.as_tagged(heap)));
+            }
+            Ok(Coercion::Value(result.as_tagged(heap)))
+        })
     }
 
     pub fn create_construct_receiver_value<'a>(

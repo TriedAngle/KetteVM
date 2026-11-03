@@ -2,7 +2,8 @@ use crate::api::Runtime;
 use crate::errors::Errors;
 use crate::intrinsics::native_fn;
 use crate::{
-    Args, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState, VM, Value, VmError,
+    Args, Coercion, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState, VM, Value,
+    VmError,
 };
 use core::ptr::NonNull;
 
@@ -64,18 +65,84 @@ impl<'a> HostCtx<'a> {
                 Some(scope.handle(nt))
             }
         };
+        let is_bound = callable.as_tagged(heap).map(heap).kind().is_bound();
+        if is_bound {
+            let forwarded: Vec<Handle<'_, Value>> = (1..args.len())
+                .filter_map(|index| args.get(index))
+                .collect();
+            return Self::enter_bound(vm, heap, state, callable.erase(), &forwarded, new_target);
+        }
         (vm.shared.execute)(vm, heap, state, callable, args, new_target)
+    }
+
+    /// A bound function's `[[Call]]`/`[[Construct]]` (ES 10.4.2): appends
+    /// `args` (the call's arguments, without a receiver) to `[[BoundArguments]]`
+    /// and forwards to `[[BoundTargetFunction]]`. A call uses `[[BoundThis]]`
+    /// as the receiver; a construct replaces `new.target` with the target when
+    /// the bound function itself is being constructed.
+    pub fn enter_bound<'h>(
+        vm: &'h VM,
+        heap: &'h mut Heap,
+        state: &'h ThreadState,
+        bound: Handle<'_, Value>,
+        args: &[Handle<'_, Value>],
+        new_target: Option<Handle<'_, Value>>,
+    ) -> Result<Tagged<'h, Value>, VmError> {
+        state.handle_scope(|scope| {
+            let Some(function) = bound.as_tagged(heap).as_heap_object() else {
+                return Err(VmError::Type);
+            };
+            let slots = function.slots(heap);
+            let target = scope.handle(slots.at(heap, 0));
+            let bound_this = scope.handle(slots.at(heap, 1));
+            let bound_args = scope.handle(slots.at(heap, 2));
+            let mut combined: Vec<Handle<'_, Value>> = Vec::new();
+            if let Some(arguments) = bound_args.as_tagged(heap).as_heap_object() {
+                for index in 0..arguments.as_ref().length() {
+                    if let Some(argument) = arguments.as_ref().element_value(heap, index) {
+                        combined.push(scope.handle(argument));
+                    }
+                }
+            }
+            for arg in args {
+                combined.push(scope.handle(arg.as_tagged(heap)));
+            }
+            match new_target {
+                None => {
+                    combined.insert(0, bound_this);
+                    let staged = scope.stage(
+                        &combined
+                            .iter()
+                            .map(|arg| arg.as_tagged(heap))
+                            .collect::<Vec<_>>(),
+                    );
+                    Self::enter(vm, heap, state, target, staged, None)
+                }
+                Some(new_target) => {
+                    let new_target =
+                        scope.handle(if new_target.as_tagged(heap) == bound.as_tagged(heap) {
+                            target.as_tagged(heap)
+                        } else {
+                            new_target.as_tagged(heap)
+                        });
+                    let result = match Object::construct_forward(
+                        vm, heap, state, target, &combined, new_target,
+                    )? {
+                        Coercion::Threw => scope.handle(heap.known().exception.get(heap).erase()),
+                        Coercion::Value(value) => scope.handle(value),
+                    };
+                    Ok(result.as_tagged(heap).erase())
+                }
+            }
+        })
     }
 }
 
-/// The runtime-call ABI (tier 1): a single tagged word in the first
-/// return register. Errors are the exception sentinel with the pending
-/// exception set — one error channel at the boundary. `Result` survives only above `execute`.
+/// The runtime-call ABI (tier 1)
 pub type NativeFn =
     for<'a, 'nt> fn(HostCtx<'a>, Option<Handle<'nt, Value>>, Args) -> Tagged<'a, Value>;
 
-/// Materialize `err` as the pending exception and return the sentinel:
-/// the single-channel bridge for runtime bodies.
+/// Materialize `err` as the pending exception and return the sentinel
 pub fn raise_runtime<'a>(
     vm: &VM,
     heap: &'a mut Heap,

@@ -159,6 +159,10 @@ macro_rules! call_enter {
                 proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged),
                 true,
             ),
+            Ok(StagedCall::Bound { callee_reg, staged }) => (
+                bound_apply_staged($ctx, $roots, $regs, callee_reg, staged),
+                true,
+            ),
             Err(err) => (Acc::set($ctx.raise_tag(err)), true),
         };
         if value {
@@ -342,7 +346,8 @@ fn enter<'a>(
     match callable.as_tagged(heap).erase().call_target(heap) {
         None => Err(VmError::Type),
         // the proxy dispatch above already intercepted these
-        Some(CallTarget::Proxy(_)) => Err(VmError::Type),
+        // proxy and bound-function calls are intercepted before `execute`
+        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
             let f = vm.runtime(rt);
             let nctx = HostCtx::new(vm, heap, state);
