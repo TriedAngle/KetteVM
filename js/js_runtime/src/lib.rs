@@ -61,12 +61,15 @@ use object::{
 };
 use proxy::{REVOKE_PRELUDE, proxy_constructor, proxy_revocable, proxy_revoke};
 use string::{string_constructor, string_to_string, string_value_of};
-use symbol::symbol_constructor;
+use symbol::{
+    symbol_constructor, symbol_for, symbol_key_for, symbol_prototype_description,
+    symbol_prototype_to_primitive, symbol_prototype_to_string, symbol_prototype_value_of,
+};
 
 use vm_core::{
     DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Tagged, Thread, VM,
-    Value, Visitor, VmError,
+    NativeIndex, Object, PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Symbol, Tagged,
+    Thread, VM, Value, Visitor, VmError,
 };
 
 pub struct JSRuntime;
@@ -183,6 +186,12 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         array_iterator_next: vm.register_runtime(array_iterator_next),
         array_iterator_symbol_iterator: vm.register_runtime(array_iterator_symbol_iterator),
         symbol: vm.register_runtime(symbol_constructor),
+        symbol_description: vm.register_runtime(symbol_prototype_description),
+        symbol_to_string: vm.register_runtime(symbol_prototype_to_string),
+        symbol_value_of: vm.register_runtime(symbol_prototype_value_of),
+        symbol_to_primitive: vm.register_runtime(symbol_prototype_to_primitive),
+        symbol_for: vm.register_runtime(symbol_for),
+        symbol_key_for: vm.register_runtime(symbol_key_for),
         object_has_own_property: vm.register_runtime(object_has_own_property),
         object_is: vm.register_runtime(object_is),
         object_property_is_enumerable: vm.register_runtime(object_property_is_enumerable),
@@ -306,6 +315,12 @@ pub struct BuiltinIndices {
     pub array_iterator_next: NativeIndex,
     pub array_iterator_symbol_iterator: NativeIndex,
     pub symbol: NativeIndex,
+    pub symbol_description: NativeIndex,
+    pub symbol_to_string: NativeIndex,
+    pub symbol_value_of: NativeIndex,
+    pub symbol_to_primitive: NativeIndex,
+    pub symbol_for: NativeIndex,
+    pub symbol_key_for: NativeIndex,
     pub object_has_own_property: NativeIndex,
     pub object_is: NativeIndex,
     pub object_property_is_enumerable: NativeIndex,
@@ -1499,10 +1514,10 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::method(performance_object.erase()),
         )?;
 
-        // ---- Symbol (minimal: constructor + Symbol.iterator) ---------------
-        // enough to author custom iterables; the full Symbol surface stays
-        // gated by the test262 feature skip
-        let symbol_fn = Object::native_function(thread.heap(), &scope, idx.symbol)?;
+        // ---- Symbol -----------------------------------------------------------
+        // `new Symbol()` throws from the constructor body (ES 20.4.1.1 step 1),
+        // so the function itself carries [[Construct]].
+        let symbol_fn = Object::native_constructor(thread.heap(), &scope, idx.symbol)?;
         Object::set_builtin_name(thread, &scope, symbol_fn, "Symbol")?;
         let symbol_name = thread.intern(&scope, "Symbol");
         // Safety: fresh interned word, rooted below before the define.
@@ -1573,43 +1588,119 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::method(symbol_fn.erase()),
         )?;
 
-        let iterator_symbol: Handle<'_, vm_core::Symbol> =
-            scope.handle(known.iterator_symbol.get(thread.heap()));
-        let iter_name = thread.intern(&scope, "iterator");
-        // Safety: fresh interned word, rooted below before the define.
-        let iter_name = scope.handle(iter_name.as_tagged(thread.heap()));
-        Object::define_own_property(
-            thread.heap(),
+        // Symbol.prototype.description is an accessor; the setter is absent.
+        {
+            let getter = Object::native_function(thread.heap(), &scope, idx.symbol_description)?;
+            Object::set_builtin_name(thread, &scope, getter, "get description")?;
+            let get = scope.handle(getter.as_tagged(thread.heap()).erase());
+            let set = scope.handle(known.undefined.get(thread.heap()).erase());
+            let description_name = thread.intern(&scope, "description");
+            // Safety: fresh interned word, rooted below before the define.
+            let description_name = scope.handle(description_name.as_tagged(thread.heap()));
+            Object::define_own_property(
+                thread.heap(),
+                &scope,
+                symbol_prototype,
+                description_name,
+                PropertyDescriptor::Accessor {
+                    get,
+                    set,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )?;
+        }
+        Object::install_method(
+            thread,
             &scope,
-            symbol_fn,
-            iter_name,
-            PropertyDescriptor::Data {
-                value: iterator_symbol.erase(),
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
+            symbol_prototype,
+            "toString",
+            idx.symbol_to_string,
         )?;
-        let to_string_tag_symbol: Handle<'_, vm_core::Symbol> =
-            scope.handle(known.to_string_tag_symbol.get(thread.heap()));
-        let to_string_tag_name = thread.intern(&scope, "toStringTag");
-        // Safety: fresh interned word, rooted below before the define.
-        let to_string_tag_name = scope.handle(to_string_tag_name.as_tagged(thread.heap()));
-        Object::define_own_property(
-            thread.heap(),
+        Object::install_method(
+            thread,
             &scope,
-            symbol_fn,
-            to_string_tag_name,
-            PropertyDescriptor::Data {
-                value: to_string_tag_symbol.erase(),
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
+            symbol_prototype,
+            "valueOf",
+            idx.symbol_value_of,
         )?;
+        // Symbol.prototype[@@toPrimitive] returns the wrapped symbol.
+        {
+            let to_primitive =
+                Object::native_function(thread.heap(), &scope, idx.symbol_to_primitive)?;
+            Object::set_builtin_name(thread, &scope, to_primitive, "[Symbol.toPrimitive]")?;
+            let key: Handle<'_, SlotName> =
+                scope.handle(known.to_primitive_symbol.get(thread.heap()));
+            Object::define_own_property(
+                thread.heap(),
+                &scope,
+                symbol_prototype,
+                key,
+                PropertyDescriptor::Data {
+                    value: to_primitive.erase(),
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )?;
+        }
+        Object::install_method(thread, &scope, symbol_fn, "for", idx.symbol_for)?;
+        Object::install_method(thread, &scope, symbol_fn, "keyFor", idx.symbol_key_for)?;
+
+        // The engine's @@iterator/@@toPrimitive/@@toStringTag are the
+        // well-known symbols; the other well-known symbols are only ever
+        // observed by user code.
+        for (name, description) in [
+            ("asyncDispose", "Symbol.asyncDispose"),
+            ("asyncIterator", "Symbol.asyncIterator"),
+            ("dispose", "Symbol.dispose"),
+            ("hasInstance", "Symbol.hasInstance"),
+            ("isConcatSpreadable", "Symbol.isConcatSpreadable"),
+            ("iterator", "Symbol.iterator"),
+            ("match", "Symbol.match"),
+            ("matchAll", "Symbol.matchAll"),
+            ("replace", "Symbol.replace"),
+            ("search", "Symbol.search"),
+            ("species", "Symbol.species"),
+            ("split", "Symbol.split"),
+            ("toPrimitive", "Symbol.toPrimitive"),
+            ("toStringTag", "Symbol.toStringTag"),
+            ("unscopables", "Symbol.unscopables"),
+        ] {
+            let value = match name {
+                "iterator" => scope.handle(known.iterator_symbol.get(thread.heap()).erase()),
+                "toPrimitive" => scope.handle(known.to_primitive_symbol.get(thread.heap()).erase()),
+                "toStringTag" => {
+                    scope.handle(known.to_string_tag_symbol.get(thread.heap()).erase())
+                }
+                _ => {
+                    let description = thread.intern(&scope, description);
+                    // Safety: fresh interned word, rooted below before the
+                    // symbol allocation.
+                    let description: Handle<'_, DenseString> =
+                        scope.handle(description.as_tagged(thread.heap()));
+                    Symbol::new(thread.heap(), &scope, Some(description)).erase()
+                }
+            };
+            let name = thread.intern(&scope, name);
+            // Safety: fresh interned word, rooted below before the define.
+            let name = scope.handle(name.as_tagged(thread.heap()));
+            Object::define_own_property(
+                thread.heap(),
+                &scope,
+                symbol_fn,
+                name,
+                PropertyDescriptor::Data {
+                    value,
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            )?;
+        }
         // Symbol.prototype[@@toStringTag] = "Symbol".
         let to_string_tag_key: Handle<'_, SlotName> =
-            scope.handle(to_string_tag_symbol.as_tagged(thread.heap()));
+            scope.handle(known.to_string_tag_symbol.get(thread.heap()));
         let symbol_tag = thread.intern(&scope, "Symbol");
         Object::define_own_property(
             thread.heap(),

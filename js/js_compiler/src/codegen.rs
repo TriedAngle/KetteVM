@@ -3922,7 +3922,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             // numeric literal keys ({ 1: x }) use the keyed path
             let key_reg = self.stage_key(&p.key, p.computed, &prop_temps)?;
-            let is_method = p.method || matches!(p.value, Expression::FunctionExpression(_));
+            let is_method = p.method;
             match p.kind {
                 PropertyKind::Init if !is_method => {
                     self.expr(&p.value)?;

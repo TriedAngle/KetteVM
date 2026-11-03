@@ -982,14 +982,12 @@ fn create_private_name<'a>(
     let HostCtx {
         vm: _, heap, state, ..
     } = nctx;
-    let text = args
-        .get(heap, 1)
-        .get_as::<DenseString>(heap)
-        .map(|s| s.to_rust_string(heap));
     state.handle_scope(|scope| {
-        let desc = text.unwrap_or_default();
-        let sym = Symbol::new(heap, &scope, desc.as_bytes());
-        sym.as_tagged(heap).erase()
+        let description = args.get(heap, 1);
+        let description = scope.cast::<DenseString>(heap, description);
+        Symbol::new(heap, &scope, description)
+            .as_tagged(heap)
+            .erase()
     })
 }
 
@@ -1347,22 +1345,33 @@ fn set_function_name<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key).erase();
-        let text = scope.handle(rt_try!(
-            vm,
-            heap,
-            state,
-            Convert::to_string(heap, &scope, key)
-        ));
-        let s = text
-            .as_tagged(heap)
-            .get_as::<DenseString>(heap)
-            .expect("ToString yields a string");
+        // ES 10.2.9 steps 1-6: a Symbol key contributes "[description]",
+        // any other key is ToString'd, and a prefix prepends "prefix ".
         let mut units: Vec<u16> = match prefix {
             1 => b"get ".iter().map(|&b| b as u16).collect(),
             2 => b"set ".iter().map(|&b| b as u16).collect(),
             _ => Vec::new(),
         };
-        s.data(heap).write_units(&mut units);
+        if let Some(symbol) = key.as_tagged(heap).get_as::<Symbol>(heap) {
+            units.push('[' as u16);
+            let description = scope.handle(symbol.as_ref().description(heap));
+            if let Some(description) = description.as_tagged(heap).get_as::<DenseString>(heap) {
+                description.as_ref().data(heap).write_units(&mut units);
+            }
+            units.push(']' as u16);
+        } else {
+            let text = scope.handle(rt_try!(
+                vm,
+                heap,
+                state,
+                Convert::to_string(heap, &scope, key)
+            ));
+            let text = text
+                .as_tagged(heap)
+                .get_as::<DenseString>(heap)
+                .expect("ToString yields a string");
+            text.as_ref().data(heap).write_units(&mut units);
+        }
         let name = vm
             .interner()
             .intern(heap, &scope, StringData::Utf16(&units))

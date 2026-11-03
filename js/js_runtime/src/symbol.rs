@@ -1,40 +1,247 @@
-//! ES 20.4: the Symbol constructor (minimal surface).
+//! ES 20.4: Symbol objects.
 
 use vm_core::HostCtx;
 use vm_core::raise_runtime;
-use vm_core::{Args, DenseString, Handle, Object, Symbol, Tagged, Value};
+use vm_core::{
+    Args, DenseString, FixedArray, Handle, HandleScope, Heap, MapKind, Object, Symbol, Tagged,
+    Value, VmError,
+};
 
-/// `Symbol(desc)`: a fresh Symbol primitive (ES 20.4.1.1). The description
-/// is ToString'd and stored raw as `[[Description]]`; the `"Symbol(…)"`
-/// wording is applied by `SymbolDescriptiveString` (see the `String`
-/// constructor). This minimal surface exists so user code can author
-/// iterables (`obj[Symbol.iterator] = ...`); `Symbol.iterator` is the
-/// well-known one.
+/// `Symbol ( [ description ] )`
+/// [ES 20.4.1.1](https://tc39.es/ecma262/#sec-symbol-constructor)
+/// Creates a new Symbol whose `[[Description]]` is `description` (or
+/// `undefined`); `new Symbol()` is a TypeError.
 pub fn symbol_constructor<'a>(
+    ctx: HostCtx<'a>,
+    new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    if new_target.is_some() {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    state.handle_scope(|scope| {
+        let description = scope.handle(args.get(heap, 1));
+        if description.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
+            return Symbol::new(heap, &scope, None).as_tagged(heap).erase();
+        }
+        let description = match Object::to_string(vm, heap, state, description) {
+            Ok(Some(text)) => scope.handle(text),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let description = scope
+            .cast::<DenseString>(heap, description.as_tagged(heap))
+            .expect("ToString returns a String");
+        Symbol::new(heap, &scope, Some(description))
+            .as_tagged(heap)
+            .erase()
+    })
+}
+
+/// `get Symbol.prototype.description`
+/// [ES 20.4.3.2](https://tc39.es/ecma262/#sec-symbol.prototype.description)
+/// Returns the `[[Description]]` of the receiver.
+pub fn symbol_prototype_description<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    state.handle_scope(
+        |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
+            Ok(symbol) => symbol.as_tagged(heap).as_ref().description(heap),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        },
+    )
+}
+
+/// `Symbol.prototype.toString ( )`
+/// [ES 20.4.3.3](https://tc39.es/ecma262/#sec-symbol.prototype.tostring)
+/// Returns `"Symbol(" + description + ")"`.
+pub fn symbol_prototype_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
-        // absent/undefined description is the empty string
-        let desc = if args.len() > 1 && args.get(heap, 1) != vm.known().undefined.get(heap) {
-            let h = args.get_handle(heap, 1);
-            match Object::to_string(vm, heap, state, h) {
-                Ok(Some(s)) => {
-                    let s = scope.handle(s);
-                    s.as_tagged(heap)
-                        .get_as::<DenseString>(heap)
-                        .map(|d| d.to_rust_string(heap))
-                        .unwrap_or_default()
-                }
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            }
-        } else {
-            String::new()
+        let receiver = scope.handle(args.get(heap, 0));
+        let symbol = match this_symbol_value(heap, &scope, receiver.as_tagged(heap)) {
+            Ok(symbol) => symbol,
+            Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let sym = Symbol::new(heap, &scope, desc.as_bytes());
-        sym.as_tagged(heap).erase()
+        descriptive_string(heap, &scope, symbol)
+            .as_tagged(heap)
+            .erase()
     })
+}
+
+/// `Symbol.prototype.valueOf ( )`
+/// [ES 20.4.3.4](https://tc39.es/ecma262/#sec-symbol.prototype.valueof)
+/// Returns the receiver's `[[SymbolData]]`.
+pub fn symbol_prototype_value_of<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    state.handle_scope(
+        |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
+            Ok(symbol) => symbol.as_tagged(heap).erase(),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        },
+    )
+}
+
+/// `Symbol.prototype [ %Symbol.toPrimitive% ] ( hint )`
+/// [ES 20.4.3.5](https://tc39.es/ecma262/#sec-symbol.prototype-@@toprimitive)
+/// Returns the receiver's symbol; `hint` is ignored.
+pub fn symbol_prototype_to_primitive<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    symbol_prototype_value_of(ctx, None, args)
+}
+
+/// `Symbol.for ( key )`
+/// [ES 20.4.2.4](https://tc39.es/ecma262/#sec-symbol.for)
+/// Returns the registered symbol for `key`, registering a new one on first use.
+pub fn symbol_for<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    state.handle_scope(|scope| {
+        let key = scope.handle(args.get(heap, 1));
+        let key = match Object::to_string(vm, heap, state, key) {
+            Ok(Some(text)) => scope.handle(text),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let key = scope
+            .cast::<DenseString>(heap, key.as_tagged(heap))
+            .expect("ToString returns a String");
+        let table = vm.known().global_symbol_registry.get(heap);
+        for index in (0..table.as_ref().len()).step_by(2) {
+            let Some(registered) = table.as_ref().at(heap, index).get_as::<DenseString>(heap)
+            else {
+                continue;
+            };
+            if registered.as_ref().content_eq(heap, key.as_tagged(heap)) {
+                return table.as_ref().at(heap, index + 1);
+            }
+        }
+        let symbol = Symbol::new(heap, &scope, Some(key));
+        register_symbol(heap, &scope, key, symbol);
+        symbol.as_tagged(heap).erase()
+    })
+}
+
+/// `Symbol.keyFor ( symbol )`
+/// [ES 20.4.2.8](https://tc39.es/ecma262/#sec-symbol.keyfor)
+/// Returns the registry key of `symbol`, or `undefined` when it was not
+/// created by `Symbol.for`.
+pub fn symbol_key_for<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = scope.handle(args.get(heap, 1));
+        let Some(symbol) = receiver.as_tagged(heap).get_as::<Symbol>(heap) else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        let table = vm.known().global_symbol_registry.get(heap);
+        for index in (0..table.as_ref().len()).step_by(2) {
+            if table.as_ref().at(heap, index + 1) == symbol.erase() {
+                return table.as_ref().at(heap, index);
+            }
+        }
+        vm.known().undefined.get(heap).erase()
+    })
+}
+
+/// `SymbolDescriptiveString ( symbol )`
+/// [ES 20.4.3.3.1](https://tc39.es/ecma262/#sec-symboldescriptivestring)
+/// `"Symbol(" + (description or "") + ")"`.
+pub fn descriptive_string<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    symbol: Handle<'_, Symbol>,
+) -> Handle<'s, DenseString> {
+    let description = symbol.as_tagged(heap).as_ref().description(heap);
+    let description = if description == heap.known().undefined.get(heap).erase() {
+        heap.known().strings.empty.get(heap).erase()
+    } else {
+        description
+    };
+    let text = description
+        .get_as::<DenseString>(heap)
+        .expect("[[Description]] is a String");
+    let mut units: Vec<u16> = Vec::with_capacity(text.as_ref().len() + 8);
+    units.extend("Symbol(".encode_utf16());
+    text.as_ref().data(heap).write_units(&mut units);
+    units.push(')' as u16);
+    DenseString::from_units(heap, scope, &units)
+}
+
+/// `ThisSymbolValue ( arg )`
+/// [ES 20.4.3.4.1](https://tc39.es/ecma262/#sec-thissymbolvalue)
+/// The primitive itself, or the `[[SymbolData]]` of a Symbol wrapper.
+fn this_symbol_value<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    value: Tagged<'_, Value>,
+) -> Result<Handle<'s, Symbol>, VmError> {
+    if let Some(symbol) = value.get_as::<Symbol>(heap) {
+        return Ok(scope.handle(symbol));
+    }
+    let Some(object) = value.as_heap_object() else {
+        return Err(VmError::Type);
+    };
+    if !object.map(heap).kind().contains(MapKind::PRIMITIVE_WRAPPER) {
+        return Err(VmError::Type);
+    }
+    let symbol = object
+        .slots(heap)
+        .at(heap, 0)
+        .get_as::<Symbol>(heap)
+        .ok_or(VmError::Type)?;
+    Ok(scope.handle(symbol))
+}
+
+/// Appends `[key, symbol]` to the `[[GlobalSymbolRegistry]]`.
+fn register_symbol(
+    heap: &mut Heap,
+    scope: &HandleScope<'_>,
+    key: Handle<'_, DenseString>,
+    symbol: Handle<'_, Symbol>,
+) {
+    let length = heap.known().global_symbol_registry.get(heap).as_ref().len();
+    let table: Handle<'_, FixedArray> = heap.allocate_hole_array(length + 2).as_handle(scope);
+    // re-read the registry: the allocation above may have moved it
+    let registry = heap.known().global_symbol_registry.get(heap);
+    for index in 0..length {
+        table
+            .as_tagged(heap)
+            .as_ref()
+            .set(heap, index, registry.as_ref().at(heap, index));
+    }
+    table
+        .as_tagged(heap)
+        .as_ref()
+        .set(heap, length, key.as_tagged(heap).erase());
+    table
+        .as_tagged(heap)
+        .as_ref()
+        .set(heap, length + 1, symbol.as_tagged(heap).erase());
+    // a root slot is scanned by every collection, so no remembered-set
+    // entry is needed for the young table
+    heap.known()
+        .global_symbol_registry
+        .init(table.as_tagged(heap));
 }

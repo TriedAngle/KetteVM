@@ -2,11 +2,11 @@ use core::ptr::NonNull;
 
 use crate::{
     AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
-    CodeInit, ContextInit, ContextObject, EdgeVisitable, FixedArray, GcSlot, Handle, HandleData,
-    HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind, NameToIndexHashTable,
-    NameToIndexHashTableInit, NativeIndex, Object, ObjectInit, PropertyDescriptor, ScopeInfo,
-    ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi,
-    StringInterner, Symbol, Tagged, Value, Visitor,
+    CodeInit, ContextInit, ContextObject, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
+    HandleData, HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind,
+    NameToIndexHashTable, NameToIndexHashTableInit, NativeIndex, Object, ObjectInit,
+    PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
+    SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -107,6 +107,10 @@ pub struct WellKnown {
     pub object_to_string: GcSlot<Object>,
     /// Loaded script contexts and their name index.
     pub script_context_table: GcSlot<ScriptContextTable>,
+    /// Agent-record `[[GlobalSymbolRegistry]]`: a `FixedArray` of
+    /// `[key, symbol]` pairs in registration order.
+    /// TODO: this can be done better probably
+    pub global_symbol_registry: GcSlot<FixedArray>,
     /// Initial map of `%Object.prototype%`: every fresh `{}` gets it
     /// (extendable, parent = object_prototype). Shared with `global_object`.
     pub object_initial_map: GcSlot<Map>,
@@ -329,6 +333,7 @@ impl WellKnown {
             eval_function: smi_slot::<Object>(),
             object_to_string: smi_slot::<Object>(),
             script_context_table: smi_slot::<ScriptContextTable>(),
+            global_symbol_registry: smi_slot::<FixedArray>(),
             object_initial_map: smi_slot::<Map>(),
             function_map: smi_slot::<Map>(),
             non_constructor_function_map: smi_slot::<Map>(),
@@ -425,6 +430,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.eval_function.as_raw());
         visitor.visit(self.object_to_string.as_raw());
         visitor.visit(self.script_context_table.as_raw());
+        visitor.visit(self.global_symbol_registry.as_raw());
         visitor.visit(self.object_initial_map.as_raw());
         visitor.visit(self.function_map.as_raw());
         visitor.visit(self.non_constructor_function_map.as_raw());
@@ -509,6 +515,16 @@ fn alloc_object<'s>(
 ) -> Handle<'s, Object> {
     heap.new_object(scope, map, HandleSlice::EMPTY)
         .as_handle(scope)
+}
+
+/// A symbol whose `[[Description]]` is `description`.
+fn alloc_symbol<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    description: &str,
+) -> Handle<'s, Symbol> {
+    let description = DenseString::from_utf8(heap, scope, description);
+    Symbol::new(heap, scope, Some(description))
 }
 
 pub fn bootstrap_basics(heap: &mut Heap) {
@@ -744,6 +760,9 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .allocate::<FixedArray>(HandleSlice::EMPTY)
         .as_handle(&scope);
     known.empty_fixed_array.init(empty_slots.as_tagged(heap));
+    known
+        .global_symbol_registry
+        .init(empty_slots.as_tagged(heap));
     let object_prototype = alloc_object(heap, &scope, object_prototype_map);
 
     let array_prototype_map = alloc_parent_map(
@@ -856,29 +875,29 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
 
     known
         .to_primitive_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"Symbol.toPrimitive").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "Symbol.toPrimitive").as_tagged(heap));
     known
         .iterator_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"Symbol.iterator").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "Symbol.iterator").as_tagged(heap));
     known
         .to_string_tag_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"Symbol.toStringTag").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "Symbol.toStringTag").as_tagged(heap));
     // IC state sentinel (never user-visible): a feedback slot holding it
     // permanently takes the slow path
     known
         .megamorphic_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"<megamorphic>").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "<megamorphic>").as_tagged(heap));
     // transition-tree key for prototype changes (never user-visible)
     known
         .prototype_transition_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"<set-prototype>").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "<set-prototype>").as_tagged(heap));
     known
         .holey_transition_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"<promote-holey>").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "<promote-holey>").as_tagged(heap));
     // transition-tree key for sparse-array normalization (never user-visible)
     known
         .dictionary_transition_symbol
-        .init_tagged(Symbol::new(heap, &scope, b"<normalize-dictionary>").as_tagged(heap));
+        .init_tagged(alloc_symbol(heap, &scope, "<normalize-dictionary>").as_tagged(heap));
 
     let empty_scope_info = heap
         .allocate::<ScopeInfo>(ScopeInfoInit {

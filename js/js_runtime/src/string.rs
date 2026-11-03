@@ -1,7 +1,9 @@
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::raise_runtime;
-use vm_core::{Args, DenseString, Handle, Symbol, Tagged, Value, WrapperKind};
+use vm_core::{Args, Handle, Symbol, Tagged, Value, WrapperKind};
+
+use crate::symbol::descriptive_string;
 
 /// `String ( value )`
 /// [ES 22.1.1.1](https://tc39.es/ecma262/#sec-string-constructor-string-value)
@@ -17,11 +19,10 @@ pub fn string_constructor<'a>(
         if new_target.is_none()
             && let Some(sym) = arg.as_tagged(heap).get_as::<Symbol>(heap)
         {
-            let mut text = String::from("Symbol(");
-            text.push_str(&String::from_utf8_lossy(sym.as_ref().description(heap)));
-            text.push(')');
-            let s = DenseString::from_utf8(heap, &scope, &text);
-            return s.as_tagged(heap).erase();
+            let sym = scope.handle(sym);
+            return descriptive_string(heap, &scope, sym)
+                .as_tagged(heap)
+                .erase();
         }
         let s = match Object::to_string(vm, heap, state, arg) {
             Ok(Some(s)) => scope.handle(s),
