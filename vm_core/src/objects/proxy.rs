@@ -173,8 +173,7 @@ fn call_trap<'a>(
     if !trap.as_tagged(heap).is_callable(heap) {
         return Err(VmError::Message(Message::ProxyTrapNotFunction));
     }
-    let words: Vec<Tagged<'_, Value>> = args.iter().map(|h| h.as_tagged(heap)).collect();
-    let staged = scope.stage(&words);
+    let staged = scope.stage_handles(args);
     let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, *trap, staged, None)?);
     let exception = heap.known().exception.get(heap);
     if result.as_tagged(heap) == exception {
@@ -974,10 +973,8 @@ fn apply_h<'a>(
         }
         TrapLookup::Trap(t) => {
             // args: (target, thisArg, argumentsList)
-            let words: Vec<Tagged<'_, Value>> =
-                args[1..].iter().map(|h| h.as_tagged(heap)).collect();
             let arr = heap
-                .new_array(scope, scope.stage(&words))
+                .new_array(scope, scope.stage_handles(&args[1..]))
                 .as_handle(scope)
                 .erase();
             let result = call_trap(
@@ -1011,9 +1008,8 @@ fn construct_h<'a>(
         }
         TrapLookup::Trap(t) => {
             // args: (target, argumentsList, newTarget)
-            let words: Vec<Tagged<'_, Value>> = args.iter().map(|h| h.as_tagged(heap)).collect();
             let arr = heap
-                .new_array(scope, scope.stage(&words))
+                .new_array(scope, scope.stage_handles(args))
                 .as_handle(scope)
                 .erase();
             let result = call_trap(

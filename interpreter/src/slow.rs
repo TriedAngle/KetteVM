@@ -1265,7 +1265,7 @@ pub fn call_getter<'a>(
 }
 
 macro_rules! apply_store_hit {
-    ($vm:expr, $heap:expr, $state:expr, $roots:expr, $scope:expr, $recv:expr, $value:expr, $hit:expr) => {
+    ($vm:expr, $heap:expr, $state:expr, $roots:expr, $scope:expr, $recv:expr, $value:expr, $hit:expr, $mode:expr) => {
         match $hit {
             StoreHit::Done => $value.as_tagged($heap).erase(),
             StoreHit::Setter(setter) => {
@@ -1293,6 +1293,14 @@ macro_rules! apply_store_hit {
                 ));
                 if result.as_tagged($heap) == $roots.exception.get($heap).erase() {
                     result.as_tagged($heap).erase()
+                } else if result.as_tagged($heap) == $roots.false_object.get($heap).erase() {
+                    // rejected by the native setter (ArraySetLength): a
+                    // strict store throws, a sloppy one is a no-op
+                    if $mode.is_strict() {
+                        raise_runtime($vm, $heap, $state, VmError::Type)
+                    } else {
+                        $value.as_tagged($heap).erase()
+                    }
                 } else {
                     $value.as_tagged($heap).erase()
                 }
@@ -1317,7 +1325,9 @@ macro_rules! cached_store {
             $value,
             $mode,
         ) {
-            return apply_store_hit!($vm, $heap, $state, $roots, $scope, $recv, $value, hit);
+            return apply_store_hit!(
+                $vm, $heap, $state, $roots, $scope, $recv, $value, hit, $mode
+            );
         }
     }};
 }

@@ -445,7 +445,7 @@ impl Object {
     ) -> Result<(), VmError> {
         let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
 
-        let (grows, logical_len, dictionary, is_array) = {
+        let (grows, logical_len, capacity, dictionary, is_array) = {
             let obj = receiver.as_tagged(heap);
             let dictionary = obj.element_dictionary(heap).is_some();
             let capacity = obj.elements_array(heap).map(|e| e.len()).unwrap_or(0);
@@ -453,7 +453,7 @@ impl Object {
             // their elements capacity
             let is_array = obj.is_array(heap);
             let logical = if is_array { obj.length() } else { capacity };
-            (i >= capacity, logical, dictionary, is_array)
+            (i >= capacity, logical, capacity, dictionary, is_array)
         };
 
         if dictionary {
@@ -475,7 +475,17 @@ impl Object {
                 logical_len,
                 is_array,
             )?;
+            // the grown capacity is holes past the written index; arrays
+            // hide them behind `length`, other receivers are bounded by
+            // capacity
+            if !is_array {
+                Self::promote_holey(heap, scope, receiver);
+            }
         } else {
+            // the same applies to a write that leaves trailing capacity
+            if !is_array && new_len < capacity {
+                Self::promote_holey(heap, scope, receiver);
+            }
             let obj = receiver.as_tagged(heap);
             let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
             elements.set(heap, i, value.as_tagged(heap));

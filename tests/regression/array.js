@@ -678,3 +678,58 @@ assert.throws(TypeError, function () {
     Object.defineProperty(clamped, "length", { value: 0 });
 }, "non-configurable element blocks shrink");
 assert.sameValue(clamped.length, 1, "length clamps to non-configurable element");
+
+// ArraySetLength (ES 10.4.2.4) via the `length` setter: the value is coerced
+// by ToUint32 and again by ToNumber, so an object runs valueOf twice.
+var coercions = 0;
+var coerced = [];
+coerced.length = {
+    valueOf: function () {
+        coercions += 1;
+        return 1;
+    },
+};
+assert.sameValue(coercions, 2, "length setter coerces the value twice");
+assert.sameValue(coerced.length, 1, "length setter applies the coerced value");
+
+var invalid = [];
+assert.throws(RangeError, function () {
+    invalid.length = 1.5;
+}, "fractional length is a RangeError");
+assert.throws(RangeError, function () {
+    invalid.length = -1;
+}, "negative length is a RangeError");
+assert.throws(RangeError, function () {
+    invalid.length = 4294967296;
+}, "length above 2^32-1 is a RangeError");
+
+// A failed shrink rejects the store: strict code throws, sloppy stays silent.
+function strictShrink(target) {
+    "use strict";
+    target.length = 0;
+}
+var blocked = [1, 2, 3];
+Object.defineProperty(blocked, "1", { value: 2, configurable: false });
+assert.throws(TypeError, function () {
+    strictShrink(blocked);
+}, "strict shrink past a non-configurable element throws");
+assert.sameValue(blocked.length, 2, "failed shrink clamps the length");
+
+var blockedSloppy = [1, 2, 3];
+Object.defineProperty(blockedSloppy, "1", { value: 2, configurable: false });
+blockedSloppy.length = 0;
+assert.sameValue(blockedSloppy.length, 2, "sloppy failed shrink is silent");
+
+// The length descriptor is read after the coercions, so valueOf making it
+// read-only rejects the store (ES 10.4.2.4 steps 12-13).
+var frozen = [1, 2, 3];
+var frozenCoercions = 0;
+frozen.length = {
+    valueOf: function () {
+        if (frozenCoercions++ === 0) {
+            Object.defineProperty(frozen, "length", { writable: false });
+        }
+        return 1;
+    },
+};
+assert.sameValue(frozen.length, 3, "read-only length set during coercion rejects");

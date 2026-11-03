@@ -3,23 +3,27 @@
 //! 0..COUNT range with. These are compiled-language semantics (each cites
 //! its ES section), not JS-visible library functions.
 
+mod for_in;
+mod iterators;
+
 use crate::{
     AccessorPair, Args, CallableInfoObject, Coercion, ContextObject, Convert, DenseString,
     FixedArray, Handle, HandleSlice, Heap, INFO_GLOBAL, Key, LanguageMode, MODE_CLASS, MODE_LET,
     Object, ObjectSlotsInit, PropertyDescriptor, SlotFlags, SlotName, Smi, StoreSemantics,
-    StringData, StringOwn, Symbol, Tagged, Value, VmError, WellKnown, info_is_immutable,
-    info_is_lexical, info_mode,
+    StringData, Symbol, Tagged, Value, VmError, info_is_immutable, info_is_lexical, info_mode,
 };
 
-use crate::Float;
 use crate::HandleScope;
 use crate::PartialDescriptor;
+use crate::lookup::own_property_enumerable;
 use crate::materialize::Materialize;
 use crate::proxy::Flow;
 use crate::proxy::Proxy;
 use crate::tools::KetteTools;
 use crate::{HostCtx, NativeFn, raise_runtime, rt_try};
 use crate::{ThreadState, VM};
+use for_in::{for_in_enumerate, for_in_next};
+use iterators::{get_iterator, iterator_done, iterator_next, iterator_value};
 
 /// The fixed runtime-helper table: one implementation per
 /// `bytecode::BuiltinFn`. The exhaustive match is the compile-time link
@@ -81,55 +85,49 @@ pub fn native_fn(id: bytecode::BuiltinFn) -> NativeFn {
 
 // ---- runtime helpers ------------------------------------------------------
 
-/// RequireObjectCoercible (ES 7.2.2): (value) -> value, TypeError on
-/// null/undefined (object destructuring sources).
+/// RequireObjectCoercible ( arg )
+/// [ES 7.2.1](https://tc39.es/ecma262/#sec-requireobjectcoercible)
+/// Throws on null/undefined; returns the argument for the destructuring caller.
 fn require_object_coercible<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    // internal-runtime convention: the register list IS the argument list
-    // (no receiver slot)
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    let arg = args.get(heap, 0);
-    let null = vm.known().null.get(heap).raw();
-    let undefined = vm.known().undefined.get(heap).raw();
-    let raw = arg.raw();
-    if raw == null || raw == undefined {
+    let HostCtx { vm, heap, state } = ctx;
+    let nullish = args.get(heap, 0).is_nullish(heap);
+    if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
-    // Safety: fresh rooted-slot word, no allocation since the read.
-    unsafe { Tagged::from_value_unchecked(raw) }
+    args.get(heap, 0)
 }
 
-/// Array `length` accessor getter: (holder) -> Smi.
+/// `length` getter of Array exotic objects
+/// [ES 10.4.2](https://tc39.es/ecma262/#sec-array-exotic-objects)
+/// Returns the receiver's `[[ArrayLength]]` (a data property in the spec).
 fn array_length_get<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state: _, ..
-    } = nctx;
-    let holder = args.get_handle(heap, 0);
-    holder
-        .as_tagged(heap)
-        .as_heap_object()
-        .map(|o| Smi::new(o.as_ref().length() as i64).into_tagged())
-        .unwrap_or_else(|| vm.known().undefined.get(heap).erase())
+    let HostCtx { vm, heap, state } = ctx;
+    let Some(object) = args.get(heap, 0).as_heap_object() else {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    };
+    if !object.as_ref().is_array(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    Smi::new(object.as_ref().length() as i64).into_tagged()
 }
 
-/// Array `length` accessor setter (ES 10.4.2.3): (holder, value) -> undefined.
+/// ArraySetLength ( array, propertyDesc )
+/// [ES 10.4.2.4](https://tc39.es/ecma262/#sec-arraysetlength)
+/// Applies a new array length; false when remaining elements block the shrink.
 fn array_length_set<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let holder = args.get_handle(heap, 0);
         let value = args.get(heap, 1);
@@ -141,28 +139,47 @@ fn array_length_set<'a>(
         }
         let obj = scope.handle(obj);
         let value = scope.handle(value);
-        let n = match Object::to_numeric(vm, heap, state, value) {
+        // ToUint32 and ToNumber each coerce the value (an object runs
+        // valueOf twice); unequal results are an invalid length
+        let new_len = match Object::to_numeric(vm, heap, state, value) {
+            Ok(Some(n)) => Convert::number_to_uint32(n),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let number_len = match Object::to_numeric(vm, heap, state, value) {
             Ok(Some(n)) => n,
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let new_len = Convert::number_to_uint32(n);
-        if new_len as f64 != n {
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+        if number_len != new_len as f64 {
+            return raise_runtime(vm, heap, state, VmError::Overflow);
         }
-        if let Err(err) = Object::set_array_length(heap, &scope, &obj, new_len as usize) {
-            return raise_runtime(vm, heap, state, err);
+        // the descriptor is read after the coercions (re-entrant code may
+        // have redefined it); a non-writable length refuses a different value
+        let length_name = vm.known().strings.length.get(heap);
+        let writable = obj
+            .as_tagged(heap)
+            .map(heap)
+            .descriptors()
+            .iter()
+            .find(|d| d.name(heap).ptr_eq(length_name))
+            .is_some_and(|d| d.flags().is_writable());
+        if !writable && new_len as usize != obj.as_tagged(heap).length() {
+            return Convert::boolean(heap, false);
         }
-        vm.known().undefined.get(heap).erase()
+        // apply, then report whether every dropped element could be deleted
+        match Object::set_array_length(heap, &scope, &obj, new_len as usize) {
+            Ok(applied) => Convert::boolean(heap, applied),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
     })
 }
 
 // ---- delete (ES 13.5.1) ----------------------------------------------------
 
-/// `delete obj.key` (ES 13.5.1.2): (obj, key) -> bool, TypeError on a
-/// refused delete in strict code. The interpreter reaches this directly
-/// from `Opcode::Delete`; the mode comes from the running frame's
-/// callable info, read once at the handler's cold edge.
+/// `delete obj.key`
+/// [ES 13.5.1.2](https://tc39.es/ecma262/#sec-delete-operator-runtime-semantics-evaluation)
+/// [[Delete]] on the base object; strict code throws on a refused delete.
 pub fn delete_property_operator<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -172,11 +189,13 @@ pub fn delete_property_operator<'a>(
     mode: LanguageMode,
 ) -> Tagged<'a, Value> {
     let strict = mode.is_strict();
-    // the reference's key is coerced before the base is touched (ES
-    // 13.15.5 EvaluatePropertyAccess: user toString/valueOf of a
-    // computed key runs even when the delete afterwards throws);
-    // the coercion allocates, so the base must stay rooted across it
     state.handle_scope(|scope| {
+        // ToObject(ref.[[Base]]) runs before the key's ToPropertyKey, so a
+        // nullish base throws without coercing a computed key
+        if target.as_tagged(heap).is_nullish(heap) {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+
         let Some(key) = rt_try!(
             vm,
             heap,
@@ -185,7 +204,6 @@ pub fn delete_property_operator<'a>(
         ) else {
             return vm.known().exception.get(heap).erase();
         };
-        // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         // proxies run their `deleteProperty` trap (ES 20.2.5.4); the
         // returned boolean flows through the strict handling below
@@ -201,26 +219,31 @@ pub fn delete_property_operator<'a>(
     })
 }
 
-/// Sloppy `delete x` on an unresolved name (ES 13.5.1.2 step 5 →
-/// GlobalEnvironmentRecord.DeleteBinding): (name) -> bool. Declared
-/// bindings resolve statically and compile to `false`; only global-object
-/// properties reach here, and sloppy references never throw on failure.
+/// `delete x` for a dynamic name in sloppy code
+/// [ES 9.1.1.4.7](https://tc39.es/ecma262/#sec-global-environment-records-deletebinding)
+/// `DeleteBinding` for the frame's environment chain.
 fn delete_identifier_sloppy<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
+    let name = args.get_handle(heap, 0);
     let ok = match state.handle_scope(|scope| {
-        let name = scope.handle(args.get(heap, 0));
-        if crate::global_lexical_has(heap, name.as_tagged(heap)) {
-            return Ok(Flow::Value(false));
+        match dynamic_lookup_frame(heap, state, &scope, name) {
+            // environment-record slots are never deletable
+            Ok(Some(DynamicBinding::Slot(_))) => Ok(Flow::Value(false)),
+            // an eval-declared binding lives on a context extension object
+            Ok(Some(DynamicBinding::Extension { holder, .. })) => {
+                Object::delete_property(vm, heap, state, holder, name)
+            }
+            // unresolved: the global object's own property decides
+            Ok(None) => {
+                let global = scope.handle(vm.known().global_object.get(heap).erase());
+                Object::delete_property(vm, heap, state, global, name)
+            }
+            Err(err) => Err(err),
         }
-        let global = scope.handle(vm.known().global_object.get(heap).erase());
-        let name = scope.handle(args.get(heap, 0));
-        Object::delete_property(vm, heap, state, global, name)
     }) {
         Ok(Flow::Value(ok)) => ok,
         Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
@@ -229,591 +252,34 @@ fn delete_identifier_sloppy<'a>(
     Convert::boolean(heap, ok)
 }
 
-/// `delete super.x` (ES 13.5.1.2 step 4.c): ReferenceError in both
-/// language modes. The reference has already been evaluated (including
-/// the uninitialized-`this` check and the key expression); the key is
-/// never coerced — delete-super fails before any ToPropertyKey.
+/// `delete super.property`
+/// [ES 13.5.1.2](https://tc39.es/ecma262/#sec-delete-operator-runtime-semantics-evaluation)
+/// ReferenceError in both language modes; the key is never coerced.
 fn delete_super_property<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     raise_runtime(vm, heap, state, VmError::Reference)
 }
 
-// ---- for-in (ES 14.7.5) ----------------------------------------------------
-
-/// Enumerator slot layout (a hidden object of `for_in_enumerator_map`):
-/// [0] the current prototype-chain level (an object, or a string
-///     primitive for level 0 of string subjects),
-/// [1] the level's own-string-key snapshot (a FixedArray of interned
-///     strings, taken when the level is reached),
-/// [2] the snapshot cursor (Smi),
-/// [3] keys already registered (a FixedArray; yielded keys and
-///     non-enumerable shadowing keys both enter it, ES 14.7.5.9).
-const FOR_IN_LEVEL: usize = 0;
-const FOR_IN_KEYS: usize = 1;
-const FOR_IN_INDEX: usize = 2;
-const FOR_IN_VISITED: usize = 3;
-
-/// Stage rooted handles into a fresh contiguous slice of `scope` slots:
-/// the words are copied out of their (short-lived) anchors so they can be
-/// consumed by an allocation or call.
-fn stage_handles<'s>(
-    heap: &Heap,
-    scope: &'s HandleScope<'_>,
-    handles: &[Handle<'_, Value>],
-) -> HandleSlice<'s> {
-    let anchored: Vec<Tagged<'_, Value>> =
-        handles.iter().map(|h| h.as_tagged(heap).erase()).collect();
-    scope.stage(&anchored)
-}
-
-/// for-in head (ES 14.7.5.6 ForIn/OfHeadEvaluation, enumerate):
-/// (subject) -> enumerator | undefined. null/undefined subjects run
-/// zero iterations; objects and strings snapshot level 0 of the lazy
-/// chain walk. Other primitives' prototypes are not walked yet (their
-/// own properties are none, so they enumerate empty).
-fn for_in_enumerate<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    let subject = args.get_handle(heap, 0);
-    state.handle_scope(|scope| {
-        let subject = subject;
-        if subject.as_tagged(heap).ptr_eq(vm.known().null.get(heap))
-            || subject
-                .as_tagged(heap)
-                .ptr_eq(vm.known().undefined.get(heap))
-        {
-            return vm.known().undefined.get(heap).erase();
-        }
-        let Some(level) = for_in_initial_level(heap, &scope, vm.known(), subject.as_tagged(heap))
-        else {
-            return vm.known().undefined.get(heap).erase();
-        };
-        // the level must survive the key collection and FixedArray
-        // allocation below (both allocate)
-        let level = scope.handle(level);
-        let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, level));
-        let staged = stage_handles(heap, &scope, &keys);
-        let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
-        let empty = vm.known().empty_fixed_array.get(heap);
-        let map = scope.handle(vm.known().for_in_enumerator_map.get(heap));
-        let words = [
-            level.as_tagged(heap).erase(),
-            keys.as_tagged(heap).erase(),
-            Smi::new(0).into_tagged(),
-            empty.erase(),
-        ];
-        let staged = scope.stage(&words);
-        let enumerator = heap.new_object(&scope, map, staged);
-        enumerator.erase()
-    })
-}
-
-/// Level 0 of the chain for a subject: objects are their own level 0;
-/// string primitives enumerate their indices (a fresh wrapper would be
-/// unobservable otherwise). Other primitives have no own properties —
-/// their level 0 is the constructor's prototype, so additions to
-/// `Number.prototype` etc. are observable (ES 14.7.5.9: the walk starts
-/// at ToObject(subject)). `None` when the prototype is unreachable.
-fn for_in_initial_level<'a, 's>(
-    heap: &'a Heap,
-    scope: &'s HandleScope<'_>,
-    roots: &WellKnown,
-    subject: Tagged<'a, Value>,
-) -> Option<Tagged<'a, Value>> {
-    if DenseString::from_receiver(heap, subject).is_some() {
-        return Some(subject);
-    }
-    if !subject.is_primitive(heap) {
-        return Some(subject);
-    }
-    let ctor_name = if Smi::decode(subject.raw()).is_some() {
-        "Number"
-    } else if subject.get_as::<Float>(heap).is_some() {
-        "Number"
-    } else if subject == roots.true_object.get(heap) || subject == roots.false_object.get(heap) {
-        "Boolean"
-    } else if subject.get_as::<Symbol>(heap).is_some() {
-        "Symbol"
-    } else {
-        return None;
-    };
-    let global = roots.global_object.get(heap);
-    let strings = &roots.strings;
-    let ctor_handle = match ctor_name {
-        "Number" => strings.number_ctor.get(heap),
-        "Boolean" => strings.boolean_ctor.get(heap),
-        _ => strings.symbol_ctor.get(heap),
-    };
-    let global = scope.handle(global.erase());
-    let ctor_key = scope.handle(ctor_handle.erase());
-    let ctor = Object::get_data_property(heap, scope, global, ctor_key);
-    if !ctor.is_strong_ptr() {
-        return None;
-    }
-    let ctor = scope.handle(ctor);
-    let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
-    let proto = Object::get_data_property(heap, scope, ctor, proto_key);
-    if proto.is_strong_ptr() {
-        Some(proto)
-    } else {
-        None
-    }
-}
-
-/// The own string keys of a level in [[OwnPropertyKeys]] order (ES
-/// 10.1.11: array indices ascending, then strings in insertion order;
-/// symbols excluded). Index keys are interned to their canonical string
-/// form, the value a for-in binding receives. Enumerability is NOT
-/// filtered here: EnumerateObjectProperties checks it lazily per key,
-/// and non-enumerable own keys must still register as visited.
-fn for_in_level_keys<'s>(
-    vm: &VM,
-    heap: &mut Heap,
-    scope: &'s HandleScope<'_>,
-    level: Handle<'_, Value>,
-) -> Result<Vec<Handle<'s, Value>>, VmError> {
-    // raw pass: Smi index keys (to be interned) and ready name keys
-    let (mut indices, names) = 'keys: {
-        let level = level.as_tagged(heap);
-        let mut indices: Vec<i64> = Vec::new();
-        let mut names: Vec<Handle<'s, Value>> = Vec::new();
-        // string exotic: indices first; wrappers may also carry ordinary
-        // descriptors, so this does not break out
-        if let Some(s) = DenseString::from_receiver(heap, level) {
-            indices.extend(0..s.len() as i64);
-        }
-        let Some(obj) = level.as_heap_object() else {
-            break 'keys (indices, names);
-        };
-        let obj = obj;
-        // elements ascending (dense hits in index order; dictionary
-        // entries collected and sorted) — every receiver, not just arrays
-        indices.extend(obj.element_keys(heap).iter().map(|i| *i as i64));
-
-        for d in obj.map(heap).descriptors() {
-            let name = d.name(heap);
-            // exclusive homes: descriptors never hold indices; symbols
-            // are never yielded, everything else keeps insertion order
-            if name.erase().get_as::<Symbol>(heap).is_some() {
-                continue;
-            }
-            names.push(scope.handle(name.erase()));
-        }
-        (indices, names)
-    };
-
-    indices.sort_unstable();
-    indices.dedup();
-    // root every key before the next allocates: interning index keys
-    // promotes earlier results, and raw copies would dangle
-    let mut keys: Vec<Handle<'s, Value>> = Vec::with_capacity(indices.len() + names.len());
-    for i in indices {
-        let s = vm.interner().intern_str(heap, scope, &i.to_string());
-        keys.push(s.erase());
-    }
-    keys.extend(names);
-    Ok(keys)
-}
-
-/// for-in iteration step (ES 14.7.5.9 EnumerateObjectProperties):
-/// (enumerator) -> next key string | undefined. Per candidate key, the
-/// own descriptor is checked lazily against the key's own level —
-/// deleted-since-snapshot keys are skipped unvisited; keys shadowed by
-/// an earlier level (yielded or non-enumerable) are skipped; enumerable
-/// survivors are yielded at most once. When a level's snapshot runs
-/// dry, the walk advances to the live prototype and snapshots it.
-fn for_in_next<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    let enumerator = args.get_handle(heap, 0);
-    state.handle_scope(|scope| {
-        if enumerator
-            .as_tagged(heap)
-            .ptr_eq(vm.known().undefined.get(heap))
-        {
-            // nullish subject: the head produced no enumerator
-            return vm.known().undefined.get(heap).erase();
-        }
-        loop {
-            // one candidate per turn: the cursor advances before the
-            // key is examined, so skipped keys are never revisited
-            let candidate = 'candidate: {
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                let slots = obj.slots(heap);
-                let keys = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    slots
-                        .at(heap, FOR_IN_KEYS)
-                        .get_as::<FixedArray>(heap)
-                        .ok_or(VmError::Type)
-                );
-                let index = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    Smi::decode(slots.at(heap, FOR_IN_INDEX).raw()).ok_or(VmError::Type)
-                )
-                .value() as usize;
-                let Some(key) = (index < keys.len()).then(|| keys.at(heap, index)) else {
-                    break 'candidate None;
-                };
-                slots.set(heap, FOR_IN_INDEX, Smi::new(index as i64 + 1).into_tagged());
-                Some(scope.handle(key))
-            };
-            let Some(key) = candidate else {
-                // snapshot exhausted: advance to the live prototype
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                let level = scope.handle(obj.slots(heap).at(heap, FOR_IN_LEVEL));
-                let Some(proto) = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    for_in_next_level(heap, vm.known(), &scope, level)
-                ) else {
-                    return vm.known().undefined.get(heap).erase();
-                };
-                let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, proto));
-                let staged = stage_handles(heap, &scope, &keys);
-                let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                let slots = obj.slots(heap);
-                slots.set(heap, FOR_IN_LEVEL, proto.as_tagged(heap).erase());
-                slots.set(heap, FOR_IN_KEYS, keys.as_tagged(heap).erase());
-                slots.set(heap, FOR_IN_INDEX, Smi::new(0).into_tagged());
-                continue;
-            };
-            // lazy [[GetOwnProperty]] on the key's own level: a key
-            // deleted since the snapshot is skipped without registering
-            let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            let level = obj.slots(heap).at(heap, FOR_IN_LEVEL);
-            let own = for_in_own_state(heap, level, key.as_tagged(heap));
-            let Some(enumerable) = own else {
-                continue;
-            };
-            // already registered (yielded earlier, or shadowing
-            // non-enumerable on a closer level): skip
-            let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            let visited = rt_try!(
-                vm,
-                heap,
-                state,
-                obj.slots
-                    .get(heap)
-                    .at(heap, FOR_IN_VISITED)
-                    .get_as::<FixedArray>(heap)
-                    .ok_or(VmError::Type)
-            );
-            let key_word = key.as_tagged(heap);
-            let seen = visited
-                .as_slice()
-                .iter()
-                .any(|s| s.get(heap).ptr_eq(key_word));
-            if seen {
-                continue;
-            }
-            // register the key — yielded or shadowing, both at most once
-            {
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                let visited = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    obj.slots
-                        .get(heap)
-                        .at(heap, FOR_IN_VISITED)
-                        .get_as::<FixedArray>(heap)
-                        .ok_or(VmError::Type)
-                );
-                let mut visited: Vec<Tagged<'_, Value>> =
-                    visited.as_slice().iter().map(|s| s.get(heap)).collect();
-                visited.push(key.as_tagged(heap));
-                let staged = scope.stage(&visited);
-                let visited = heap.allocate_handle::<FixedArray>(staged, &scope);
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                obj.slots(heap)
-                    .set(heap, FOR_IN_VISITED, visited.as_tagged(heap).erase());
-            }
-            if !enumerable {
-                continue;
-            }
-            return key.as_tagged(heap);
-        }
-    })
-}
-
-/// The next level of the prototype chain: an object's live [[Prototype]]
-/// (read at advance time, so mutations between iterations are visible),
-/// or `String.prototype` for a string primitive level. Multi-parent
-/// (Self-style) and null prototypes end the walk.
-fn for_in_next_level<'s>(
-    heap: &Heap,
-    roots: &WellKnown,
-    scope: &'s HandleScope<'_>,
-    level: Handle<'_, Value>,
-) -> Result<Option<Handle<'s, Value>>, VmError> {
-    let level = level.as_tagged(heap);
-    if level.get_as::<DenseString>(heap).is_some() {
-        // String.prototype via the global object (both plain data
-        // lookups; no user code can run)
-        let global = scope.handle(roots.global_object.get(heap).erase());
-        let ctor_key = scope.handle(roots.strings.string.get(heap).erase());
-        let string_ctor = Object::get_data_property(heap, scope, global, ctor_key);
-        if !string_ctor.is_strong_ptr() {
-            return Ok(None);
-        }
-        let string_ctor = scope.handle(string_ctor);
-        let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
-        let proto = Object::get_data_property(heap, scope, string_ctor, proto_key);
-        return Ok(proto
-            .is_strong_ptr()
-            .then(|| scope.handle(proto))
-            .filter(|p| p.as_tagged(heap).is_strong_ptr()));
-    }
-    let Some(obj) = level.as_heap_object() else {
-        return Ok(None);
-    };
-    let proto = obj.prototype(heap);
-    let hole = roots.the_hole.get(heap);
-    if proto.ptr_eq(hole) || proto.ptr_eq(roots.null.get(heap)) {
-        return Ok(None);
-    }
-    // a FixedArray prototype is the Self-style multi-parent form;
-    // the chain walk does not model it (ends the enumeration)
-    Ok(proto
-        .get_as::<FixedArray>(heap)
-        .map_or(Some(proto), |_| None)
-        .map(|p| scope.handle(p)))
-}
-
-/// The lazy own-property state of `key` on its own level: `None` when
-/// the property is gone (deleted since the snapshot), else its
-/// [[Enumerable]]. Own-only — the shadow check against other levels is
-/// the visited set's job.
-fn for_in_own_state(heap: &Heap, level: Tagged<'_, Value>, key: Tagged<'_, Value>) -> Option<bool> {
-    match key.classify_key(heap).ok()? {
-        Key::Element(i) => {
-            if let Some(s) = DenseString::from_receiver(heap, level) {
-                // string indices are enumerable own properties
-                return Some((i as u64) < s.len() as u64);
-            }
-            let obj = level.as_heap_object()?;
-            let obj = obj;
-            if obj.is_array(heap) {
-                return obj.element_value(heap, i).is_some().then_some(true);
-            }
-            // plain objects keep index keys as Smi-named descriptors
-            let name = Tagged::<SlotName>::from(Smi::new(i as i64));
-            obj.map(heap)
-                .descriptors()
-                .iter()
-                .find(|d| d.name(heap).ptr_eq(name))
-                .map(|d| d.flags().is_enumerable())
-        }
-        Key::Name(name) => {
-            // string exotics: indices are enumerable, "length" is not
-            if let Some(s) = DenseString::from_receiver(heap, level)
-                && let Some(own) = s.own_key(heap, name)
-            {
-                return Some(matches!(own, StringOwn::Index(_)));
-            }
-            let obj = level.as_heap_object()?;
-            let obj = obj;
-
-            // arrays hold "length" outside the descriptors (never a
-            // snapshot key) — any other name lives in them
-            obj.map(heap)
-                .descriptors()
-                .iter()
-                .find(|d| d.name(heap).ptr_eq(name))
-                .map(|d| d.flags().is_enumerable())
-        }
-    }
-}
-
-/// GetIterator (ES 8.5.4): (obj) -> iterator.
-fn get_iterator<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    state.handle_scope(|scope| {
-        let obj = scope.handle(args.get(heap, 0));
-        let symbol = scope.handle(vm.known().iterator_symbol.get(heap).erase());
-        let method = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::get_property(vm, heap, state, obj, obj, symbol, false)
-        );
-        let method = match method {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            Coercion::Value(v) => scope.handle(v),
-        };
-        let method_tagged = method.as_tagged(heap);
-        if method_tagged.ptr_eq(vm.known().undefined.get(heap))
-            || method_tagged.ptr_eq(vm.known().null.get(heap))
-            || !method_tagged.is_callable(heap)
-        {
-            return raise_runtime(vm, heap, state, VmError::Type); // "obj is not iterable"
-        }
-        let call_args = stage_handles(heap, &scope, &[obj]);
-        match HostCtx::enter(vm, heap, state, method, call_args, None).map(|v| v.raw()) {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
-    })
-}
-
-/// IteratorNext (ES 8.5.6): (iterator) -> result object.
-fn iterator_next<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    state.handle_scope(|scope| {
-        let iter = scope.handle(args.get(heap, 0));
-        let next_name = scope.handle(vm.known().strings.next.get(heap).erase());
-        let next = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::get_property(vm, heap, state, iter, iter, next_name, false)
-        );
-        let next = match next {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            Coercion::Value(v) => scope.handle(v),
-        };
-        let call_args = stage_handles(heap, &scope, &[iter]);
-        let result = scope.handle(
-            match HostCtx::enter(vm, heap, state, next, call_args, None).map(|v| v.raw()) {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            },
-        );
-        if result
-            .as_tagged(heap)
-            .ptr_eq(vm.known().exception.get(heap))
-        {
-            return result.as_tagged(heap);
-        }
-        if result.as_tagged(heap).is_primitive(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type); // IteratorNext result must be an Object
-        }
-        result.as_tagged(heap)
-    })
-}
-
-/// IteratorComplete (ES 8.5.7): (result) -> bool.
-fn iterator_done<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    state.handle_scope(|scope| {
-        let result = scope.handle(args.get(heap, 0));
-        let done_name = scope.handle(vm.known().strings.done.get(heap).erase());
-        let v = match rt_try!(
-            vm,
-            heap,
-            state,
-            Object::get_property(vm, heap, state, result, result, done_name, false)
-        ) {
-            Coercion::Threw => return vm.known().exception.get(heap).erase(),
-            Coercion::Value(v) => scope.handle(v),
-        };
-        let truthy = v.as_tagged(heap).is_truthy(heap);
-        Convert::boolean(heap, truthy)
-    })
-}
-
-/// IteratorValue (ES 8.5.8): (result) -> value.
-fn iterator_value<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    state.handle_scope(|scope| {
-        let result = scope.handle(args.get(heap, 0));
-        let value_name = scope.handle(vm.known().strings.value.get(heap).erase());
-        let v = match rt_try!(
-            vm,
-            heap,
-            state,
-            Object::get_property(vm, heap, state, result, result, value_name, false)
-        ) {
-            Coercion::Threw => return vm.known().exception.get(heap).erase(),
-            Coercion::Value(v) => scope.handle(v),
-        };
-        v.as_tagged(heap)
-    })
-}
-
-/// The `in` operator (ES 14.11.2): (key, obj) -> bool. Proxy receivers
-/// run their `has` trap (ES 20.2.5.9).
+/// `in` operator
+/// [ES 13.10.1](https://tc39.es/ecma262/#sec-relational-operators-runtime-semantics-evaluation)
+/// (key, obj) -> bool; proxies run their `has` trap.
 fn has_property<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
-    // `in` requires an Object right operand (ES 14.11.2).
+    // a non-Object right operand is a TypeError, thrown before the key is
+    // coerced
     if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
-    // the key coercion allocates (wrapper keys run toString/valueOf):
-    // the receiver stays rooted in its argument handle across it
     state.handle_scope(|scope| {
         let Some(key) = rt_try!(
             vm,
@@ -823,165 +289,143 @@ fn has_property<'a>(
         ) else {
             return vm.known().exception.get(heap).erase();
         };
-        // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        let key_value = scope.handle(key.as_tagged(heap).erase());
         let has = match rt_try!(
             vm,
             heap,
             state,
-            Object::has_property(vm, heap, state, obj, key_value)
+            Object::has_property(vm, heap, state, obj, key.erase())
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
         };
-        has.as_tagged(heap).erase()
+        has.as_tagged(heap)
     })
 }
 
-/// CopyDataProperties (ES 8.5.1) with an exclusion list (object rest):
-/// (excluded..., target, source); `excluded` has count−2 entries.
+/// Own property keys of an ordinary object or string exotic in
+/// specification order: ascending indices, strings, then symbols.
+/// TODO: a proxy source needs its `ownKeys` trap.
+fn own_property_keys<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    receiver: Tagged<'_, Value>,
+) -> Vec<Handle<'s, Value>> {
+    let mut keys: Vec<Handle<'s, Value>> = Vec::new();
+    // string exotics expose their code units as own index properties
+    if let Some(s) = DenseString::from_receiver(heap, receiver) {
+        keys.extend((0..s.len()).map(|i| scope.handle(Smi::new(i as i64))));
+    }
+    let Some(object) = receiver.as_heap_object() else {
+        return keys;
+    };
+    keys.extend(
+        object
+            .element_keys(heap)
+            .into_iter()
+            .map(|i| scope.handle(Smi::new(i as i64))),
+    );
+    let map = object.map(heap);
+    let descriptors = map.descriptors();
+    for symbols in [false, true] {
+        keys.extend(
+            descriptors
+                .iter()
+                .filter(|d| d.name(heap).erase().get_as::<Symbol>(heap).is_some() == symbols)
+                .map(|d| scope.handle(d.name(heap).erase())),
+        );
+    }
+    keys
+}
+
+/// CopyDataProperties ( target, source, excludedItems )
+/// [ES 7.3.25](https://tc39.es/ecma262/#sec-copydataproperties)
+/// Object rest/spread: (excluded..., target, source) -> target.
 fn copy_data_properties<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let n = args.len();
     if n < 2 {
         return raise_runtime(vm, heap, state, VmError::Arity);
     }
+    // the register window roots the target, the source and the exclusions
+    // across the copy (getters run user code)
     let target = args.get_handle(heap, n - 2);
     let source = args.get_handle(heap, n - 1);
-    // the window's own slots root the list across CopyDataProperties'
-    // allocations (getters)
-    let excluded: Vec<Handle<'_, Value>> = (0..n - 2).map(|i| args.get_handle(heap, i)).collect();
-    {
-        let source_tagged = source.as_tagged(heap);
-        // null/undefined contribute nothing; so do the primitives whose
-        // ToObject wrapper has no own enumerable properties. Strings are
-        // the exception: their indices are own enumerable properties, so
-        // they fall through to the string branch below.
-        if source_tagged.ptr_eq(vm.known().null.get(heap))
-            || source_tagged.ptr_eq(vm.known().undefined.get(heap))
-            || (source_tagged.is_primitive(heap)
-                && DenseString::from_receiver(heap, source_tagged).is_none())
-        {
-            return target.as_tagged(heap);
-        }
+    if source.as_tagged(heap).is_nullish(heap) {
+        return target.as_tagged(heap);
     }
-    state.handle_scope(|scope| -> Tagged<'a, Value> {
-        // canonicalize the excluded keys (interning strings) so a plain
-        // bits comparison suffices against the source's descriptor names
-        let excluded: Vec<Handle<'_, SlotName>> = {
-            let mut out = Vec::with_capacity(excluded.len());
-            for k in excluded {
-                match rt_try!(vm, heap, state, Object::to_property_key(vm, heap, state, k)) {
-                    Some(k) => out.push(scope.handle(k)),
-                    None => return vm.known().exception.get(heap).erase(),
-                }
-            }
-            out
-        };
-        // enumerate own enumerable keys: element indices ascending, then
-        // named descriptors in insertion order; collected AFTER the
-        // exclusion canonicalization so no allocation can stale them
-        let keys: Vec<Handle<'_, Value>> = {
-            let mut keys = Vec::new();
-            // String primitive or wrapper: ToObject exposes the code units
-            // as own enumerable index properties (ES 10.4.3.4); `length` is
-            // non-enumerable, so it is not copied.
-            if let Some(s) = DenseString::from_receiver(heap, source.as_tagged(heap)) {
-                keys.reserve(s.len());
-                for i in 0..s.len() {
-                    keys.push(scope.handle(Smi::new(i as i64)));
-                }
-            }
-            let Some(obj) = source.as_tagged(heap).as_heap_object() else {
-                return target.as_tagged(heap);
-            };
-            for i in obj.element_keys(heap) {
-                keys.push(scope.handle(Smi::new(i as i64)));
-            }
-            for d in obj.map(heap).descriptors() {
-                if d.flags().is_enumerable() {
-                    keys.push(scope.handle(d.name(heap).erase()));
-                }
-            }
-            keys
-        };
-        for key in keys {
-            let key_name = key.as_tagged(heap).as_name();
-            if excluded.iter().any(|e| e.as_tagged(heap).ptr_eq(key_name)) {
-                continue;
-            }
-            // the one code unit at a string index (fresh string, as required)
-            let string_char = match (
-                DenseString::from_receiver(heap, source.as_tagged(heap)),
-                key.as_tagged(heap).raw().to_i64(),
-            ) {
-                (Some(s), Some(i)) if (i as usize) < s.len() => Some(s.code_unit(heap, i as usize)),
-                _ => None,
-            };
-            let value = if let Some(unit) = string_char {
-                DenseString::from_units(heap, &scope, &[unit]).erase()
-            } else {
-                // full [[Get]] (getters may run)
-                match rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    Object::get_property(vm, heap, state, source, source, key, false)
-                ) {
-                    Coercion::Threw => return vm.known().exception.get(heap).erase(),
-                    Coercion::Value(v) => scope.handle(v),
-                }
-            };
-            // CreateDataProperty: skipped when already present
-            let exists = Object::ordinary_own_descriptor(
-                heap,
-                &scope,
-                target.as_tagged(heap),
-                key.as_tagged(heap),
-            )
-            .is_some();
-            if exists {
-                continue;
-            }
-            let target_obj = scope
-                .cast::<Object>(heap, target.as_tagged(heap))
-                .expect("copy target is an object");
-            let key_name = scope.handle(key.as_tagged(heap).as_name());
-            rt_try!(
+    state.handle_scope(|scope| {
+        // the compiler passes property keys; the ABI hands them over raw
+        let mut excluded: Vec<Handle<'_, SlotName>> = Vec::with_capacity(n - 2);
+        for i in 0..n - 2 {
+            match rt_try!(
                 vm,
                 heap,
                 state,
-                Object::add_own_property(
+                Object::to_property_key(vm, heap, state, args.get_handle(heap, i))
+            ) {
+                Some(key) => excluded.push(scope.handle(key)),
+                None => return vm.known().exception.get(heap).erase(),
+            }
+        }
+        let target = scope
+            .cast::<Object>(heap, target.as_tagged(heap))
+            .expect("copy target is an object");
+        for key in own_property_keys(heap, &scope, source.as_tagged(heap)) {
+            let name = scope.handle(key.as_tagged(heap).as_name());
+            if excluded
+                .iter()
+                .any(|e| e.as_tagged(heap).ptr_eq(name.as_tagged(heap)))
+            {
+                continue;
+            }
+            // [[GetOwnProperty]] is re-read per key: an earlier getter may
+            // have deleted or hidden a later key
+            if own_property_enumerable(heap, source.as_tagged(heap), key.as_tagged(heap))
+                != Some(true)
+            {
+                continue;
+            }
+            let value = match rt_try!(
+                vm,
+                heap,
+                state,
+                Object::get_property(vm, heap, state, source, source, key, false)
+            ) {
+                Coercion::Threw => return vm.known().exception.get(heap).erase(),
+                Coercion::Value(v) => scope.handle(v),
+            };
+            // CreateDataPropertyOrThrow
+            if !rt_try!(
+                vm,
+                heap,
+                state,
+                Object::define_own_property(
                     heap,
                     &scope,
-                    target_obj,
-                    key_name,
-                    PropertyDescriptor::data(value),
+                    target,
+                    name,
+                    PropertyDescriptor::data(value)
                 )
-            );
+            ) {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
         }
-        // re-read through the handle: the copy loop allocated (getters,
-        // property adds) and may have moved the target
-        target.as_tagged(heap)
+        target.as_tagged(heap).erase()
     })
 }
 
 /// A fresh private name: (description) -> Symbol.
 fn create_private_name<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm: _, heap, state, ..
-    } = nctx;
+    let HostCtx { vm: _, heap, state } = ctx;
     state.handle_scope(|scope| {
         let description = args.get(heap, 1);
         let description = scope.cast::<DenseString>(heap, description);
@@ -993,13 +437,11 @@ fn create_private_name<'a>(
 
 /// PrivateGet (ES 7.3.30): (obj, key) -> value, TypeError when absent.
 fn private_get<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let obj = args.get(heap, 0);
     let key = args.get(heap, 1);
     match obj.private_find(heap, key) {
@@ -1010,13 +452,11 @@ fn private_get<'a>(
 
 /// PrivateSet (ES 7.3.31): (obj, key, value), TypeError when absent.
 fn private_set<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let obj = args.get(heap, 0);
     let key = args.get(heap, 1);
     let value = args.get(heap, 2);
@@ -1039,16 +479,11 @@ fn private_set<'a>(
 
 /// `#x in obj`: (key, obj) -> bool (own private presence only).
 fn private_in<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm: _,
-        heap,
-        state: _,
-        ..
-    } = nctx;
+    let HostCtx { heap, .. } = ctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
     let has = obj
@@ -1061,13 +496,11 @@ fn private_in<'a>(
 /// Attach the instance-field array to the class constructor:
 /// (ctor, fields).
 fn set_class_fields<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let ctor = args.get_handle(heap, 0);
     let fields = args.get_handle(heap, 1);
     let mut ok = false;
@@ -1090,13 +523,11 @@ fn set_class_fields<'a>(
 /// Runs each field initializer with the instance as receiver and defines
 /// the result onto it ({w+, e+, c+}).
 fn init_instance_fields<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let ctor = args.get_handle(heap, 0);
     let instance = args.get_handle(heap, 1);
     state.handle_scope(|scope| -> Tagged<'a, Value> {
@@ -1195,16 +626,27 @@ fn frame_context_value<'a>(
     Ok(state.stack.context(heap, state.frame_base()))
 }
 
-/// Walk the current frame's context chain looking for a slot named
-/// `name` (direct eval): Some(slot value) found (possibly the hole),
-/// None when the whole chain lacks the name. The result is rooted in
-/// `scope` so callers may allocate before inspecting it.
+/// Where a dynamically resolved (direct eval) name lives.
+enum DynamicBinding<'s> {
+    /// An environment-record slot (possibly the hole): not deletable.
+    Slot(Handle<'s, Value>),
+    /// A property of a context extension object, created by a sloppy eval
+    /// declaration: deletable (ES 19.2.1.3 CreateMutableBinding(..., true)).
+    Extension {
+        holder: Handle<'s, Value>,
+        value: Handle<'s, Value>,
+    },
+}
+
+/// Walk the current frame's context chain looking for a binding named
+/// `name` (direct eval). The result is rooted in `scope` so callers may
+/// allocate before inspecting it.
 fn dynamic_lookup_frame<'s>(
     heap: &Heap,
     state: &ThreadState,
     scope: &'s HandleScope<'_>,
     name: Handle<'_, Value>,
-) -> Result<Option<Handle<'s, Value>>, VmError> {
+) -> Result<Option<DynamicBinding<'s>>, VmError> {
     let context = frame_context_value(state, heap)?;
     let mut context = context.get_as::<ContextObject>(heap).ok_or(VmError::Type)?;
     loop {
@@ -1215,14 +657,17 @@ fn dynamic_lookup_frame<'s>(
                 .get(heap)
                 .context_slot_index(heap, name.as_tagged(heap))
         {
-            return Ok(Some(
+            return Ok(Some(DynamicBinding::Slot(
                 scope.handle(ctx.slots.get(heap).as_ref().element_slot(i).get(heap)),
-            ));
+            )));
         }
         if let Some(extension) = ctx.extension.get(heap)
             && let Some(value) = extension_property(heap, scope, extension, name)
         {
-            return Ok(Some(value));
+            return Ok(Some(DynamicBinding::Extension {
+                holder: scope.handle(extension.erase()),
+                value,
+            }));
         }
         match ctx.outer.get(heap) {
             Some(outer) => context = outer,
@@ -1232,7 +677,7 @@ fn dynamic_lookup_frame<'s>(
                     return Ok(None);
                 };
                 let context = table.context(heap, found.context_index);
-                return Ok(Some(
+                return Ok(Some(DynamicBinding::Slot(
                     scope.handle(
                         context
                             .slots
@@ -1241,7 +686,7 @@ fn dynamic_lookup_frame<'s>(
                             .element_slot(found.slot_index)
                             .get(heap),
                     ),
-                ));
+                )));
             }
         }
     }
@@ -1291,13 +736,11 @@ fn frame_super_parts<'a>(
 /// A full [[Get]] that treats non-callable getters (an absent half of an
 /// accessor pair) as undefined instead of throwing.
 fn get_property_lenient<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     receiver: Handle<'_, Value>,
     name: Handle<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let result = match Object::get_property(vm, heap, state, receiver, receiver, name, false) {
             Ok(result) => result,
@@ -1322,13 +765,11 @@ fn get_property_lenient<'a>(
 /// explicitly defined `name` wins (ES 15.7.14: SetFunctionName happens
 /// before element installation).
 fn set_function_name<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let fn_value = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let prefix = args.get(heap, 2).to_i64().unwrap_or(0);
@@ -1345,8 +786,8 @@ fn set_function_name<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key).erase();
-        // ES 10.2.9 steps 1-6: a Symbol key contributes "[description]",
-        // any other key is ToString'd, and a prefix prepends "prefix ".
+        // a Symbol key contributes "[description]", any other key is
+        // ToString'd, and a prefix prepends "prefix ".
         let mut units: Vec<u16> = match prefix {
             1 => b"get ".iter().map(|&b| b as u16).collect(),
             2 => b"set ".iter().map(|&b| b as u16).collect(),
@@ -1425,13 +866,11 @@ fn set_function_name<'a>(
 /// the same key; flags bit 0 marks the getter half, PropertyFlags bits
 /// carry enumerability.
 fn install_accessor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let target = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let closure = args.get_handle(heap, 2);
@@ -1484,13 +923,11 @@ fn install_accessor<'a>(
 /// strict-mode code: a rejected define throws a TypeError. flags are
 /// PropertyFlags bits (the Accessor bit: the value is an AccessorPair).
 fn define_own_property<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let receiver = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let value = args.get_handle(heap, 2);
@@ -1612,13 +1049,11 @@ fn define_own_property<'a>(
 
 /// [[SetPrototypeOf]] (class prototype wiring): (obj, proto) -> obj.
 fn set_prototype<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let obj = args.get_handle(heap, 0);
         let proto = args.get_handle(heap, 1);
@@ -1638,13 +1073,11 @@ fn set_prototype<'a>(
 /// Class extends validation (ES 15.7.14 step 15.e): (value) -> value,
 /// TypeError unless the superclass is null or a constructor.
 fn throw_if_not_constructor_or_null<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let v = args.get(heap, 0);
     let v_raw = v.raw();
     let null = vm.known().null.get(heap).raw();
@@ -1663,13 +1096,11 @@ fn throw_if_not_constructor_or_null<'a>(
 /// superCtor.prototype validation: (value) -> value, TypeError unless the
 /// value is an Object or null.
 fn throw_if_not_object_or_null<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     let null = vm.known().null.get(heap).raw();
@@ -1685,13 +1116,11 @@ fn throw_if_not_object_or_null<'a>(
 /// [[ThisBindingStatus]] guard of derived constructors (ES 10.2.2):
 /// (value) -> value, ReferenceError when `this` is still the hole.
 fn throw_super_not_called_if_hole<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     if raw == vm.known().the_hole.get(heap).raw() {
@@ -1705,13 +1134,11 @@ fn throw_super_not_called_if_hole<'a>(
 /// InitializeThisBinding guard (ES 10.2.2): (value) -> value,
 /// ReferenceError unless `this` is still the hole (super() runs once).
 fn throw_super_already_called_if_not_hole<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     if raw != vm.known().the_hole.get(heap).raw() {
@@ -1728,14 +1155,12 @@ fn throw_super_already_called_if_not_hole<'a>(
 /// giving derived parents the hole receiver. The instance lands in the
 /// return value; the exception sentinel escapes when user code threw.
 fn construct_super_construct<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     callee: Handle<'_, Value>,
     new_target: Handle<'_, Value>,
     args: &[Handle<'_, Value>],
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let new_target_tagged = new_target.as_tagged(heap);
         if new_target_tagged.ptr_eq(vm.known().undefined.get(heap))
@@ -1775,7 +1200,7 @@ fn construct_super_construct<'a>(
         let mut args_v = Vec::with_capacity(args.len() + 1);
         args_v.push(receiver);
         args_v.extend_from_slice(args);
-        let call_args = stage_handles(heap, &scope, &args_v);
+        let call_args = scope.stage_handles(&args_v);
         let result = scope.handle(rt_try!(
             vm,
             heap,
@@ -1812,13 +1237,11 @@ fn construct_super_construct<'a>(
 /// super(...): (args...) -> instance. Resolves the super constructor and
 /// new.target from the executing frame.
 fn construct_super<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let (callee, new_target) = rt_try!(vm, heap, state, frame_super_parts(heap, state));
         // keep the resolved parts rooted across the construct below
@@ -1837,13 +1260,11 @@ fn construct_super<'a>(
 /// super() forwarding the frame's full argument list (synthesized default
 /// derived constructors, ES 15.7.13): () -> instance.
 fn construct_super_all_args<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let (callee, new_target) = rt_try!(vm, heap, state, frame_super_parts(heap, state));
         let callee = scope.handle(callee);
@@ -1871,13 +1292,11 @@ fn construct_super_all_args<'a>(
 /// The constructor closure and its new.target ride the tail of the
 /// argument window (threaded through .this_function).
 fn construct_super_via<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let n = args.len();
     if n < 2 {
         return raise_runtime(vm, heap, state, VmError::Arity);
@@ -1913,13 +1332,11 @@ fn construct_super_via<'a>(
 /// by name (slots, then extension objects); unresolved names fall back to
 /// the global object.
 fn load_dynamic_name<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let name = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let found = rt_try!(
@@ -1929,10 +1346,13 @@ fn load_dynamic_name<'a>(
             dynamic_lookup_frame(heap, state, &scope, name)
         );
         match found {
-            Some(v) if !v.as_tagged(heap).ptr_eq(vm.known().the_hole.get(heap)) => {
-                v.as_tagged(heap)
+            Some(DynamicBinding::Slot(slot))
+                if !slot.as_tagged(heap).ptr_eq(vm.known().the_hole.get(heap)) =>
+            {
+                slot.as_tagged(heap)
             }
-            Some(_) => raise_runtime(vm, heap, state, VmError::Reference),
+            Some(DynamicBinding::Slot(_)) => raise_runtime(vm, heap, state, VmError::Reference),
+            Some(DynamicBinding::Extension { value, .. }) => value.as_tagged(heap),
             None => {
                 // unresolved: fall back to a global object property
                 let global = scope.handle(vm.known().global_object.get(heap).erase());
@@ -1946,13 +1366,11 @@ fn load_dynamic_name<'a>(
 /// context chain in order (slots then extension object per context);
 /// unresolved names store on the global object.
 fn store_dynamic_name<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
@@ -2056,13 +1474,11 @@ fn store_dynamic_name<'a>(
 }
 
 fn store_repl_global_init<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
     state.handle_scope(|_scope| {
@@ -2084,13 +1500,11 @@ fn store_repl_global_init<'a>(
 /// Sloppy direct-eval declaration. `value == None` is a var; otherwise a
 /// function declaration is installed with that value.
 fn resolve_direct_eval<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let callee = args.get_handle(heap, 0);
     if callee.as_tagged(heap) != vm.known().eval_function.get(heap).erase() {
         return callee.as_tagged(heap).erase();
@@ -2196,13 +1610,11 @@ fn validate_eval_binding<'s>(
 }
 
 fn declare_eval_binding<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     name: Handle<'_, Value>,
     value: Option<Handle<'_, Value>>,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let context = rt_try!(
             vm,
@@ -2352,13 +1764,11 @@ fn read_global_declarations<'s>(
 }
 
 fn validate_eval_declarations<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let declarations = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
@@ -2391,22 +1801,22 @@ fn validate_eval_declarations<'a>(
 }
 
 fn declare_eval_var<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let name = args.get_handle(nctx.heap, 0);
-    declare_eval_binding(nctx, name, None)
+    let name = args.get_handle(ctx.heap, 0);
+    declare_eval_binding(ctx, name, None)
 }
 
 fn declare_eval_function<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let name = args.get_handle(nctx.heap, 0);
-    let value = args.get_handle(nctx.heap, 1);
-    declare_eval_binding(nctx, name, Some(value))
+    let name = args.get_handle(ctx.heap, 0);
+    let value = args.get_handle(ctx.heap, 1);
+    declare_eval_binding(ctx, name, Some(value))
 }
 
 fn global_property_flags(
@@ -2521,13 +1931,11 @@ fn create_global_function_binding(
 }
 
 fn declare_globals<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let declarations = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
@@ -2653,13 +2061,11 @@ fn declare_globals<'a>(
 }
 
 fn throw_const_assign_error<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     raise_runtime(
         vm,
         heap,
@@ -2673,13 +2079,11 @@ fn throw_const_assign_error<'a>(
 /// A fresh array of the frame's arguments from formal index `first`:
 /// (first) -> array.
 fn create_rest_parameter<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let first = args.get(heap, 0).to_i64().map(|v| v as usize).unwrap_or(0);
     state.handle_scope(|scope| {
         if !state.is_frame_active() {
@@ -2691,8 +2095,7 @@ fn create_rest_parameter<'a>(
         let values: Vec<Handle<'_, Value>> = (0..count)
             .map(|i| scope.handle(state.stack.reg(heap, base, (first + i + 1) as i32)))
             .collect();
-        let elements =
-            heap.allocate_handle::<FixedArray>(stage_handles(heap, &scope, &values), &scope);
+        let elements = heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), &scope);
         let map = scope.handle(vm.known().js_array_map.get(heap));
         heap.allocate_object(
             &scope,
@@ -2714,13 +2117,11 @@ fn create_rest_parameter<'a>(
 /// after the parent link is resolved (user toString must not change the
 /// chain searched).
 fn super_get_property<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let home = args.get_handle(heap, 0);
     let recv = args.get_handle(heap, 1);
     let raw_key = args.get_handle(heap, 2);
@@ -2781,13 +2182,11 @@ fn super_get_property<'a>(
 /// semantics flag is set; the parent link is resolved before any user key
 /// coercion runs.
 fn super_set_property<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let home = args.get_handle(heap, 0);
     let recv = args.get_handle(heap, 1);
     let raw_key = args.get_handle(heap, 2);

@@ -30,7 +30,7 @@ pub mod value;
 
 pub use objects::object::SetApplied;
 pub use objects::proxy;
-pub use objects::script_context::{global_lexical_get, global_lexical_has, global_lexical_set};
+pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
 
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime};

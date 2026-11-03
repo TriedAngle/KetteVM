@@ -352,14 +352,6 @@ impl EdgeVisitable for ScriptContextTable {
     }
 }
 
-pub fn global_lexical_has(heap: &Heap, name: Tagged<'_, Value>) -> bool {
-    heap.known()
-        .script_context_table
-        .get(heap)
-        .lookup(heap, name)
-        .is_some()
-}
-
 pub fn global_lexical_get<'a>(
     heap: &'a Heap,
     name: Tagged<'_, Value>,

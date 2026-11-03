@@ -11,7 +11,7 @@
 use crate::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FixedArray, FunctionKind,
     Handle, HandleScope, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap,
-    Object, ScopeInfo, ScopeInfoInit, Tagged, Value, VmError, decode_wtf8, mode_from_strict,
+    Object, ScopeInfo, ScopeInfoInit, Value, VmError, decode_wtf8, mode_from_strict,
     new_feedback_vector,
 };
 
@@ -116,8 +116,7 @@ fn materialize_function<'s>(
                     .iter()
                     .map(|local| intern(heap, state, scope, vm, &local.name).erase())
                     .collect();
-                let names: HandleSlice<'s> =
-                    scope.stage(&names.iter().map(|h| h.as_tagged(heap)).collect::<Vec<_>>());
+                let names: HandleSlice<'s> = scope.stage_handles(&names);
                 let infos: Vec<i64> = layout.locals.iter().map(|l| l.info as i64).collect();
                 heap.allocate_handle::<ScopeInfo>(
                     ScopeInfoInit {
@@ -151,9 +150,7 @@ fn materialize_function<'s>(
                     )?;
                     values.push(info.erase());
                 }
-                let words: Vec<Tagged<'_, Value>> =
-                    values.iter().map(|h| h.as_tagged(heap)).collect();
-                heap.allocate_handle::<FixedArray>(scope.stage(&words), scope)
+                heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), scope)
                     .erase()
             }
             Constant::ObjectPrototype => {
@@ -173,8 +170,7 @@ fn materialize_function<'s>(
         },
         scope,
     );
-    let words: Vec<Tagged<'_, Value>> = materialized.iter().map(|h| h.as_tagged(heap)).collect();
-    let constants = heap.allocate_handle::<FixedArray>(scope.stage(&words), scope);
+    let constants = heap.allocate_handle::<FixedArray>(scope.stage_handles(&materialized), scope);
     let handlers = if program.handlers(function).is_empty() {
         None
     } else {

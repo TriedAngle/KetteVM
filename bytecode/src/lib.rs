@@ -85,7 +85,7 @@ pub enum BuiltinFn {
     /// (ctor, instance) -> instance — run each field initializer with the
     /// instance as receiver, [[DefineOwnProperty]] the results (ES 7.3.33)
     InitInstanceFields,
-    /// (value) -> value — RequireObjectCoercible (ES 7.2.2): TypeError on
+    /// (value) -> value — RequireObjectCoercible (ES 7.2.1): TypeError on
     /// null/undefined (object destructuring sources)
     RequireObjectCoercible,
     /// (name) -> bool — sloppy `delete x` on an unresolved (global-object)
@@ -189,9 +189,10 @@ pub enum BuiltinFn {
     /// world-stopped point), cancel their executions, and terminate the
     /// calling thread's execution through the uncatchable channel
     ShutdownVm,
-    /// (holder) -> Smi — array `length` accessor getter
+    /// (holder) -> Smi — `length` getter of Array exotic objects (ES 10.4.2)
     ArrayLengthGet,
-    /// (holder, value) -> undefined — array `length` accessor setter
+    /// (holder, value) -> bool — ArraySetLength (ES 10.4.2.4); false
+    /// rejects the store (a strict store then throws)
     ArrayLengthSet,
 }
 

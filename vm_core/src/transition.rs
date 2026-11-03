@@ -503,9 +503,7 @@ impl Transition {
                 .map(|m| m.as_handle(scope));
             if let Some(existing) = existing {
                 // only this receiver's slots need compacting
-                let anchored: Vec<Tagged<'_, Value>> =
-                    values.iter().map(|h| h.as_tagged(heap)).collect();
-                let values = scope.stage(&anchored);
+                let values = scope.stage_handles(&values);
                 heap.allocate_token_enter_heap(
                     FixedArray::<Value>::layout_for(values.len()),
                     |token, heap| {
@@ -531,9 +529,7 @@ impl Transition {
             let pairs_layout = WeakFixedArray::<Value>::layout_for(pairs_len + 2);
             let slots_layout = FixedArray::<Value>::layout_for(values.len());
             let total = AllocToken::total_for(&[map_layout, pairs_layout, slots_layout]);
-            let anchored: Vec<Tagged<'_, Value>> =
-                values.iter().map(|h| h.as_tagged(heap)).collect();
-            let values = scope.stage(&anchored);
+            let values = scope.stage_handles(&values);
             let published = heap.allocate_token_enter_heap(total, |token, heap| {
                 let obj = receiver.as_tagged(heap);
                 let parent = obj.map(heap);
@@ -856,8 +852,7 @@ impl Object {
         }
         pairs.push(name.erase());
         pairs.push(value);
-        let anchored: Vec<Tagged<'_, Value>> = pairs.iter().map(|h| h.as_tagged(heap)).collect();
-        let pairs = heap.allocate_handle::<FixedArray>(scope.stage(&anchored), scope);
+        let pairs = heap.allocate_handle::<FixedArray>(scope.stage_handles(&pairs), scope);
         Self::set_prototype(heap, scope, receiver, pairs.erase())
     }
 

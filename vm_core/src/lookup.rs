@@ -828,6 +828,11 @@ fn native_accessor_set<'h>(
     let result = scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Flow::Threw)
+    } else if result.as_tagged(heap) == heap.known().false_object.get(heap).erase() {
+        // a native setter rejects the store by returning false (ArraySetLength
+        // when a remaining element cannot be deleted); strict code turns this
+        // into a TypeError, sloppy code ignores it
+        Ok(Flow::Value(SetApplied::Rejected))
     } else {
         Ok(Flow::Value(SetApplied::CallSetter))
     }
@@ -860,5 +865,46 @@ fn define_on_receiver(
         Flow::Threw => Ok(Flow::Threw),
         Flow::Value(true) => Ok(Flow::Value(SetApplied::Transition)),
         Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
+    }
+}
+
+/// `[[GetOwnProperty]]`'s [[Enumerable]] for an own key of an ordinary
+/// object or string exotic: `None` when the property is absent. Proxy traps
+/// are the caller's business.
+pub fn own_property_enumerable(
+    heap: &Heap,
+    receiver: Tagged<'_, Value>,
+    key: Tagged<'_, Value>,
+) -> Option<bool> {
+    let key = key.classify_key(heap).ok()?;
+    // string exotic: indices are enumerable own properties, "length" is not
+    if let Some(s) = DenseString::from_receiver(heap, receiver) {
+        return match key {
+            Key::Element(i) => Some((i as u64) < s.len() as u64),
+            Key::Name(name) => s
+                .own_key(heap, name)
+                .map(|own| matches!(own, StringOwn::Index(_))),
+        };
+    }
+    let object = receiver.as_heap_object()?;
+    match key {
+        Key::Element(i) => {
+            if i >= object.max_element_index(heap) {
+                return None;
+            }
+            // dense entries are created writable, enumerable, configurable
+            if object.element_value_dense(heap, i).is_some() {
+                return Some(true);
+            }
+            let entry = object.element_dictionary(heap)?.find(heap, i)?;
+            let details = object.element_dictionary(heap)?.details_at(heap, entry);
+            Some(details & DETAILS_ENUMERABLE != 0)
+        }
+        Key::Name(name) => object
+            .map(heap)
+            .descriptors()
+            .iter()
+            .find(|d| d.name(heap).ptr_eq(name))
+            .map(|d| d.flags().is_enumerable()),
     }
 }

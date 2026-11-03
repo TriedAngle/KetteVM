@@ -236,13 +236,29 @@ impl<'d> HandleScope<'d> {
     /// Root a copy of `values` in contiguous scope slots. The values may be
     /// anchored anywhere: rooting only writes words.
     pub fn stage<'x, T>(&self, values: &[Tagged<'x, T>]) -> HandleSlice<'_> {
+        // SAFETY: a `Tagged` word is a strong, GC-valid reference.
+        unsafe { self.stage_words(values.len(), |i| values[i].raw()) }
+    }
+
+    /// Root copies of `handles` in contiguous scope slots: their own slots
+    /// may be scattered or belong to an enclosing scope.
+    pub fn stage_handles<T>(&self, handles: &[Handle<'_, T>]) -> HandleSlice<'_> {
+        // SAFETY: handle slots only ever hold strong values.
+        unsafe { self.stage_words(handles.len(), |i| handles[i].raw()) }
+    }
+
+    /// # Safety
+    /// Every word `word` yields must be strong (non-weak) and GC-valid: the
+    /// slots become roots the collector traces.
+    unsafe fn stage_words(&self, len: usize, word: impl Fn(usize) -> Value) -> HandleSlice<'_> {
         let inner = unsafe { &*self.data.as_ptr() }.inner();
-        let start = inner.allocate_block(values.len());
-        for (i, v) in values.iter().enumerate() {
-            debug_assert!(!v.is_weak_ptr(), "weak value staged for a call");
-            unsafe { *start.add(i) = v.raw() };
+        let start = inner.allocate_block(len);
+        for i in 0..len {
+            let word = word(i);
+            debug_assert!(!word.is_weak_ptr(), "weak value staged for a call");
+            unsafe { *start.add(i) = word };
         }
-        unsafe { HandleSlice::from_slice(core::slice::from_raw_parts(start, values.len())) }
+        unsafe { HandleSlice::from_slice(core::slice::from_raw_parts(start, len)) }
     }
 
     pub fn cast<T: HeapObject>(
