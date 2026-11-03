@@ -278,7 +278,7 @@ fn install_error_class<'s>(
         scope,
         prototype,
         name_key,
-        PropertyDescriptor::data(name.erase()),
+        PropertyDescriptor::method(name.erase()),
     )?;
     let message_key = scope.handle(thread.heap().known().strings.message.get(thread.heap()));
     let empty = scope.handle(
@@ -295,7 +295,7 @@ fn install_error_class<'s>(
         scope,
         prototype,
         message_key,
-        PropertyDescriptor::data(empty),
+        PropertyDescriptor::method(empty),
     )?;
     let map = thread.heap().allocate_handle::<Map>(
         MapInit {
@@ -380,7 +380,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
                 &scope,
                 number_fn,
                 n,
-                PropertyDescriptor::data(value.erase()),
+                PropertyDescriptor::Data {
+                    value: value.erase(),
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
             )?;
         }
         {
@@ -510,6 +515,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let function_prototype = scope.handle(known.function_prototype.get(thread.heap()));
         let function_fn =
             Object::native_constructor(thread.heap(), &scope, idx.function_constructor)?;
+        Object::set_builtin_name(thread, &scope, function_fn, "Function")?;
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -522,7 +528,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             function_fn,
             wks_prototype,
-            PropertyDescriptor::data(function_prototype.erase()),
+            PropertyDescriptor::Data {
+                value: function_prototype.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         let function_name = thread.intern(&scope, "Function");
         // Safety: fresh interned word, rooted below before the define.
@@ -533,7 +544,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global_object,
             function_name,
-            PropertyDescriptor::data(function_fn.erase()),
+            PropertyDescriptor::method(function_fn.erase()),
         )?;
 
         // ---- Function.prototype toString/call/apply/bind ------------------------
@@ -586,6 +597,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- eval -------------------------------------------------------------
         let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
+        Object::set_builtin_name(thread, &scope, eval_fn, "eval")?;
         known.eval_function.init(eval_fn.as_tagged(thread.heap()));
         let global = scope.handle(known.global_object.get(thread.heap()));
         let eval_name = thread.intern(&scope, "eval");
@@ -596,7 +608,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             eval_name,
-            PropertyDescriptor::data(eval_fn.erase()),
+            PropertyDescriptor::method(eval_fn.erase()),
         )?;
 
         // ---- globalThis -------------------------------------------------------
@@ -671,6 +683,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // constructor to it (like Array below)
         let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
         let object_fn = Object::native_constructor(thread.heap(), &scope, idx.object)?;
+        Object::set_builtin_name(thread, &scope, object_fn, "Object")?;
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -683,7 +696,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             object_fn,
             wks_prototype,
-            PropertyDescriptor::method(object_prototype.erase()),
+            PropertyDescriptor::Data {
+                value: object_prototype.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         let object_name = thread.intern(&scope, "Object");
         // Safety: fresh interned word, rooted below before the define.
@@ -693,7 +711,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             object_name,
-            PropertyDescriptor::data(object_fn.erase()),
+            PropertyDescriptor::method(object_fn.erase()),
         )?;
         Object::install_method(thread, &scope, object_fn, "create", idx.object_create)?;
         Object::install_method(
@@ -736,6 +754,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // %Array.prototype% already exists from bootstrap (an array object
         // whose prototype is %Object.prototype%); just link the constructor
         let array_fn = Object::native_constructor(thread.heap(), &scope, idx.array)?;
+        Object::set_builtin_name(thread, &scope, array_fn, "Array")?;
         let array_prototype = scope.handle(known.array_prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
@@ -765,7 +784,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             array_name,
-            PropertyDescriptor::data(array_fn.erase()),
+            PropertyDescriptor::method(array_fn.erase()),
         )?;
 
         Object::install_method(thread, &scope, array_prototype, "push", idx.array_push)?;
@@ -798,6 +817,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date)?;
+        Object::set_builtin_name(thread, &scope, date_fn, "Date")?;
         let date_prototype = scope.handle(known.date_prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
@@ -811,7 +831,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             date_fn,
             wks_prototype,
-            PropertyDescriptor::data(date_prototype.erase()),
+            PropertyDescriptor::Data {
+                value: date_prototype.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         Object::install_method(thread, &scope, date_prototype, "valueOf", idx.date_value_of)?;
         Object::install_method(thread, &scope, date_prototype, "getTime", idx.date_get_time)?;
@@ -845,6 +870,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             idx.date_to_gmt_string,
         )?;
         let date_parse_fn = Object::native_function(thread.heap(), &scope, idx.date_parse)?;
+        Object::set_builtin_name(thread, &scope, date_parse_fn, "parse")?;
         let date_parse_name = thread.intern(&scope, "parse");
         // Safety: fresh interned word, rooted below before the define.
         let date_parse_name = scope.handle(date_parse_name.as_tagged(thread.heap()));
@@ -853,9 +879,10 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             date_fn,
             date_parse_name,
-            PropertyDescriptor::data(date_parse_fn.erase()),
+            PropertyDescriptor::method(date_parse_fn.erase()),
         )?;
         let date_now_fn = Object::native_function(thread.heap(), &scope, idx.date_now)?;
+        Object::set_builtin_name(thread, &scope, date_now_fn, "now")?;
         let date_now_name = thread.intern(&scope, "now");
         // Safety: fresh interned word, rooted below before the define.
         let date_now_name = scope.handle(date_now_name.as_tagged(thread.heap()));
@@ -864,7 +891,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             date_fn,
             date_now_name,
-            PropertyDescriptor::data(date_now_fn.erase()),
+            PropertyDescriptor::method(date_now_fn.erase()),
         )?;
         let date_name = thread.intern(&scope, "Date");
         // Safety: fresh interned word, rooted below before the define.
@@ -874,11 +901,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             date_name,
-            PropertyDescriptor::data(date_fn.erase()),
+            PropertyDescriptor::method(date_fn.erase()),
         )?;
 
         // Array.isArray
         let is_array_fn = Object::native_function(thread.heap(), &scope, idx.array_is_array)?;
+        Object::set_builtin_name(thread, &scope, is_array_fn, "isArray")?;
         let is_array_name = thread.intern(&scope, "isArray");
         // Safety: fresh interned word, rooted below before the define.
         let is_array_name = scope.handle(is_array_name.as_tagged(thread.heap()));
@@ -887,7 +915,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             array_fn,
             is_array_name,
-            PropertyDescriptor::data(is_array_fn.erase()),
+            PropertyDescriptor::method(is_array_fn.erase()),
         )?;
 
         // ---- Array iteration (the iterator protocol minimum) ---------------------
@@ -1061,7 +1089,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
                 &scope,
                 math_object,
                 n,
-                PropertyDescriptor::data(v.erase()),
+                PropertyDescriptor::Data {
+                    value: v.erase(),
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
             )?;
         }
         let math_name = thread.intern(&scope, "Math");
@@ -1072,7 +1105,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             math_name,
-            PropertyDescriptor::data(math_object.erase()),
+            PropertyDescriptor::method(math_object.erase()),
         )?;
 
         // ---- console (namespace object; shell convenience, not ES) -----------
@@ -1096,10 +1129,11 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             console_name,
-            PropertyDescriptor::data(console_object.erase()),
+            PropertyDescriptor::method(console_object.erase()),
         )?;
 
         let is_nan_fn = Object::native_function(thread.heap(), &scope, idx.is_nan)?;
+        Object::set_builtin_name(thread, &scope, is_nan_fn, "isNaN")?;
         let is_nan_name = thread.intern(&scope, "isNaN");
         // Safety: fresh interned word, rooted below before the define.
         let is_nan_name = scope.handle(is_nan_name.as_tagged(thread.heap()));
@@ -1108,7 +1142,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             is_nan_name,
-            PropertyDescriptor::data(is_nan_fn.erase()),
+            PropertyDescriptor::method(is_nan_fn.erase()),
         )?;
 
         // ---- print / performance (shell conveniences; not ES) --------------------
@@ -1121,7 +1155,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             print_name,
-            PropertyDescriptor::data(print_fn.erase()),
+            PropertyDescriptor::method(print_fn.erase()),
         )?;
 
         let map = thread.heap().allocate_handle::<Map>(
@@ -1150,13 +1184,14 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             performance_name,
-            PropertyDescriptor::data(performance_object.erase()),
+            PropertyDescriptor::method(performance_object.erase()),
         )?;
 
         // ---- Symbol (minimal: constructor + Symbol.iterator) ---------------
         // enough to author custom iterables; the full Symbol surface stays
         // gated by the test262 feature skip
         let symbol_fn = Object::native_function(thread.heap(), &scope, idx.symbol)?;
+        Object::set_builtin_name(thread, &scope, symbol_fn, "Symbol")?;
         let symbol_name = thread.intern(&scope, "Symbol");
         // Safety: fresh interned word, rooted below before the define.
         let symbol_name = scope.handle(symbol_name.as_tagged(thread.heap()));
@@ -1165,7 +1200,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             symbol_name,
-            PropertyDescriptor::data(symbol_fn.erase()),
+            PropertyDescriptor::method(symbol_fn.erase()),
         )?;
 
         // %Symbol.prototype% is ordinary; Symbol instances use the wrapper
@@ -1236,7 +1271,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             symbol_fn,
             iter_name,
-            PropertyDescriptor::data(iterator_symbol.erase()),
+            PropertyDescriptor::Data {
+                value: iterator_symbol.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         let to_string_tag_symbol: Handle<'_, vm_core::Symbol> =
             scope.handle(known.to_string_tag_symbol.get(thread.heap()));
@@ -1248,7 +1288,12 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             symbol_fn,
             to_string_tag_name,
-            PropertyDescriptor::data(to_string_tag_symbol.erase()),
+            PropertyDescriptor::Data {
+                value: to_string_tag_symbol.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
         // Symbol.prototype[@@toStringTag] = "Symbol".
         let to_string_tag_key: Handle<'_, SlotName> =
@@ -1295,7 +1340,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             proxy_name,
-            PropertyDescriptor::data(proxy_fn.erase()),
+            PropertyDescriptor::method(proxy_fn.erase()),
         )?;
         // Proxy.revocable: a non-constructor function returning
         // { proxy, revoke }; the revoke closure is the JS template
@@ -1321,7 +1366,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             proxy_fn,
             revocable_name,
-            PropertyDescriptor::data(revocable_fn.erase()),
+            PropertyDescriptor::method(revocable_fn.erase()),
         )?;
         // hidden revoke runtime used by the REVOKE_PRELUDE closure
         let revoke_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revoke)?;
@@ -1333,7 +1378,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             &scope,
             global,
             revoke_name,
-            PropertyDescriptor::data(revoke_fn.erase()),
+            PropertyDescriptor::method(revoke_fn.erase()),
         )?;
 
         // ---- Object extensibility statics --------------------------------------

@@ -7,15 +7,15 @@ use vm_core::{
 };
 use vm_core::{raise_runtime, rt_try};
 
+/// `Number ( value )`
+/// [ES 21.1.1.1](https://tc39.es/ecma262/#sec-number-constructor-number-value)
+/// Converts `value` with ToNumeric; under `new` it wraps that Number.
 pub fn number_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let is_construct = new_target.is_some();
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let n = rt_try!(
         vm,
         heap,
@@ -33,26 +33,36 @@ pub fn number_constructor<'a>(
         return vm.known().exception.get(heap).erase();
     };
 
-    if !is_construct {
+    let Some(new_target) = new_target else {
         return heap.new_number(n);
-    }
+    };
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().number_wrapper_map.get(heap));
         let value = scope.handle(heap.new_number(n));
-        heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap)]))
-            .erase()
+        let obj = match Object::create_wrapper_from_constructor(
+            vm,
+            heap,
+            state,
+            new_target,
+            WrapperKind::Number,
+            value,
+        ) {
+            Ok(Some(obj)) => scope.handle(obj),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        obj.as_tagged(heap).erase()
     })
 }
 
 pub fn number_value_of<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
     // The result crosses this call boundary, so root it: `wrapper_value`
     // borrows the heap immutably, and a handle releases that borrow before
     // the `TypeError` path needs the heap mutably.
-    nctx.handle_scope(|vm, heap, state, scope| {
+    ctx.handle_scope(|vm, heap, state, scope| {
         let v = match args
             .get(heap, 0)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
@@ -65,11 +75,11 @@ pub fn number_value_of<'a>(
 }
 
 pub fn number_to_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    nctx.handle_scope(|vm, heap, state, scope| {
+    ctx.handle_scope(|vm, heap, state, scope| {
         // root the receiver: `Convert::to_string` allocates a fresh string
         let v = match args
             .get(heap, 0)
@@ -97,11 +107,11 @@ fn number_receiver(heap: &Heap, roots: &WellKnown, args: Args) -> Result<f64, Vm
 /// `Number.prototype.toFixed(fractionDigits?)` (ES 21.1.3.3): fixed-point
 /// notation with `fractionDigits` digits after the decimal point.
 pub fn number_to_fixed<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    nctx.handle_scope(|vm, heap, state, scope| {
+    ctx.handle_scope(|vm, heap, state, scope| {
         let x = rt_try!(vm, heap, state, number_receiver(heap, vm.known(), args));
         let digits = match (args.len() > 1).then(|| args.get(heap, 1)) {
             Some(d) if d != vm.known().undefined.get(heap) => {
@@ -130,11 +140,11 @@ pub fn number_to_fixed<'a>(
 /// `Number.prototype.toPrecision(precision?)` (ES 21.1.3.6): `precision`
 /// significant digits, fixed or exponential per the magnitude.
 pub fn number_to_precision<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    nctx.handle_scope(|vm, heap, state, scope| {
+    ctx.handle_scope(|vm, heap, state, scope| {
         let x = rt_try!(vm, heap, state, number_receiver(heap, vm.known(), args));
         let arg = args.get(heap, 1);
         if arg == vm.known().undefined.get(heap) {

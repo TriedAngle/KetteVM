@@ -8,49 +8,47 @@ use vm_core::{
 use vm_core::{raise_runtime, rt_try};
 
 pub fn error_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    make_error(nctx, args, "Error")
+    make_error(ctx, args, "Error")
 }
 
 pub fn type_error_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    make_error(nctx, args, "TypeError")
+    make_error(ctx, args, "TypeError")
 }
 
 pub fn reference_error_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    make_error(nctx, args, "ReferenceError")
+    make_error(ctx, args, "ReferenceError")
 }
 
 pub fn range_error_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    make_error(nctx, args, "RangeError")
+    make_error(ctx, args, "RangeError")
 }
 
 pub fn syntax_error_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    make_error(nctx, args, "SyntaxError")
+    make_error(ctx, args, "SyntaxError")
 }
 
-pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+pub fn make_error<'a>(ctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         // root the message right away: the allocations below (new_object,
         // interning) would leave a raw copy stale
@@ -90,13 +88,11 @@ pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, 
 }
 
 pub fn error_to_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
 

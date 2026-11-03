@@ -97,37 +97,31 @@ fn math_integral<'a>(
 /// `Math.sqrt(x)` (ES 22.1.2.29): ToNumber, then the IEEE-754 square root
 /// (NaN/negative input → NaN, ±0 → ±0).
 pub fn math_sqrt<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_unary(vm, heap, state, args, f64::sqrt)
 }
 
 /// `Math.log(x)` (ES 22.1.2.15): natural logarithm.
 pub fn math_log<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_unary(vm, heap, state, args, f64::ln)
 }
 
 /// `Math.pow(base, exponent)` (ES 22.1.2.20).
 pub fn math_pow<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let Some(base) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
         return vm.known().exception.get(heap).erase();
     };
@@ -151,71 +145,59 @@ fn js_round(x: f64) -> f64 {
 
 /// `Math.abs(x)` (ES 22.1.2.1).
 pub fn math_abs<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_unary(vm, heap, state, args, f64::abs)
 }
 
 /// `Math.floor(x)` (ES 22.1.2.11).
 pub fn math_floor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_integral(vm, heap, state, args, f64::floor)
 }
 
 /// `Math.ceil(x)` (ES 22.1.2.2).
 pub fn math_ceil<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_integral(vm, heap, state, args, f64::ceil)
 }
 
 /// `Math.trunc(x)` (ES 22.1.2.31).
 pub fn math_trunc<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_integral(vm, heap, state, args, f64::trunc)
 }
 
 /// `Math.round(x)` (ES 22.1.2.24).
 pub fn math_round<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     math_integral(vm, heap, state, args, js_round)
 }
 
 /// Shared body of `Math.min`/`Math.max`: ToNumber every argument; any NaN
 /// argument (or no argument at all) decides the result per spec.
 #[inline]
-fn math_minmax<'a>(nctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value> {
+    let HostCtx { vm, heap, state } = ctx;
     let mut result = if min {
         f64::INFINITY
     } else {
@@ -242,30 +224,30 @@ fn math_minmax<'a>(nctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value
 
 /// `Math.min(...args)` (ES 22.1.2.14).
 pub fn math_min<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    math_minmax(nctx, args, true)
+    math_minmax(ctx, args, true)
 }
 
 /// `Math.max(...args)` (ES 22.1.2.13).
 pub fn math_max<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    math_minmax(nctx, args, false)
+    math_minmax(ctx, args, false)
 }
 
 /// `Math.random()` (ES 22.1.2.22): a number in `[0, 1)` built from the top
 /// 53 random bits.
 pub fn math_random<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
     let bits = random_bits() >> 11;
-    nctx.heap
+    ctx.heap
         .new_number((bits as f64) * (1.0 / 9_007_199_254_740_992.0))
 }

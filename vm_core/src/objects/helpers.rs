@@ -1,7 +1,8 @@
 use crate::materialize::Materialize;
 use crate::{
-    DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, Value, VmError, WellKnown,
+    Coercion, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit,
+    MapKind, NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value,
+    VmError, WellKnown,
 };
 
 #[derive(Copy, Clone)]
@@ -12,6 +13,16 @@ pub enum WrapperKind {
 }
 
 impl WrapperKind {
+    /// The intrinsic initial map holding this wrapper kind's
+    /// `%X.prototype%` as its prototype.
+    pub fn wrapper_map<'a>(self, heap: &'a Heap, roots: &'a WellKnown) -> Tagged<'a, Map> {
+        match self {
+            WrapperKind::Number => roots.number_wrapper_map.get(heap),
+            WrapperKind::Boolean => roots.boolean_wrapper_map.get(heap),
+            WrapperKind::String => roots.string_wrapper_map.get(heap),
+        }
+    }
+
     #[inline]
     fn matches(self, heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> bool {
         match self {
@@ -144,6 +155,7 @@ impl Object {
     ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
         let name_str = thread.intern(scope, name);
         let fn_obj = Self::native_constructor(thread.heap(), scope, index)?;
+        Self::set_builtin_name(thread, scope, fn_obj, name)?;
 
         // prototype object: fresh extendable object chained to proto_parent
         // (wrapper prototypes also carry their primitive in slot 0)
@@ -186,7 +198,12 @@ impl Object {
             scope,
             fn_obj,
             prototype_name,
-            PropertyDescriptor::method(proto.erase()),
+            PropertyDescriptor::Data {
+                value: proto.erase(),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
         )?;
 
         // global.Name = fn
@@ -201,9 +218,30 @@ impl Object {
             scope,
             global,
             name,
-            PropertyDescriptor::data(fn_obj.erase()),
+            PropertyDescriptor::method(fn_obj.erase()),
         )?;
         Ok((fn_obj, proto))
+    }
+
+    /// `name` of a builtin function: { writable: false, enumerable: false, configurable: true }
+    pub fn set_builtin_name(
+        thread: &mut Thread,
+        scope: &HandleScope<'_>,
+        function: Handle<'_, Object>,
+        name: &str,
+    ) -> Result<(), VmError> {
+        let name_str = thread.intern(scope, name);
+        // Safety: fresh interned word, rooted below before any allocation.
+        let name_str: Handle<'_, DenseString> = scope.handle(name_str.as_tagged(thread.heap()));
+        let name_key = scope.handle(thread.heap().known().strings.name.get(thread.heap()));
+        Object::define_own_property(
+            thread.heap(),
+            scope,
+            function,
+            name_key,
+            PropertyDescriptor::non_enumerable(name_str.erase()),
+        )?;
+        Ok(())
     }
 
     pub fn install_method(
@@ -217,6 +255,7 @@ impl Object {
         let name_str = thread.intern(scope, name);
         // Safety: fresh interned word, rooted below before any allocation.
         let method_name = scope.handle(name_str.as_tagged(thread.heap()));
+        Self::set_builtin_name(thread, scope, method, name)?;
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -225,6 +264,42 @@ impl Object {
             PropertyDescriptor::method(method.erase()),
         )?;
         Ok(())
+    }
+
+    /// `OrdinaryCreateFromConstructor ( newTarget, "%X.prototype%", [[PrimitiveValue]] )`
+    /// [ES 10.1.14](https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor)
+    /// Wrapper object whose `[[Prototype]]` is `newTarget.prototype`.
+    pub fn create_wrapper_from_constructor<'a>(
+        vm: &'a VM,
+        heap: &'a mut Heap,
+        state: &ThreadState,
+        new_target: Handle<'_, Value>,
+        kind: WrapperKind,
+        value: Handle<'_, Value>,
+    ) -> Result<Option<Tagged<'a, Value>>, VmError> {
+        state.handle_scope(|scope| {
+            let prototype_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
+            let prototype = match Object::get_property(
+                vm,
+                heap,
+                state,
+                new_target,
+                new_target,
+                prototype_name,
+                false,
+            )? {
+                Coercion::Threw => return Ok(None),
+                Coercion::Value(v) => scope.handle(v),
+            };
+            let map = scope.handle(kind.wrapper_map(heap, vm.known()));
+            let obj =
+                scope.handle(heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap)])));
+            // A non-object `newTarget.prototype` falls back to the intrinsic one.
+            if let Some(prototype) = scope.cast::<Object>(heap, prototype.as_tagged(heap)) {
+                Object::set_prototype(heap, &scope, obj, prototype.erase())?;
+            }
+            Ok(Some(obj.as_tagged(heap).erase()))
+        })
     }
 }
 

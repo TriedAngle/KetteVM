@@ -13,13 +13,11 @@ use vm_core::{raise_runtime, rt_try};
 /// Stub: `Function.prototype.toString` returns a stable marker string
 /// (test262 A2.2 compares it against itself, not against real source).
 pub fn function_to_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         // fresh interned word, consumed with no allocation delay
         vm.interner()
@@ -33,18 +31,16 @@ pub fn function_to_string<'a>(
 /// receiver (args[0], per the receiver-first runtime calling convention)
 /// with `thisArg` as `this`.
 pub fn function_call<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let f = args.get_handle(heap, 0);
     if !f.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
-    let fwd = nctx.state.stack().slice(args.slice_from(1));
+    let fwd = ctx.state.stack().slice(args.slice_from(1));
     match HostCtx::enter(vm, heap, state, f, fwd, None).map(|v| v.raw()) {
         Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
         Err(err) => raise_runtime(vm, heap, state, err),
@@ -55,13 +51,11 @@ pub fn function_call<'a>(
 /// the receiver with `thisArg` as `this` and the array-like spread as
 /// arguments.
 pub fn function_apply<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let f = args.get_handle(heap, 0);
     if !f.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -87,13 +81,11 @@ pub fn function_apply<'a>(
 /// bound function is the JS closure template installed by BIND_PRELUDE,
 /// called with (target, thisArg, prepend-array).
 pub fn function_bind<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let f = args.get(heap, 0);
     if !f.is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -169,13 +161,11 @@ Function.prototype.__makeBound = function (f, t, p) {
 /// scope (approximated with the caller's context; the direct-eval pipeline
 /// provides the parsing).
 pub fn function_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let argv: Vec<_> = (1..args.len()).map(|i| args.get_handle(heap, i)).collect();
     state.handle_scope(|scope| {
         // root the caller context before the allocating ToString loop below

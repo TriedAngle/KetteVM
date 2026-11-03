@@ -412,13 +412,11 @@ fn parse_loose(text: &str) -> Option<f64> {
 /// `Date.parse(string)` (ES 21.4.3.2): the ISO form plus the formats our
 /// `toGMTString`/`toString` emit. Unparseable input is NaN.
 pub fn date_parse<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let arg = args.get_handle(heap, 1);
     // Fast path: a primitive string needs no ToString coercion.
     if let Some(text) = arg.as_tagged(heap).get_as::<DenseString>(heap) {
@@ -549,13 +547,11 @@ fn date_from_components(
 /// arguments and answers the current date-time as a string; the constructor
 /// accepts no arguments, one value, or the component form.
 pub fn date_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
 
     if new_target.is_none() {
         return state.handle_scope(|scope| {
@@ -598,11 +594,11 @@ pub fn date_constructor<'a>(
 /// `Date.now()` (ES 21.4.4.2): the current time value, an integral number of
 /// epoch milliseconds.
 pub fn date_now<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    nctx.heap.new_number(time_clip(now_millis()))
+    ctx.heap.new_number(time_clip(now_millis()))
 }
 
 /// The [[DateValue]] of a receiver, or `None` when it is not a Date.
@@ -616,13 +612,11 @@ fn date_value(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<f64> {
 
 /// `Date.prototype.getTime` (ES 21.4.4.9): the wrapped time value.
 pub fn date_get_time<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -632,24 +626,22 @@ pub fn date_get_time<'a>(
 /// `Date.prototype.valueOf` (ES 21.4.4.40): the same [[DateValue]] access
 /// as `getTime`.
 pub fn date_value_of<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    date_get_time(nctx, None, args)
+    date_get_time(ctx, None, args)
 }
 
 /// Shared body of the string formatters: read the receiver's time value and
 /// format it, or emit `invalid` for an invalid Date.
 fn format_with<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     args: Args,
     format: fn(&Broken) -> String,
     invalid: &'static str,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -667,13 +659,11 @@ fn format_with<'a>(
 /// `Date.prototype.toISOString` (ES 21.4.4.36): the ISO 8601 extended form.
 /// An invalid Date is a RangeError.
 pub fn date_to_iso_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -690,32 +680,30 @@ pub fn date_to_iso_string<'a>(
 
 /// `Date.prototype.toGMTString` / `toUTCString` (ES 21.4.4.43).
 pub fn date_to_gmt_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    format_with(nctx, args, format_gmt, "Invalid Date")
+    format_with(ctx, args, format_gmt, "Invalid Date")
 }
 
 /// `Date.prototype.toString` (ES 21.4.4.41; UTC-formatted).
 pub fn date_to_string<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    format_with(nctx, args, format_date_string, "Invalid Date")
+    format_with(ctx, args, format_date_string, "Invalid Date")
 }
 
 /// `Date.prototype.toJSON` (ES 21.4.4.37): `null` for non-finite time
 /// values, otherwise the result of invoking `this.toISOString()`.
 pub fn date_to_json<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         let this = args.get_handle(heap, 0);
         let object = scope.handle(this.as_tagged(heap));

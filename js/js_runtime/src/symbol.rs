@@ -11,13 +11,11 @@ use vm_core::{Args, DenseString, Handle, Object, Symbol, Tagged, Value};
 /// iterables (`obj[Symbol.iterator] = ...`); `Symbol.iterator` is the
 /// well-known one.
 pub fn symbol_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     state.handle_scope(|scope| {
         // absent/undefined description is the empty string
         let desc = if args.len() > 1 && args.get(heap, 1) != vm.known().undefined.get(heap) {

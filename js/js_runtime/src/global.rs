@@ -11,13 +11,11 @@ use vm_core::{
 use vm_core::{raise_runtime, rt_try};
 
 pub fn eval_runtime<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let source = args.get_handle(heap, 1);
     if source.as_tagged(heap).get_as::<DenseString>(heap).is_none() {
         return source.as_tagged(heap).erase();
@@ -75,13 +73,11 @@ fn eval_global_context<'s>(
 
 /// `isNaN(x)`: ToNumber(x) is NaN.
 pub fn is_nan<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let n = rt_try!(
         vm,
         heap,
@@ -101,13 +97,11 @@ pub fn is_nan<'a>(
 /// `print(x)`: ToString(x) to stdout followed by a newline (a shell
 /// convenience, not an ES builtin; the Octane runner reports through it).
 pub fn print<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     if args.len() < 2 {
         println!();
         return vm.known().undefined.get(heap).erase();
@@ -182,13 +176,11 @@ fn console_arg_cold(
 /// spaces, and write the result to stdout followed by a newline (Node's
 /// single-line formatting; a shell convenience, not an ES builtin).
 pub fn console_log<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let mut parts: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
     for i in 1..args.len() {
         // Safety: `i < args.len()`, so the slot exists.
@@ -210,7 +202,7 @@ pub fn console_log<'a>(
 /// `performance.now()`: fractional milliseconds since the Unix epoch
 /// (shell timing convenience mirroring the browser API).
 pub fn performance_now<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
@@ -218,5 +210,5 @@ pub fn performance_now<'a>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    nctx.heap.new_number(ms)
+    ctx.heap.new_number(ms)
 }

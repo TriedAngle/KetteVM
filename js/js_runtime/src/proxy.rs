@@ -15,14 +15,12 @@ use vm_core::{Args, Handle, HandleSlice, Tagged, Value, VmError};
 /// the map's capability bits mirror the target's so callability is
 /// observable (`typeof`, future `Call`/`Construct` dispatch).
 pub fn proxy_constructor<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let construct = new_target.is_some();
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     if !construct {
         return raise_runtime(vm, heap, state, VmError::Message(Message::ProxyRequiresNew));
     }
@@ -54,13 +52,11 @@ pub fn proxy_constructor<'a>(
 /// by REVOKE_PRELUDE (it keeps the idempotence flag and calls the
 /// hidden `__revokeProxy` runtime).
 pub fn proxy_revocable<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
+    let HostCtx { vm, heap, state } = ctx;
     let target = args.get_handle(heap, 1);
     let handler = args.get_handle(heap, 2);
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
@@ -144,13 +140,11 @@ pub fn proxy_revocable<'a>(
 /// (idempotent — a null handler already means revoked). Called only by
 /// the REVOKE_PRELUDE closure, which guards it with a done-flag.
 pub fn proxy_revoke<'a>(
-    nctx: HostCtx<'a>,
+    ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state: _, ..
-    } = nctx;
+    let HostCtx { vm, heap, state: _ } = ctx;
     let proxy = args.get(heap, 1);
     let proxy = proxy.raw();
     Proxy::revoke(
