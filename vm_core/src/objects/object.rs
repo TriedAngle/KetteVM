@@ -43,7 +43,9 @@ impl Object {
     }
 
     pub fn callable_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, CallableInfoObject>> {
-        if !self.map(heap).kind().is_callable() {
+        let kind = self.map(heap).kind();
+        // TODO: this is not clean, we should separate callability from layout
+        if !kind.is_callable() || kind.is_bound() {
             return None;
         }
         let info = self.slots(heap).at(heap, 0);

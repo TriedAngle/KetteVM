@@ -25,8 +25,16 @@ use array::{
 };
 use boolean::{boolean_constructor, boolean_to_string, boolean_value_of};
 use date::{
-    date_constructor, date_get_time, date_now, date_parse, date_to_gmt_string, date_to_iso_string,
-    date_to_json, date_to_string, date_value_of,
+    date_constructor, date_get_date, date_get_day, date_get_full_year, date_get_hours,
+    date_get_milliseconds, date_get_minutes, date_get_month, date_get_seconds, date_get_time,
+    date_get_timezone_offset, date_get_utc_date, date_get_utc_day, date_get_utc_full_year,
+    date_get_utc_hours, date_get_utc_milliseconds, date_get_utc_minutes, date_get_utc_month,
+    date_get_utc_seconds, date_get_year, date_now, date_parse, date_set_date, date_set_full_year,
+    date_set_hours, date_set_milliseconds, date_set_minutes, date_set_month, date_set_seconds,
+    date_set_time, date_set_utc_date, date_set_utc_full_year, date_set_utc_hours,
+    date_set_utc_milliseconds, date_set_utc_minutes, date_set_utc_month, date_set_utc_seconds,
+    date_set_year, date_to_gmt_string, date_to_iso_string, date_to_json, date_to_string,
+    date_value_of,
 };
 use error::{
     error_constructor, error_is_error, error_to_string, eval_error_constructor,
@@ -131,6 +139,40 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         date_now: vm.register_runtime(date_now),
         date_value_of: vm.register_runtime(date_value_of),
         date_get_time: vm.register_runtime(date_get_time),
+        date_get_date: vm.register_runtime(date_get_date),
+        date_get_day: vm.register_runtime(date_get_day),
+        date_get_full_year: vm.register_runtime(date_get_full_year),
+        date_get_hours: vm.register_runtime(date_get_hours),
+        date_get_milliseconds: vm.register_runtime(date_get_milliseconds),
+        date_get_minutes: vm.register_runtime(date_get_minutes),
+        date_get_month: vm.register_runtime(date_get_month),
+        date_get_seconds: vm.register_runtime(date_get_seconds),
+        date_get_timezone_offset: vm.register_runtime(date_get_timezone_offset),
+        date_get_utc_date: vm.register_runtime(date_get_utc_date),
+        date_get_utc_day: vm.register_runtime(date_get_utc_day),
+        date_get_utc_full_year: vm.register_runtime(date_get_utc_full_year),
+        date_get_utc_hours: vm.register_runtime(date_get_utc_hours),
+        date_get_utc_milliseconds: vm.register_runtime(date_get_utc_milliseconds),
+        date_get_utc_minutes: vm.register_runtime(date_get_utc_minutes),
+        date_get_utc_month: vm.register_runtime(date_get_utc_month),
+        date_get_utc_seconds: vm.register_runtime(date_get_utc_seconds),
+        date_get_year: vm.register_runtime(date_get_year),
+        date_set_date: vm.register_runtime(date_set_date),
+        date_set_full_year: vm.register_runtime(date_set_full_year),
+        date_set_hours: vm.register_runtime(date_set_hours),
+        date_set_milliseconds: vm.register_runtime(date_set_milliseconds),
+        date_set_minutes: vm.register_runtime(date_set_minutes),
+        date_set_month: vm.register_runtime(date_set_month),
+        date_set_seconds: vm.register_runtime(date_set_seconds),
+        date_set_time: vm.register_runtime(date_set_time),
+        date_set_utc_date: vm.register_runtime(date_set_utc_date),
+        date_set_utc_full_year: vm.register_runtime(date_set_utc_full_year),
+        date_set_utc_hours: vm.register_runtime(date_set_utc_hours),
+        date_set_utc_milliseconds: vm.register_runtime(date_set_utc_milliseconds),
+        date_set_utc_minutes: vm.register_runtime(date_set_utc_minutes),
+        date_set_utc_month: vm.register_runtime(date_set_utc_month),
+        date_set_utc_seconds: vm.register_runtime(date_set_utc_seconds),
+        date_set_year: vm.register_runtime(date_set_year),
         date_to_string: vm.register_runtime(date_to_string),
         date_to_iso_string: vm.register_runtime(date_to_iso_string),
         date_to_json: vm.register_runtime(date_to_json),
@@ -220,6 +262,40 @@ pub struct BuiltinIndices {
     pub date_now: NativeIndex,
     pub date_value_of: NativeIndex,
     pub date_get_time: NativeIndex,
+    pub date_get_date: NativeIndex,
+    pub date_get_day: NativeIndex,
+    pub date_get_full_year: NativeIndex,
+    pub date_get_hours: NativeIndex,
+    pub date_get_milliseconds: NativeIndex,
+    pub date_get_minutes: NativeIndex,
+    pub date_get_month: NativeIndex,
+    pub date_get_seconds: NativeIndex,
+    pub date_get_timezone_offset: NativeIndex,
+    pub date_get_utc_date: NativeIndex,
+    pub date_get_utc_day: NativeIndex,
+    pub date_get_utc_full_year: NativeIndex,
+    pub date_get_utc_hours: NativeIndex,
+    pub date_get_utc_milliseconds: NativeIndex,
+    pub date_get_utc_minutes: NativeIndex,
+    pub date_get_utc_month: NativeIndex,
+    pub date_get_utc_seconds: NativeIndex,
+    pub date_get_year: NativeIndex,
+    pub date_set_date: NativeIndex,
+    pub date_set_full_year: NativeIndex,
+    pub date_set_hours: NativeIndex,
+    pub date_set_milliseconds: NativeIndex,
+    pub date_set_minutes: NativeIndex,
+    pub date_set_month: NativeIndex,
+    pub date_set_seconds: NativeIndex,
+    pub date_set_time: NativeIndex,
+    pub date_set_utc_date: NativeIndex,
+    pub date_set_utc_full_year: NativeIndex,
+    pub date_set_utc_hours: NativeIndex,
+    pub date_set_utc_milliseconds: NativeIndex,
+    pub date_set_utc_minutes: NativeIndex,
+    pub date_set_utc_month: NativeIndex,
+    pub date_set_utc_seconds: NativeIndex,
+    pub date_set_year: NativeIndex,
     pub date_to_string: NativeIndex,
     pub date_to_iso_string: NativeIndex,
     pub date_to_json: NativeIndex,
@@ -874,6 +950,208 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         Object::install_method(thread, &scope, date_prototype, "valueOf", idx.date_value_of)?;
         Object::install_method(thread, &scope, date_prototype, "getTime", idx.date_get_time)?;
+        Object::install_method(thread, &scope, date_prototype, "getDate", idx.date_get_date)?;
+        Object::install_method(thread, &scope, date_prototype, "getDay", idx.date_get_day)?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getFullYear",
+            idx.date_get_full_year,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getHours",
+            idx.date_get_hours,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getMilliseconds",
+            idx.date_get_milliseconds,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getMinutes",
+            idx.date_get_minutes,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getMonth",
+            idx.date_get_month,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getSeconds",
+            idx.date_get_seconds,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getTimezoneOffset",
+            idx.date_get_timezone_offset,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCDate",
+            idx.date_get_utc_date,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCDay",
+            idx.date_get_utc_day,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCFullYear",
+            idx.date_get_utc_full_year,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCHours",
+            idx.date_get_utc_hours,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCMilliseconds",
+            idx.date_get_utc_milliseconds,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCMinutes",
+            idx.date_get_utc_minutes,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCMonth",
+            idx.date_get_utc_month,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "getUTCSeconds",
+            idx.date_get_utc_seconds,
+        )?;
+        Object::install_method(thread, &scope, date_prototype, "getYear", idx.date_get_year)?;
+        Object::install_method(thread, &scope, date_prototype, "setDate", idx.date_set_date)?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setFullYear",
+            idx.date_set_full_year,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setHours",
+            idx.date_set_hours,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setMilliseconds",
+            idx.date_set_milliseconds,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setMinutes",
+            idx.date_set_minutes,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setMonth",
+            idx.date_set_month,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setSeconds",
+            idx.date_set_seconds,
+        )?;
+        Object::install_method(thread, &scope, date_prototype, "setTime", idx.date_set_time)?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCDate",
+            idx.date_set_utc_date,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCFullYear",
+            idx.date_set_utc_full_year,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCHours",
+            idx.date_set_utc_hours,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCMilliseconds",
+            idx.date_set_utc_milliseconds,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCMinutes",
+            idx.date_set_utc_minutes,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCMonth",
+            idx.date_set_utc_month,
+        )?;
+        Object::install_method(
+            thread,
+            &scope,
+            date_prototype,
+            "setUTCSeconds",
+            idx.date_set_utc_seconds,
+        )?;
+        Object::install_method(thread, &scope, date_prototype, "setYear", idx.date_set_year)?;
         Object::install_method(
             thread,
             &scope,
