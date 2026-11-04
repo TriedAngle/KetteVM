@@ -4,7 +4,7 @@ use vm::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, HandlerEntryInit,
     HandlerTable, HandlerTableInit, MODE_SLOPPY, ObjectSlotsInit, Smi, Tagged, Value,
 };
-use vm::{Thread, VM};
+use vm::{Runtime, Thread, VM};
 
 fn smi(v: i64) -> Value {
     Smi::new(v).encode()
@@ -20,9 +20,14 @@ fn callable(
 ) -> Value {
     let _the_hole = thread.heap().known().the_hole.as_handle();
     let empty_context = thread.heap().known().empty_context.as_handle();
-    let code = thread
-        .heap()
-        .allocate_handle::<Code>(CodeInit { bytes: program }, scope);
+    let runtime = thread.vm().runtime_id::<vm::VmCore>();
+    let code = thread.heap().allocate_handle::<Code>(
+        CodeInit {
+            runtime,
+            bytes: program,
+        },
+        scope,
+    );
     let constants = thread
         .heap()
         .allocate_handle::<FixedArray>(scope.stage(constants), scope);
@@ -77,7 +82,10 @@ fn table<'s>(
 
 #[test]
 fn roundtrip_entries() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -102,7 +110,10 @@ fn roundtrip_entries() {
 
 #[test]
 fn lookup_finds_handler_inside_range() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -120,7 +131,10 @@ fn lookup_finds_handler_inside_range() {
 
 #[test]
 fn lookup_returns_none_outside_range() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -140,7 +154,10 @@ fn lookup_returns_none_outside_range() {
 
 #[test]
 fn lookup_returns_innermost_of_nested_ranges() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -168,7 +185,10 @@ fn lookup_returns_innermost_of_nested_ranges() {
 
 #[test]
 fn lookup_on_empty_table_returns_none() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -184,7 +204,10 @@ fn lookup_on_empty_table_returns_none() {
 
 #[test]
 fn callable_info_carries_handler_table() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     let result = thread.handle_scope(|thread, scope| {
@@ -207,7 +230,10 @@ fn callable_info_carries_handler_table() {
 
 #[test]
 fn callable_info_without_handler_table() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -224,7 +250,10 @@ fn callable_info_without_handler_table() {
 
 #[test]
 fn throw_is_caught_in_same_function() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     // 0: LoadSmi 99 | 2: Throw | 3: Return | 4: Store r0 | 6: Load r0 | 8: Return
@@ -251,7 +280,7 @@ fn throw_is_caught_in_same_function() {
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
         };
-        thread.execute(callable, &[])
+        thread.execute(callable, &[], vm::VmCore::ID)
     });
     assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 99);
     // catching consumes the pending exception
@@ -260,7 +289,10 @@ fn throw_is_caught_in_same_function() {
 
 #[test]
 fn throw_any_value_escapes_as_sentinel() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     // throw 42: arbitrary values are throwable (ES §14.18), no handlers
@@ -277,7 +309,7 @@ fn throw_any_value_escapes_as_sentinel() {
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
         };
-        thread.execute(callable, &[])
+        thread.execute(callable, &[], vm::VmCore::ID)
     });
     let exception_word = {
         let heap = thread.heap();
@@ -293,7 +325,10 @@ fn throw_any_value_escapes_as_sentinel() {
 
 #[test]
 fn innermost_handler_wins() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     // 0: LoadSmi 1 | 2: LoadSmi 2 | 4: Throw | 5: Return
@@ -321,14 +356,17 @@ fn innermost_handler_wins() {
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
         };
-        thread.execute(callable, &[])
+        thread.execute(callable, &[], vm::VmCore::ID)
     });
     assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 100);
 }
 
 #[test]
 fn exception_unwinds_to_caller() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     thread.handle_scope(|thread, scope| {
@@ -369,7 +407,7 @@ fn exception_unwinds_to_caller() {
                     .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(caller) })
                     .unwrap()
             };
-            thread.execute(callable, &[])
+            thread.execute(callable, &[], vm::VmCore::ID)
         };
         assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 7);
     });
@@ -377,7 +415,10 @@ fn exception_unwinds_to_caller() {
 
 #[test]
 fn throw_from_finally_escapes_past_its_own_handler() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<vm::VmCore>()
+        .unwrap();
     let mut thread = vm.attach();
 
     // 0: LoadSmi 3 | 2: Throw | 3: Return | 4: Throw (finally handler)
@@ -405,7 +446,7 @@ fn throw_from_finally_escapes_past_its_own_handler() {
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
         };
-        thread.execute(callable, &[])
+        thread.execute(callable, &[], vm::VmCore::ID)
     });
     let exception_word = {
         let heap = thread.heap();

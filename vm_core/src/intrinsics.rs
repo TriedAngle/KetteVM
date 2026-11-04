@@ -4,10 +4,10 @@
 
 use crate::tools::KetteTools;
 use crate::{
-    AccessorInfo, Args, CallableInfoObject, ContextObject, Convert, FixedArray, Handle,
-    HandleScope, Heap, HostCtx, INFO_GLOBAL, MODE_CLASS, MODE_LET, Object, PropertyDescriptor,
-    Runtime, SlotFlags, Smi, Tagged, VM, Value, VmError, frame_context_value, info_is_lexical,
-    info_mode, raise_runtime, rt_try,
+    AccessorInfo, Args, CallableInfoObject, ContextObject, Convert, EdgeVisitable, FixedArray,
+    Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind,
+    Object, PropertyDescriptor, Runtime, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
+    frame_context_value, info_is_lexical, info_mode, raise_runtime, rt_try,
 };
 
 // ---- array `length` ----
@@ -19,7 +19,9 @@ pub fn array_length_get<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(object) = args.get(heap, 0).as_heap_object() else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -37,7 +39,9 @@ pub fn array_length_set<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let holder = args.get_handle(heap, 0);
         let value = args.get(heap, 1);
@@ -90,12 +94,27 @@ pub fn array_length_set<'a>(
 /// The VM's own runtime: the natives that are not a front end's, so they are
 /// available regardless of which languages a VM hosts. Added with
 /// `vm.add::<VmCore>()` before the front end's runtime.
+#[derive(Default)]
 pub struct VmCore;
 
-impl Runtime for VmCore {
-    type State = ();
+impl EdgeVisitable for VmCore {
+    fn visit_edges(&self, _visitor: &mut dyn Visitor) {}
+}
 
-    fn setup(vm: &mut VM, _state: &mut Self::State) -> Result<(), VmError> {
+/// `%Function.prototype%` (ES 19.2.3): the canonical empty function.
+fn function_prototype_call<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    _args: Args,
+) -> Tagged<'a, Value> {
+    ctx.vm.known().undefined.get(ctx.heap).erase()
+}
+
+impl Runtime for VmCore {
+    const ID: crate::RuntimeId = crate::RuntimeId(0);
+
+    fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), VmError> {
+        let call_index = vm.register_native(function_prototype_call);
         let getter = vm.register_native(array_length_get);
         let setter = vm.register_native(array_length_set);
         debug_assert_eq!(setter.0, getter.0 + 1);
@@ -107,6 +126,42 @@ impl Runtime for VmCore {
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let heap = thread.heap();
+            // the canonical empty function object: callable, non-constructable,
+            // [[Prototype]] = %Object.prototype%
+            let object_prototype = scope.handle(vm.known().object_prototype.get(heap).erase());
+            let empty_context = scope.handle(vm.known().empty_context.get(heap).erase());
+            let map = heap.allocate_handle::<Map>(
+                MapInit {
+                    kind: MapKind::OBJECT
+                        .union(MapKind::CALLABLE)
+                        .union(MapKind::NATIVE)
+                        .union(MapKind::EXTENDABLE),
+                    value_slot_count: 2,
+                    descriptors: &[],
+                    prototype: object_prototype,
+                },
+                &scope,
+            );
+            let slots = scope.stage(&[
+                Smi::new(call_index.0 as i64).into_tagged(),
+                empty_context.as_tagged(heap).erase(),
+            ]);
+            let function_prototype = scope.handle(heap.new_object(&scope, map, slots));
+            vm.known()
+                .function_prototype
+                .init(function_prototype.as_tagged(heap));
+            // ordinary function objects' [[Prototype]] (ES 19.2.3.1)
+            for map in [
+                vm.known().function_map.get(heap),
+                vm.known().non_constructor_function_map.get(heap),
+                vm.known().class_constructor_map.get(heap),
+            ] {
+                map.prototype.set(
+                    heap,
+                    map.erase(),
+                    function_prototype.as_tagged(heap).erase(),
+                );
+            }
             // `bootstrap` installs the `length` accessor on the array map
             // with no natives; point it at the ones registered above
             let map = scope.handle(vm.known().js_array_map.get(heap));
@@ -284,7 +339,9 @@ pub fn declare_globals<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let declarations = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {

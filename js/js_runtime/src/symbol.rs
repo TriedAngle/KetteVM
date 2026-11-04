@@ -16,7 +16,9 @@ pub fn symbol_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     if new_target.is_some() {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
@@ -47,7 +49,9 @@ pub fn symbol_prototype_description<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(
         |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
             Ok(symbol) => symbol.as_tagged(heap).as_ref().description(heap),
@@ -64,7 +68,9 @@ pub fn symbol_prototype_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         let symbol = match this_symbol_value(heap, &scope, receiver.as_tagged(heap)) {
@@ -85,7 +91,9 @@ pub fn symbol_prototype_value_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(
         |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
             Ok(symbol) => symbol.as_tagged(heap).erase(),
@@ -113,7 +121,9 @@ pub fn symbol_for<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let key = scope.handle(args.get(heap, 1));
         let key = match Object::to_string(vm, heap, state, key) {
@@ -149,7 +159,9 @@ pub fn symbol_key_for<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 1));
         let Some(symbol) = receiver.as_tagged(heap).get_as::<Symbol>(heap) else {

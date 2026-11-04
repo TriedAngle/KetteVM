@@ -2,13 +2,14 @@
 
 use std::hint::black_box;
 use std::time::Instant;
+use vm_core::Runtime;
 
 use bytecode::{Opcode, emit};
 use interpreter::DefaultInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
-    Interpreter, MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value,
+    Interpreter, MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, VmCore,
     new_feedback_vector,
 };
 
@@ -22,9 +23,14 @@ fn callable<'s>(
     program: &[u8],
     register_count: usize,
 ) -> Handle<'s, Object> {
-    let code = thread
-        .heap()
-        .allocate_handle::<Code>(CodeInit { bytes: program }, scope);
+    let runtime = thread.vm().runtime_id::<VmCore>();
+    let code = thread.heap().allocate_handle::<Code>(
+        CodeInit {
+            runtime,
+            bytes: program,
+        },
+        scope,
+    );
     let constants = {
         let empty: &[Tagged<'_, Value>] = &[];
         let staged = scope.stage(empty);
@@ -105,11 +111,17 @@ fn bench<I: Interpreter>(name: &str, op: &str, program: &[u8], reps: usize) {
     let elapsed = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, program, 4);
         // Warm up code/IC state and make sure the program returns.
-        let result = thread.execute(f, &args).expect("program runs");
+        let result = thread
+            .execute(f, &args, vm_core::intrinsics::VmCore::ID)
+            .expect("program runs");
         black_box(result);
         let start = Instant::now();
         for _ in 0..reps {
-            black_box(thread.execute(f, &args).expect("program runs"));
+            black_box(
+                thread
+                    .execute(f, &args, vm_core::intrinsics::VmCore::ID)
+                    .expect("program runs"),
+            );
         }
         start.elapsed()
     });

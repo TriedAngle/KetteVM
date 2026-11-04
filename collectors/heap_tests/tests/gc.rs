@@ -104,9 +104,13 @@ where
 
     thread.handle_scope(|t, scope| {
         let bytes = [1u8, 2, 3, 4, 5];
-        let code = t
-            .heap()
-            .allocate_handle::<vm::Code>(vm::CodeInit { bytes: &bytes }, &scope);
+        let code = t.heap().allocate_handle::<vm::Code>(
+            vm::CodeInit {
+                runtime: vm.runtime_id::<vm::VmCore>(),
+                bytes: &bytes,
+            },
+            &scope,
+        );
 
         t.heap().collect();
 

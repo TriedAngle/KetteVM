@@ -30,7 +30,9 @@ pub fn for_in_enumerate<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let subject = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let subject = subject;
@@ -184,7 +186,9 @@ pub fn for_in_next<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let enumerator = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         if enumerator

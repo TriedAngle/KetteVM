@@ -31,8 +31,10 @@ impl Compiler for JavascriptCompiler {
         source: &str,
         mode: bytecode::SourceMode,
     ) -> Result<bytecode::Program, bytecode::FrontendError> {
-        js_compiler::compile_js(source, mode, &vm.runtime_state::<JSRuntime>().ids)
+        js_compiler::compile_js(source, mode, &vm.runtime::<JSRuntime>().ids)
     }
+
+    const RUNTIME: RuntimeId = JSRuntime::ID;
 }
 
 /// The Kette front end paired with [`KetteRuntime`].
@@ -44,9 +46,11 @@ impl Compiler for KetteCompiler {
         source: &str,
         mode: bytecode::SourceMode,
     ) -> Result<bytecode::Program, bytecode::FrontendError> {
-        let declare_globals = vm.runtime_state::<KetteRuntime>().declare_globals;
+        let declare_globals = vm.runtime::<KetteRuntime>().declare_globals;
         kette_compiler::compile_kette(source, mode, declare_globals)
     }
+
+    const RUNTIME: RuntimeId = KetteRuntime::ID;
 }
 
 pub trait VmEval {

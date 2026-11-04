@@ -1142,7 +1142,8 @@ impl Object {
         if value.as_tagged(heap).is_primitive(heap) {
             return Ok(Coercion::Value(value.as_tagged(heap)));
         }
-        HostCtx::new(vm, heap, state).handle_scope(|vm, heap, state, scope| {
+        let runtime = state.runtime(vm, heap);
+        HostCtx::new(vm, runtime, heap, state).handle_scope(|vm, heap, state, scope| {
             // 1. exotic @@toPrimitive (GetMethod)
             let exotic = match Object::get_property(
                 vm,
@@ -1170,8 +1171,9 @@ impl Object {
                     Hint::String => s.string.get(heap).erase(),
                 });
                 let args = scope.stage(&[hint_string.as_tagged(heap)]);
-                let result =
-                    scope.handle(HostCtx::enter(vm, &mut *heap, state, exotic, args, None)?);
+                let result = scope.handle(HostCtx::enter(
+                    vm, runtime, &mut *heap, state, exotic, args, None,
+                )?);
                 if result.as_tagged(heap) == heap.known().exception.get(heap) {
                     return Ok(Coercion::Threw);
                 }
@@ -1207,8 +1209,9 @@ impl Object {
                     continue;
                 }
                 let args = scope.stage(&[value.as_tagged(heap)]);
-                let result =
-                    scope.handle(HostCtx::enter(vm, &mut *heap, state, method, args, None)?);
+                let result = scope.handle(HostCtx::enter(
+                    vm, runtime, &mut *heap, state, method, args, None,
+                )?);
                 if result.as_tagged(heap) == heap.known().exception.get(heap) {
                     return Ok(Coercion::Threw);
                 }
@@ -1452,6 +1455,7 @@ impl Object {
         args: &[Handle<'_, Value>],
         new_target: Handle<'_, Value>,
     ) -> Result<Coercion<'a>, VmError> {
+        let runtime = state.runtime(vm, heap);
         let is_bound = target
             .as_tagged(heap)
             .as_heap_object()
@@ -1460,6 +1464,7 @@ impl Object {
             return state.handle_scope(|scope| {
                 let value = scope.handle(HostCtx::enter_bound(
                     vm,
+                    runtime,
                     heap,
                     state,
                     target,
@@ -1498,6 +1503,7 @@ impl Object {
             let staged = scope.stage(&all);
             let result = scope.handle(HostCtx::enter(
                 vm,
+                runtime,
                 heap,
                 state,
                 target,

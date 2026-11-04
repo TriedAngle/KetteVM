@@ -4,6 +4,7 @@
 use crate::JSRuntime;
 use vm_core::Coercion;
 use vm_core::HostCtx;
+use vm_core::Runtime;
 use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextObject, DenseString, Errors, Handle, HandleScope, HandleSlice, Heap, Object,
@@ -19,7 +20,10 @@ pub fn function_constructor<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let ids = &ctx.runtime::<JSRuntime>().ids;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         // root the caller context before the allocating ToString loop below
         let context = scope.handle(
@@ -53,7 +57,6 @@ pub fn function_constructor<'a>(
         // TODO: the dynamic function is parsed in the caller's context; the
         // spec parses it in the global scope (ES 20.2.1.1 step 8).
         let source = format!("(function ({params}) {{\n{body}\n}})");
-        let ids = &vm.runtime_state::<JSRuntime>().ids;
         let program = match js_compiler::compile_js(&source, bytecode::SourceMode::Eval, ids) {
             Ok(program) => program,
             Err(_) => {
@@ -74,13 +77,20 @@ pub fn function_constructor<'a>(
             vm,
             heap,
             state,
-            Materialize::closure_vm(vm, heap, state, &scope, &program, context)
+            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context)
         );
-        let result =
-            match HostCtx::enter(vm, heap, state, closure.erase(), HandleSlice::EMPTY, None) {
-                Ok(result) => scope.handle(result),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+        let result = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            closure.erase(),
+            HandleSlice::EMPTY,
+            None,
+        ) {
+            Ok(result) => scope.handle(result),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
         result.as_tagged(heap).erase()
     })
 }
@@ -93,7 +103,9 @@ pub fn function_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -132,7 +144,9 @@ pub fn function_call<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -140,7 +154,15 @@ pub fn function_call<'a>(
     // args[0] is the receiver, so the tail is exactly (thisArg, ...args)
     let forwarded = state.stack().slice(args.slice_from(1));
     state.handle_scope(|scope| {
-        let result = match HostCtx::enter(vm, heap, state, function, forwarded, None) {
+        let result = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            function,
+            forwarded,
+            None,
+        ) {
             Ok(result) => scope.handle(result),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
@@ -156,7 +178,9 @@ pub fn function_apply<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -177,7 +201,15 @@ pub fn function_apply<'a>(
         call_args.push(this_arg.as_tagged(heap));
         call_args.extend(elements.iter().map(|element| element.as_tagged(heap)));
         let call_args = scope.stage(&call_args);
-        let result = match HostCtx::enter(vm, heap, state, function, call_args, None) {
+        let result = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            function,
+            call_args,
+            None,
+        ) {
             Ok(result) => scope.handle(result),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
@@ -230,7 +262,9 @@ pub fn function_bind<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 0);
     if !target.as_tagged(heap).is_callable(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);

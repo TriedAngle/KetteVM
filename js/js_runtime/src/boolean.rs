@@ -11,7 +11,9 @@ pub fn boolean_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(new_target) = new_target else {
         let arg = args.get(heap, 1);
         return Convert::boolean(heap, arg.is_truthy(heap));
@@ -63,7 +65,9 @@ pub fn boolean_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let value = match args
         .get(heap, 0)
         .wrapper_value(heap, vm.known(), WrapperKind::Boolean)

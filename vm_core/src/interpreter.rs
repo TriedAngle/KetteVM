@@ -7,12 +7,13 @@ use core::cell::Cell;
 
 use bytecode::Opcode;
 
+use crate::api::ErasedRuntimeState;
 use crate::heap::{Heap, Register};
 use crate::stack::{FrameMeta, Stack};
 use crate::value::{Tagged, Value};
 use crate::{
-    Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, ThreadState, VM, VmError,
-    Word, raise_runtime,
+    Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, RuntimeId, ThreadState,
+    VM, VmError, Word, raise_runtime,
 };
 
 /// Loop back-edge ticks between safepoint polls.
@@ -145,6 +146,17 @@ impl Acc {
     }
 }
 
+/// The runtime a frame's code belongs to (its callable's runtime id).
+#[inline(always)]
+fn frame_runtime_id(state: &ThreadState, heap: &Heap, base: usize) -> RuntimeId {
+    state
+        .stack()
+        .frame_header(base)
+        .code(heap)
+        .as_ref()
+        .runtime()
+}
+
 pub struct Ctx<'s, 'h> {
     vm: &'s VM,
     state: &'s ThreadState,
@@ -158,12 +170,18 @@ pub struct Ctx<'s, 'h> {
     /// throws with a sentinel successor pointer; the pc rides here so
     /// the per-instruction dispatch path stays two pointer compares.
     throw_pc: Cell<usize>,
+    /// The executing frame's runtime and its resolved state: re-resolved on
+    /// a frame switch only when the runtime changes, so the native path is
+    /// one load with no branch.
+    runtime: Cell<(RuntimeId, &'s dyn ErasedRuntimeState)>,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
         let code = state.stack().frame_header(base_anchor).code(heap).as_ptr();
+        let runtime_id = frame_runtime_id(state, heap, base_anchor);
+        let runtime = vm.runtime_by_id(runtime_id);
         Ctx {
             vm,
             state,
@@ -172,7 +190,14 @@ impl<'s, 'h> Ctx<'s, 'h> {
             code: Cell::new(code),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
             throw_pc: Cell::new(0),
+            runtime: Cell::new((runtime_id, runtime)),
         }
+    }
+
+    /// The runtime whose bytecode is executing.
+    #[inline(always)]
+    pub fn runtime(&self) -> &'s dyn ErasedRuntimeState {
+        self.runtime.get().1
     }
 
     #[inline(always)]
@@ -238,10 +263,20 @@ impl<'s, 'h> Ctx<'s, 'h> {
         self.base_anchor
     }
 
+    /// Re-resolve the cached runtime when a switch changes it (the common
+    /// case, same-language calls, costs one compare).
+    #[inline]
+    fn set_frame_runtime(&self, id: RuntimeId) {
+        if self.runtime.get().0 != id {
+            self.runtime.set((id, self.vm.runtime_by_id(id)));
+        }
+    }
+
     /// Switch the current frame (after a push, pop, or unwind).
     #[inline(always)]
     pub fn set_frame_base(&self, base: usize) {
         self.state.set_frame_base(base);
+        self.set_frame_runtime(frame_runtime_id(self.state, self.heap, base));
     }
 
     /// The current frame's pc origin (one load; the header chain runs
@@ -270,14 +305,16 @@ impl<'s, 'h> Ctx<'s, 'h> {
         let code = state.stack().frame_header(base).code(self.heap);
         self.state.set_frame_base(base);
         self.code.set(code.as_ptr());
+        self.set_frame_runtime(code.as_ref().runtime());
     }
 
     /// Switch to a freshly pushed frame, whose pc origin the caller
     /// already read from the callee's info.
     #[inline(always)]
-    pub fn switch_frame_code(&self, base: usize, code: *const u8) {
+    pub fn switch_frame_code(&self, base: usize, code: *const u8, runtime: RuntimeId) {
         self.state.set_frame_base(base);
         self.code.set(code);
+        self.set_frame_runtime(runtime);
     }
 
     /// The current frame's language mode, read from its callable info.
@@ -359,7 +396,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
         if let Some(top) = bump {
             stack.set_top(top);
         }
-        let nctx = HostCtx::new(vm, self.heap_mut(), state);
+        let nctx = HostCtx::new(vm, state.runtime(vm, self.heap()), self.heap_mut(), state);
         let v = f(nctx, None, args);
         if bump.is_some() {
             stack.set_top(saved);

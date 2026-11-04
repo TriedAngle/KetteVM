@@ -23,6 +23,8 @@ use vm_core::{Coercion, Hint};
 use vm_core::{DenseString, MapKind, Tagged, Value, VmError};
 use vm_core::{ThreadState, VM};
 
+use crate::JSRuntime;
+
 /// Milliseconds in a UTC day.
 const MS_PER_DAY_I64: i64 = 86_400_000;
 /// The largest time value (ES 21.4.1.1): 100_000_000 days.
@@ -416,7 +418,9 @@ pub fn date_parse<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let arg = args.get_handle(heap, 1);
     // Fast path: a primitive string needs no ToString coercion.
     if let Some(text) = arg.as_tagged(heap).get_as::<DenseString>(heap) {
@@ -562,7 +566,9 @@ pub fn date_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     // The call form ignores every argument.
     let Some(new_target) = new_target else {
         return state.handle_scope(|scope| {
@@ -631,7 +637,9 @@ pub fn date_get_time<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -680,7 +688,9 @@ impl Field {
 /// Shared body of the getters: `𝔽(op(LocalTime(tv)))`, NaN for an invalid
 /// Date. `LocalTime` is the identity, so the local and UTC forms coincide.
 fn get_field<'a>(ctx: HostCtx<'a>, args: Args, field: Field) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -759,7 +769,9 @@ fn set_fields<'a>(
     span: SetSpan,
     invalid_fills_zero: bool,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -810,7 +822,9 @@ pub fn date_set_time<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     if date_value(heap, receiver.as_tagged(heap)).is_none() {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -831,7 +845,9 @@ pub fn date_get_timezone_offset<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -847,7 +863,9 @@ pub fn date_get_year<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -1195,7 +1213,9 @@ pub fn date_set_year<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -1229,7 +1249,9 @@ fn format_with<'a>(
     format: fn(&Broken) -> String,
     invalid: &'static str,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -1251,7 +1273,9 @@ pub fn date_to_iso_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
@@ -1291,7 +1315,10 @@ pub fn date_to_json<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let known = &ctx.runtime::<JSRuntime>().known;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let this = args.get_handle(heap, 0);
         let object = scope.handle(this.as_tagged(heap));
@@ -1307,7 +1334,7 @@ pub fn date_to_json<'a>(
         {
             return vm.known().null.get(heap).erase();
         }
-        let name = scope.handle(vm.known().strings.to_iso_string.get(heap).erase());
+        let name = scope.handle(known.strings.to_iso_string.get(heap).erase());
         let method = match Object::get_property(vm, heap, state, object, object, name, false) {
             Ok(Coercion::Value(value)) => scope.handle(value),
             Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
@@ -1320,7 +1347,15 @@ pub fn date_to_json<'a>(
         // Root the call result before dropping the heap borrow it carries:
         // that keeps the error path free of a second `&mut Heap` while the
         // first is still anchored.
-        let outcome = match HostCtx::enter(vm, heap, state, method, call_args, None) {
+        let outcome = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            method,
+            call_args,
+            None,
+        ) {
             Ok(value) => Ok(scope.handle(value)),
             Err(err) => Err(err),
         };

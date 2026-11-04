@@ -42,9 +42,9 @@ pub fn push_callee_frame<'a>(
     let undefined = roots.undefined.get(heap).erase();
     // the pushed frame's code, straight from the callee's info:
     // `push_frame` does not allocate, so it cannot go stale
-    let code = callee.info.as_ref().code.get(heap).as_ptr();
+    let bytecode = callee.info.as_ref().code.get(heap);
     let frame = x.stack().push_frame(heap, meta, callee, undefined, args)?;
-    x.switch_frame_code(frame.base, code);
+    x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(StagedCall::Frame)
 }
 
@@ -62,11 +62,11 @@ pub fn push_callee_frame_values<'a>(
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
-    let code = callee.info.as_ref().code.get(heap).as_ptr();
+    let bytecode = callee.info.as_ref().code.get(heap);
     let frame = x
         .stack()
         .push_frame_values(heap, meta, callee, undefined, values)?;
-    x.switch_frame_code(frame.base, code);
+    x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(StagedCall::Frame)
 }
 
@@ -303,7 +303,15 @@ pub fn bound_apply_staged<'a>(
         let forwarded: Vec<Handle<'_, Value>> = (1..staged.len())
             .map(|index| staged.get_handle(x.heap(), index))
             .collect();
-        match HostCtx::enter_bound(vm, x.heap_mut(), state, callee, &forwarded, None) {
+        match HostCtx::enter_bound(
+            vm,
+            x.runtime(),
+            x.heap_mut(),
+            state,
+            callee,
+            &forwarded,
+            None,
+        ) {
             Ok(value) => Acc::set(value),
             Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
         }
@@ -492,7 +500,7 @@ pub fn construct_start<'a>(
     if !derived && kind != FunctionKind::Normal && kind != FunctionKind::BaseClassConstructor {
         return Ok(ConstructStart::Slow);
     }
-    let code = info.as_ref().code.get(x.heap()).as_ptr();
+    let bytecode = info.as_ref().code.get(x.heap());
     let frame = x.stack().push_frame(
         x.heap(),
         x.caller_meta(pc + size, pc),
@@ -504,7 +512,7 @@ pub fn construct_start<'a>(
         callee_word,
         staged,
     )?;
-    x.switch_frame_code(frame.base, code);
+    x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(ConstructStart::Frame)
 }
 
@@ -535,7 +543,7 @@ pub fn construct_native<'a>(
         stack.set_top(top);
     }
     let new_target = Some(stack.reg_handle(base, callee_reg));
-    let nctx = HostCtx::new(x.vm(), x.heap_mut(), state);
+    let nctx = HostCtx::new(x.vm(), x.runtime(), x.heap_mut(), state);
     let v = f(nctx, new_target, args);
     if bump.is_some() {
         stack.set_top(saved);

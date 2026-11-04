@@ -60,7 +60,7 @@ use object::{
     object_property_is_enumerable, object_proto_get, object_proto_set, object_seal,
     object_set_prototype_of, object_to_string,
 };
-use proxy::{REVOKE_PRELUDE, proxy_constructor, proxy_revocable, proxy_revoke};
+use proxy::{proxy_constructor, proxy_revocable, proxy_revoke};
 use string::{string_constructor, string_to_string, string_value_of};
 use symbol::{
     symbol_constructor, symbol_for, symbol_key_for, symbol_prototype_description,
@@ -69,34 +69,46 @@ use symbol::{
 
 use vm_core::{
     DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Symbol, Tagged,
-    Thread, VM, Value, Visitor, VmError,
+    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SlotFlags, SlotName, Smi, Symbol,
+    Tagged, Thread, VM, Value, Visitor, VmError,
 };
 
+mod known;
 mod native;
 
-pub struct JSRuntime;
-
-impl Runtime for JSRuntime {
-    type State = JSState;
-
-    fn setup(vm: &mut VM, state: &mut Self::State) -> Result<(), VmError> {
-        state.ids = native::register(vm);
-        state.indices = register_builtin_natives(vm);
-        install_builtins(vm, &state.indices, &state.ids)
-    }
-}
-
-pub struct JSState {
+/// The JS runtime: its state is the runtime itself (one instance per VM).
+pub struct JSRuntime {
     pub indices: BuiltinIndices,
     /// Ids of the native functions the compiler emits in `CallNative`.
     pub ids: NativeIds,
+    /// Well-known roots only JS uses.
+    pub known: known::JsKnown,
 }
 
-impl Default for JSState {
+impl Runtime for JSRuntime {
+    const ID: RuntimeId = RuntimeId(1);
+
+    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError> {
+        state.ids = native::register(vm);
+        state.indices = register_builtin_natives(vm);
+        {
+            let mut thread = vm.attach();
+            thread.handle_scope(|thread, scope| {
+                state
+                    .known
+                    .strings
+                    .intern_all(thread.heap(), vm.interner(), &scope);
+            });
+        }
+        install_builtins(vm, state)
+    }
+}
+
+impl Default for JSRuntime {
     fn default() -> Self {
         Self {
             indices: BuiltinIndices::default(),
+            known: known::JsKnown::default(),
             ids: NativeIds {
                 get_iterator: NativeIndex(0),
                 iterator_next: NativeIndex(0),
@@ -144,8 +156,10 @@ impl Default for JSState {
     }
 }
 
-impl EdgeVisitable for JSState {
-    fn visit_edges(&self, _visitor: &mut dyn Visitor) {}
+impl EdgeVisitable for JSRuntime {
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        self.known.visit_edges(visitor);
+    }
 }
 
 /// Register the native functions behind the builtins.
@@ -459,7 +473,8 @@ fn install_error_class<'s>(
 }
 
 /// Build the builtin objects and install them on the global object.
-pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices, ids: &NativeIds) -> Result<(), VmError> {
+pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmError> {
+    let idx = &state.indices;
     let known = vm.known();
     let mut thread = vm.attach();
     let wks = &known.strings;
@@ -759,15 +774,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices, ids: &NativeIds) -> R
             "bind",
             idx.function_bind,
         )?;
-        // the proxy revoke closure (see REVOKE_PRELUDE)
-        Object::run_prelude(
-            thread,
-            &scope,
-            REVOKE_PRELUDE,
-            "revoke prelude",
-            |src, mode| js_compiler::compile_js(src, mode, ids),
-        )?;
-
         // ---- eval -------------------------------------------------------------
         let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
         Object::set_builtin_name(thread, &scope, eval_fn, "eval")?;
@@ -1373,7 +1379,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices, ids: &NativeIds) -> R
 
         // iterator-result map: { value, done } both {w+, e+, c+}
         let value_name = scope.handle(known.strings.value.get(thread.heap()));
-        let done_name = scope.handle(known.strings.done.get(thread.heap()));
+        let done_name = scope.handle(state.known.strings.done.get(thread.heap()));
         let flags = SlotFlags::WRITABLE
             .union(SlotFlags::CONFIGURABLE)
             .union(SlotFlags::ENUMERABLE);
@@ -1807,19 +1813,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices, ids: &NativeIds) -> R
             revocable_name,
             PropertyDescriptor::method(revocable_fn.erase()),
         )?;
-        // hidden revoke runtime used by the REVOKE_PRELUDE closure
-        let revoke_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revoke)?;
-        let revoke_name = thread.intern(&scope, "__revokeProxy");
-        // Safety: fresh interned word, rooted below before the define.
-        let revoke_name = scope.handle(revoke_name.as_tagged(thread.heap()));
-        Object::define_own_property(
-            thread.heap(),
-            &scope,
-            global,
-            revoke_name,
-            PropertyDescriptor::method(revoke_fn.erase()),
-        )?;
-
         // ---- Object extensibility statics --------------------------------------
         Object::install_method(thread, &scope, object_fn, "is", idx.object_is)?;
         Object::install_method(

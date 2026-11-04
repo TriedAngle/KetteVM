@@ -13,7 +13,9 @@ pub fn string_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let arg = scope.handle(args.get(heap, 1));
         if new_target.is_none()

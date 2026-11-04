@@ -6,6 +6,7 @@ use interpreter::DefaultInterpreter;
 use js_compiler::{SourceMode, compile_js};
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
+use vm_core::Runtime;
 use vm_core::{Interpreter, VM, VmCore};
 
 fn run<I: Interpreter>(src: &str) {
@@ -15,14 +16,12 @@ fn run<I: Interpreter>(src: &str) {
         .expect("vm core")
         .add::<JSRuntime>()
         .expect("js runtime");
-    let program = compile_js(
-        src,
-        SourceMode::Script,
-        &vm.runtime_state::<JSRuntime>().ids,
-    )
-    .expect("compile");
+    let program =
+        compile_js(src, SourceMode::Script, &vm.runtime::<JSRuntime>().ids).expect("compile");
     let mut thread = vm.attach();
-    thread.run_program(program).expect("script runs");
+    thread
+        .run_program(program, JSRuntime::ID)
+        .expect("script runs");
     if let Some(ex) = thread.take_pending_exception() {
         eprintln!("uncaught exception: {ex:?}");
         std::process::exit(1);

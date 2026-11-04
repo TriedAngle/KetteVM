@@ -101,7 +101,9 @@ pub fn math_sqrt<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_unary(vm, heap, state, args, f64::sqrt)
 }
 
@@ -111,7 +113,9 @@ pub fn math_log<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_unary(vm, heap, state, args, f64::ln)
 }
 
@@ -121,7 +125,9 @@ pub fn math_pow<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let Some(base) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
         return vm.known().exception.get(heap).erase();
     };
@@ -149,7 +155,9 @@ pub fn math_abs<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_unary(vm, heap, state, args, f64::abs)
 }
 
@@ -159,7 +167,9 @@ pub fn math_floor<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_integral(vm, heap, state, args, f64::floor)
 }
 
@@ -169,7 +179,9 @@ pub fn math_ceil<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_integral(vm, heap, state, args, f64::ceil)
 }
 
@@ -179,7 +191,9 @@ pub fn math_trunc<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_integral(vm, heap, state, args, f64::trunc)
 }
 
@@ -189,7 +203,9 @@ pub fn math_round<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     math_integral(vm, heap, state, args, js_round)
 }
 
@@ -197,7 +213,9 @@ pub fn math_round<'a>(
 /// argument (or no argument at all) decides the result per spec.
 #[inline]
 fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let mut result = if min {
         f64::INFINITY
     } else {

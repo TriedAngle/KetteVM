@@ -174,7 +174,15 @@ fn call_trap<'a>(
         return Err(VmError::Message(Message::ProxyTrapNotFunction));
     }
     let staged = scope.stage_handles(args);
-    let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, *trap, staged, None)?);
+    let result = scope.handle(HostCtx::enter(
+        vm,
+        state.runtime(vm, heap),
+        &mut *heap,
+        state,
+        *trap,
+        staged,
+        None,
+    )?);
     let exception = heap.known().exception.get(heap);
     if result.as_tagged(heap) == exception {
         Ok(Coercion::Threw)
@@ -963,7 +971,15 @@ fn apply_h<'a>(
                 all.push(h.as_tagged(heap).erase());
             }
             let staged = scope.stage(&all);
-            let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, target, staged, None)?);
+            let result = scope.handle(HostCtx::enter(
+                vm,
+                state.runtime(vm, heap),
+                &mut *heap,
+                state,
+                target,
+                staged,
+                None,
+            )?);
             let exception = heap.known().exception.get(heap);
             if result.as_tagged(heap) == exception {
                 Ok(Coercion::Threw)

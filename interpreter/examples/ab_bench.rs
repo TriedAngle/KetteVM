@@ -2,6 +2,7 @@ use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::time::Instant;
+use vm_core::Runtime;
 use vm_core::{Smi, Thread, VM, VmCore};
 
 fn pending_exception_message(thread: &mut Thread) -> Option<String> {
@@ -25,12 +26,12 @@ fn bench(name: &str, src: &str, iters: usize) {
         let program = js_compiler::compile_js(
             src,
             js_compiler::SourceMode::Script,
-            &vm.runtime_state::<JSRuntime>().ids,
+            &vm.runtime::<JSRuntime>().ids,
         )
         .expect("compile");
         let mut thread = vm.attach();
         let t = Instant::now();
-        let _result = thread.run_program(program).expect("runs");
+        let _result = thread.run_program(program, JSRuntime::ID).expect("runs");
         let dt = t.elapsed();
         if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
@@ -81,11 +82,11 @@ fn score_bench(name: &str, src: &str, iters: usize) {
         let program = js_compiler::compile_js(
             src,
             js_compiler::SourceMode::Script,
-            &vm.runtime_state::<JSRuntime>().ids,
+            &vm.runtime::<JSRuntime>().ids,
         )
         .expect("compile");
         let mut thread = vm.attach();
-        let result = thread.run_program(program).expect("runs");
+        let result = thread.run_program(program, JSRuntime::ID).expect("runs");
         if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
         }

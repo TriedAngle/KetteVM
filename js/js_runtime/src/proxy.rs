@@ -1,7 +1,6 @@
 //! ES 28.2: the Proxy constructor, Proxy.revocable, and the
 //! revoke-closure prelude.
 
-use vm_core::Coercion;
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::PropertyDescriptor;
@@ -9,7 +8,9 @@ use vm_core::error::Message;
 use vm_core::proxy::Proxy;
 use vm_core::raise_runtime;
 use vm_core::rt_try;
-use vm_core::{Args, Handle, HandleSlice, Tagged, Value, VmError};
+use vm_core::{Args, Handle, HandleSlice, Smi, Tagged, Value, VmError};
+
+use crate::JSRuntime;
 
 /// `new Proxy(target, handler)` (ES 20.2.1.1): both must be JSReceivers;
 /// the map's capability bits mirror the target's so callability is
@@ -20,7 +21,9 @@ pub fn proxy_constructor<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     let construct = new_target.is_some();
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     if !construct {
         return raise_runtime(vm, heap, state, VmError::Message(Message::ProxyRequiresNew));
     }
@@ -56,7 +59,10 @@ pub fn proxy_revocable<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let idx = &ctx.runtime::<JSRuntime>().indices;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 1);
     let handler = args.get_handle(heap, 2);
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
@@ -77,41 +83,58 @@ pub fn proxy_revocable<'a>(
             unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) },
             unsafe { Tagged::<Value>::from_value_unchecked(handler.raw()) },
         ));
-        // Function.prototype.__makeRevoke (installed by REVOKE_PRELUDE)
-        // Safety: fresh interned word, consumed by the lookup.
-        let name = vm
-            .interner()
-            .intern_str(heap, &scope, "__makeRevoke")
-            .erase();
-        let proto = scope.handle(vm.known().function_prototype.get(heap).erase());
-        let make_revoke = match rt_try!(
+        // revoke = `%__revokeProxy%` bound to the proxy (ES 20.2.4: a
+        // built-in function with [[RevocableProxy]]; the revocation itself
+        // is idempotent, so no done-flag is needed). A bound function has
+        // no `prototype` own property, like a built-in.
+        let target = rt_try!(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, proto, proto, name, false)
-        ) {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            Coercion::Value(v) => scope.handle(v),
-        };
-        // Safety: fresh rooted-slot words staged for the call.
-        let exception = vm.known().exception.get(heap).raw();
-        let staged = scope.stage(&[
-            vm.known().undefined.get(heap).erase(),
-            proxy.as_tagged(heap).erase(),
-        ]);
-        let r = rt_try!(
-            vm,
-            heap,
-            state,
-            HostCtx::enter(vm, &mut *heap, state, make_revoke, staged, None)
+            Object::native_function(heap, &scope, idx.proxy_revoke)
         );
-        if r.raw() == exception {
-            return vm.known().exception.get(heap).erase();
-        }
-        // Safety: fresh call result, rooted below.
-        let revoke = scope.handle(r);
+        let bound_args =
+            scope.handle(heap.new_array(&scope, scope.stage(&[proxy.as_tagged(heap)])));
+        let map = scope.handle(vm.known().bound_function_map.get(heap));
+        let slots = scope.stage(&[
+            target.as_tagged(heap).erase(),
+            vm.known().undefined.get(heap).erase(),
+            bound_args.as_tagged(heap).erase(),
+        ]);
+        let bound = scope.handle(heap.new_object(&scope, map, slots));
+        let prototype = scope.handle(vm.known().function_prototype.get(heap).erase());
+        rt_try!(
+            vm,
+            heap,
+            state,
+            Object::set_prototype(heap, &scope, bound, prototype)
+        );
+        // name "revoke", length 0 (the bound argument), neither enumerable
+        let name_key = scope.handle(vm.known().strings.name.get(heap));
+        let name_value = scope.handle(
+            vm.interner()
+                .intern_str(heap, &scope, "revoke")
+                .as_tagged(heap)
+                .erase(),
+        );
+        let builtin_attrs = PropertyDescriptor::Data {
+            value: name_value,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        let _ = Object::define_own_property(heap, &scope, bound, name_key, builtin_attrs);
+        let length_key = scope.handle(vm.known().strings.length.get(heap));
+        let zero: Handle<'_, Value> = scope.handle(Smi::new(0));
+        let length_attrs = PropertyDescriptor::Data {
+            value: zero,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        let _ = Object::define_own_property(heap, &scope, bound, length_key, length_attrs);
+        let revoke = bound.as_tagged(heap).erase();
+        let revoke = scope.handle(revoke);
         let map = scope.handle(vm.known().object_initial_map.get(heap));
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
@@ -144,7 +167,9 @@ pub fn proxy_revoke<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state: _ } = ctx;
+    let HostCtx {
+        vm, heap, state: _, ..
+    } = ctx;
     let proxy = args.get(heap, 1);
     let proxy = proxy.raw();
     Proxy::revoke(
@@ -154,18 +179,3 @@ pub fn proxy_revoke<'a>(
     );
     vm.known().undefined.get(heap).erase()
 }
-
-/// The revoke-closure template: `done` plays [[RevocableProxy]]'s
-/// cleared-slot role (idempotent revoke), the captured `p` keeps the
-/// proxy reachable.
-pub const REVOKE_PRELUDE: &str = r#"
-Function.prototype.__makeRevoke = function (p) {
-  var done = false;
-  return function revoke() {
-    if (!done) {
-      done = true;
-      __revokeProxy(p);
-    }
-  };
-};
-"#;

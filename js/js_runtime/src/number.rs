@@ -15,7 +15,9 @@ pub fn number_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let n = rt_try!(
         vm,
         heap,

@@ -1,8 +1,8 @@
 use crate::api::Runtime;
 use crate::errors::Errors;
 use crate::{
-    Args, Coercion, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState, VM, Value,
-    VmError,
+    Args, Coercion, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Tagged,
+    ThreadState, VM, Value, VmError,
 };
 use core::ptr::NonNull;
 
@@ -10,22 +10,42 @@ use core::ptr::NonNull;
 
 pub struct HostCtx<'a> {
     pub vm: &'a VM,
+    /// The runtime whose code is executing: the frame's runtime, or
+    /// `VmCore` when the call did not come from a front end's frame.
+    pub runtime: &'a dyn ErasedRuntimeState,
     pub heap: &'a mut Heap,
     pub state: &'a ThreadState,
 }
 
 impl<'a> HostCtx<'a> {
-    pub fn new(vm: &'a VM, heap: &'a mut Heap, state: &'a ThreadState) -> Self {
-        Self { vm, heap, state }
+    pub fn new(
+        vm: &'a VM,
+        runtime: &'a dyn ErasedRuntimeState,
+        heap: &'a mut Heap,
+        state: &'a ThreadState,
+    ) -> Self {
+        Self {
+            vm,
+            runtime,
+            heap,
+            state,
+        }
     }
 
     /// The state runtime `R` stored during `VM::add`.
-    pub fn runtime_state<R: Runtime>(&self) -> &R::State {
-        self.vm.runtime_state::<R>()
+    #[inline(always)]
+    pub fn runtime<R: Runtime>(&self) -> &'a R {
+        debug_assert!(
+            self.runtime.as_any().is::<R>(),
+            "native read a foreign runtime's state"
+        );
+        // Safety: the executing runtime is `R` (asserted in debug builds).
+        unsafe { &*(self.runtime as *const dyn ErasedRuntimeState as *const R) }
     }
 
     /// Root a handle scope and hand the closure the context parts at their
     /// real (heap) lifetime, so values produced inside are `Tagged<'a>`.
+    #[inline(always)]
     pub fn handle_scope<R>(
         self,
         f: impl FnOnce(&'a VM, &'a mut Heap, &'a ThreadState, HandleScope<'_>) -> R,
@@ -43,6 +63,7 @@ impl<'a> HostCtx<'a> {
     /// the `heap` borrow and `heap` stays usable.
     pub fn enter<'h, 'r>(
         vm: &'h VM,
+        runtime: &'h dyn ErasedRuntimeState,
         heap: &'h mut Heap,
         state: &'h ThreadState,
         callable: Handle<'_, Value>,
@@ -69,9 +90,17 @@ impl<'a> HostCtx<'a> {
             let forwarded: Vec<Handle<'_, Value>> = (1..args.len())
                 .filter_map(|index| args.get(index))
                 .collect();
-            return Self::enter_bound(vm, heap, state, callable.erase(), &forwarded, new_target);
+            return Self::enter_bound(
+                vm,
+                runtime,
+                heap,
+                state,
+                callable.erase(),
+                &forwarded,
+                new_target,
+            );
         }
-        (vm.shared.execute)(vm, heap, state, callable, args, new_target)
+        (vm.shared.execute)(vm, runtime, heap, state, callable, args, new_target)
     }
 
     /// A bound function's `[[Call]]`/`[[Construct]]` (ES 10.4.2): appends
@@ -81,6 +110,7 @@ impl<'a> HostCtx<'a> {
     /// the bound function itself is being constructed.
     pub fn enter_bound<'h>(
         vm: &'h VM,
+        runtime: &'h dyn ErasedRuntimeState,
         heap: &'h mut Heap,
         state: &'h ThreadState,
         bound: Handle<'_, Value>,
@@ -115,7 +145,7 @@ impl<'a> HostCtx<'a> {
                             .map(|arg| arg.as_tagged(heap))
                             .collect::<Vec<_>>(),
                     );
-                    Self::enter(vm, heap, state, target, staged, None)
+                    Self::enter(vm, runtime, heap, state, target, staged, None)
                 }
                 Some(new_target) => {
                     let new_target =

@@ -7,6 +7,7 @@ use vm_core::{
 };
 use vm_core::{raise_runtime, rt_try};
 
+use crate::JSRuntime;
 use crate::object::is_array;
 
 const ARRAY_ITERATOR_KIND_KEY: i64 = 0;
@@ -67,7 +68,9 @@ pub fn array_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let proto = match new_target {
             Some(nt) => {
@@ -137,7 +140,9 @@ pub fn array_push<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     match array_push_fast(heap, state, args) {
         Some(Ok(len)) => return Smi::new(len as i64).into_tagged(),
         Some(Err(err)) => return raise_runtime(vm, heap, state, err),
@@ -288,7 +293,9 @@ pub fn array_pop<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         if let Some(v) = array_pop_fast(heap, &scope, args) {
             return v.as_tagged(heap);
@@ -413,7 +420,9 @@ pub fn array_values<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
         let obj = match Convert::to_object(vm, heap, &scope, receiver) {
@@ -442,7 +451,9 @@ pub fn array_iterator_next<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(iterator) = receiver.as_tagged(heap).as_heap_object() else {
@@ -575,7 +586,9 @@ pub fn array_join<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     let separator = (args.len() > 1).then(|| args.get_handle(heap, 1));
     join_impl(vm, heap, state, receiver, separator)
@@ -589,7 +602,9 @@ pub fn array_map<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
         let obj = match Convert::to_object(vm, heap, &scope, receiver) {
@@ -631,7 +646,15 @@ pub fn array_map<'a>(
                 Smi::new(k as i64).into_tagged(),
                 obj.as_tagged(heap),
             ]);
-            let mapped = match HostCtx::enter(vm, heap, state, callback, call_args, None) {
+            let mapped = match HostCtx::enter(
+                vm,
+                state.runtime(vm, heap),
+                heap,
+                state,
+                callback,
+                call_args,
+                None,
+            ) {
                 Ok(value) => scope.handle(value),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             };
@@ -659,7 +682,9 @@ pub fn array_reduce<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
         let obj = match Convert::to_object(vm, heap, &scope, receiver) {
@@ -715,7 +740,15 @@ pub fn array_reduce<'a>(
                 Smi::new(k as i64).into_tagged(),
                 obj.as_tagged(heap),
             ]);
-            let result = match HostCtx::enter(vm, heap, state, callback, call_args, None) {
+            let result = match HostCtx::enter(
+                vm,
+                state.runtime(vm, heap),
+                heap,
+                state,
+                callback,
+                call_args,
+                None,
+            ) {
                 Ok(value) => scope.handle(value),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             };
@@ -737,14 +770,17 @@ pub fn array_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let known = &ctx.runtime::<JSRuntime>().known;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let obj = match Convert::to_object(vm, heap, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let join_key = scope.handle(vm.known().strings.join.get(heap).erase());
+        let join_key = scope.handle(known.strings.join.get(heap).erase());
         let join = match Object::get_property(vm, heap, state, obj, obj, join_key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
@@ -756,7 +792,15 @@ pub fn array_to_string<'a>(
             scope.handle(vm.known().object_to_string.get(heap).erase())
         };
         let call_args = scope.stage(&[obj.as_tagged(heap).erase()]);
-        let outcome = match HostCtx::enter(vm, heap, state, func, call_args, None) {
+        let outcome = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            func,
+            call_args,
+            None,
+        ) {
             Ok(value) => Ok(scope.handle(value)),
             Err(err) => Err(err),
         };
@@ -855,7 +899,9 @@ pub fn array_is_array<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let arg = args.get(heap, 1);
     let is_array = match is_array(heap, arg) {
         Ok(is_array) => is_array,
@@ -898,7 +944,9 @@ pub fn array_slice<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
         let obj = match Convert::to_object(vm, heap, &scope, receiver) {
@@ -1017,7 +1065,9 @@ pub fn array_sort<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         // Comparator validation happens before ToObject (ES step 1).
         let cmpfn = if args.len() > 1 {
@@ -1121,7 +1171,15 @@ pub fn array_sort<'a>(
                         let x = a.as_tagged(heap);
                         let y = b.as_tagged(heap);
                         let call_args = cscope.stage(&[undefined.as_tagged(heap), x, y]);
-                        let result = match HostCtx::enter(vm, heap, state, *cmp, call_args, None) {
+                        let result = match HostCtx::enter(
+                            vm,
+                            state.runtime(vm, heap),
+                            heap,
+                            state,
+                            *cmp,
+                            call_args,
+                            None,
+                        ) {
                             Ok(v) => cscope.handle(v),
                             Err(err) => {
                                 raise_runtime(vm, heap, state, err);

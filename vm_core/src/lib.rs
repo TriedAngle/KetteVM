@@ -1,4 +1,3 @@
-use std::any::{Any, TypeId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -33,9 +32,10 @@ pub use objects::proxy;
 pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
 
-pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime};
+pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
+    smi_slot,
 };
 pub use compare::Compare;
 pub use convert::{Coercion, Convert, Hint};
@@ -101,6 +101,9 @@ pub trait Compiler {
         source: &str,
         mode: bytecode::SourceMode,
     ) -> Result<bytecode::Program, bytecode::FrontendError>;
+
+    /// The runtime this front end's programs belong to.
+    const RUNTIME: RuntimeId;
 }
 
 /// Number of slots per handle block.
@@ -146,7 +149,8 @@ pub struct SharedVM {
     interner: StringInterner,
     prototype_registry: PrototypeRegistry,
     natives: NativeRegistry,
-    states: Mutex<Vec<(TypeId, Box<dyn ErasedRuntimeState>)>>,
+    /// Installed runtimes in `add` order; a [`RuntimeId`] indexes this.
+    runtimes: Vec<Box<dyn ErasedRuntimeState>>,
     /// Weak slots the GC clears when their targets die; used for tests and
     /// the seed of a weak-registry feature.
     weak_slots: Mutex<Vec<RawCell>>,
@@ -178,7 +182,7 @@ pub struct ThreadState {
     pending_exception: Register,
     has_pending_exception: StdCell<bool>,
     /// The error code behind the current sentinel-channel raise, for
-    /// edges that surface `Result` again (`Thread::run_native`).
+    /// edges that surface `Result` again (`HostCtx::enter`).
     last_error: StdCell<VmError>,
     /// Why this thread's execution terminated, if it did. Set exactly once,
     /// right before the uncatchable unwind; guest code can never observe or
@@ -193,6 +197,7 @@ pub struct ThreadState {
 }
 
 impl ThreadState {
+    #[inline(always)]
     pub fn stack(&self) -> &Stack {
         &self.stack
     }
@@ -205,6 +210,13 @@ impl ThreadState {
     #[inline(always)]
     pub fn set_frame_base(&self, base: usize) {
         self.frame_base.set(base);
+    }
+
+    #[inline]
+    pub fn runtime<'a>(&self, vm: &'a VM, heap: &Heap) -> &'a dyn ErasedRuntimeState {
+        debug_assert!(self.is_frame_active(), "no frame");
+        let code = self.stack().frame_header(self.frame_base()).code(heap);
+        vm.runtime_by_id(code.as_ref().runtime())
     }
 
     #[inline(always)]
@@ -414,7 +426,7 @@ impl SharedVM {
         for slot in self.weak_slots.lock().unwrap().iter() {
             visitor.visit(slot);
         }
-        for (_, state) in self.states.lock().unwrap().iter() {
+        for state in &self.runtimes {
             state.visit_edges(visitor);
         }
         let threads = self.threads.lock().unwrap();
@@ -498,6 +510,7 @@ impl Thread {
         self.state.has_pending_exception()
     }
 
+    #[inline(always)]
     pub fn handle_scope<R>(
         &mut self,
         f: impl for<'s> FnOnce(&mut Self, HandleScope<'s>) -> R,
@@ -510,6 +523,7 @@ impl Thread {
         &mut self,
         callable: Handle<'_, Object>,
         args: &[Value],
+        runtime: RuntimeId,
     ) -> Result<Value, VmError> {
         debug_assert_eq!(self.state.stack.top(), 0);
         debug_assert!(!self.state.is_frame_active());
@@ -525,8 +539,17 @@ impl Thread {
                     .map(|v| unsafe { Tagged::<Value>::from_value_unchecked(*v) })
                     .collect::<Vec<_>>(),
             );
-            (self.vm.shared.execute)(&self.vm, &mut self.heap, &self.state, callable, args, None)
-                .map(|v| v.raw())
+            let runtime = self.vm.runtime_by_id(runtime);
+            (self.vm.shared.execute)(
+                &self.vm,
+                runtime,
+                &mut self.heap,
+                &self.state,
+                callable,
+                args,
+                None,
+            )
+            .map(|v| v.raw())
         });
         if self.state.termination().is_some() {
             let _ = self.state.take_pending_exception();
@@ -540,54 +563,30 @@ impl Thread {
         Errors::from_vm_error(&self.vm, &mut self.heap, &self.state, err).map(|v| v.raw())
     }
 
-    pub fn run_native(&mut self, f: NativeFn, args: &[Value]) -> Result<Value, VmError> {
-        let exception = self.vm.known().exception.get(&self.heap).raw();
-        let nctx = HostCtx::new(&self.vm, &mut self.heap, &self.state);
-        // stage a rooted copy: the native may keep reading it across its
-        // own allocations
-        // Safety: caller-owned words staged before any allocation.
-        self.state.handle_scope(|scope| {
-            let v = f(
-                nctx,
-                None,
-                scope
-                    .stage(
-                        &args
-                            .iter()
-                            .map(|v| unsafe { Tagged::<Value>::from_value_unchecked(*v) })
-                            .collect::<Vec<_>>(),
-                    )
-                    .as_args(),
-            );
-            // single channel at the ABI: the sentinel means the pending
-            // exception is set — surface it as the Err half here (the
-            // edge above `execute` keeps the Result convention)
-            if v.raw() == exception {
-                Err(self.state.last_error())
-            } else {
-                Ok(v.raw())
-            }
-        })
-    }
-
-    pub fn run_program(&mut self, program: bytecode::Program) -> Result<Value, ScriptError> {
+    pub fn run_program(
+        &mut self,
+        program: bytecode::Program,
+        runtime: RuntimeId,
+    ) -> Result<Value, ScriptError> {
         self.handle_scope(|thread, scope| {
-            let closure = materialize::Materialize::script(thread, &scope, &program)
+            let closure = materialize::Materialize::script(thread, &scope, &program, runtime)
                 .map_err(ScriptError::Vm)?;
-            thread.execute(closure, &[]).map_err(ScriptError::Vm)
+            thread
+                .execute(closure, &[], runtime)
+                .map_err(ScriptError::Vm)
         })
     }
 
     pub fn eval<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
         let program = C::compile(self.vm(), src, bytecode::SourceMode::Script)
             .map_err(ScriptError::from_frontend)?;
-        self.run_program(program)
+        self.run_program(program, C::RUNTIME)
     }
 
     pub fn eval_repl<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
         let program = C::compile(self.vm(), src, bytecode::SourceMode::Repl)
             .map_err(ScriptError::from_frontend)?;
-        self.run_program(program)
+        self.run_program(program, C::RUNTIME)
     }
 }
 
@@ -641,7 +640,7 @@ impl VM {
             interner,
             prototype_registry: PrototypeRegistry::new(),
             natives: NativeRegistry::new(),
-            states: Mutex::new(Vec::new()),
+            runtimes: Vec::new(),
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
             execute: I::EXECUTE,
@@ -749,28 +748,18 @@ impl VM {
     }
 
     /// Run `R`'s setup (native-fn registration + global installation) and
-    /// store its rooted state for later `runtime_state` access. Must run
-    /// before the VM is shared: `R::setup` registers native functions,
-    /// which requires exclusive access.
-    /// Install one runtime: [`Runtime::setup`] then keep its state.
+    /// store its rooted state. Must run before the VM is shared:
+    /// `R::setup` registers native functions, which needs exclusive access.
     fn install<R: Runtime>(&mut self) -> Result<(), VmError> {
         assert!(
-            !self
-                .shared
-                .states
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(id, _)| *id == TypeId::of::<R>()),
+            !self.has_runtime::<R>(),
             "a runtime is installed once per VM"
         );
-        let mut state = R::State::default();
+        let mut state = Box::new(R::default());
         R::setup(self, &mut state)?;
-        self.shared
-            .states
-            .lock()
-            .unwrap()
-            .push((TypeId::of::<R>(), Box::new(state)));
+        let shared =
+            Arc::get_mut(&mut self.shared).expect("cannot install runtimes on a shared VM");
+        shared.runtimes.push(state);
         Ok(())
     }
 
@@ -779,16 +768,32 @@ impl VM {
         Ok(self)
     }
 
+    /// Whether `R` was installed on this VM.
+    #[inline]
+    pub fn has_runtime<R: Runtime>(&self) -> bool {
+        self.shared.runtimes.get(R::ID.0 as usize).is_some()
+    }
+
+    /// The slot of an installed runtime.
+    #[inline]
+    pub fn runtime_id<R: Runtime>(&self) -> RuntimeId {
+        debug_assert!(self.has_runtime::<R>(), "runtime not added to this VM");
+        R::ID
+    }
+
+    /// The state of the runtime in `id`'s slot.
+    #[inline]
+    pub fn runtime_by_id(&self, id: RuntimeId) -> &dyn ErasedRuntimeState {
+        &*self.shared.runtimes[id.0 as usize]
+    }
+
     /// The state a runtime stored during [`VM::add`].
-    pub fn runtime_state<R: Runtime>(&self) -> &R::State {
-        let states = self.shared.states.lock().unwrap();
-        let (_, state) = states
-            .iter()
-            .find(|(id, _)| *id == TypeId::of::<R>())
-            .expect("runtime not added to this VM");
-        // Safety: entries are append-only and `Box` targets never move, so
-        // the reference stays valid for the life of the VM.
-        unsafe { &*(state.as_any() as *const dyn Any as *const R::State) }
+    #[inline]
+    pub fn runtime<R: Runtime>(&self) -> &R {
+        self.shared.runtimes[R::ID.0 as usize]
+            .as_any()
+            .downcast_ref::<R>()
+            .expect("runtime not added to this VM")
     }
 
     pub fn roots(&self) -> &RootHandles {

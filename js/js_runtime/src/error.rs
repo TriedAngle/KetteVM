@@ -15,7 +15,9 @@ pub fn error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -29,7 +31,9 @@ pub fn eval_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().eval_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -43,7 +47,9 @@ pub fn range_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().range_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -57,7 +63,9 @@ pub fn reference_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().reference_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -71,7 +79,9 @@ pub fn syntax_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().syntax_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -85,7 +95,9 @@ pub fn type_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().type_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -99,7 +111,9 @@ pub fn uri_error_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().uri_error_map.get(heap));
         make_error(vm, heap, state, &scope, new_target, map, args)
@@ -150,7 +164,9 @@ pub fn error_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         if receiver.as_tagged(heap).is_primitive(heap) {

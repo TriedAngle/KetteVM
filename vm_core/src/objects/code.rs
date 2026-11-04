@@ -1,15 +1,18 @@
 use core::{alloc::Layout, cell::UnsafeCell};
 
-use crate::{EdgeVisitable, GcSlot, Header, Heap, HeapObject, ObjectKind, Smi, Visitor};
+use crate::{EdgeVisitable, GcSlot, Header, Heap, HeapObject, ObjectKind, RuntimeId, Smi, Visitor};
 
 #[repr(C)]
 pub struct Code {
     pub header: Header,
     pub size: GcSlot<Smi>,
+    /// The runtime whose bytecode this is (see [`RuntimeId`]).
+    pub runtime: GcSlot<Smi>,
     pub values: [UnsafeCell<u8>; 0],
 }
 
 pub struct CodeInit<'a> {
+    pub runtime: RuntimeId,
     pub bytes: &'a [u8],
 }
 
@@ -20,6 +23,12 @@ impl Code {
             .extend(values_layout)
             .expect("code layout")
             .0
+    }
+
+    /// The runtime whose bytecode this is.
+    #[inline(always)]
+    pub fn runtime(&self) -> RuntimeId {
+        RuntimeId(self.runtime.to_smi_unchecked().value() as u16)
     }
 
     #[inline]
@@ -58,6 +67,8 @@ impl HeapObject for Code {
         self.header.map.init(heap.known().code_map.get(heap));
         self.size
             .set(heap, host, Smi::new(config.bytes.len() as i64));
+        self.runtime
+            .set(heap, host, Smi::new(config.runtime.0 as i64));
         // Safety: `layout_for` reserved `bytes.len()` inline bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(

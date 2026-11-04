@@ -419,7 +419,15 @@ impl Object {
                         return Ok(Coercion::Value(undefined.as_tagged(heap)));
                     }
                     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
-                    let result = scope.handle(HostCtx::enter(vm, heap, state, getter, args, None)?);
+                    let result = scope.handle(HostCtx::enter(
+                        vm,
+                        state.runtime(vm, heap),
+                        heap,
+                        state,
+                        getter,
+                        args,
+                        None,
+                    )?);
                     if result.as_tagged(heap) == heap.known().exception.get(heap) {
                         Ok(Coercion::Threw)
                     } else {
@@ -782,7 +790,15 @@ fn call_setter(
     setter: Handle<'_, Value>,
 ) -> Result<Flow<SetApplied>, VmError> {
     let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
-    let result = scope.handle(HostCtx::enter(vm, heap, state, setter, args, None)?);
+    let result = scope.handle(HostCtx::enter(
+        vm,
+        state.runtime(vm, heap),
+        heap,
+        state,
+        setter,
+        args,
+        None,
+    )?);
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Flow::Threw)
     } else {
@@ -802,7 +818,11 @@ fn native_accessor_get<'h>(
         return Ok(Coercion::Value(heap.known().undefined.get(heap).erase()));
     };
     let args = scope.stage(&[holder.as_tagged(heap).erase()]).as_args();
-    let result = scope.handle(vm.native(index)(HostCtx::new(vm, heap, state), None, args));
+    let result = scope.handle(vm.native(index)(
+        HostCtx::new(vm, state.runtime(vm, heap), heap, state),
+        None,
+        args,
+    ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Coercion::Threw)
     } else {
@@ -825,7 +845,11 @@ fn native_accessor_set<'h>(
     let args = scope
         .stage(&[holder.as_tagged(heap).erase(), value.as_tagged(heap)])
         .as_args();
-    let result = scope.handle(vm.native(index)(HostCtx::new(vm, heap, state), None, args));
+    let result = scope.handle(vm.native(index)(
+        HostCtx::new(vm, state.runtime(vm, heap), heap, state),
+        None,
+        args,
+    ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Flow::Threw)
     } else if result.as_tagged(heap) == heap.known().false_object.get(heap).erase() {

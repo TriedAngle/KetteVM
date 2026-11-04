@@ -82,7 +82,9 @@ pub fn object_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         let value = receiver.as_tagged(heap);
@@ -133,7 +135,9 @@ pub fn object_constructor<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     let is_construct = new_target.is_some();
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let arg = args.get_handle(heap, 1);
     if !arg.as_tagged(heap).is_primitive(heap) {
         // Object(obj) / new Object(obj) return the object unchanged
@@ -167,7 +171,9 @@ pub fn object_get_prototype_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 1));
         {
@@ -197,7 +203,9 @@ pub fn object_proto_get<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         {
@@ -227,7 +235,9 @@ pub fn object_proto_set<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         let proto = scope.handle(args.get(heap, 1));
@@ -280,7 +290,9 @@ pub fn object_create<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let proto_arg = args.get(heap, 1);
         let proto = scope.handle(proto_arg);
@@ -406,7 +418,9 @@ pub fn object_has_own_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         // ToObject(this): null/undefined throw (ES 20.4.3.2 step 1)
@@ -442,7 +456,9 @@ pub fn object_property_is_enumerable<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         // ToObject(this): null/undefined throw (ES 20.4.3.5 step 1)
@@ -478,7 +494,9 @@ pub fn object_get_own_property_names<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get(heap, 1);
     let target = target;
     // array `length` is a real (accessor) descriptor on the array map, so
@@ -524,7 +542,9 @@ pub fn object_get_own_property_descriptor<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         // the key coercion allocates (Float keys intern a string): the
         // target must stay rooted across it
@@ -611,7 +631,9 @@ pub fn object_define_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         // root the target, key, and descriptor: the key coercion and the
         // descriptor conversion below allocate (user getters run), which
@@ -661,7 +683,9 @@ pub fn object_set_prototype_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let target = args.get(heap, 1);
         let target = scope.handle(target);
@@ -718,7 +742,9 @@ pub fn object_prevent_extensions<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let target = args.get(heap, 1);
         let target = scope.handle(target);
@@ -760,7 +786,9 @@ pub fn object_is<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm: _, heap, state } = ctx;
+    let HostCtx {
+        vm: _, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let a = args.get_handle(heap, 1);
         let b = args.get_handle(heap, 2);
@@ -780,7 +808,9 @@ pub fn object_is_extensible<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let target = args.get_handle(heap, 1);
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
@@ -877,7 +907,9 @@ pub fn object_seal<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 1);
     if target.as_tagged(heap).is_nullish(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -928,7 +960,9 @@ pub fn object_freeze<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 1);
     if target.as_tagged(heap).is_nullish(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);

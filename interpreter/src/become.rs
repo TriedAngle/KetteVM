@@ -4,9 +4,9 @@ use bytecode::Opcode;
 use handler_derive::{handler, handler_become, handler_table};
 
 use vm_core::{
-    Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, FrameMeta, Handle, HandleSlice,
-    Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs, Tagged, ThreadState, VM, Value,
-    VmError,
+    Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, ErasedRuntimeState, FrameMeta,
+    Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs, Tagged,
+    ThreadState, VM, Value, VmError,
 };
 
 use crate::slow::*;
@@ -332,8 +332,9 @@ pub static TABLE: DispatchTable = DispatchTable {
 
 // --- entry ---
 
-fn enter<'a>(
+fn enter<'a, 't>(
     vm: &'a VM,
+    runtime: &'t dyn ErasedRuntimeState,
     heap: &'a mut Heap,
     state: &'a ThreadState,
     callable: Handle<'_, Object>,
@@ -347,7 +348,10 @@ fn enter<'a>(
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
             let f = vm.native(rt);
-            let nctx = HostCtx::new(vm, heap, state);
+            // Safety: the runtime state is owned by the VM, which outlives
+            // this call.
+            let runtime: &'a dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
+            let nctx = HostCtx::new(vm, runtime, heap, state);
             Ok(Acc::set(f(nctx, new_target, args.as_args())))
         }
         Some(CallTarget::Bytecode {
@@ -400,8 +404,9 @@ fn enter<'a>(
     }
 }
 
-pub fn execute<'a>(
+pub fn execute<'a, 't>(
     vm: &VM,
+    runtime: &'t dyn ErasedRuntimeState,
     heap: &'a mut Heap,
     state: &ThreadState,
     callable: Handle<'_, Object>,
@@ -415,7 +420,7 @@ pub fn execute<'a>(
     let outer = was_active.then(|| state.frame_base());
 
     state.handle_scope(|scope| {
-        let acc = enter(vm, heap, state, callable, args, new_target)?;
+        let acc = enter(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(acc.get(heap));
         stack.set_top(saved_top);
         if let Some(outer) = outer {

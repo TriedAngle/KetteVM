@@ -1,6 +1,7 @@
 //! Iterator protocol natives (ES 8.5): GetIterator, IteratorNext,
 //! IteratorComplete and IteratorValue.
 
+use crate::JSRuntime;
 use vm_core::{
     Args, Coercion, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise_runtime, rt_try,
 };
@@ -11,7 +12,9 @@ pub fn get_iterator<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let obj = scope.handle(args.get(heap, 0));
         let symbol = scope.handle(vm.known().iterator_symbol.get(heap).erase());
@@ -35,7 +38,17 @@ pub fn get_iterator<'a>(
             return raise_runtime(vm, heap, state, VmError::Type); // "obj is not iterable"
         }
         let call_args = scope.stage_handles(&[obj]);
-        match HostCtx::enter(vm, heap, state, method, call_args, None).map(|v| v.raw()) {
+        match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            method,
+            call_args,
+            None,
+        )
+        .map(|v| v.raw())
+        {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
             Err(err) => return raise_runtime(vm, heap, state, err),
         }
@@ -48,7 +61,9 @@ pub fn iterator_next<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let iter = scope.handle(args.get(heap, 0));
         let next_name = scope.handle(vm.known().strings.next.get(heap).erase());
@@ -66,7 +81,17 @@ pub fn iterator_next<'a>(
         };
         let call_args = scope.stage_handles(&[iter]);
         let result = scope.handle(
-            match HostCtx::enter(vm, heap, state, next, call_args, None).map(|v| v.raw()) {
+            match HostCtx::enter(
+                vm,
+                state.runtime(vm, heap),
+                heap,
+                state,
+                next,
+                call_args,
+                None,
+            )
+            .map(|v| v.raw())
+            {
                 Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
                 Err(err) => return raise_runtime(vm, heap, state, err),
             },
@@ -90,10 +115,13 @@ pub fn iterator_done<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let known = &ctx.runtime::<JSRuntime>().known;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
-        let done_name = scope.handle(vm.known().strings.done.get(heap).erase());
+        let done_name = scope.handle(known.strings.done.get(heap).erase());
         let v = match rt_try!(
             vm,
             heap,
@@ -114,7 +142,9 @@ pub fn iterator_value<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
         let value_name = scope.handle(vm.known().strings.value.get(heap).erase());

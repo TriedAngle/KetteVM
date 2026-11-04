@@ -12,8 +12,9 @@ use crate::{
 /// `I: Interpreter` type parameter) so core re-entry points —
 /// `Thread::execute`, `HostCtx::enter` — pay one indirect call,
 /// never per opcode.
-pub type EntryFn = for<'a, 'v, 's, 'c, 'r, 'n> fn(
+pub type EntryFn = for<'a, 'v, 's, 'c, 'r, 'n, 't> fn(
     vm: &'v VM,
+    runtime: &'t dyn ErasedRuntimeState,
     heap: &'a mut Heap,
     state: &'s ThreadState,
     callable: Handle<'c, Object>,
@@ -25,14 +26,21 @@ pub trait Interpreter {
     const EXECUTE: EntryFn;
 }
 
-/// A language runtime contributing native functions and globals to a VM
-/// (registered and installed once by `VM::add`, before any code runs).
-pub trait Runtime: 'static {
-    /// Per-VM runtime state, rooted for the GC; fetched back by native
-    /// functions via `HostCtx::runtime_state`.
-    type State: EdgeVisitable + Default + Send + Sync + Any;
+/// Index of an installed runtime in the VM's runtime list. Every callable
+/// records the runtime its bytecode belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeId(pub u16);
 
-    fn setup(vm: &mut VM, state: &mut Self::State) -> Result<(), VmError>;
+/// A language runtime contributing native functions and globals to a VM
+/// (installed once by `VM::add`, before any code runs). The runtime type is
+/// its own per-VM state: it is rooted for the GC and fetched back by native
+/// functions via `HostCtx::runtime`.
+pub trait Runtime: EdgeVisitable + Default + Send + Sync + Any + 'static {
+    /// This runtime's slot: runtimes are installed in id order, so the id is
+    /// a direct index into the VM's runtime list.
+    const ID: RuntimeId;
+
+    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError>;
 }
 
 pub trait ErasedRuntimeState: EdgeVisitable + Send + Sync {

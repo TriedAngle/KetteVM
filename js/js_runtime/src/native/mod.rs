@@ -2,6 +2,7 @@
 //! cites its ES section), not JS-visible library functions. [`register`]
 //! assigns their ids in the VM's native registry.
 
+use vm_core::Runtime;
 mod for_in;
 mod iterators;
 
@@ -84,7 +85,9 @@ fn require_object_coercible<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let nullish = args.get(heap, 0).is_nullish(heap);
     if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -102,7 +105,9 @@ fn delete_property_operator<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     // TODO: getting strict this way is really cumbersome this should be made easier.
@@ -152,7 +157,9 @@ fn delete_identifier_sloppy<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let name = args.get_handle(heap, 0);
     let ok = match state.handle_scope(|scope| {
         match dynamic_lookup_frame(heap, state, &scope, name) {
@@ -185,7 +192,9 @@ fn delete_super_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     raise_runtime(vm, heap, state, VmError::Reference)
 }
 
@@ -197,7 +206,9 @@ fn has_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
     // a non-Object right operand is a TypeError, thrown before the key is
@@ -271,7 +282,9 @@ fn copy_data_properties<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let n = args.len();
     if n < 2 {
         return raise_runtime(vm, heap, state, VmError::Arity);
@@ -350,7 +363,9 @@ fn create_private_name<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm: _, heap, state } = ctx;
+    let HostCtx {
+        vm: _, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let description = args.get(heap, 1);
         let description = scope.cast::<DenseString>(heap, description);
@@ -366,7 +381,9 @@ fn private_get<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let obj = args.get(heap, 0);
     let key = args.get(heap, 1);
     match obj.private_find(heap, key) {
@@ -381,7 +398,9 @@ fn private_set<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let obj = args.get(heap, 0);
     let key = args.get(heap, 1);
     let value = args.get(heap, 2);
@@ -425,7 +444,9 @@ fn set_class_fields<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let ctor = args.get_handle(heap, 0);
     let fields = args.get_handle(heap, 1);
     let mut ok = false;
@@ -452,7 +473,9 @@ fn init_instance_fields<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let ctor = args.get_handle(heap, 0);
     let instance = args.get_handle(heap, 1);
     state.handle_scope(|scope| -> Tagged<'a, Value> {
@@ -503,7 +526,15 @@ fn init_instance_fields<'a>(
                 vm,
                 heap,
                 state,
-                HostCtx::enter(vm, heap, state, scope.handle(init), call_args, None,)
+                HostCtx::enter(
+                    vm,
+                    state.runtime(vm, heap),
+                    heap,
+                    state,
+                    scope.handle(init),
+                    call_args,
+                    None,
+                )
             ));
             if value.as_tagged(heap).ptr_eq(vm.known().exception.get(heap)) {
                 return vm.known().exception.get(heap).erase();
@@ -653,7 +684,9 @@ fn get_property_lenient<'a>(
     receiver: Handle<'_, Value>,
     name: Handle<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let result = match Object::get_property(vm, heap, state, receiver, receiver, name, false) {
             Ok(result) => result,
@@ -682,7 +715,9 @@ fn set_function_name<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let fn_value = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let prefix = args.get(heap, 2).to_i64().unwrap_or(0);
@@ -783,7 +818,9 @@ fn install_accessor<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let target = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let closure = args.get_handle(heap, 2);
@@ -840,7 +877,9 @@ fn define_own_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let receiver = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let value = args.get_handle(heap, 2);
@@ -966,7 +1005,9 @@ fn set_prototype<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let obj = args.get_handle(heap, 0);
         let proto = args.get_handle(heap, 1);
@@ -990,7 +1031,9 @@ fn throw_if_not_constructor_or_null<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let v = args.get(heap, 0);
     let v_raw = v.raw();
     let null = vm.known().null.get(heap).raw();
@@ -1013,7 +1056,9 @@ fn throw_if_not_object_or_null<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     let null = vm.known().null.get(heap).raw();
@@ -1033,7 +1078,9 @@ fn throw_super_not_called_if_hole<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     if raw == vm.known().the_hole.get(heap).raw() {
@@ -1051,7 +1098,9 @@ fn throw_super_already_called_if_not_hole<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
     if raw != vm.known().the_hole.get(heap).raw() {
@@ -1073,7 +1122,10 @@ fn construct_super_construct<'a>(
     new_target: Handle<'_, Value>,
     args: &[Handle<'_, Value>],
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let runtime = ctx.runtime;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let new_target_tagged = new_target.as_tagged(heap);
         if new_target_tagged.ptr_eq(vm.known().undefined.get(heap))
@@ -1120,6 +1172,7 @@ fn construct_super_construct<'a>(
             state,
             HostCtx::enter(
                 vm,
+                runtime,
                 heap,
                 state,
                 callee.erase(),
@@ -1154,7 +1207,12 @@ fn construct_super<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm,
+        runtime,
+        heap,
+        state,
+    } = ctx;
     state.handle_scope(|scope| {
         let (callee, new_target) = rt_try!(vm, heap, state, frame_super_parts(heap, state));
         // keep the resolved parts rooted across the construct below
@@ -1162,7 +1220,7 @@ fn construct_super<'a>(
         let new_target = scope.handle(new_target);
         let arg_words: Vec<Handle<'_, Value>> = args.iter(heap).map(|t| scope.handle(t)).collect();
         construct_super_construct(
-            HostCtx::new(vm, heap, state),
+            HostCtx::new(vm, runtime, heap, state),
             callee,
             new_target,
             &arg_words,
@@ -1177,7 +1235,12 @@ fn construct_super_all_args<'a>(
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm,
+        runtime,
+        heap,
+        state,
+    } = ctx;
     state.handle_scope(|scope| {
         let (callee, new_target) = rt_try!(vm, heap, state, frame_super_parts(heap, state));
         let callee = scope.handle(callee);
@@ -1193,7 +1256,7 @@ fn construct_super_all_args<'a>(
             .map(|j| scope.handle(state.stack().reg(heap, base, j as i32)))
             .collect();
         construct_super_construct(
-            HostCtx::new(vm, heap, state),
+            HostCtx::new(vm, runtime, heap, state),
             callee,
             new_target,
             &arg_words,
@@ -1209,7 +1272,12 @@ fn construct_super_via<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm,
+        runtime,
+        heap,
+        state,
+    } = ctx;
     let n = args.len();
     if n < 2 {
         return raise_runtime(vm, heap, state, VmError::Arity);
@@ -1231,7 +1299,7 @@ fn construct_super_via<'a>(
         let arg_words: Vec<Handle<'_, Value>> =
             (0..n - 2).map(|i| args.get_handle(heap, i)).collect();
         construct_super_construct(
-            HostCtx::new(vm, heap, state),
+            HostCtx::new(vm, runtime, heap, state),
             callee,
             new_target,
             &arg_words,
@@ -1249,7 +1317,9 @@ fn load_dynamic_name<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let name = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let found = rt_try!(
@@ -1269,7 +1339,11 @@ fn load_dynamic_name<'a>(
             None => {
                 // unresolved: fall back to a global object property
                 let global = scope.handle(vm.known().global_object.get(heap).erase());
-                get_property_lenient(HostCtx::new(vm, heap, state), global, name)
+                get_property_lenient(
+                    HostCtx::new(vm, state.runtime(vm, heap), heap, state),
+                    global,
+                    name,
+                )
             }
         }
     })
@@ -1283,7 +1357,9 @@ fn store_dynamic_name<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
@@ -1391,7 +1467,9 @@ fn store_repl_global_init<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
     state.handle_scope(|_scope| {
@@ -1417,7 +1495,10 @@ fn resolve_direct_eval<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let ids = &ctx.runtime::<JSRuntime>().ids;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let callee = args.get_handle(heap, 0);
     if callee.as_tagged(heap) != vm.known().eval_function.get(heap).erase() {
         return callee.as_tagged(heap).erase();
@@ -1442,7 +1523,6 @@ fn resolve_direct_eval<'a>(
     } else {
         bytecode::SourceMode::Eval
     };
-    let ids = &vm.runtime_state::<JSRuntime>().ids;
     let program = match js_compiler::compile_js(&text, mode, ids) {
         Ok(program) => program,
         Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
@@ -1452,7 +1532,7 @@ fn resolve_direct_eval<'a>(
         let Some(context) = scope.cast::<ContextObject>(heap, context) else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
-        match Materialize::closure_vm(vm, heap, state, &scope, &program, context) {
+        match Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context) {
             Ok(closure) => closure.as_tagged(heap).erase(),
             Err(err) => raise_runtime(vm, heap, state, err),
         }
@@ -1525,7 +1605,9 @@ fn declare_eval_binding<'a>(
     name: Handle<'_, Value>,
     value: Option<Handle<'_, Value>>,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     state.handle_scope(|scope| {
         let context = rt_try!(
             vm,
@@ -1642,7 +1724,9 @@ fn validate_eval_declarations<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let declarations = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
@@ -1698,7 +1782,9 @@ fn throw_const_assign_error<'a>(
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     raise_runtime(
         vm,
         heap,
@@ -1716,7 +1802,9 @@ fn create_rest_parameter<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let first = args.get(heap, 0).to_i64().map(|v| v as usize).unwrap_or(0);
     state.handle_scope(|scope| {
         if !state.is_frame_active() {
@@ -1754,7 +1842,9 @@ fn super_get_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let home = args.get_handle(heap, 0);
     let recv = args.get_handle(heap, 1);
     let raw_key = args.get_handle(heap, 2);
@@ -1819,7 +1909,9 @@ fn super_set_property<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let home = args.get_handle(heap, 0);
     let recv = args.get_handle(heap, 1);
     let raw_key = args.get_handle(heap, 2);

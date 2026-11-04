@@ -1258,7 +1258,7 @@ pub fn call_getter<'a>(
     getter: Handle<'_, Value>,
 ) -> Tagged<'a, Value> {
     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
-    match HostCtx::enter(vm, heap, state, getter, args, None) {
+    match HostCtx::enter(vm, state.runtime(vm, heap), heap, state, getter, args, None) {
         Ok(v) => scope.handle(v).as_tagged(heap).erase(),
         Err(e) => raise_runtime(vm, heap, state, e),
     }
@@ -1274,7 +1274,15 @@ macro_rules! apply_store_hit {
                     $recv.as_tagged($heap).erase(),
                     $value.as_tagged($heap).erase(),
                 ]);
-                match HostCtx::enter($vm, $heap, $state, setter, args, None) {
+                match HostCtx::enter(
+                    $vm,
+                    $state.runtime($vm, $heap),
+                    $heap,
+                    $state,
+                    setter,
+                    args,
+                    None,
+                ) {
                     Ok(v) => $scope.handle(v).as_tagged($heap).erase(),
                     Err(e) => raise_runtime($vm, $heap, $state, e),
                 }
@@ -1287,7 +1295,7 @@ macro_rules! apply_store_hit {
                     ])
                     .as_args();
                 let result = $scope.handle($vm.native(index)(
-                    HostCtx::new($vm, $heap, $state),
+                    HostCtx::new($vm, $state.runtime($vm, $heap), $heap, $state),
                     None,
                     args,
                 ));
@@ -1550,7 +1558,15 @@ pub fn slow_construct(frame: Frame) {
             let forwarded: Vec<Handle<'_, Value>> = (0..args.len())
                 .map(|index| args.get_handle(heap, index))
                 .collect();
-            return match HostCtx::enter_bound(vm, heap, state, callee, &forwarded, Some(callee)) {
+            return match HostCtx::enter_bound(
+                vm,
+                state.runtime(vm, heap),
+                heap,
+                state,
+                callee,
+                &forwarded,
+                Some(callee),
+            ) {
                 Ok(value) => Acc::set(value),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -1579,6 +1595,7 @@ pub fn slow_construct(frame: Frame) {
         let staged = scope.stage(&staged);
         let result = match HostCtx::enter(
             vm,
+            state.runtime(vm, heap),
             heap,
             state,
             callee_obj.erase(),

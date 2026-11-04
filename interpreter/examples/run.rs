@@ -1,6 +1,7 @@
 use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
+use vm_core::Runtime;
 use vm_core::{VM, VmCore};
 
 fn main() {
@@ -24,7 +25,7 @@ fn main() {
     let program = match js_compiler::compile_js(
         &joined,
         js_compiler::SourceMode::Script,
-        &vm.runtime_state::<JSRuntime>().ids,
+        &vm.runtime::<JSRuntime>().ids,
     ) {
         Ok(program) => program,
         Err(e) => {
@@ -32,7 +33,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    match thread.run_program(program) {
+    match thread.run_program(program, JSRuntime::ID) {
         Ok(_) => {
             if let Some(ex) = thread.take_pending_exception() {
                 eprintln!("uncaught exception: {ex:?}");

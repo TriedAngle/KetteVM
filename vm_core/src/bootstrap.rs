@@ -1,12 +1,11 @@
 use core::ptr::NonNull;
 
 use crate::{
-    AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
-    CodeInit, ContextInit, ContextObject, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
-    HandleData, HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind,
-    NameToIndexHashTable, NameToIndexHashTableInit, Object, ObjectInit, PropertyDescriptor,
-    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi,
-    StringInterner, Symbol, Tagged, Value, Visitor,
+    AccessorInfo, AccessorInfoInit, Cell, CellInit, ContextInit, ContextObject, DenseString,
+    EdgeVisitable, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice, Heap, Map,
+    MapInit, MapKind, NameToIndexHashTable, NameToIndexHashTableInit, Object, ObjectInit,
+    PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
+    SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -204,11 +203,8 @@ define_well_known_strings! {
     prototype => "prototype",
     constructor => "constructor",
     to_string => "toString",
-    to_iso_string => "toISOString",
     value_of => "valueOf",
-    join => "join",
     next => "next",
-    done => "done",
     value => "value",
     values => "values",
     default => "default",
@@ -249,9 +245,11 @@ define_well_known_strings! {
     proxy => "proxy",
 }
 
-fn smi_slot<T>() -> GcSlot<T> {
+/// A root slot holding the Smi placeholder: a valid strong word for a slot
+/// that is part of a live root set before its real value is interned.
+pub fn smi_slot<T>() -> GcSlot<T> {
     // Safety: an encoded Smi is a valid strong word; no GC can observe it
-    // before the root slot is part of the live `WellKnown` struct.
+    // before the root slot is part of the live root set.
     unsafe { GcSlot::from_value(Smi::new(0).encode()) }
 }
 
@@ -916,44 +914,10 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         })
         .as_handle(&scope);
 
-    // %Function.prototype% (ES 19.2.3): the canonical empty function — a
-    // callable, non-constructable function whose [[Prototype]] is
-    // %Object.prototype%; the [[Prototype]] of ordinary function objects
-    // (patched onto function_map at the end). The body is a single
-    // `Return` (bytecode::Opcode::Return as u8) so calling it yields
-    // undefined.
-    let function_prototype_map = alloc_parent_map_with_slots(
-        heap,
-        &scope,
-        MapKind::OBJECT
-            .union(MapKind::CALLABLE)
-            .union(MapKind::EXTENDABLE),
-        object_prototype,
-        2, // [callable info, context], like function_map
-    );
-    let empty_code = heap
-        .allocate::<Code>(CodeInit { bytes: &[1] })
-        .as_handle(&scope);
-    let empty_info = heap
-        .allocate::<CallableInfoObject>(CallableInfoInit {
-            code: empty_code,
-            constants: empty_slots,
-            register_count: 0,
-            handlers: None,
-            expected_slots: 0,
-            mode: MODE_SLOPPY,
-        })
-        .as_handle(&scope);
-    let function_prototype = heap
-        .new_object(
-            &scope,
-            function_prototype_map,
-            scope.stage(&[
-                empty_info.as_tagged(heap).erase(),
-                empty_context.as_tagged(heap).erase(),
-            ]),
-        )
-        .as_handle(&scope);
+    // %Function.prototype% (ES 19.2.3) is the canonical empty function: a
+    // callable, non-constructable native whose [[Prototype]] is
+    // %Object.prototype%. It is built by `VmCore::setup`, which can register
+    // the native and patch the function maps' [[Prototype]].
 
     known.undefined.init(undefined.as_tagged(heap));
     known.undefined_map.init(undefined_map.as_tagged(heap));
@@ -969,9 +933,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known
         .date_instance_map
         .init(date_instance_map.as_tagged(heap));
-    known
-        .function_prototype
-        .init(function_prototype.as_tagged(heap));
     known.error_map.init(error_map.as_tagged(heap));
 
     known.type_error_map.init(error_map.as_tagged(heap));
@@ -1030,25 +991,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     null_object
         .elements
         .set(heap, null_erased, empty_fixed_array);
-    // ordinary function objects' [[Prototype]] is %Function.prototype%
-    // (ES 19.2.3.1): function_map was created with a null placeholder
-    // in bootstrap_basics
-    let function_map = known.function_map.get(heap);
-    function_map.prototype.set(
-        heap,
-        function_map.erase(),
-        function_prototype.as_tagged(heap).erase(),
-    );
-    let non_constructor_function_map = known.non_constructor_function_map.get(heap);
-    non_constructor_function_map.prototype.set(
-        heap,
-        non_constructor_function_map.erase(),
-        function_prototype.as_tagged(heap).erase(),
-    );
-    let class_constructor_map = known.class_constructor_map.get(heap);
-    class_constructor_map.prototype.set(
-        heap,
-        class_constructor_map.erase(),
-        function_prototype.as_tagged(heap).erase(),
-    );
+    // the function maps' [[Prototype]] (%Function.prototype%) is patched by
+    // `VmCore::setup`, which owns the canonical empty function
 }

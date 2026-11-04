@@ -11,7 +11,7 @@
 use crate::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FixedArray, FunctionKind,
     Handle, HandleScope, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap,
-    Object, ScopeInfo, ScopeInfoInit, Value, VmError, decode_wtf8, mode_from_strict,
+    Object, RuntimeId, ScopeInfo, ScopeInfoInit, Value, VmError, decode_wtf8, mode_from_strict,
     new_feedback_vector,
 };
 
@@ -32,25 +32,27 @@ impl Materialize {
         thread: &mut Thread,
         scope: &'s HandleScope<'_>,
         program: &Program,
+        runtime: RuntimeId,
     ) -> Result<Handle<'s, Object>, VmError> {
         let empty = {
             let (vm, heap, _state) = thread.split();
             scope.handle(vm.known().empty_context.get(heap))
         };
-        Self::closure(thread, scope, program, empty)
+        Self::closure(thread, scope, program, runtime, empty)
     }
 
     pub fn closure<'s, 'c>(
         thread: &mut Thread,
         scope: &'s HandleScope<'_>,
         program: &Program,
+        runtime: RuntimeId,
         context: Handle<'c, ContextObject>,
     ) -> Result<Handle<'s, Object>, VmError>
     where
         'c: 's,
     {
         let (vm, heap, state) = thread.split();
-        Self::closure_vm(vm, heap, state, scope, program, context)
+        Self::closure_vm(vm, heap, state, scope, program, runtime, context)
     }
 
     pub fn closure_vm<'s>(
@@ -59,6 +61,7 @@ impl Materialize {
         state: &ThreadState,
         scope: &'s HandleScope<'_>,
         program: &Program,
+        runtime: RuntimeId,
         context: Handle<'s, ContextObject>,
     ) -> Result<Handle<'s, Object>, VmError> {
         let _span = trace::info_span!("vm::materialize").entered();
@@ -70,6 +73,7 @@ impl Materialize {
             state,
             scope,
             program,
+            runtime,
             &mut infos,
             FunctionId::SCRIPT,
         )?;
@@ -90,6 +94,7 @@ fn materialize_function<'s>(
     state: &ThreadState,
     scope: &'s HandleScope<'_>,
     program: &Program,
+    runtime: RuntimeId,
     infos: &mut [Option<Handle<'s, CallableInfoObject>>],
     fid: FunctionId,
 ) -> Result<Handle<'s, CallableInfoObject>, VmError> {
@@ -107,7 +112,8 @@ fn materialize_function<'s>(
             Constant::Smi(v) => scope.handle(Smi::new(*v)),
             Constant::Float(f) => scope.handle(heap.new_number(*f)),
             Constant::Callable(child) => {
-                let info = materialize_function(vm, heap, state, scope, program, infos, *child)?;
+                let info =
+                    materialize_function(vm, heap, state, scope, program, runtime, infos, *child)?;
                 info.erase()
             }
             Constant::ScopeInfo(layout) => {
@@ -145,6 +151,7 @@ fn materialize_function<'s>(
                         state,
                         scope,
                         program,
+                        runtime,
                         infos,
                         decl.function,
                     )?;
@@ -166,6 +173,7 @@ fn materialize_function<'s>(
 
     let code = heap.allocate_handle::<Code>(
         CodeInit {
+            runtime,
             bytes: program.code(function),
         },
         scope,

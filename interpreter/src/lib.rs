@@ -1270,7 +1270,7 @@ fn op_call_native(frame: Frame) {
     let state = frame.ctx().state();
     let native = vm.native(NativeIndex(rt));
     let args = state.stack().window(frame.ctx().frame_base(), base, count);
-    let nctx = HostCtx::new(vm, frame.ctx().heap_mut(), state);
+    let nctx = HostCtx::new(vm, frame.ctx().runtime(), frame.ctx().heap_mut(), state);
     let v = native(nctx, None, args);
     frame.set_acc(v);
     reenter!(pc)

@@ -3,6 +3,7 @@
 use crate::JSRuntime;
 use vm_core::HostCtx;
 use vm_core::Object;
+use vm_core::Runtime;
 use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap,
@@ -16,7 +17,10 @@ pub fn eval_runtime<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let ids = &ctx.runtime::<JSRuntime>().ids;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let source = args.get_handle(heap, 1);
     if source.as_tagged(heap).get_as::<DenseString>(heap).is_none() {
         return source.as_tagged(heap).erase();
@@ -27,7 +31,6 @@ pub fn eval_runtime<'a>(
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap))
             .expect("checked string source");
-        let ids = &vm.runtime_state::<JSRuntime>().ids;
         let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal, ids) {
             Ok(program) => program,
             Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
@@ -37,10 +40,18 @@ pub fn eval_runtime<'a>(
             vm,
             heap,
             state,
-            Materialize::closure_vm(vm, heap, state, &scope, &program, context)
+            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context)
         );
-        match HostCtx::enter(vm, heap, state, closure.erase(), HandleSlice::EMPTY, None)
-            .map(|v| v.raw())
+        match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            closure.erase(),
+            HandleSlice::EMPTY,
+            None,
+        )
+        .map(|v| v.raw())
         {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
             Err(err) => raise_runtime(vm, heap, state, err),
@@ -79,7 +90,9 @@ pub fn is_nan<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let n = rt_try!(
         vm,
         heap,
@@ -103,7 +116,9 @@ pub fn print<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     if args.len() < 2 {
         println!();
         return vm.known().undefined.get(heap).erase();
@@ -182,7 +197,9 @@ pub fn console_log<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, state } = ctx;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
     let mut parts: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
     for i in 1..args.len() {
         // Safety: `i < args.len()`, so the slot exists.

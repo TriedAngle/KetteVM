@@ -1,8 +1,6 @@
-use crate::materialize::Materialize;
 use crate::{
-    DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value, VmError,
-    WellKnown,
+    DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex,
+    Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value, VmError, WellKnown,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -88,43 +86,6 @@ impl Object {
             ]),
         );
         Ok(scope.handle(obj))
-    }
-
-    // TODO: get rid of this.
-    pub fn run_prelude(
-        thread: &mut Thread,
-        scope: &HandleScope<'_>,
-        src: &str,
-        name: &str,
-        compile: impl FnOnce(
-            &str,
-            bytecode::SourceMode,
-        ) -> Result<bytecode::Program, bytecode::FrontendError>,
-    ) -> Result<(), VmError> {
-        let (vm, heap, state) = thread.split();
-        let empty = scope.handle(vm.known().empty_context.get(heap));
-        let program = compile(src, bytecode::SourceMode::Script).map_err(|e| {
-            eprintln!("{name} prelude compile error: {e}");
-            VmError::Type
-        })?;
-        let closure = Materialize::closure_vm(vm, heap, state, scope, &program, empty)?;
-        let (vm, heap, state) = thread.split();
-        let exception = vm.known().exception.get(heap).raw();
-        let result = HostCtx::enter(
-            vm,
-            &mut *heap,
-            state,
-            closure.erase(),
-            HandleSlice::EMPTY,
-            None,
-        )?;
-        if result.raw() == exception {
-            if let Some(ex) = state.take_pending_exception() {
-                eprintln!("{name} prelude threw: {ex:?}")
-            }
-            return Err(VmError::Type);
-        }
-        Ok(())
     }
 
     pub fn install_constructor<'s>(

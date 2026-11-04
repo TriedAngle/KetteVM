@@ -12,8 +12,9 @@ use crate::utils::{
     construct_native, construct_start, proxy_apply_staged, resolve_target,
 };
 use vm_core::{
-    Acc, CallTarget, Callee, Ctx, EntryFn, FrameMeta, Handle, HandleSlice, Heap, HostCtx,
-    Interpreter, Object, Ops, Regs, Tagged, Termination, ThreadState, Unwind, VM, Value, VmError,
+    Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, FrameMeta, Handle, HandleSlice,
+    Heap, HostCtx, Interpreter, Object, Ops, Regs, Tagged, Termination, ThreadState, Unwind, VM,
+    Value, VmError,
 };
 
 pub struct MatchInterpreter;
@@ -126,8 +127,9 @@ macro_rules! raise {
     }};
 }
 
-pub fn execute<'a>(
+pub fn execute<'a, 't>(
     vm: &VM,
+    runtime: &'t dyn ErasedRuntimeState,
     heap: &'a mut Heap,
     state: &ThreadState,
     callable: Handle<'_, Object>,
@@ -141,7 +143,7 @@ pub fn execute<'a>(
     let outer = was_active.then(|| state.frame_base());
 
     state.handle_scope(|scope| {
-        let result = start(vm, heap, state, callable, args, new_target)?;
+        let result = start(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(result);
 
         stack.set_top(saved_top);
@@ -154,8 +156,9 @@ pub fn execute<'a>(
     })
 }
 
-fn start<'b>(
+fn start<'b, 't>(
     vm: &'b VM,
+    runtime: &'t dyn ErasedRuntimeState,
     heap: &'b mut Heap,
     state: &'b ThreadState,
     callable: Handle<'_, Object>,
@@ -168,7 +171,10 @@ fn start<'b>(
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
             let f = vm.native(rt);
-            let nctx = HostCtx::new(vm, heap, state);
+            // Safety: the runtime state is owned by the VM, which outlives
+            // this call.
+            let runtime: &'b dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
+            let nctx = HostCtx::new(vm, runtime, heap, state);
             Ok(f(nctx, new_target, args.as_args()))
         }
         Some(CallTarget::Bytecode {
