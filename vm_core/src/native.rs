@@ -4,7 +4,6 @@ use crate::{
     Args, Coercion, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Tagged,
     ThreadState, VM, Value, VmError,
 };
-use core::ptr::NonNull;
 
 // -- native calling convention --
 
@@ -50,7 +49,7 @@ impl<'a> HostCtx<'a> {
         self,
         f: impl FnOnce(&'a VM, &'a mut Heap, &'a ThreadState, HandleScope<'_>) -> R,
     ) -> R {
-        let scope = unsafe { HandleScope::from_raw(NonNull::from(&self.state.handles)) };
+        let scope = self.state.scope();
         let HostCtx {
             vm, heap, state, ..
         } = self;
@@ -70,7 +69,7 @@ impl<'a> HostCtx<'a> {
         args: HandleSlice<'r>,
         new_target: Option<Handle<'_, Value>>,
     ) -> Result<Tagged<'h, Value>, VmError> {
-        let scope = unsafe { HandleScope::from_raw(NonNull::from(&state.handles)) };
+        let scope = state.scope();
         let Some(callable) = scope.cast::<Object>(heap, callable.as_tagged(heap)) else {
             return Err(VmError::Type);
         };

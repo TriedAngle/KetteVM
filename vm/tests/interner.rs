@@ -72,8 +72,8 @@ fn interning_compresses_utf16_to_latin1() {
             let l = latin1_content.as_tagged(heap);
             let u = utf16_content.as_tagged(heap);
             // encodings come from the map's kind bits
-            assert_eq!(l.encoding(), Encoding::Latin1);
-            assert_eq!(u.encoding(), Encoding::Utf16);
+            assert_eq!(l.encoding(heap), Encoding::Latin1);
+            assert_eq!(u.encoding(heap), Encoding::Utf16);
             assert_eq!(l.len(), 5);
             assert_eq!(u.len(), 1);
             // code-unit access is O(1) in both encodings

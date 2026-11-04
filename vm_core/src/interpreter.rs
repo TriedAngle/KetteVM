@@ -210,34 +210,6 @@ impl<'s, 'h> Ctx<'s, 'h> {
         self.heap
     }
 
-    /// Shared access to the heap for the match-loop interpreter's cold
-    /// helpers, which hold a heap reference while calling other `Ctx`
-    /// methods. This is transitional: once those call paths use exclusive
-    /// `&mut Ctx` reborrows, this accessor should be deleted.
-    ///
-    /// # Safety
-    /// The caller must uphold the interpreter's heap-access discipline;
-    /// this exists only for the match-loop shell's shared cold helpers.
-    #[inline(always)]
-    pub unsafe fn heap_shared(&self) -> &'h Heap {
-        let ptr = self.heap as *const Heap;
-        unsafe { &*ptr }
-    }
-
-    /// Shared access to the heap for the match-loop interpreter's cold
-    /// helpers, which hold a heap reference while calling other `Ctx`
-    /// methods. This is transitional: once those call paths use exclusive
-    /// `&mut Ctx` reborrows, this accessor should be deleted.
-    ///
-    /// # Safety
-    /// The caller must uphold the interpreter's heap-access discipline;
-    /// this exists only for the match-loop shell's shared cold helpers.
-    #[inline(always)]
-    pub unsafe fn heap_mut_shared(&self) -> &'h mut Heap {
-        let ptr = core::ptr::addr_of!(*self.heap).cast_mut();
-        unsafe { &mut *ptr }
-    }
-
     #[inline(always)]
     pub fn vm(&self) -> &'s VM {
         self.vm
@@ -425,9 +397,8 @@ pub enum Unwind<'h> {
 /// and the current frame is the handler's.
 #[cold]
 #[inline(never)]
-pub fn unwind<'h>(ctx: &Ctx<'_, 'h>, fault_pc: usize) -> Unwind<'h> {
-    // Safety: unwind only reads the heap.
-    let heap = unsafe { ctx.heap_shared() };
+pub fn unwind<'c>(ctx: &'c Ctx<'_, '_>, fault_pc: usize) -> Unwind<'c> {
+    let heap = ctx.heap();
     let mut pc = fault_pc;
     loop {
         let base = ctx.frame_base();

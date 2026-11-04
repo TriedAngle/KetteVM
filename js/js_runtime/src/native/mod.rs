@@ -401,21 +401,13 @@ fn private_set<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let obj = args.get(heap, 0);
-    let key = args.get(heap, 1);
-    let value = args.get(heap, 2);
-    let value = value.raw();
-    let obj_tagged = obj.raw();
-    // Safety: fresh rooted words above; `private_find` allocates nothing.
-    match unsafe { Tagged::<Value>::from_value_unchecked(obj_tagged) }.private_find(heap, key) {
+    let obj = args.get_handle(heap, 0);
+    let key = args.get_handle(heap, 1);
+    let value = args.get_handle(heap, 2);
+    match obj.as_tagged(heap).private_find(heap, key.as_tagged(heap)) {
         Some(slot) => {
-            slot.set(
-                heap,
-                unsafe { Tagged::<Value>::from_value_unchecked(obj_tagged) },
-                unsafe { Tagged::<Value>::from_value_unchecked(value) },
-            );
-            // Safety: fresh stored word, no allocation since.
-            unsafe { Tagged::<Value>::from_value_unchecked(value) }
+            slot.set(heap, obj.as_tagged(heap), value.as_tagged(heap));
+            value.as_tagged(heap)
         }
         None => raise_runtime(vm, heap, state, VmError::Type),
     }
@@ -1034,19 +1026,16 @@ fn throw_if_not_constructor_or_null<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let v = args.get(heap, 0);
-    let v_raw = v.raw();
-    let null = vm.known().null.get(heap).raw();
-    // Safety: rooted-slot word re-anchored fresh; no allocation between
-    // the reads below and the return.
-    let ok = v_raw == null
-        || unsafe { Tagged::<Value>::from_value_unchecked(v_raw) }
+    let v = args.get_handle(heap, 0);
+    let null = vm.known().null.get(heap);
+    let ok = v.as_tagged(heap) == null
+        || v.as_tagged(heap)
             .as_heap_object()
             .is_some_and(|obj| obj.map(heap).kind().is_constructor());
     if !ok {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
-    unsafe { Tagged::from_value_unchecked(v_raw) }
+    v.as_tagged(heap)
 }
 
 /// superCtor.prototype validation: (value) -> value, TypeError unless the
@@ -1059,16 +1048,13 @@ fn throw_if_not_object_or_null<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let v = args.get(heap, 0);
-    let raw = v.raw();
-    let null = vm.known().null.get(heap).raw();
-    // Safety: rooted-slot word, fresh at both uses below.
-    let ok =
-        raw == null || !unsafe { Tagged::<Value>::from_value_unchecked(raw) }.is_primitive(heap);
+    let v = args.get_handle(heap, 0);
+    let null = vm.known().null.get(heap);
+    let ok = v.as_tagged(heap) == null || !v.as_tagged(heap).is_primitive(heap);
     if !ok {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
-    unsafe { Tagged::from_value_unchecked(raw) }
+    v.as_tagged(heap)
 }
 
 /// [[ThisBindingStatus]] guard of derived constructors (ES 10.2.2):
@@ -1081,14 +1067,12 @@ fn throw_super_not_called_if_hole<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let v = args.get(heap, 0);
-    let raw = v.raw();
-    if raw == vm.known().the_hole.get(heap).raw() {
+    let v = args.get_handle(heap, 0);
+    if v.as_tagged(heap) == vm.known().the_hole.get(heap) {
         // "Must call super constructor before accessing 'this'"
         return raise_runtime(vm, heap, state, VmError::Reference);
     }
-    // Safety: fresh rooted-slot word, no allocation since the read.
-    unsafe { Tagged::from_value_unchecked(raw) }
+    v.as_tagged(heap)
 }
 
 /// InitializeThisBinding guard (ES 10.2.2): (value) -> value,
@@ -1101,14 +1085,12 @@ fn throw_super_already_called_if_not_hole<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let v = args.get(heap, 0);
-    let raw = v.raw();
-    if raw != vm.known().the_hole.get(heap).raw() {
+    let v = args.get_handle(heap, 0);
+    if v.as_tagged(heap) != vm.known().the_hole.get(heap) {
         // "Super constructor may only be called once"
         return raise_runtime(vm, heap, state, VmError::Reference);
     }
-    // Safety: fresh rooted-slot word, no allocation since the read.
-    unsafe { Tagged::from_value_unchecked(raw) }
+    v.as_tagged(heap)
 }
 
 // ---- super() construction (ES 15.4.3) ---------------------------------------

@@ -11,8 +11,8 @@ pub struct Cell {
     pub maybe_value: MaybeWeakGcSlot,
 }
 
-pub struct CellInit {
-    pub value: Value,
+pub struct CellInit<'a> {
+    pub value: Tagged<'a, MaybeWeak<Value>>,
 }
 
 impl Cell {
@@ -37,7 +37,7 @@ impl Cell {
 
 impl HeapObject for Cell {
     const KIND: ObjectKind = ObjectKind::Cell;
-    type Init<'a> = CellInit;
+    type Init<'a> = CellInit<'a>;
 
     fn layout_for(_config: &Self::Init<'_>) -> Layout {
         Layout::new::<Self>()
@@ -46,8 +46,7 @@ impl HeapObject for Cell {
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().cell_map.get(heap));
-        let word = unsafe { Tagged::from_maybe_weak_unchecked(config.value) };
-        self.maybe_value.set(heap, host, word);
+        self.maybe_value.set(heap, host, config.value);
     }
 
     fn header(&self) -> &Header {

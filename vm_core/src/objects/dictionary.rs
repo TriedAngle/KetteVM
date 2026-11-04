@@ -111,6 +111,13 @@ impl NumberDictionary {
         unsafe { &*self.entry_ptr(entry).add(2) }
     }
 
+    fn entry_slots(&self) -> &[GcSlot<Value>] {
+        let len = self.capacity() * ENTRY_WORDS;
+        // Safety: the inline storage holds exactly `capacity * ENTRY_WORDS`
+        // slots.
+        unsafe { core::slice::from_raw_parts(self.entries.as_ptr(), len) }
+    }
+
     fn key_word<'a>(&self, heap: &'a Heap, entry: usize) -> Tagged<'a, Value> {
         self.key_slot(entry).get(heap)
     }
@@ -294,13 +301,13 @@ impl NumberDictionary {
         scope: &'s HandleScope<'_>,
         dict: &Handle<'s, NumberDictionary>,
         index: usize,
-        value: Tagged<'_, Value>,
+        value: Handle<'_, Value>,
         details: i64,
     ) -> Handle<'s, NumberDictionary> {
         let current = *dict;
         if current
             .as_tagged(heap)
-            .set_in_place(heap, index, value, details)
+            .set_in_place(heap, index, value.as_tagged(heap), details)
         {
             return current;
         }
@@ -312,7 +319,7 @@ impl NumberDictionary {
             let reused_tombstone = t.key_word(heap, entry) == heap.known().the_hole.get(heap);
             t.key_slot(entry)
                 .set(heap, host, Smi::new(index as i64).into_tagged());
-            t.value_slot(entry).set(heap, host, value);
+            t.value_slot(entry).set(heap, host, value.as_tagged(heap));
             t.details_slot(entry)
                 .set(heap, host, Smi::new(details).into_tagged());
             let nof = t.nof() + 1;
@@ -409,9 +416,8 @@ impl EdgeVisitable for NumberDictionary {
         visitor.visit(self.nof.as_raw());
         visitor.visit(self.nod.as_raw());
         visitor.visit(self.flags.as_raw());
-        let capacity = self.capacity.to_smi_unchecked().value() as usize;
-        for entry in 0..capacity * ENTRY_WORDS {
-            visitor.visit(unsafe { &*self.entries.as_ptr().add(entry) }.as_raw());
+        for slot in self.entry_slots() {
+            visitor.visit(slot.as_raw());
         }
     }
 }

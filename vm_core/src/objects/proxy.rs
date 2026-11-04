@@ -1205,11 +1205,11 @@ impl Proxy {
     pub fn allocate<'a>(
         heap: &'a mut Heap,
         scope: &HandleScope<'_>,
-        target: Tagged<'_, Value>,
-        handler: Tagged<'_, Value>,
+        target: Handle<'_, Value>,
+        handler: Handle<'_, Value>,
     ) -> Tagged<'a, Value> {
-        let target = scope.handle(target);
-        let handler = scope.handle(handler);
+        let target = scope.handle(target.as_tagged(heap));
+        let handler = scope.handle(handler.as_tagged(heap));
         let known = heap.known();
         let map = {
             let kind = target
@@ -1237,7 +1237,8 @@ impl Proxy {
         .erase()
     }
 
-    pub fn revoke(heap: &mut Heap, proxy: Tagged<'_, Value>) {
+    pub fn revoke(heap: &mut Heap, proxy: Handle<'_, Value>) {
+        let proxy = proxy.as_tagged(heap);
         let Some(p) = proxy.get_as::<ProxyObject>(heap) else {
             return;
         };

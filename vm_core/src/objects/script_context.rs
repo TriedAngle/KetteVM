@@ -43,6 +43,7 @@ impl NameToIndexHashTable {
         self.count.to_smi_unchecked().value() as usize
     }
 
+    #[inline]
     pub fn entry(&self, index: usize) -> &NameIndexEntry {
         debug_assert!(index < self.capacity());
         // Safety: index checked against the inline entry array.
@@ -118,7 +119,7 @@ impl HeapObject for NameToIndexHashTable {
         self.count.set(heap, host, Smi::new(0));
         let hole = heap.known().the_hole.get(heap).erase();
         for i in 0..config.capacity {
-            let entry = unsafe { &*self.entries.as_ptr().add(i) };
+            let entry = self.entry(i);
             entry.name.set(heap, host, hole);
             entry.index.set(heap, host, Smi::new(-1));
         }
@@ -326,8 +327,7 @@ impl HeapObject for ScriptContextTable {
         self.names.set(heap, host, config.names.as_tagged(heap));
         let hole = heap.known().the_hole.get(heap).erase();
         for i in 0..config.capacity {
-            let slot = unsafe { &*self.contexts.as_ptr().add(i) };
-            slot.set(heap, host, hole);
+            self.context_slot(i).set(heap, host, hole);
         }
     }
 

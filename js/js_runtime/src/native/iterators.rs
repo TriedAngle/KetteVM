@@ -48,11 +48,11 @@ pub fn get_iterator<'a>(
             call_args,
             None,
         )
-        .map(|v| v.raw())
         {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
+            Ok(v) => scope.handle(v),
             Err(err) => return raise_runtime(vm, heap, state, err),
         }
+        .as_tagged(heap)
     })
 }
 
@@ -81,22 +81,19 @@ pub fn iterator_next<'a>(
             Coercion::Value(v) => scope.handle(v),
         };
         let call_args = scope.stage_handles(&[iter]);
-        let result = scope.handle(
-            match HostCtx::enter(
-                vm,
-                state.runtime(vm, heap),
-                heap,
-                state,
-                next,
-                call_args,
-                None,
-            )
-            .map(|v| v.raw())
-            {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            },
-        );
+        let result = match HostCtx::enter(
+            vm,
+            state.runtime(vm, heap),
+            heap,
+            state,
+            next,
+            call_args,
+            None,
+        )
+        {
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
         if result
             .as_tagged(heap)
             .ptr_eq(vm.known().exception.get(heap))

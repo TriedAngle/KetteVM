@@ -59,6 +59,26 @@ impl ScopeInfo {
             .0
     }
 
+    #[inline]
+    fn name_slot(&self, index: usize) -> &GcSlot<DenseString> {
+        debug_assert!(index < self.local_count());
+        // Safety: index checked against the inline names section.
+        unsafe { &*self.data.as_ptr().cast::<GcSlot<DenseString>>().add(index) }
+    }
+
+    #[inline]
+    fn info_slot(&self, index: usize, count: usize) -> &GcSlot<Smi> {
+        debug_assert!(index < count);
+        // Safety: index checked against the inline infos section.
+        unsafe { &*self.data.as_ptr().cast::<GcSlot<Smi>>().add(count + index) }
+    }
+
+    fn data_slots(&self) -> &[GcSlot] {
+        let len = self.local_count() * 2;
+        // Safety: the inline data holds exactly 2*local_count slots.
+        unsafe { core::slice::from_raw_parts(self.data.as_ptr(), len) }
+    }
+
     pub fn flags(&self) -> i64 {
         self.flags.to_smi_unchecked().value()
     }
@@ -80,33 +100,12 @@ impl ScopeInfo {
     }
 
     pub fn name<'a>(&self, heap: &'a Heap, index: usize) -> Tagged<'a, DenseString> {
-        debug_assert!(index < self.local_count());
-        // Safety: index checked against the inline names section.
-        unsafe {
-            self.data
-                .as_ptr()
-                .add(index)
-                .cast::<GcSlot<DenseString>>()
-                .as_ref()
-                .unwrap_unchecked()
-                .get(heap)
-        }
+        self.name_slot(index).get(heap)
     }
 
     pub fn info(&self, index: usize) -> i64 {
-        debug_assert!(index < self.local_count());
         let count = self.local_count();
-        // Safety: index checked against the inline infos section.
-        unsafe {
-            self.data
-                .as_ptr()
-                .add(count + index)
-                .cast::<GcSlot<Smi>>()
-                .as_ref()
-                .unwrap_unchecked()
-                .to_smi_unchecked()
-                .value()
-        }
+        self.info_slot(index, count).to_smi_unchecked().value()
     }
 
     // TODO: reuse a NameToIndexHashTable for non-inlined context-local names;
@@ -144,37 +143,12 @@ impl HeapObject for ScopeInfo {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().scope_info_map.get(heap));
         self.flags.set(heap, host, Smi::new(config.flags));
-        self.local_count
-            .set(heap, host, Smi::new(config.names.len() as i64));
         let count = config.names.len();
-        for i in 0..count {
-            // Safety: inline data has exactly 2*count GcSlots.
-            unsafe {
-                self.data
-                    .as_ptr()
-                    .add(i)
-                    .cast::<GcSlot<DenseString>>()
-                    .as_ref()
-                    .unwrap_unchecked()
-                    .set(
-                        heap,
-                        host,
-                        config
-                            .names
-                            .get(i)
-                            .unwrap()
-                            .as_tagged(heap)
-                            .get_as::<DenseString>(heap)
-                            .unwrap(),
-                    );
-                self.data
-                    .as_ptr()
-                    .add(count + i)
-                    .cast::<GcSlot<Smi>>()
-                    .as_ref()
-                    .unwrap_unchecked()
-                    .set(heap, host, Smi::new(config.infos[i]));
-            }
+        self.local_count.set(heap, host, Smi::new(count as i64));
+        for (i, (name, &info)) in config.names.iter().zip(config.infos).enumerate() {
+            let name = name.as_tagged(heap).get_as::<DenseString>(heap).unwrap();
+            self.name_slot(i).set(heap, host, name);
+            self.info_slot(i, count).set(heap, host, Smi::new(info));
         }
     }
 
@@ -192,10 +166,8 @@ impl EdgeVisitable for ScopeInfo {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.flags.as_raw());
         visitor.visit(self.local_count.as_raw());
-        for i in 0..self.local_count() * 2 {
-            // Safety: inline data has exactly 2*count GcSlots.
-            visitor
-                .visit(unsafe { self.data.as_ptr().add(i).as_ref().unwrap_unchecked() }.as_raw());
+        for slot in self.data_slots() {
+            visitor.visit(slot.as_raw());
         }
     }
 }

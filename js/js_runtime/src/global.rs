@@ -51,11 +51,11 @@ pub fn eval_runtime<'a>(
             HandleSlice::EMPTY,
             None,
         )
-        .map(|v| v.raw())
         {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => raise_runtime(vm, heap, state, err),
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(vm, heap, state, err),
         }
+        .as_tagged(heap)
     })
 }
 

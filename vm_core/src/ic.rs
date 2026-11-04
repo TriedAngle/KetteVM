@@ -412,10 +412,9 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
             // a dictionary-backed hop may hold elements
             return false;
         }
-        let elements = obj.elements(heap);
-        if elements.is_strong_ptr() {
+        let elements = obj.elements_array(heap);
+        if let Some(elements) = elements {
             let hole = heap.known().the_hole.get(heap);
-            let elements = elements;
             for i in 0..elements.len() {
                 if elements.at(heap, i) != hole {
                     return false;
@@ -723,7 +722,7 @@ fn apply_element_load<'a>(
     if index >= len {
         return oob(heap);
     }
-    let elements = obj.elements(heap);
+    let elements = obj.elements_array(heap)?;
     if holey {
         // `length` can exceed the backing store: those indices are holes
         if index >= elements.len() {
@@ -1073,7 +1072,7 @@ impl InlineCache {
         {
             return None;
         }
-        let elements = obj.elements(heap);
+        let elements = obj.elements_array(heap)?;
         let clean = payload & STORE_CHAIN_CLEAN != 0;
         if holey && !append {
             if index >= elements.len() {
@@ -1164,11 +1163,11 @@ impl InlineCache {
             // non-hole reads never install (the interpreter's direct read
             // covers them); hole/OOB misses add the guarded OOB bit
             let len = obj.length();
-            let hole_miss = payload & ELEMENT_HOLEY != 0 && {
-                let elements = obj.elements(heap);
-                index < elements.len()
-                    && elements.at(heap, index) == heap.known().the_hole.get(heap)
-            };
+            let hole_miss = payload & ELEMENT_HOLEY != 0
+                && obj.elements_array(heap).is_some_and(|elements| {
+                    index < elements.len()
+                        && elements.at(heap, index) == heap.known().the_hole.get(heap)
+                });
             if (index >= len || hole_miss)
                 && chain_elements_clean(heap, map.as_tagged(heap))
                 && attach_chain_cell(heap, scope, &map)

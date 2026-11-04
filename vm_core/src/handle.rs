@@ -7,8 +7,8 @@ use core::{
 
 use crate::stack::Args;
 use crate::{
-    EdgeVisitable, GcSlot, Global, HANDLE_BLOCK_SIZE, Heap, HeapObject, RawCell, Register, Tagged,
-    Value, Visitor,
+    EdgeVisitable, GcSlot, Global, HANDLE_BLOCK_SIZE, Heap, HeapObject, Register, Tagged, Value,
+    Visitor,
 };
 
 /// A rooted reference to a `T` that survives relocation by the GC.
@@ -73,7 +73,7 @@ pub struct HandleData {
 /// Slots handed out while this block was the active one; root scanning
 /// never visits past this watermark.
 struct HandleBlock {
-    slots: Box<[Value]>,
+    slots: Box<[GcSlot]>,
     used: usize,
 }
 
@@ -107,7 +107,12 @@ impl HandleDataImpl {
         if let Some(block) = self.blocks.last_mut() {
             block.used = live;
         }
-        let block = vec![self.fill.raw(); size].into_boxed_slice();
+        let block = (0..size)
+            .map(|_| {
+                // Safety: the fill word is a strong, GC-valid root value.
+                unsafe { GcSlot::from_value(self.fill.raw()) }
+            })
+            .collect::<Box<[GcSlot]>>();
         self.next = block.as_ptr() as *mut Value;
         self.limit = unsafe { self.next.add(block.len()) };
         self.blocks.push(HandleBlock {
@@ -142,31 +147,19 @@ impl HandleDataImpl {
 
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.fill.as_raw());
-        let Some(active) = self.blocks.len().checked_sub(1) else {
+        let Some((active, full)) = self.blocks.split_last() else {
             return;
         };
-        for (i, block) in self.blocks.iter().enumerate() {
-            let start = block.slots.as_ptr() as *mut Value;
-            let used_end = if i == active {
-                self.next
-            } else {
-                unsafe { start.add(block.used) }
-            };
-            let mut slot = start;
-            while slot < used_end {
-                visitor.visit(unsafe { &*(slot as *const RawCell) });
-                slot = unsafe { slot.add(1) };
+        for block in full {
+            for slot in &block.slots[..block.used] {
+                visitor.visit(slot.as_raw());
             }
+        }
+        for slot in &active.slots[..self.live_in_active()] {
+            visitor.visit(slot.as_raw());
         }
     }
 
-    #[cfg(debug_assertions)]
-    fn fill_range(&self, from: *mut Value, to: *mut Value) {
-        const FILL: Value = Value::from_bits(0x1bad_dead0_bad_deaf);
-        debug_assert!(from <= to);
-        let len = unsafe { to.offset_from(from) } as usize;
-        unsafe { core::slice::from_raw_parts_mut(from, len) }.fill(FILL);
-    }
 }
 
 impl HandleData {
@@ -288,16 +281,6 @@ impl<'d> HandleScope<'d> {
 impl Drop for HandleScope<'_> {
     fn drop(&mut self) {
         let inner = unsafe { &*self.data.as_ptr() }.inner();
-        #[cfg(debug_assertions)]
-        {
-            // block addresses are unordered: compare counts, not pointers
-            let to = if inner.blocks.len() > self.prev_block_count {
-                self.prev_limit
-            } else {
-                inner.next
-            };
-            inner.fill_range(self.prev_next, to);
-        }
         inner.level -= 1;
         inner.next = self.prev_next;
         inner.limit = self.prev_limit;
@@ -339,16 +322,6 @@ impl<'i, 'o> EscapableHandleScope<'i, 'o> {
 impl Drop for EscapableHandleScope<'_, '_> {
     fn drop(&mut self) {
         let inner = self.data().inner();
-        #[cfg(debug_assertions)]
-        {
-            // block addresses are unordered: compare counts, not pointers
-            let to = if inner.blocks.len() > self.prev_block_count {
-                self.prev_limit
-            } else {
-                inner.next
-            };
-            inner.fill_range(self.prev_next, to);
-        }
         inner.level -= 1;
         inner.next = self.prev_next;
         inner.limit = self.prev_limit;

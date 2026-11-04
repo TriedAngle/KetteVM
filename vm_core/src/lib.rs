@@ -109,21 +109,6 @@ pub trait Compiler {
 /// Number of slots per handle block.
 pub const HANDLE_BLOCK_SIZE: usize = 1024;
 
-/// Re-anchor a tagged word at the enclosing function and return
-/// immediately: the anchor is in **forced tail position**, so no code
-/// in the enclosing function runs after it.
-#[macro_export]
-macro_rules! reanchor {
-    ($tagged:expr, $heap:expr, $f:expr) => {{
-        let word = ($tagged).raw();
-        let heap_ref: &$crate::Heap = $heap;
-        // Safety: forced return
-        return $f(heap_ref, unsafe {
-            $crate::Tagged::<$crate::Value>::from_value_unchecked(word)
-        });
-    }};
-}
-
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<Value>() == size_of::<Word>());
@@ -405,9 +390,16 @@ impl ThreadState {
         Some(self.stack.context(heap, self.frame_base()))
     }
 
+    /// A handle scope over this thread's registered root slots.
+    #[inline]
+    pub fn scope(&self) -> HandleScope<'_> {
+        // Safety: a live `ThreadState` is reachable from the VM root set, so
+        // its handle slots are visited for the whole scope borrow.
+        unsafe { HandleScope::from_raw(NonNull::from(&self.handles)) }
+    }
+
     pub fn handle_scope<R>(&self, f: impl for<'s> FnOnce(HandleScope<'s>) -> R) -> R {
-        let scope = unsafe { HandleScope::from_raw(NonNull::from(&self.handles)) };
-        f(scope)
+        f(self.scope())
     }
 }
 
@@ -515,7 +507,8 @@ impl Thread {
         &mut self,
         f: impl for<'s> FnOnce(&mut Self, HandleScope<'s>) -> R,
     ) -> R {
-        let scope = unsafe { HandleScope::from_raw(NonNull::from(&self.state.handles)) };
+        let state = Arc::clone(&self.state);
+        let scope = state.scope();
         f(self, scope)
     }
 

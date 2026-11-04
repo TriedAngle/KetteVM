@@ -236,14 +236,12 @@ fn start<'b, 't>(
 
             let mut ctx = Ctx::new(vm, state, heap, frame.base);
             let value = dispatch(&mut ctx)?;
-            // Safety: `value` came from the rooted accumulator slot and `heap`
-            // is still borrowed here.
-            Ok(unsafe { Tagged::from_value_unchecked(value) })
+            Ok(value.get(heap))
         }
     }
 }
 
-fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Value, VmError> {
+fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc, VmError> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
@@ -255,7 +253,7 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Value, VmError> {
 
         // A null successor is become's `return acc`: the execution is done.
         if ip.is_null() {
-            return Ok(acc.get(ctx.heap()).raw());
+            return Ok(acc);
         }
 
         // The throw sentinel is become's `throw_dispatch`: unwind from
@@ -271,7 +269,7 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Value, VmError> {
                     ip = offset(ctx.code_ptr(), pc);
                 }
                 Unwind::Escaped => {
-                    return Ok(roots.exception.get(ctx.heap()).erase().raw());
+                    return Ok(Acc::set(roots.exception.get(ctx.heap()).erase()));
                 }
             }
         }

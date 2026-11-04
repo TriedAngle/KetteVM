@@ -70,7 +70,7 @@ use symbol::{
 use vm_core::{
     DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
     NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SlotFlags, SlotName, Smi, Symbol,
-    Tagged, Thread, VM, Value, Visitor, VmError,
+    Thread, VM, Value, Visitor, VmError,
 };
 
 mod known;
@@ -1402,9 +1402,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         let flags = SlotFlags::WRITABLE
             .union(SlotFlags::CONFIGURABLE)
             .union(SlotFlags::ENUMERABLE);
-        // Safety: fresh root-slot word, rooted below before any allocation.
-        let proto =
-            scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(object_prototype.raw()) });
+        let proto = object_prototype.erase();
         let iterator_result_map =
             thread
                 .heap()
@@ -1877,10 +1875,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 "NaN" => nan.erase(),
                 _ => undefined.erase(),
             };
-            // Safety: fresh root-slot words, rooted below before any
-            // allocation.
-            let receiver =
-                scope.handle(unsafe { Tagged::<Object>::from_value_unchecked(global.raw()) });
+            let receiver = global;
             let key = scope.handle(n.as_tagged(thread.heap()));
             Object::define_own_property(
                 thread.heap(),

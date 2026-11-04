@@ -594,7 +594,7 @@ impl Object {
                                 .get(heap)
                                 .get_as::<FixedArray>(heap)
                                 .expect("parent state implies a parent list");
-                            pairs.as_ref().element_slot(slot).set(
+                            pairs.element_slot(slot).set(
                                 heap,
                                 pairs.erase(),
                                 value.as_tagged(heap),

@@ -595,11 +595,11 @@ pub fn object_get_own_property_descriptor<'a>(
                     ("configurable", bool_(configurable)),
                 ],
             )
-            .map(|v| v.raw())
             {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
+                Ok(v) => scope.handle(v),
                 Err(err) => return raise_runtime(vm, heap, state, err),
-            },
+            }
+            .as_tagged(heap),
             Some(PropertyDescriptor::Accessor {
                 get,
                 set,
@@ -616,11 +616,11 @@ pub fn object_get_own_property_descriptor<'a>(
                     ("configurable", bool_(configurable)),
                 ],
             )
-            .map(|v| v.raw())
             {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
+                Ok(v) => scope.handle(v),
                 Err(err) => return raise_runtime(vm, heap, state, err),
-            },
+            }
+            .as_tagged(heap),
             None => vm.known().undefined.get(heap).erase(),
         }
     })
@@ -759,19 +759,19 @@ pub fn object_prevent_extensions<'a>(
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
             return target.as_tagged(heap).erase(); // primitives returned unchanged
         }
-        let raw = match rt_try!(
+        let v = match rt_try!(
             vm,
             heap,
             state,
             Proxy::prevent_extensions(vm, heap, state, target)
         ) {
             Coercion::Threw => None,
-            Coercion::Value(v) => Some(v.raw()),
+            Coercion::Value(v) => Some(v),
         };
-        let Some(raw) = raw else {
+        let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
+        let v = scope.handle(v);
         let cond_39 = v.as_tagged(heap).is_truthy(heap);
         if !cond_39 {
             raise_runtime(vm, heap, state, VmError::NotExtensible)
@@ -925,19 +925,19 @@ pub fn object_seal<'a>(
             return target_handle.as_tagged(heap).erase();
         }
         // [[PreventExtensions]] first (traps included)
-        let raw = match rt_try!(
+        let v = match rt_try!(
             vm,
             heap,
             state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
         ) {
             Coercion::Threw => None,
-            Coercion::Value(v) => Some(v.raw()),
+            Coercion::Value(v) => Some(v),
         };
-        let Some(raw) = raw else {
+        let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
+        let v = scope.handle(v);
         let cond_42 = v.as_tagged(heap).is_truthy(heap);
         if !cond_42 {
             return raise_runtime(vm, heap, state, VmError::NotExtensible);
@@ -977,19 +977,19 @@ pub fn object_freeze<'a>(
         if !Proxy::is_js_receiver(heap, target_handle.as_tagged(heap)) {
             return target_handle.as_tagged(heap).erase();
         }
-        let raw = match rt_try!(
+        let v = match rt_try!(
             vm,
             heap,
             state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
         ) {
             Coercion::Threw => None,
-            Coercion::Value(v) => Some(v.raw()),
+            Coercion::Value(v) => Some(v),
         };
-        let Some(raw) = raw else {
+        let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
+        let v = scope.handle(v);
         let cond_45 = v.as_tagged(heap).is_truthy(heap);
         if !cond_45 {
             return raise_runtime(vm, heap, state, VmError::NotExtensible);

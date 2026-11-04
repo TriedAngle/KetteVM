@@ -39,13 +39,7 @@ pub fn proxy_constructor<'a>(
         );
     }
     state.handle_scope(|scope| {
-        Proxy::allocate(
-            heap,
-            &scope,
-            // Safety: rooted argument words, consumed by the allocation.
-            unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) },
-            unsafe { Tagged::<Value>::from_value_unchecked(handler.raw()) },
-        )
+        Proxy::allocate(heap, &scope, target, handler)
     })
 }
 
@@ -76,13 +70,7 @@ pub fn proxy_revocable<'a>(
         );
     }
     state.handle_scope(|scope| {
-        let proxy = scope.handle(Proxy::allocate(
-            heap,
-            &scope,
-            // Safety: rooted argument words, consumed by the allocation.
-            unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) },
-            unsafe { Tagged::<Value>::from_value_unchecked(handler.raw()) },
-        ));
+        let proxy = scope.handle(Proxy::allocate(heap, &scope, target, handler));
         // revoke = `%__revokeProxy%` bound to the proxy (ES 20.2.4: a
         // built-in function with [[RevocableProxy]]; the revocation itself
         // is idempotent, so no done-flag is needed). A bound function has
@@ -174,12 +162,7 @@ pub fn proxy_revoke<'a>(
     let HostCtx {
         vm, heap, state: _, ..
     } = ctx;
-    let proxy = args.get(heap, 1);
-    let proxy = proxy.raw();
-    Proxy::revoke(
-        heap,
-        // Safety: fresh argument word, consumed with no allocation delay.
-        unsafe { Tagged::<Value>::from_value_unchecked(proxy) },
-    );
+    let proxy = args.get_handle(heap, 1);
+    Proxy::revoke(heap, proxy);
     vm.known().undefined.get(heap).erase()
 }

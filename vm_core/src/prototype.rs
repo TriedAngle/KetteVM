@@ -76,7 +76,7 @@ impl Prototype {
 
         let cell = heap.allocate_handle::<Cell>(
             CellInit {
-                value: Smi::new(1).encode(),
+                value: Smi::new(1).into_tagged().as_maybe_weak(),
             },
             scope,
         );
@@ -103,7 +103,7 @@ impl Prototype {
 
         let cell = heap.allocate_handle::<Cell>(
             CellInit {
-                value: Smi::new(1).encode(),
+                value: Smi::new(1).into_tagged().as_maybe_weak(),
             },
             scope,
         );

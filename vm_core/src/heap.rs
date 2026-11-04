@@ -532,10 +532,12 @@ impl<T> AtomicOptionGcSlot<T> {
     }
 
     pub fn decode<'a>(&self, heap: &'a Heap, word: Word) -> Option<Tagged<'a, T>> {
-        if Value::from_bits(word) == heap.known().the_hole.raw() {
+        let value = Value::from_bits(word);
+        if value == heap.known().the_hole.raw() || !value.is_strong_ptr() {
             return None;
         }
-        Some(unsafe { Tagged::from_value_unchecked(Value::from_bits(word)) })
+        // Safety: typed option slots hold either the hole or a strong `T`.
+        Some(unsafe { Tagged::from_value_unchecked(value) })
     }
 
     pub fn publish<'h, 'x>(

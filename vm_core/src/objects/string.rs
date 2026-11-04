@@ -253,27 +253,18 @@ impl DenseString {
         UnsafeCell::raw_get(self.data.as_ptr())
     }
 
-    fn encoding_of(header: &Header) -> Encoding {
-        // Safety: layout callbacks run without a heap borrow, so the map
-        // word read from the header is promoted unsafely; only its kind
-        // bits are read and the map cannot move under the GC callback.
-        let map = header.map.raw();
-        let map_ref = unsafe { Tagged::<Map>::from_value_unchecked(map) };
-        if map_ref.kind().contains(MapKind::LATIN1) {
+    pub fn encoding(&self, heap: &Heap) -> Encoding {
+        if self.header.map.get(heap).kind().contains(MapKind::LATIN1) {
             Encoding::Latin1
         } else {
             Encoding::Utf16
         }
     }
 
-    pub fn encoding(&self) -> Encoding {
-        Self::encoding_of(&self.header)
-    }
-
-    pub fn data<'s>(&'s self, _heap: &Heap) -> StringData<'s> {
+    pub fn data<'s>(&'s self, heap: &Heap) -> StringData<'s> {
         let ptr = self.data_ptr();
         let len = self.len();
-        match self.encoding() {
+        match self.encoding(heap) {
             Encoding::Latin1 => {
                 StringData::Latin1(unsafe { core::slice::from_raw_parts(ptr, len) })
             }
@@ -316,9 +307,9 @@ impl DenseString {
         self.data(heap) == other.data(heap)
     }
 
-    pub fn code_unit(&self, _heap: &Heap, i: usize) -> u16 {
+    pub fn code_unit(&self, heap: &Heap, i: usize) -> u16 {
         debug_assert!(i < self.len());
-        match self.encoding() {
+        match self.encoding(heap) {
             Encoding::Latin1 => unsafe { *self.data_ptr().add(i) as u16 },
             Encoding::Utf16 => unsafe { *self.data_ptr().cast::<u16>().add(i) },
         }
@@ -441,9 +432,14 @@ impl HeapObject for DenseString {
     }
 
     fn layout(&self) -> Layout {
-        let values = match self.encoding() {
-            Encoding::Latin1 => Layout::array::<u8>(self.len()).expect("string layout"),
-            Encoding::Utf16 => Layout::array::<u16>(self.len()).expect("string layout"),
+        // Safety: layout callbacks run without a heap borrow; only the
+        // map's kind bits are read and the map cannot move during the
+        // callback.
+        let map = unsafe { Tagged::<Map>::from_value_unchecked(self.header.map.raw()) };
+        let values = if map.kind().contains(MapKind::LATIN1) {
+            Layout::array::<u8>(self.len()).expect("string layout")
+        } else {
+            Layout::array::<u16>(self.len()).expect("string layout")
         };
         Layout::new::<Self>()
             .extend(values)

@@ -18,22 +18,13 @@ pub enum SetApplied {
     Rejected,
 }
 
-/// The elements slot is typed `FixedArray` but holds a
-/// `NumberDictionary` in dictionary mode; the map's elements kind is
-/// the authority for interpreting it.
-///
-/// # Safety
-/// The word must be a NumberDictionary; only reachable while the
-/// receiver's map says `ElementsKind::Dictionary`.
-unsafe fn as_elements_word<'a>(dict: Tagged<'a, NumberDictionary>) -> Tagged<'a, FixedArray> {
-    unsafe { Tagged::from_value_unchecked(dict.erase().raw()) }
-}
-
 #[repr(C)]
 pub struct Object {
     pub header: Header,
     pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<FixedArray>,
+    /// Dense elements are a `FixedArray`; dictionary elements are a
+    /// `NumberDictionary`. The map's elements kind selects the shape.
+    pub elements: GcSlot<Value>,
     pub length: GcSlot<Smi>,
 }
 
@@ -130,9 +121,10 @@ impl Object {
         self.slots.get(heap)
     }
 
-    /// The object's elements backing store word.
+    /// The raw elements backing store word. Dense receivers hold a
+    /// `FixedArray`; dictionary receivers hold a `NumberDictionary`.
     #[inline(always)]
-    pub fn elements<'a>(&self, heap: &'a Heap) -> Tagged<'a, FixedArray> {
+    pub fn elements<'a>(&self, heap: &'a Heap) -> Tagged<'a, Value> {
         self.elements.get(heap)
     }
 
@@ -161,8 +153,9 @@ impl Object {
             // dictionary-backed: not a FixedArray
             return None;
         }
-        let elements = self.elements(heap);
-        elements.is_strong_ptr().then_some(elements)
+        // Safety: the receiver map's elements kind says the backing store
+        // is a FixedArray.
+        Some(unsafe { self.elements.get(heap).cast::<FixedArray>() })
     }
 
     /// The sparse-elements backing store, when the receiver is in
@@ -173,11 +166,11 @@ impl Object {
         if !kind.is_js_receiver() || !kind.is_dictionary_elements() {
             return None;
         }
-        let elements = self.elements(heap);
-        if !elements.is_strong_ptr() {
-            return None;
-        }
-        elements.erase().get_as::<NumberDictionary>(heap)
+        // Safety: the receiver map's elements kind says the backing store
+        // is a NumberDictionary.
+        Some(unsafe {
+            self.elements.get(heap).cast::<NumberDictionary>()
+        })
     }
 
     pub fn promote_holey(heap: &mut Heap, scope: &HandleScope<'_>, receiver: &Handle<'_, Object>) {
@@ -227,9 +220,14 @@ impl Object {
     #[inline]
     pub fn max_element_index(&self, heap: &Heap) -> usize {
         if self.is_array(heap) {
-            self.length()
+            return self.length();
+        }
+        let kind = self.map(heap).kind();
+        if kind.is_dictionary_elements() {
+            self.element_dictionary(heap)
+                .map_or(0, |dict| dict.capacity())
         } else {
-            self.elements(heap).len()
+            self.elements_array(heap).map_or(0, |elements| elements.len())
         }
     }
 
@@ -259,7 +257,7 @@ impl Object {
         if !kind.is_js_receiver() || !kind.is_dense_elements() {
             return None;
         }
-        let elements = self.elements(heap);
+        let elements = self.elements.get(heap).get_as::<FixedArray>(heap)?;
         if kind.is_holey() {
             // `length`/capacity can exceed the backing store: those
             // indices are holes
@@ -552,7 +550,7 @@ impl Object {
         }
         let obj = receiver.as_tagged(heap);
         obj.elements
-            .set(heap, obj.erase(), elements.as_tagged(heap));
+            .set(heap, obj.erase(), elements.as_tagged(heap).erase());
         if is_array && new_len > logical_len {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
         }
@@ -597,20 +595,11 @@ impl Object {
                 return Self::store_array_element(heap, scope, receiver, i, value);
             }
         }
-        let value_word = value.as_tagged(heap).raw();
-        let table = NumberDictionary::insert(
-            heap,
-            scope,
-            &dict,
-            i,
-            unsafe { Tagged::from_value_unchecked(value_word) },
-            DETAILS_DATA,
-        );
+        let table = NumberDictionary::insert(heap, scope, &dict, i, *value, DETAILS_DATA);
         let obj = receiver.as_tagged(heap);
         if table.as_tagged(heap) != dict.as_tagged(heap) {
-            obj.elements.set(heap, obj.erase(), unsafe {
-                as_elements_word(table.as_tagged(heap))
-            });
+            obj.elements
+                .set(heap, obj.erase(), table.as_tagged(heap).erase());
         }
         if is_array && i >= length {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
@@ -696,14 +685,14 @@ impl Object {
                 .element_dictionary(heap)
                 .ok_or(VmError::Type)?,
         );
-        let (value_word, details, accessor) = match desc {
+        let (value, details, accessor) = match desc {
             PropertyDescriptor::Data {
                 value,
                 writable,
                 enumerable,
                 configurable,
             } => (
-                value.as_tagged(heap).raw(),
+                value,
                 DETAILS_WRITABLE * writable as i64
                     | DETAILS_ENUMERABLE * enumerable as i64
                     | DETAILS_CONFIGURABLE * configurable as i64,
@@ -717,7 +706,7 @@ impl Object {
             } => {
                 let pair = heap.allocate_handle::<AccessorPair>((get, set), scope);
                 (
-                    pair.as_tagged(heap).raw(),
+                    pair.erase(),
                     DETAILS_ACCESSOR
                         | DETAILS_ENUMERABLE * enumerable as i64
                         | DETAILS_CONFIGURABLE * configurable as i64,
@@ -725,26 +714,14 @@ impl Object {
                 )
             }
         };
-        let table = NumberDictionary::insert(
-            heap,
-            scope,
-            &dict,
-            i,
-            // Safety: fresh word, no allocation since the read.
-            unsafe { Tagged::from_value_unchecked(value_word) },
-            details,
-        );
+        let table = NumberDictionary::insert(heap, scope, &dict, i, value, details);
         if accessor {
             table.as_tagged(heap).require_slow(heap);
         }
         let obj = receiver.as_tagged(heap);
         let host = obj.erase();
-        obj.elements.set(
-            heap,
-            host,
-            // Safety: dictionary mode was established above.
-            unsafe { Tagged::from_value_unchecked(table.as_tagged(heap).erase().raw()) },
-        );
+        obj.elements
+            .set(heap, host, table.as_tagged(heap).erase());
         if is_array && i >= obj.length() {
             obj.length.set(heap, host, Smi::new((i + 1) as i64));
         }
@@ -880,15 +857,7 @@ impl Object {
             scope,
         );
         for (k, v) in &entries {
-            let word = v.as_tagged(heap).raw();
-            dict = NumberDictionary::insert(
-                heap,
-                scope,
-                &dict,
-                *k,
-                unsafe { Tagged::from_value_unchecked(word) },
-                DETAILS_DATA,
-            );
+            dict = NumberDictionary::insert(heap, scope, &dict, *k, *v, DETAILS_DATA);
         }
         // the map swap must invalidate chains keyed on the old map
         Prototype::shape_changed(heap, map.as_tagged(heap));
@@ -899,9 +868,8 @@ impl Object {
             SiblingChange::Dictionary,
         );
         let obj = receiver.as_tagged(heap);
-        obj.elements.set(heap, obj.erase(), unsafe {
-            as_elements_word(dict.as_tagged(heap))
-        });
+        obj.elements
+            .set(heap, obj.erase(), dict.as_tagged(heap).erase());
         obj.header
             .map
             .set(heap, obj.erase(), target.as_tagged(heap));
@@ -937,7 +905,7 @@ impl Object {
             Transition::sibling_target(heap, scope, |h| map.as_tagged(h), SiblingChange::Holey);
         let obj = receiver.as_tagged(heap);
         obj.elements
-            .set(heap, obj.erase(), elements.as_tagged(heap));
+            .set(heap, obj.erase(), elements.as_tagged(heap).erase());
         obj.header
             .map
             .set(heap, obj.erase(), target.as_tagged(heap));
@@ -973,7 +941,7 @@ impl Object {
         let host = self.tagged(heap);
         self.header.map.set(heap, host, map);
         self.slots.set(heap, host, slots);
-        self.elements.set(heap, host, elements);
+        self.elements.set(heap, host, elements.erase());
         self.length.set(heap, host, Smi::new(length as i64));
     }
 }

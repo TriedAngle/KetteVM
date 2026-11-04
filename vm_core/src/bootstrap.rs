@@ -580,7 +580,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
         .init(prototype_info_map.as_tagged(heap));
     let invalid_prototype_validity_cell = heap.allocate_handle::<Cell>(
         CellInit {
-            value: Value::CLEARED,
+            value: Tagged::CLEARED,
         },
         &scope,
     );
@@ -927,5 +927,5 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     null_object.slots.set(heap, null_erased, empty_fixed_array);
     null_object
         .elements
-        .set(heap, null_erased, empty_fixed_array);
+        .set(heap, null_erased, empty_fixed_array.erase());
 }

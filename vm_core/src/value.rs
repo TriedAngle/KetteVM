@@ -463,6 +463,14 @@ impl<'a, T> Tagged<'a, T> {
     }
 }
 
+impl<'a> Tagged<'a, MaybeWeak<Value>> {
+    /// The cleared weak sentinel: a valid maybe-weak word that names no object.
+    pub const CLEARED: Self = Tagged {
+        raw: Value::CLEARED,
+        _phantom: PhantomData,
+    };
+}
+
 impl<'a, T> Tagged<'a, MaybeWeak<T>> {
     pub unsafe fn from_maybe_weak_unchecked(value: Value) -> Self {
         Tagged {

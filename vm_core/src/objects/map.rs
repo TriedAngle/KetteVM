@@ -77,12 +77,7 @@ impl Map {
     }
 
     pub fn try_get_prototype_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, PrototypeInfo>> {
-        let value = Value::from_bits(self.prototype_info.load_word(heap));
-        if !value.is_strong_ptr() {
-            return None;
-        }
-        // Safety: the slot is only ever published a strong `PrototypeInfo`.
-        unsafe { Tagged::<Value>::from_value_unchecked(value) }.get_as::<PrototypeInfo>(heap)
+        self.prototype_info.load(heap)
     }
 
     pub fn published_validity_cell<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Cell>> {

@@ -44,9 +44,16 @@ impl DataHandler {
         self.validity_cell.get(heap)
     }
 
+    fn data_slots(&self) -> &[MaybeWeakGcSlot] {
+        let len = self.data_len();
+        // Safety: the inline data section holds exactly data_len slots.
+        unsafe { core::slice::from_raw_parts(self.data.as_ptr(), len) }
+    }
+
     fn data_slot(&self, i: usize) -> &MaybeWeakGcSlot {
         debug_assert!(i < self.data_len());
-        unsafe { &*self.data.as_ptr().add(i) }
+        // Safety: checked against the inline data section.
+        unsafe { self.data_slots().get_unchecked(i) }
     }
 
     pub fn data<'a>(&self, heap: &'a Heap, i: usize) -> Tagged<'a, MaybeWeak<Value>> {
@@ -93,8 +100,8 @@ impl EdgeVisitable for DataHandler {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.validity_cell.as_raw());
-        for i in 0..self.data_len() {
-            visitor.visit(self.data_slot(i).as_raw());
+        for slot in self.data_slots() {
+            visitor.visit(slot.as_raw());
         }
     }
 }
