@@ -159,7 +159,6 @@ impl HandleDataImpl {
             visitor.visit(slot.as_raw());
         }
     }
-
 }
 
 impl HandleData {

@@ -168,9 +168,7 @@ impl Object {
         }
         // Safety: the receiver map's elements kind says the backing store
         // is a NumberDictionary.
-        Some(unsafe {
-            self.elements.get(heap).cast::<NumberDictionary>()
-        })
+        Some(unsafe { self.elements.get(heap).cast::<NumberDictionary>() })
     }
 
     pub fn promote_holey(heap: &mut Heap, scope: &HandleScope<'_>, receiver: &Handle<'_, Object>) {
@@ -227,7 +225,8 @@ impl Object {
             self.element_dictionary(heap)
                 .map_or(0, |dict| dict.capacity())
         } else {
-            self.elements_array(heap).map_or(0, |elements| elements.len())
+            self.elements_array(heap)
+                .map_or(0, |elements| elements.len())
         }
     }
 
@@ -720,8 +719,7 @@ impl Object {
         }
         let obj = receiver.as_tagged(heap);
         let host = obj.erase();
-        obj.elements
-            .set(heap, host, table.as_tagged(heap).erase());
+        obj.elements.set(heap, host, table.as_tagged(heap).erase());
         if is_array && i >= obj.length() {
             obj.length.set(heap, host, Smi::new((i + 1) as i64));
         }

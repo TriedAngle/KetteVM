@@ -19,15 +19,3 @@ default = ["star_fusion"]
 fast = []
 star_fusion = []
 stress-minor-gc = ["vm_core/stress-minor-gc"]
-
-[[example]]
-name = "abi"
-required-features = ["fast"]
-
-[[example]]
-name = "ab_bench"
-required-features = ["fast"]
-
-[[example]]
-name = "run"
-required-features = ["fast"]

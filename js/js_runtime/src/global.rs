@@ -50,8 +50,7 @@ pub fn eval_runtime<'a>(
             closure.erase(),
             HandleSlice::EMPTY,
             None,
-        )
-        {
+        ) {
             Ok(v) => scope.handle(v),
             Err(err) => return raise_runtime(vm, heap, state, err),
         }

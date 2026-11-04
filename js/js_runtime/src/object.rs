@@ -594,8 +594,7 @@ pub fn object_get_own_property_descriptor<'a>(
                     ("enumerable", bool_(enumerable)),
                     ("configurable", bool_(configurable)),
                 ],
-            )
-            {
+            ) {
                 Ok(v) => scope.handle(v),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }
@@ -615,8 +614,7 @@ pub fn object_get_own_property_descriptor<'a>(
                     ("enumerable", bool_(enumerable)),
                     ("configurable", bool_(configurable)),
                 ],
-            )
-            {
+            ) {
                 Ok(v) => scope.handle(v),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }

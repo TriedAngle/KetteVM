@@ -38,9 +38,7 @@ pub fn proxy_constructor<'a>(
             VmError::Message(Message::ProxyBadTargetOrHandler),
         );
     }
-    state.handle_scope(|scope| {
-        Proxy::allocate(heap, &scope, target, handler)
-    })
+    state.handle_scope(|scope| Proxy::allocate(heap, &scope, target, handler))
 }
 
 /// `Proxy.revocable(target, handler)` (ES 20.2.2.1): returns

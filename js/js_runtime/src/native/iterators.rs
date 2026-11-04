@@ -47,8 +47,7 @@ pub fn get_iterator<'a>(
             method,
             call_args,
             None,
-        )
-        {
+        ) {
             Ok(v) => scope.handle(v),
             Err(err) => return raise_runtime(vm, heap, state, err),
         }
@@ -89,8 +88,7 @@ pub fn iterator_next<'a>(
             next,
             call_args,
             None,
-        )
-        {
+        ) {
             Ok(v) => scope.handle(v),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };

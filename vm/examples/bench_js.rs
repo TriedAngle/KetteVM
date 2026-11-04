@@ -1,23 +1,19 @@
-//! Tiny JS runner for comparing the three interpreter shells.
+//! Tiny JS runner for comparing the interpreter shells.
 //!
-//!     cargo run --release --example bench_js -- files...
+//!     cargo run --release -p vm --example bench_js -- files...
 
-use interpreter::DefaultInterpreter;
-use js_compiler::{SourceMode, compile_js};
-use js_runtime::JSRuntime;
+use bytecode::SourceMode;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm_core::Runtime;
-use vm_core::{Interpreter, VM, VmCore};
+use vm::{Compiler, DefaultInterpreter, Interpreter, JSRuntime, JavascriptCompiler, Runtime, VM};
 
 fn run<I: Interpreter>(src: &str) {
     let vm = VM::new::<MarkSweep, I>(MarkSweepConfig::default())
         .expect("heap")
-        .add::<VmCore>()
+        .add::<vm::VmCore>()
         .expect("vm core")
         .add::<JSRuntime>()
         .expect("js runtime");
-    let program =
-        compile_js(src, SourceMode::Script, &vm.runtime::<JSRuntime>().ids).expect("compile");
+    let program = JavascriptCompiler::compile(&vm, src, SourceMode::Script).expect("compile");
     let mut thread = vm.attach();
     thread
         .run_program(program, JSRuntime::ID)
