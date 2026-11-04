@@ -1,8 +1,8 @@
 //! for-in enumeration (ES 14.7.5): a hidden enumerator object that walks
 //! the prototype chain lazily, one own-key snapshot per level.
 
-use crate::lookup::own_property_enumerable;
-use crate::{
+use vm_core::lookup::own_property_enumerable;
+use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
     Tagged, VM, Value, VmError, WellKnown, raise_runtime, rt_try,
 };

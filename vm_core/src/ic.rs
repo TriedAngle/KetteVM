@@ -1510,11 +1510,13 @@ fn promote_from_mono(
     let total = WeakFixedArray::<Value>::layout_for(4);
     let arr = heap.allocate_token_enter_heap(total, |token, heap| {
         let vec_t = vector.as_tagged(heap);
-        let old_map = vec_t
-            .slot(slot)
-            .get(heap)
-            .as_strong()
-            .expect("caller checked live");
+        // the reservation may have collected: the cached map is weak, so
+        // re-read the entry instead of trusting the pre-allocation check
+        let old_map = vec_t.slot(slot).get(heap).as_strong();
+        let Some(old_map) = old_map else {
+            token.discard_remaining();
+            return None;
+        };
         let old_handler = vec_t.slot(slot + 1).get(heap);
         let words = [
             old_map.as_weak(),
@@ -1523,11 +1525,20 @@ fn promote_from_mono(
             handler.word(heap),
         ];
         let arr = token.allocate::<WeakFixedArray>(WeakFixedArrayInit { values: &words });
-        scope.handle(arr)
+        token.discard_remaining();
+        Some(scope.handle(arr))
     });
-    vector
-        .as_tagged(heap)
-        .set_poly(heap, slot, arr.as_tagged(heap));
+    match arr {
+        Some(arr) => vector
+            .as_tagged(heap)
+            .set_poly(heap, slot, arr.as_tagged(heap)),
+        // the stale mono entry died: install the new one
+        None => {
+            vector
+                .as_tagged(heap)
+                .set_mono(heap, slot, map.as_tagged(heap), handler.word(heap))
+        }
+    }
 }
 
 fn update_poly(
@@ -1579,6 +1590,10 @@ fn update_poly(
         words.push(map.as_tagged(heap).erase().as_weak());
         words.push(handler.word(heap));
         let arr = token.allocate::<WeakFixedArray>(WeakFixedArrayInit { values: &words });
+        // the reservation was sized from the pre-collection live count: a map
+        // whose only reference was this weak cache entry may have died here,
+        // so the array can be shorter than reserved
+        token.discard_remaining();
         scope.handle(arr)
     });
     vector

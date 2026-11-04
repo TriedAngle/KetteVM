@@ -14,7 +14,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::{DefaultInterpreter, JSRuntime, JavascriptCompiler, VM};
+use vm::{DefaultInterpreter, JSRuntime, JavascriptCompiler, VM, VmCore};
 
 enum Outcome {
     Pass,
@@ -159,6 +159,8 @@ fn run_one(harness: &str, path: &Path) -> Result<(), String> {
 
     let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
         .map_err(|e| format!("{e:?}"))?
+        .add::<VmCore>()
+        .expect("vm core")
         .add::<JSRuntime>()
         .map_err(|e| format!("{e:?}"))?;
     if std::env::var_os("KETTEVM_GC_STRESS").is_some() {

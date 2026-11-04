@@ -52,7 +52,10 @@ pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
 pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
 
-pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
+pub use intrinsics::VmCore;
+pub use native::{
+    HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
+};
 pub use objects::{
     AccessorInfo, AccessorInfoInit, AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject,
     Cell, CellInit, Code, CodeInit, ContextInit, ContextObject, DETAILS_ACCESSOR,
@@ -91,7 +94,10 @@ pub type Global<T> = Handle<'static, T>;
 /// A bytecode frontend, selectable by type at the call site
 /// (`vm.eval::<JavascriptCompiler>(..)`).
 pub trait Compiler {
+    /// Parse and lower `source` for `vm`: the native-function ids the code
+    /// emits (`CallNative`) come from the VM's native registry.
     fn compile(
+        vm: &VM,
         source: &str,
         mode: bytecode::SourceMode,
     ) -> Result<bytecode::Program, bytecode::FrontendError>;
@@ -139,7 +145,7 @@ pub struct SharedVM {
     threads: Mutex<Vec<Weak<ThreadState>>>,
     interner: StringInterner,
     prototype_registry: PrototypeRegistry,
-    runtimes: NativeRegistry,
+    natives: NativeRegistry,
     states: Mutex<Vec<(TypeId, Box<dyn ErasedRuntimeState>)>>,
     /// Weak slots the GC clears when their targets die; used for tests and
     /// the seed of a weak-registry feature.
@@ -151,8 +157,6 @@ pub struct SharedVM {
     /// Interpreter entry ([[Call]]/[[Construct]] on bytecode callables);
     /// set once at construction from the `I: Interpreter` type parameter.
     execute: EntryFn,
-    /// JS source compiler used by direct eval; installed by the JS runtime.
-    eval_compile: std::sync::OnceLock<bytecode::CompileFn>,
 }
 
 pub struct VM {
@@ -166,15 +170,15 @@ pub struct ThreadState {
     /// self-describing (see [`Stack`]): this cell is the only shadow
     /// state, written by push/pop/unwind frame switches.
     frame_base: StdCell<usize>,
-    /// Whether an interpreted frame is current (runtime calls inspecting
-    /// the running frame check this).
+    /// Whether an interpreted frame is current (natives inspecting the
+    /// running frame check this).
     frame_active: StdCell<bool>,
     /// The accumulator cell: rooted, the GC updates it in place.
     acc: Register,
     pending_exception: Register,
     has_pending_exception: StdCell<bool>,
     /// The error code behind the current sentinel-channel raise, for
-    /// edges that surface `Result` again (`Thread::run_runtime`).
+    /// edges that surface `Result` again (`Thread::run_native`).
     last_error: StdCell<VmError>,
     /// Why this thread's execution terminated, if it did. Set exactly once,
     /// right before the uncatchable unwind; guest code can never observe or
@@ -427,17 +431,6 @@ impl SharedVM {
             visit_object: host_visit_object,
         }
     }
-
-    /// Install `KetteTools` on the global object. Owns the bootstrap-style
-    /// stack handle scope; the installed object stays reachable through
-    /// the global object after it dies.
-    fn install_tools(&self, local: &mut Heap) {
-        let data = HandleData::new(self.known.the_hole.get(local).erase());
-        // Safety: `data` outlives every use of the scope below.
-        let scope = unsafe { HandleScope::from_raw(NonNull::from(&data)) };
-        KetteTools::install(local, &self.known, &self.interner, &scope)
-            .expect("installing KetteTools must not fail");
-    }
 }
 
 fn host_visit_roots(ctx: *const (), visitor: &mut dyn Visitor) {
@@ -547,10 +540,10 @@ impl Thread {
         Errors::from_vm_error(&self.vm, &mut self.heap, &self.state, err).map(|v| v.raw())
     }
 
-    pub fn run_runtime(&mut self, f: NativeFn, args: &[Value]) -> Result<Value, VmError> {
+    pub fn run_native(&mut self, f: NativeFn, args: &[Value]) -> Result<Value, VmError> {
         let exception = self.vm.known().exception.get(&self.heap).raw();
         let nctx = HostCtx::new(&self.vm, &mut self.heap, &self.state);
-        // stage a rooted copy: the runtime may keep reading it across its
+        // stage a rooted copy: the native may keep reading it across its
         // own allocations
         // Safety: caller-owned words staged before any allocation.
         self.state.handle_scope(|scope| {
@@ -577,13 +570,7 @@ impl Thread {
         })
     }
 
-    pub fn run_source(
-        &mut self,
-        src: &str,
-        compile: bytecode::CompileFn,
-        mode: bytecode::SourceMode,
-    ) -> Result<Value, ScriptError> {
-        let program = compile(src, mode).map_err(ScriptError::from_frontend)?;
+    pub fn run_program(&mut self, program: bytecode::Program) -> Result<Value, ScriptError> {
         self.handle_scope(|thread, scope| {
             let closure = materialize::Materialize::script(thread, &scope, &program)
                 .map_err(ScriptError::Vm)?;
@@ -592,11 +579,15 @@ impl Thread {
     }
 
     pub fn eval<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
-        self.run_source(src, C::compile, bytecode::SourceMode::Script)
+        let program = C::compile(self.vm(), src, bytecode::SourceMode::Script)
+            .map_err(ScriptError::from_frontend)?;
+        self.run_program(program)
     }
 
     pub fn eval_repl<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
-        self.run_source(src, C::compile, bytecode::SourceMode::Repl)
+        let program = C::compile(self.vm(), src, bytecode::SourceMode::Repl)
+            .map_err(ScriptError::from_frontend)?;
+        self.run_program(program)
     }
 }
 
@@ -649,12 +640,11 @@ impl VM {
             threads: Mutex::new(Vec::new()),
             interner,
             prototype_registry: PrototypeRegistry::new(),
-            runtimes: NativeRegistry::new(),
+            natives: NativeRegistry::new(),
             states: Mutex::new(Vec::new()),
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
             execute: I::EXECUTE,
-            eval_compile: std::sync::OnceLock::new(),
         });
         shared.heap.set_host(shared.gc_host());
         let mut local = shared
@@ -663,7 +653,6 @@ impl VM {
         bootstrap_basics(&mut local);
         intern_well_known_strings(&mut local, &shared.interner);
         bootstrap_well_known(&mut local);
-        shared.install_tools(&mut local);
         Ok(Self { shared })
     }
 
@@ -689,30 +678,22 @@ impl VM {
         &self.shared.interner
     }
 
-    pub fn runtimes(&self) -> &NativeRegistry {
-        &self.shared.runtimes
+    pub fn natives(&self) -> &NativeRegistry {
+        &self.shared.natives
     }
 
     #[inline]
-    pub fn runtime(&self, index: NativeIndex) -> NativeFn {
+    pub fn native(&self, index: NativeIndex) -> NativeFn {
         self.shared
-            .runtimes
+            .natives
             .get(index)
-            .expect("unknown runtime index")
+            .expect("unknown native function index")
     }
 
-    pub fn set_eval_compiler(&self, compile: bytecode::CompileFn) {
-        let _ = self.shared.eval_compile.set(compile);
-    }
-
-    pub fn eval_compiler(&self) -> Option<bytecode::CompileFn> {
-        self.shared.eval_compile.get().copied()
-    }
-
-    pub fn register_runtime(&mut self, f: NativeFn) -> NativeIndex {
+    pub fn register_native(&mut self, f: NativeFn) -> NativeIndex {
         Arc::get_mut(&mut self.shared)
-            .expect("cannot register runtimes on a shared VM")
-            .runtimes
+            .expect("cannot register natives on a shared VM")
+            .natives
             .insert(f)
     }
 
@@ -769,16 +750,32 @@ impl VM {
 
     /// Run `R`'s setup (native-fn registration + global installation) and
     /// store its rooted state for later `runtime_state` access. Must run
-    /// before the VM is shared: `R::setup` registers runtime functions,
+    /// before the VM is shared: `R::setup` registers native functions,
     /// which requires exclusive access.
-    pub fn add<R: Runtime>(mut self) -> Result<Self, VmError> {
+    /// Install one runtime: [`Runtime::setup`] then keep its state.
+    fn install<R: Runtime>(&mut self) -> Result<(), VmError> {
+        assert!(
+            !self
+                .shared
+                .states
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, _)| *id == TypeId::of::<R>()),
+            "a runtime is installed once per VM"
+        );
         let mut state = R::State::default();
-        R::setup(&mut self, &mut state)?;
+        R::setup(self, &mut state)?;
         self.shared
             .states
             .lock()
             .unwrap()
             .push((TypeId::of::<R>(), Box::new(state)));
+        Ok(())
+    }
+
+    pub fn add<R: Runtime>(mut self) -> Result<Self, VmError> {
+        self.install::<R>()?;
         Ok(self)
     }
 

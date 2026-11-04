@@ -802,7 +802,7 @@ fn native_accessor_get<'h>(
         return Ok(Coercion::Value(heap.known().undefined.get(heap).erase()));
     };
     let args = scope.stage(&[holder.as_tagged(heap).erase()]).as_args();
-    let result = scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
+    let result = scope.handle(vm.native(index)(HostCtx::new(vm, heap, state), None, args));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Coercion::Threw)
     } else {
@@ -825,7 +825,7 @@ fn native_accessor_set<'h>(
     let args = scope
         .stage(&[holder.as_tagged(heap).erase(), value.as_tagged(heap)])
         .as_args();
-    let result = scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
+    let result = scope.handle(vm.native(index)(HostCtx::new(vm, heap, state), None, args));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Flow::Threw)
     } else if result.as_tagged(heap) == heap.known().false_object.get(heap).erase() {

@@ -12,14 +12,14 @@
 //! the callee itself as `self` — the call is the `value` send.
 
 use bytecode::{
-    BuiltinFn, CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta,
-    GlobalDeclarations, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
+    CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
+    Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
     Symbol, UnaryOp,
 };
-use vm_core::{MODE_VAR, SCOPE_DECLARATION};
+use vm_core::{MODE_VAR, NativeIndex, SCOPE_DECLARATION};
 
 use crate::CompileError;
 
@@ -112,7 +112,11 @@ fn collect_branch(ast: &Ast, branch: NodeId, out: &mut Vec<NodeId>) {
     }
 }
 
-pub fn generate(ast: &Ast, resolved: &Resolved) -> Result<Program, CompileError> {
+pub fn generate(
+    ast: &Ast,
+    resolved: &Resolved,
+    declare_globals: NativeIndex,
+) -> Result<Program, CompileError> {
     let root = ast.root().expect("the parser sets a root");
     let mut objects = Vec::new();
     collect_objects(ast, root, &mut objects);
@@ -127,8 +131,16 @@ pub fn generate(ast: &Ast, resolved: &Resolved) -> Result<Program, CompileError>
     let root_scope = resolved.scope_of(root).expect("root owns the script scope");
     let mut program = Program::with_capacity(objects.len() + 1);
     {
-        let mut generator =
-            FunctionGen::new(ast, resolved, root_scope, root_scope, root, 0, &object_fids);
+        let mut generator = FunctionGen::new(
+            ast,
+            resolved,
+            root_scope,
+            root_scope,
+            root,
+            0,
+            &object_fids,
+            declare_globals,
+        );
         generator.generate()?;
         program.add_function(generator.finish());
     }
@@ -151,6 +163,7 @@ pub fn generate(ast: &Ast, resolved: &Resolved) -> Result<Program, CompileError>
             parts.body,
             param_count,
             &object_fids,
+            declare_globals,
         );
         generator.generate()?;
         program.add_function(generator.finish());
@@ -173,6 +186,8 @@ struct FunctionGen<'a> {
     param_count: usize,
     /// `node -> function index` for closure creation
     object_fids: &'a [Option<u32>],
+    /// id of the native that installs the top-level declarations
+    declare_globals: NativeIndex,
     b: FnBuilder,
     /// register holding the pushed-over context (prologue/epilogue)
     ctx_save: Reg,
@@ -192,6 +207,7 @@ impl<'a> FunctionGen<'a> {
         body: NodeId,
         param_count: usize,
         object_fids: &'a [Option<u32>],
+        declare_globals: NativeIndex,
     ) -> Self {
         let decls = resolved.scope(scope).decls.len();
         let mut captured = vec![false; decls];
@@ -227,6 +243,7 @@ impl<'a> FunctionGen<'a> {
             reg_of,
             param_count,
             object_fids,
+            declare_globals,
             b,
             ctx_save,
             completion,
@@ -386,7 +403,7 @@ impl<'a> FunctionGen<'a> {
                 .b
                 .constant(Constant::GlobalDeclarations(self.global_declarations()));
             self.b
-                .call_runtime_staged(BuiltinFn::DeclareGlobals, &[RtArg::Const(idx)]);
+                .call_native_staged(self.declare_globals, &[RtArg::Const(idx)]);
         }
         self.b.load_undefined();
         self.b.store(self.completion);

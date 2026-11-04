@@ -1,6 +1,5 @@
 use crate::api::Runtime;
 use crate::errors::Errors;
-use crate::intrinsics::native_fn;
 use crate::{
     Args, Coercion, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState, VM, Value,
     VmError,
@@ -138,7 +137,7 @@ impl<'a> HostCtx<'a> {
     }
 }
 
-/// The runtime-call ABI (tier 1)
+/// The native-call ABI (tier 1)
 pub type NativeFn =
     for<'a, 'nt> fn(HostCtx<'a>, Option<Handle<'nt, Value>>, Args) -> Tagged<'a, Value>;
 
@@ -171,10 +170,10 @@ macro_rules! rt_try {
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NativeIndex(pub usize);
 
-impl NativeIndex {
-    /// the fixed `BuiltinFn` table occupies 0..COUNT; dynamically
-    /// registered runtimes (builtins) append after it
-    pub const NATIVE_TABLE_END: Self = Self(bytecode::BuiltinFn::COUNT as usize);
+impl From<NativeIndex> for u32 {
+    fn from(index: NativeIndex) -> Self {
+        index.0 as u32
+    }
 }
 
 pub struct NativeRegistry {
@@ -183,18 +182,9 @@ pub struct NativeRegistry {
 
 impl NativeRegistry {
     pub fn new() -> Self {
-        let mut registry = Self {
+        Self {
             entries: Vec::new(),
-        };
-        // the runtime-helper table owns indices 0..COUNT: CallRuntime
-        // operands carry BuiltinFn discriminants, so registration order
-        // must (and is asserted to) match
-        for (i, id) in bytecode::BuiltinFn::ALL.iter().enumerate() {
-            debug_assert_eq!(*id as u16 as usize, i, "ALL order must match discriminants");
-            let idx = registry.insert(native_fn(*id));
-            debug_assert_eq!(idx.0, i, "runtime table must start at index 0");
         }
-        registry
     }
 
     pub fn insert(&mut self, f: NativeFn) -> NativeIndex {
@@ -220,4 +210,18 @@ impl Default for NativeRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The running frame's context (CallNative runs in place, so the
+/// interpreter's cache still holds the frame executing the call).
+/// The current (calling) frame's context: `CallNative` runs in place, so
+/// the interpreter's cache still holds the frame executing the call.
+pub fn frame_context_value<'a>(
+    state: &ThreadState,
+    heap: &'a Heap,
+) -> Result<Tagged<'a, Value>, VmError> {
+    if !state.is_frame_active() {
+        return Err(VmError::Type);
+    }
+    Ok(state.stack.context(heap, state.frame_base()))
 }

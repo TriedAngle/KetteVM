@@ -1,6 +1,6 @@
 use crate::opcodes::IndexKind;
 use crate::program::{Constant, Function, Program};
-use crate::{BuiltinFn, Opcode, Operand, REGISTER_FILE_START, jump_target, try_decode};
+use crate::{Opcode, Operand, REGISTER_FILE_START, jump_target, try_decode};
 
 /// A compiled function (or program) is malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,8 +16,6 @@ pub enum ValidationError {
     ConstantIndexOutOfRange { pc: usize, index: u32 },
     /// A feedback operand's `[state, handler]` pair exceeds the vector.
     FeedbackSlotOutOfRange { pc: usize, slot: u32 },
-    /// A runtime-call discriminant exceeds `BuiltinFn::COUNT`.
-    RuntimeFnOutOfRange { pc: usize, discriminant: u32 },
     /// A jump target is outside the stream or not on an instruction
     /// boundary.
     BadJumpTarget { pc: usize, target: usize },
@@ -103,12 +101,6 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
                         let slot = ops.idx(i) as u32;
                         if slot + 1 >= f.feedback_count {
                             return Err(ValidationError::FeedbackSlotOutOfRange { pc, slot });
-                        }
-                    }
-                    IndexKind::BuiltinFn => {
-                        let discriminant = ops.idx(i) as u32;
-                        if discriminant >= BuiltinFn::COUNT as u32 {
-                            return Err(ValidationError::RuntimeFnOutOfRange { pc, discriminant });
                         }
                     }
                     IndexKind::Unchecked => {}

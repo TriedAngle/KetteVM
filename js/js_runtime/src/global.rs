@@ -1,5 +1,6 @@
 //! ES 19: function properties of the global object (eval, isNaN).
 
+use crate::JSRuntime;
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::materialize::Materialize;
@@ -26,7 +27,8 @@ pub fn eval_runtime<'a>(
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap))
             .expect("checked string source");
-        let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal) {
+        let ids = &vm.runtime_state::<JSRuntime>().ids;
+        let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal, ids) {
             Ok(program) => program,
             Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
         };

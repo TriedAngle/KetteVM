@@ -152,9 +152,7 @@ macro_rules! call_enter {
         let (acc, value) = match $result {
             Ok(StagedCall::Frame) => ($acc, false),
             Ok(StagedCall::Value(v)) => (Acc::set(v), true),
-            Ok(StagedCall::Native { rt, staged }) => {
-                (Acc::set($ctx.call_runtime(rt, staged)), true)
-            }
+            Ok(StagedCall::Native { rt, staged }) => (Acc::set($ctx.call_native(rt, staged)), true),
             Ok(StagedCall::Proxy { callee_reg, staged }) => (
                 proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged),
                 true,
@@ -236,7 +234,7 @@ handler_table!(
     crate::op_move,
     crate::op_store,
     crate::op_add,
-    crate::op_call_runtime,
+    crate::op_call_native,
     crate::op_jump,
     crate::op_jump_if_truthy,
     crate::op_jump_if_falsy,
@@ -306,7 +304,6 @@ handler_table!(
     crate::op_store_named_property_no_shadow,
     crate::op_store_keyed_property_no_shadow,
     crate::op_store_global,
-    crate::op_delete,
     crate::op_create_closure,
     crate::op_throw,
     crate::op_add_parent,
@@ -349,7 +346,7 @@ fn enter<'a>(
         // proxy and bound-function calls are intercepted before `execute`
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
-            let f = vm.runtime(rt);
+            let f = vm.native(rt);
             let nctx = HostCtx::new(vm, heap, state);
             Ok(Acc::set(f(nctx, new_target, args.as_args())))
         }

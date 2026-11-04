@@ -1,7 +1,7 @@
-//! Iterator protocol runtimes (ES 8.5): GetIterator, IteratorNext,
+//! Iterator protocol natives (ES 8.5): GetIterator, IteratorNext,
 //! IteratorComplete and IteratorValue.
 
-use crate::{
+use vm_core::{
     Args, Coercion, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise_runtime, rt_try,
 };
 

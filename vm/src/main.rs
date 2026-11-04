@@ -1,10 +1,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use kette_compiler::KetteCompiler;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, Thread, VM};
-use vm::{DenseString, Float, Heap, JavascriptCompiler, SlotName, Smi, Tagged, Value};
+use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, Thread, VM, VmCore};
+use vm::{
+    DenseString, Float, Heap, JavascriptCompiler, KetteCompiler, SlotName, Smi, Tagged, Value,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Language {
@@ -39,15 +40,6 @@ impl Language {
 
 fn main() {
     trace::init();
-    let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
-        .expect("failed to create heap")
-        .add::<JSRuntime>()
-        .expect("failed to install js runtime")
-        .add::<KetteRuntime>()
-        .expect("failed to install kette runtime");
-    vm.arm_gc_stress();
-    let mut thread = vm.attach();
-
     let mut files = Vec::new();
     let mut repl_language = None;
     let mut args = std::env::args().skip(1).peekable();
@@ -77,6 +69,24 @@ fn main() {
             std::process::exit(1);
         }
     }
+    for path in &files {
+        if Language::of(path).is_none() {
+            eprintln!("kettevm: cannot tell the language of {path} (expected .js or .ktt)");
+            std::process::exit(1);
+        }
+    }
+
+    let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
+        .expect("failed to create heap")
+        .add::<VmCore>()
+        .expect("failed to install the VM core")
+        .add::<JSRuntime>()
+        .expect("failed to install js runtime")
+        .add::<KetteRuntime>()
+        .expect("failed to install kette runtime");
+
+    vm.arm_gc_stress();
+    let mut thread = vm.attach();
 
     for path in &files {
         run_file(&mut thread, path);
@@ -101,12 +111,8 @@ fn run_file(thread: &mut Thread, path: &str) {
         }
     };
     match Language::of(path) {
-        Some(Language::Javascript) => run_with::<JavascriptCompiler>(thread, &src, path),
         Some(Language::Kette) => run_with::<KetteCompiler>(thread, &src, path),
-        Some(Language::Infer) | None => {
-            eprintln!("kettevm: cannot tell the language of {path} (expected .js or .ktt)");
-            std::process::exit(1);
-        }
+        _ => run_with::<JavascriptCompiler>(thread, &src, path),
     }
 }
 

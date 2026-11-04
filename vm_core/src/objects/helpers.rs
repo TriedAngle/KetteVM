@@ -96,7 +96,10 @@ impl Object {
         scope: &HandleScope<'_>,
         src: &str,
         name: &str,
-        compile: bytecode::CompileFn,
+        compile: impl FnOnce(
+            &str,
+            bytecode::SourceMode,
+        ) -> Result<bytecode::Program, bytecode::FrontendError>,
     ) -> Result<(), VmError> {
         let (vm, heap, state) = thread.split();
         let empty = scope.handle(vm.known().empty_context.get(heap));

@@ -1,16 +1,28 @@
+use vm_core::intrinsics::declare_globals;
 use vm_core::raise_runtime;
 use vm_core::{
-    Args, DenseString, Handle, HandleSlice, HostCtx, Map, MapInit, MapKind, Object,
-    PropertyDescriptor, Runtime, Tagged, VM, Value, VmError,
+    Args, DenseString, EdgeVisitable, Handle, HandleSlice, HostCtx, Map, MapInit, MapKind,
+    NativeIndex, Object, PropertyDescriptor, Runtime, Tagged, VM, Value, Visitor, VmError,
 };
 
 pub struct KetteRuntime;
 
-impl Runtime for KetteRuntime {
-    type State = ();
+#[derive(Default)]
+pub struct KetteState {
+    /// Id of the native that installs the top-level declarations.
+    pub declare_globals: NativeIndex,
+}
 
-    fn setup(vm: &mut VM, _state: &mut Self::State) -> Result<(), VmError> {
-        let print = vm.register_runtime(console_print);
+impl EdgeVisitable for KetteState {
+    fn visit_edges(&self, _visitor: &mut dyn Visitor) {}
+}
+
+impl Runtime for KetteRuntime {
+    type State = KetteState;
+
+    fn setup(vm: &mut VM, state: &mut Self::State) -> Result<(), VmError> {
+        state.declare_globals = vm.register_native(declare_globals);
+        let print = vm.register_native(console_print);
         let known = vm.known();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {

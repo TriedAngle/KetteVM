@@ -350,9 +350,9 @@ impl<'s, 'h> Ctx<'s, 'h> {
     }
 
     #[inline(always)]
-    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
+    pub fn call_native(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
         let (vm, state) = (self.vm, self.state);
-        let f = vm.runtime(rt);
+        let f = vm.native(rt);
         let stack = state.stack();
         let saved = stack.top();
         let bump = stack.rooting_top(args);

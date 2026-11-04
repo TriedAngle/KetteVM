@@ -339,6 +339,8 @@ fn run_test_inner(
     // simply exhaust its reservation.
     let vm = vm::VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
         .expect("vm")
+        .add::<vm::VmCore>()
+        .expect("vm core")
         .add::<vm::JSRuntime>()
         .expect("vm");
     vm.arm_gc_stress();

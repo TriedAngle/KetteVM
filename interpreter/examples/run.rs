@@ -1,11 +1,13 @@
 use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm_core::VM;
+use vm_core::{VM, VmCore};
 
 fn main() {
     let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
         .expect("failed to create heap")
+        .add::<VmCore>()
+        .expect("vm core")
         .add::<JSRuntime>()
         .expect("failed to install js runtime");
     let mut thread = vm.attach();
@@ -19,11 +21,18 @@ fn main() {
         parts.push(src);
     }
     let joined = parts.join("\n");
-    match thread.run_source(
+    let program = match js_compiler::compile_js(
         &joined,
-        js_compiler::compile_js,
         js_compiler::SourceMode::Script,
+        &vm.runtime_state::<JSRuntime>().ids,
     ) {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("compile error: {e}");
+            std::process::exit(1);
+        }
+    };
+    match thread.run_program(program) {
         Ok(_) => {
             if let Some(ex) = thread.take_pending_exception() {
                 eprintln!("uncaught exception: {ex:?}");

@@ -1,9 +1,11 @@
 //! Dump compiled bytecode: `cargo run -q -p kette_compiler --example dis -- '1 + 2'`
 use bytecode::SourceMode;
+use vm_core::NativeIndex;
 
 fn main() {
     let src = std::env::args().nth(1).unwrap_or_else(|| "10 - 3".into());
-    let program = kette_compiler::compile_kette(&src, SourceMode::Script).expect("compile");
+    let program =
+        kette_compiler::compile_kette(&src, SourceMode::Script, NativeIndex(0)).expect("compile");
     for (fid, f) in program.functions().enumerate() {
         println!("== fn {fid}");
         let code = program.code(f);

@@ -820,6 +820,19 @@ impl AccessorInfo {
     pub fn setter(&self) -> Option<NativeIndex> {
         Self::decode(self.setter.to_smi())
     }
+
+    /// Point the accessor at native registry slots (the front end does this
+    /// after installing its runtime table).
+    pub fn set_natives(
+        &self,
+        heap: &Heap,
+        getter: Option<NativeIndex>,
+        setter: Option<NativeIndex>,
+    ) {
+        let host = self.tagged(heap);
+        self.getter.set(heap, host, Self::encode(getter));
+        self.setter.set(heap, host, Self::encode(setter));
+    }
 }
 
 impl HeapObject for AccessorInfo {

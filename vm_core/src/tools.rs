@@ -51,6 +51,7 @@ impl KetteTools {
         roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
+        natives: [NativeIndex; 3],
     ) -> Result<(), VmError> {
         let global = scope.handle(roots.global_object.get(heap));
         let map = heap.allocate_handle::<Map>(
@@ -64,22 +65,13 @@ impl KetteTools {
         );
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
-        let methods: &[(&str, NativeIndex)] = &[
-            (
-                "forceMinorGC",
-                NativeIndex(bytecode::BuiltinFn::ForceMinorGc as usize),
-            ),
-            (
-                "forceMajorGC",
-                NativeIndex(bytecode::BuiltinFn::ForceMajorGc as usize),
-            ),
-            (
-                "shutdown",
-                NativeIndex(bytecode::BuiltinFn::ShutdownVm as usize),
-            ),
+        let methods: [(&str, NativeIndex); 3] = [
+            ("forceMinorGC", natives[0]),
+            ("forceMajorGC", natives[1]),
+            ("shutdown", natives[2]),
         ];
         for (name, index) in methods {
-            let method = Object::native_function(heap, scope, *index)?;
+            let method = Object::native_function(heap, scope, index)?;
             let name_str = interner.intern_str(heap, scope, name);
             let method_name = scope.handle(name_str.as_tagged(heap));
             Object::define_own_property(

@@ -3,9 +3,9 @@
 //! handler ranges, accumulator elision, and validation.
 
 use bytecode::{
-    BuildError, BuiltinFn, CallableKind, Constant, FnBuilder, FunctionId, FunctionMeta, Opcode,
-    Operand, Program, REGISTER_FILE_START, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
-    ValidationError, try_decode, validate, validate_function,
+    BuildError, CallableKind, Constant, FnBuilder, FunctionId, FunctionMeta, Opcode, Operand,
+    Program, REGISTER_FILE_START, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, ValidationError,
+    try_decode, validate, validate_function,
 };
 
 #[derive(Debug, PartialEq)]
@@ -65,6 +65,9 @@ fn emit_130_bytes(b: &mut FnBuilder) {
         }
     }
 }
+
+/// The builder only carries a raw runtime id: the front end owns the table.
+const RUNTIME_ID: u32 = 18;
 
 fn meta() -> FunctionMeta {
     FunctionMeta {
@@ -153,10 +156,7 @@ fn staged_runtime_calls_lay_out_the_window_in_order() {
         b.load_name(b"fn");
         let obj = b.stage_acc(&temps);
         let name = b.name(b"key");
-        b.call_runtime_staged(
-            BuiltinFn::SetFunctionName,
-            &[RtArg::Acc, RtArg::Const(name), RtArg::Smi(2)],
-        );
+        b.call_native_staged(RUNTIME_ID, &[RtArg::Acc, RtArg::Const(name), RtArg::Smi(2)]);
         b.load(obj);
     }
     b.ret();
@@ -204,10 +204,10 @@ fn staged_runtime_calls_lay_out_the_window_in_order() {
                 at: 12
             },
             Instr {
-                op: Opcode::CallRuntime,
-                ops: vec![bytecode::BuiltinFn::SetFunctionName as i64, 1, 3],
+                op: Opcode::CallNative,
+                ops: vec![RUNTIME_ID as i64, 1, 3],
                 at: 14
-            }, // SetFunctionName discriminant
+            }, // runtime id operand
             Instr {
                 op: Opcode::Load,
                 ops: vec![0],

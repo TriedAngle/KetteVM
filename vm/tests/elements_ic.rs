@@ -3,11 +3,13 @@
 // warms an IC first, so a stale handler would produce the wrong answer.
 
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::{DefaultInterpreter, JSRuntime, JavascriptCompiler, VM};
+use vm::{DefaultInterpreter, JSRuntime, JavascriptCompiler, VM, VmCore};
 
 fn eval_ok(src: &str) {
     let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
         .expect("vm")
+        .add::<VmCore>()
+        .expect("vm core")
         .add::<JSRuntime>()
         .expect("js runtime");
     let mut thread = vm.attach();

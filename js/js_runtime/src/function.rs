@@ -1,6 +1,7 @@
 //! ES 20.2: the Function constructor and Function.prototype
 //! toString/call/apply/bind.
 
+use crate::JSRuntime;
 use vm_core::Coercion;
 use vm_core::HostCtx;
 use vm_core::materialize::Materialize;
@@ -52,7 +53,8 @@ pub fn function_constructor<'a>(
         // TODO: the dynamic function is parsed in the caller's context; the
         // spec parses it in the global scope (ES 20.2.1.1 step 8).
         let source = format!("(function ({params}) {{\n{body}\n}})");
-        let program = match js_compiler::compile_js(&source, bytecode::SourceMode::Eval) {
+        let ids = &vm.runtime_state::<JSRuntime>().ids;
+        let program = match js_compiler::compile_js(&source, bytecode::SourceMode::Eval, ids) {
             Ok(program) => program,
             Err(_) => {
                 let ex = rt_try!(

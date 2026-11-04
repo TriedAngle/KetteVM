@@ -1340,7 +1340,7 @@ impl Proxy {
     }
 
     /// Proxy `[[Delete]]` (ES 20.2.5.4). The strict-mode false→TypeError
-    /// translation is the caller's (`delete` sloppy/strict runtimes).
+    /// translation is the caller's (`delete` sloppy/strict natives).
     pub fn delete<'a>(
         vm: &VM,
         heap: &'a mut Heap,

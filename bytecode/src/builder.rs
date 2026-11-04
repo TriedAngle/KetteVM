@@ -18,12 +18,13 @@ pub enum RtArg {
 }
 
 impl FnBuilder {
-    /// Emit a `CallRuntime` with its argument window staged from a
+    /// Emit a `CallNative` with its argument window staged from a
     /// declarative list: `&[RtArg::Acc, RtArg::Reg(obj), RtArg::Const(k)]`
     /// stages the accumulator into window slot 0 (the lowest address,
     /// `base + len - 1`), `obj` into slot 1, and the pooled constant into
     /// slot 2, then calls.
-    pub fn call_runtime_staged(&mut self, f: crate::BuiltinFn, args: &[RtArg]) {
+    pub fn call_native_staged(&mut self, f: impl Into<u32>, args: &[RtArg]) {
+        let f = f.into();
         let temps = self.temp_scope();
         let base = temps.reserve(args.len() as u32);
         let slot = |i: usize| Reg::new(base.index() + (args.len() - 1 - i) as i32);
@@ -48,7 +49,7 @@ impl FnBuilder {
                 }
             }
         }
-        self.call_runtime(f, RegList::new(base, args.len() as u32));
+        self.call_native(f, RegList::new(base, args.len() as u32));
     }
 }
 
@@ -796,15 +797,9 @@ impl FnBuilder {
         );
     }
 
-    pub fn call_runtime(&mut self, f: crate::BuiltinFn, args: RegList) {
+    pub fn call_native(&mut self, f: impl Into<u32>, args: RegList) {
         let [base, count] = args.operands();
-        self.emit_tracked(Opcode::CallRuntime, &[f as u32, base, count]);
-    }
-
-    /// `delete obj[key]` over a two-register list `[obj, key]`.
-    pub fn delete_property(&mut self, args: RegList) {
-        let [base, count] = args.operands();
-        self.emit_tracked(Opcode::Delete, &[base, count]);
+        self.emit_tracked(Opcode::CallNative, &[f.into(), base, count]);
     }
 
     pub fn construct(&mut self, callee: Reg, args: RegList) {

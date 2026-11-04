@@ -67,11 +67,6 @@ impl core::fmt::Display for FrontendError {
 
 impl std::error::Error for FrontendError {}
 
-/// The signature every frontend exposes for source → [`Program`]. Passed
-/// around as a plain function pointer: frontends are selected explicitly at
-/// the call site, so no trait objects or registries are needed yet.
-pub type CompileFn = fn(&str, SourceMode) -> Result<Program, FrontendError>;
-
 /// Callable execution metadata consumed by the interpreter.
 ///
 /// The taxonomy is JS-centric; prototype-based frontends map their own

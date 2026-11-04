@@ -589,32 +589,6 @@ fn op_store_global(frame: Frame) {
     tail!(slow_store_global)
 }
 
-#[handler(Delete)]
-fn op_delete(frame: Frame) {
-    let mode = frame.ctx().language_mode();
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let args = frame
-        .ctx()
-        .state()
-        .stack()
-        .window(base, frame.signed::<0>(), frame.unsigned::<1>());
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let target = args.get_handle(frame.ctx().heap(), 0);
-    let raw_key = args.get_handle(frame.ctx().heap(), 1);
-    let v = vm_core::intrinsics::delete_property_operator(
-        vm,
-        frame.ctx().heap_mut(),
-        state,
-        target,
-        raw_key,
-        mode,
-    );
-    frame.set_acc(v);
-    reenter!(pc)
-}
-
 #[handler(AddParent)]
 fn op_add_parent(frame: Frame) {
     tail!(slow_add_parent)
@@ -1286,15 +1260,15 @@ fn op_jump_if_not_undefined(frame: Frame) {
     }
     next!()
 }
-#[handler(CallRuntime)]
-fn op_call_runtime(frame: Frame) {
+#[handler(CallNative)]
+fn op_call_native(frame: Frame) {
     let pc = frame.pc();
     let rt = frame.unsigned::<0>();
     let base = frame.signed::<1>();
     let count = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let native = vm.runtime(NativeIndex(rt));
+    let native = vm.native(NativeIndex(rt));
     let args = state.stack().window(frame.ctx().frame_base(), base, count);
     let nctx = HostCtx::new(vm, frame.ctx().heap_mut(), state);
     let v = native(nctx, None, args);

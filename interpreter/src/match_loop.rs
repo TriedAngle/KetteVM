@@ -167,7 +167,7 @@ fn start<'b>(
         // proxy and bound-function calls are intercepted before `execute`
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
         Some(CallTarget::Native(rt)) => {
-            let f = vm.runtime(rt);
+            let f = vm.native(rt);
             let nctx = HostCtx::new(vm, heap, state);
             Ok(f(nctx, new_target, args.as_args()))
         }
@@ -260,8 +260,8 @@ fn step<'h, const STRIDE: usize>(
         Opcode::Move => crate::match_op_move::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Store => crate::match_op_store::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Add => crate::match_op_add::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CallRuntime => {
-            let next = crate::match_op_call_runtime::<STRIDE>(*ip, *regs, acc, ctx, roots);
+        Opcode::CallNative => {
+            let next = crate::match_op_call_native::<STRIDE>(*ip, *regs, acc, ctx, roots);
             *regs = unsafe { Regs::new(ctx.regs_ptr()) };
             *frame_base = ctx.frame_base();
             next
@@ -436,7 +436,6 @@ fn step<'h, const STRIDE: usize>(
             crate::match_op_store_keyed_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreGlobal => crate::match_op_store_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Delete => crate::match_op_delete::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::CreateClosure => {
             crate::match_op_create_closure::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
@@ -510,7 +509,7 @@ macro_rules! call_enter {
                 $ctx.code_ptr()
             }
             Ok(StagedCall::Native { rt, staged }) => {
-                let v = $ctx.call_runtime(rt, staged);
+                let v = $ctx.call_native(rt, staged);
                 reenter!($ctx, $acc, $pc, $next_pc, v)
             }
             Ok(StagedCall::Proxy { callee_reg, staged }) => {

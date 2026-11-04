@@ -1286,7 +1286,7 @@ macro_rules! apply_store_hit {
                         $value.as_tagged($heap).erase(),
                     ])
                     .as_args();
-                let result = $scope.handle($vm.runtime(index)(
+                let result = $scope.handle($vm.native(index)(
                     HostCtx::new($vm, $heap, $state),
                     None,
                     args,

@@ -517,7 +517,7 @@ pub fn construct_native<'a>(
     args_base: i32,
     count: usize,
 ) -> Tagged<'a, Value> {
-    let f = x.vm().runtime(rt);
+    let f = x.vm().native(rt);
     let state = x.state();
     let base = x.frame_base();
     let stack = state.stack();

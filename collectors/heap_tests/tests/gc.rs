@@ -151,7 +151,9 @@ fn gc_during_interpretation<B: HeapBackend>()
 where
     B::Config: Default,
 {
-    let vm = heap_tests::vm::<B>(B::Config::default());
+    // interpreting JavaScript needs the JS runtime's native functions;
+    // this is not a gc-stress run
+    let vm = heap_tests::vm_with_js::<B>(B::Config::default());
     let script = "\
         (function () { \
         var a = []; var s = 0; \

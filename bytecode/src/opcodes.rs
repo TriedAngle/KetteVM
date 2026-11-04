@@ -7,8 +7,6 @@ pub enum IndexKind {
     ConstantPool,
     /// The function's feedback vector (`[state, handler]` pairs).
     Feedback,
-    /// The VM's runtime-function registry (`BuiltinFn` discriminants).
-    BuiltinFn,
     /// Not statically checkable (e.g. context slots, bounded by the
     /// runtime scope chain).
     Unchecked,
@@ -193,7 +191,7 @@ define_opcodes! {
     LoadGlobalNoThrow { operands: [Index, Index], acc: writes, indices: [ConstantPool, Feedback] },
 
     // dynamic name resolution (direct eval) walks the frame context chain
-    // by name through BuiltinFn::Load/StoreDynamicName
+    // by name through the runtime functions Load/StoreDynamicName
     LoadNamedProperty { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
     LoadKeyedProperty { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // reg (obj) idx (feedback); key in acc -> acc
 
@@ -218,7 +216,6 @@ define_opcodes! {
     StoreKeyedProperty { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] }, // acc -> reg (obj) reg (key) idx (feedback)
     StoreKeyedPropertyNoShadow { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
 
-    Delete { operands: [RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked] },
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)
 
@@ -241,7 +238,7 @@ define_opcodes! {
     // for methods the `self` is the first element in the reglist
     Call { operands: [Register, RegisterListStart, RegisterCount, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, Feedback] }, // reg (callee) reglist (base) regcount (count) idx (feedback) -> acc
     CallNoFeedback { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] },
-    CallRuntime { operands: [Index, RegisterListStart, RegisterCount], acc: writes, indices: [BuiltinFn, Unchecked, Unchecked] }, // idx (BuiltinFn discriminant) reglist (base) regcount (count) -> acc
+    CallNative { operands: [Index, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // idx (native function index) reglist (base) regcount (count) -> acc
 
     Construct { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // reg (callee) reglist (base) regcount (count) -> acc (constructed object)
 

@@ -1,5 +1,7 @@
 use bytecode::{Constant, Operand, SourceMode, decode};
 use js_compiler::compile_js;
+use js_compiler::native::NativeIds;
+use vm_core::NativeIndex;
 
 fn show_const(c: &Constant) -> String {
     match c {
@@ -24,7 +26,7 @@ fn main() {
     let path = args.next().expect("usage: disasm <file.js>");
     let filter = args.next();
     let src = std::fs::read_to_string(&path).expect("read");
-    let prog = compile_js(&src, SourceMode::Script).expect("compile");
+    let prog = compile_js(&src, SourceMode::Script, &native_ids()).expect("compile");
     for id in prog.function_ids() {
         let f = prog.function(id);
         let name = f
@@ -75,5 +77,52 @@ fn main() {
                 println!("    [{i}] {}", show_const(c));
             }
         }
+    }
+}
+
+/// Ids are placeholders: this tool never executes the program.
+fn native_ids() -> NativeIds {
+    NativeIds {
+        get_iterator: NativeIndex(0),
+        iterator_next: NativeIndex(0),
+        iterator_done: NativeIndex(0),
+        iterator_value: NativeIndex(0),
+        has_property: NativeIndex(0),
+        copy_data_properties: NativeIndex(0),
+        create_private_name: NativeIndex(0),
+        private_get: NativeIndex(0),
+        private_set: NativeIndex(0),
+        private_in: NativeIndex(0),
+        set_class_fields: NativeIndex(0),
+        init_instance_fields: NativeIndex(0),
+        require_object_coercible: NativeIndex(0),
+        delete_property_operator: NativeIndex(0),
+        delete_identifier_sloppy: NativeIndex(0),
+        delete_super_property: NativeIndex(0),
+        for_in_enumerate: NativeIndex(0),
+        for_in_next: NativeIndex(0),
+        set_function_name: NativeIndex(0),
+        install_accessor: NativeIndex(0),
+        define_own_property: NativeIndex(0),
+        set_prototype: NativeIndex(0),
+        throw_if_not_constructor_or_null: NativeIndex(0),
+        throw_if_not_object_or_null: NativeIndex(0),
+        throw_super_not_called_if_hole: NativeIndex(0),
+        throw_super_already_called_if_not_hole: NativeIndex(0),
+        construct_super: NativeIndex(0),
+        construct_super_all_args: NativeIndex(0),
+        construct_super_via: NativeIndex(0),
+        load_dynamic_name: NativeIndex(0),
+        store_dynamic_name: NativeIndex(0),
+        declare_eval_var: NativeIndex(0),
+        declare_eval_function: NativeIndex(0),
+        resolve_direct_eval: NativeIndex(0),
+        store_repl_global_init: NativeIndex(0),
+        validate_eval_declarations: NativeIndex(0),
+        declare_globals: NativeIndex(0),
+        throw_const_assign: NativeIndex(0),
+        create_rest_parameter: NativeIndex(0),
+        super_get_property: NativeIndex(0),
+        super_set_property: NativeIndex(0),
     }
 }

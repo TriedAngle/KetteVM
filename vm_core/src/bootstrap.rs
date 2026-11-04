@@ -4,9 +4,9 @@ use crate::{
     AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
     CodeInit, ContextInit, ContextObject, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
     HandleData, HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind,
-    NameToIndexHashTable, NameToIndexHashTableInit, NativeIndex, Object, ObjectInit,
-    PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
-    SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
+    NameToIndexHashTable, NameToIndexHashTableInit, Object, ObjectInit, PropertyDescriptor,
+    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi,
+    StringInterner, Symbol, Tagged, Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -774,9 +774,11 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     let array_prototype = alloc_object(heap, &scope, array_prototype_map);
     let length_name = scope.handle(known.strings.length.get(heap));
     let array_length_info = heap
+        // the front end fills in the native getter/setter once it has
+        // registered its runtime table (`AccessorInfo::set_natives`)
         .allocate::<AccessorInfo>(AccessorInfoInit {
-            getter: Some(NativeIndex(bytecode::BuiltinFn::ArrayLengthGet as usize)),
-            setter: Some(NativeIndex(bytecode::BuiltinFn::ArrayLengthSet as usize)),
+            getter: None,
+            setter: None,
         })
         .as_handle(&scope);
     let array_length_descriptor: [(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>); 1] = [(

@@ -12,6 +12,7 @@
 
 pub mod analysis;
 pub mod codegen;
+pub mod native;
 
 pub use codegen::CompileError;
 
@@ -20,17 +21,17 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 
+use native::NativeIds;
+
 pub use bytecode::{FrontendError, Program, SourceMode};
 
-pub struct JavascriptCompiler;
-
-impl vm_core::Compiler for JavascriptCompiler {
-    fn compile(source: &str, mode: SourceMode) -> Result<Program, FrontendError> {
-        compile_js(source, mode)
-    }
-}
-/// Parse + analyze + lower `source` in the given mode.
-pub fn compile_js(source: &str, mode: SourceMode) -> Result<Program, FrontendError> {
+/// Parse + analyze + lower `source` in the given mode; `CallNative` ids come
+/// from `ids`.
+pub fn compile_js(
+    source: &str,
+    mode: SourceMode,
+    ids: &NativeIds,
+) -> Result<Program, FrontendError> {
     let allocator = Allocator::default();
     let _pipeline = trace::info_span!("js::compile");
     let parser = Parser::new(&allocator, source, SourceType::script()).with_options(ParseOptions {
@@ -74,7 +75,7 @@ pub fn compile_js(source: &str, mode: SourceMode) -> Result<Program, FrontendErr
     };
     {
         let _span = trace::info_span!("js::codegen").entered();
-        codegen::generate(semantic.semantic.scoping(), &facts)
+        codegen::generate(semantic.semantic.scoping(), &facts, ids)
             .map_err(|e| FrontendError::compile(e.to_string()))
     }
 }

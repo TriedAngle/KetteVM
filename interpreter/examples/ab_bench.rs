@@ -2,7 +2,7 @@ use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::time::Instant;
-use vm_core::{Smi, Thread, VM};
+use vm_core::{Smi, Thread, VM, VmCore};
 
 fn pending_exception_message(thread: &mut Thread) -> Option<String> {
     let (_vm, heap, state) = thread.split();
@@ -18,17 +18,19 @@ fn bench(name: &str, src: &str, iters: usize) {
     for _ in 0..iters {
         let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
             .unwrap()
+            .add::<VmCore>()
+            .expect("vm core")
             .add::<JSRuntime>()
             .unwrap();
+        let program = js_compiler::compile_js(
+            src,
+            js_compiler::SourceMode::Script,
+            &vm.runtime_state::<JSRuntime>().ids,
+        )
+        .expect("compile");
         let mut thread = vm.attach();
         let t = Instant::now();
-        let _result = thread
-            .run_source(
-                src,
-                js_compiler::compile_js,
-                js_compiler::SourceMode::Script,
-            )
-            .expect("runs");
+        let _result = thread.run_program(program).expect("runs");
         let dt = t.elapsed();
         if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
@@ -72,16 +74,18 @@ fn score_bench(name: &str, src: &str, iters: usize) {
     for _ in 0..iters {
         let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
             .unwrap()
+            .add::<VmCore>()
+            .expect("vm core")
             .add::<JSRuntime>()
             .unwrap();
+        let program = js_compiler::compile_js(
+            src,
+            js_compiler::SourceMode::Script,
+            &vm.runtime_state::<JSRuntime>().ids,
+        )
+        .expect("compile");
         let mut thread = vm.attach();
-        let result = thread
-            .run_source(
-                src,
-                js_compiler::compile_js,
-                js_compiler::SourceMode::Script,
-            )
-            .expect("runs");
+        let result = thread.run_program(program).expect("runs");
         if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
         }

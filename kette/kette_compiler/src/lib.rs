@@ -7,6 +7,7 @@ pub mod codegen;
 
 use bytecode::{FrontendError, Program, SourceMode};
 use kette_parser::{Ast, ByteSpan, Parser, Utf8SliceStream, resolve};
+use vm_core::NativeIndex;
 /// A construct the lowering does not support yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -31,7 +32,7 @@ impl core::fmt::Display for CompileError {
 }
 
 /// Resolve + lower a parsed unit. `functions[0]` is the script.
-pub fn compile_ast(ast: &mut Ast) -> Result<Program, CompileError> {
+pub fn compile_ast(ast: &mut Ast, declare_globals: NativeIndex) -> Result<Program, CompileError> {
     let _pipeline = trace::info_span!("kette::compile");
     let resolved = {
         let _span = trace::info_span!("kette::resolve").entered();
@@ -39,13 +40,17 @@ pub fn compile_ast(ast: &mut Ast) -> Result<Program, CompileError> {
     };
     {
         let _span = trace::info_span!("kette::codegen").entered();
-        codegen::generate(ast, &resolved)
+        codegen::generate(ast, &resolved, declare_globals)
     }
 }
 
 /// Kette frontend entry point: parse `source` and lower it to bytecode,
 /// mapping failures into the language-neutral [`FrontendError`].
-pub fn compile_kette(source: &str, mode: SourceMode) -> Result<Program, FrontendError> {
+pub fn compile_kette(
+    source: &str,
+    mode: SourceMode,
+    declare_globals: NativeIndex,
+) -> Result<Program, FrontendError> {
     if !matches!(mode, SourceMode::Script | SourceMode::Repl) {
         return Err(FrontendError::compile(
             "kette: only script and repl mode are implemented",
@@ -56,13 +61,5 @@ pub fn compile_kette(source: &str, mode: SourceMode) -> Result<Program, Frontend
         .parse_script()
         .map_err(|e| FrontendError::syntax(e.to_string()))?;
     let mut ast = parser.into_ast();
-    compile_ast(&mut ast).map_err(|e| FrontendError::compile(e.to_string()))
-}
-
-pub struct KetteCompiler;
-
-impl vm_core::Compiler for KetteCompiler {
-    fn compile(source: &str, mode: SourceMode) -> Result<Program, FrontendError> {
-        compile_kette(source, mode)
-    }
+    compile_ast(&mut ast, declare_globals).map_err(|e| FrontendError::compile(e.to_string()))
 }

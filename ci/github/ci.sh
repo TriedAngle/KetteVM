@@ -18,9 +18,9 @@ cargo test --workspace --locked
 cargo +nightly test --workspace --locked --features vm/fast
 cargo test --workspace --locked --features vm/stress-minor-gc
 cargo run --release -p vm --example regression --locked
-cargo +nightly run --release -p vm --example regression --features fast --locked
+cargo +nightly run --release -p vm --example regression --features fast --locked --target-dir target-become
 cargo build --release -p vm --locked
-cargo +nightly build --release -p vm --features fast --locked
+cargo +nightly build --release -p vm --features fast --locked --target-dir target-become
 (
     cd interpreter
     cargo +nightly test --release --locked --features fast

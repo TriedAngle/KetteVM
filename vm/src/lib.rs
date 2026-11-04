@@ -21,8 +21,33 @@ pub type DefaultInterpreter = ::interpreter::match_loop::MatchInterpreter;
 pub use js_runtime::JSRuntime;
 pub use kette_runtime::KetteRuntime;
 
-pub use js_compiler::JavascriptCompiler;
-pub use kette_compiler::KetteCompiler;
+/// The JS front end paired with [`JSRuntime`]: its compiler emits the native
+/// ids the JS runtime registered.
+pub struct JavascriptCompiler;
+
+impl Compiler for JavascriptCompiler {
+    fn compile(
+        vm: &VM,
+        source: &str,
+        mode: bytecode::SourceMode,
+    ) -> Result<bytecode::Program, bytecode::FrontendError> {
+        js_compiler::compile_js(source, mode, &vm.runtime_state::<JSRuntime>().ids)
+    }
+}
+
+/// The Kette front end paired with [`KetteRuntime`].
+pub struct KetteCompiler;
+
+impl Compiler for KetteCompiler {
+    fn compile(
+        vm: &VM,
+        source: &str,
+        mode: bytecode::SourceMode,
+    ) -> Result<bytecode::Program, bytecode::FrontendError> {
+        let declare_globals = vm.runtime_state::<KetteRuntime>().declare_globals;
+        kette_compiler::compile_kette(source, mode, declare_globals)
+    }
+}
 
 pub trait VmEval {
     fn eval<C: Compiler>(&self, source: &str) -> Result<Value, ScriptError>;
