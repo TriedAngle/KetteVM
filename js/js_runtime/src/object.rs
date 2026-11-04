@@ -1,6 +1,8 @@
 //! ES 20.1: the Object constructor, statics, and prototype methods.
 use vm_core::Coercion;
 use vm_core::HostCtx;
+
+use crate::JSRuntime;
 use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
@@ -82,6 +84,7 @@ pub fn object_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -110,7 +113,7 @@ pub fn object_to_string<'a>(
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         // Let tag be ? Get(O, @@toStringTag).
-        let symbol = scope.handle(vm.known().to_string_tag_symbol.get(heap).erase());
+        let symbol = scope.handle(known.to_string_tag_symbol.get(heap).erase());
         let tag = match rt_try!(
             vm,
             heap,

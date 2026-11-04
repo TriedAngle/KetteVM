@@ -566,6 +566,7 @@ pub fn date_constructor<'a>(
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -597,7 +598,7 @@ pub fn date_constructor<'a>(
         }
     };
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().date_instance_map.get(heap));
+        let map = scope.handle(known.date_instance_map.get(heap));
         let time = scope.handle(heap.new_number(time));
         let slots = scope.stage(&[time.as_tagged(heap)]);
         let object = match Object::create_from_constructor(

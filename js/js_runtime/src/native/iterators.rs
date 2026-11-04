@@ -12,12 +12,13 @@ pub fn get_iterator<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
         let obj = scope.handle(args.get(heap, 0));
-        let symbol = scope.handle(vm.known().iterator_symbol.get(heap).erase());
+        let symbol = scope.handle(known.iterator_symbol.get(heap).erase());
         let method = rt_try!(
             vm,
             heap,

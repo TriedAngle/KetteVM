@@ -59,6 +59,7 @@ pub fn proxy_revocable<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let idx = &ctx.runtime::<JSRuntime>().indices;
     let HostCtx {
         vm, heap, state, ..
@@ -139,7 +140,7 @@ pub fn proxy_revocable<'a>(
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
-        let proxy_name = scope.handle(vm.known().strings.proxy.get(heap));
+        let proxy_name = scope.handle(known.strings.proxy.get(heap));
         let _ = Object::define_own_property(
             heap,
             &scope,
@@ -147,7 +148,7 @@ pub fn proxy_revocable<'a>(
             proxy_name,
             PropertyDescriptor::data(proxy.erase()),
         );
-        let revoke_name = scope.handle(vm.known().strings.revoke.get(heap));
+        let revoke_name = scope.handle(known.strings.revoke.get(heap));
         let _ = Object::define_own_property(
             heap,
             &scope,

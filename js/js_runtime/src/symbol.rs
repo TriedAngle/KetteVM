@@ -2,6 +2,7 @@
 
 use vm_core::HostCtx;
 use vm_core::raise_runtime;
+
 use vm_core::{
     Args, DenseString, FixedArray, Handle, HandleScope, Heap, MapKind, Object, Symbol, Tagged,
     Value, VmError,

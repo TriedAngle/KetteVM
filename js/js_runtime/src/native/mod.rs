@@ -1495,12 +1495,13 @@ fn resolve_direct_eval<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let ids = &ctx.runtime::<JSRuntime>().ids;
+    let js = &ctx.runtime::<JSRuntime>();
+    let ids = &js.ids;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let callee = args.get_handle(heap, 0);
-    if callee.as_tagged(heap) != vm.known().eval_function.get(heap).erase() {
+    if callee.as_tagged(heap) != js.known.eval_function.get(heap).erase() {
         return callee.as_tagged(heap).erase();
     }
     let source = args.get_handle(heap, 1);

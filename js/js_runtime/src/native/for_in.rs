@@ -1,6 +1,7 @@
 //! for-in enumeration (ES 14.7.5): a hidden enumerator object that walks
 //! the prototype chain lazily, one own-key snapshot per level.
 
+use crate::JSRuntime;
 use vm_core::lookup::own_property_enumerable;
 use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
@@ -30,6 +31,7 @@ pub fn for_in_enumerate<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -43,7 +45,8 @@ pub fn for_in_enumerate<'a>(
         {
             return vm.known().undefined.get(heap).erase();
         }
-        let Some(level) = for_in_initial_level(heap, &scope, vm.known(), subject.as_tagged(heap))
+        let Some(level) =
+            for_in_initial_level(heap, &scope, vm.known(), known, subject.as_tagged(heap))
         else {
             return vm.known().undefined.get(heap).erase();
         };
@@ -54,7 +57,7 @@ pub fn for_in_enumerate<'a>(
         let staged = scope.stage_handles(&keys);
         let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
         let empty = vm.known().empty_fixed_array.get(heap);
-        let map = scope.handle(vm.known().for_in_enumerator_map.get(heap));
+        let map = scope.handle(known.for_in_enumerator_map.get(heap));
         let words = [
             level.as_tagged(heap).erase(),
             keys.as_tagged(heap).erase(),
@@ -77,6 +80,7 @@ fn for_in_initial_level<'a, 's>(
     heap: &'a Heap,
     scope: &'s HandleScope<'_>,
     roots: &WellKnown,
+    known: &crate::known::JsKnown,
     subject: Tagged<'a, Value>,
 ) -> Option<Tagged<'a, Value>> {
     if DenseString::from_receiver(heap, subject).is_some() {
@@ -97,7 +101,7 @@ fn for_in_initial_level<'a, 's>(
         return None;
     };
     let global = roots.global_object.get(heap);
-    let strings = &roots.strings;
+    let strings = &known.strings;
     let ctor_handle = match ctor_name {
         "Number" => strings.number_ctor.get(heap),
         "Boolean" => strings.boolean_ctor.get(heap),

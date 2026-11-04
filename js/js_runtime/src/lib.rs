@@ -98,6 +98,7 @@ impl Runtime for JSRuntime {
                     .known
                     .strings
                     .intern_all(thread.heap(), vm.interner(), &scope);
+                state.known.init(thread.heap(), &scope);
             });
         }
         install_builtins(vm, state)
@@ -777,7 +778,10 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         // ---- eval -------------------------------------------------------------
         let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
         Object::set_builtin_name(thread, &scope, eval_fn, "eval")?;
-        known.eval_function.init(eval_fn.as_tagged(thread.heap()));
+        state
+            .known
+            .eval_function
+            .init(eval_fn.as_tagged(thread.heap()));
         let global = scope.handle(known.global_object.get(thread.heap()));
         let eval_name = thread.intern(&scope, "eval");
         // Safety: fresh interned word, rooted below before the define.
@@ -810,7 +814,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
         let object_to_string_fn =
             Object::native_function(thread.heap(), &scope, idx.object_to_string)?;
-        known
+        state
+            .known
             .object_to_string
             .init(object_to_string_fn.as_tagged(thread.heap()));
         let object_to_string_name = scope.handle(known.strings.to_string.get(thread.heap()));
@@ -997,7 +1002,13 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
 
         let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date)?;
         Object::set_builtin_name(thread, &scope, date_fn, "Date")?;
-        let date_prototype = scope.handle(known.date_prototype.get(thread.heap()));
+        let date_prototype = {
+            let heap = thread.heap();
+            let prototype = state.known.date_prototype.get(heap).erase();
+            scope
+                .cast::<Object>(heap, prototype)
+                .expect("date prototype is an object")
+        };
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1319,7 +1330,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator)?;
         let iterator_name: Handle<'_, SlotName> = {
             let heap = thread.heap();
-            scope.handle(known.iterator_symbol.get(heap))
+            scope.handle(state.known.iterator_symbol.get(heap))
         };
         Object::define_own_property(
             thread.heap(),
@@ -1414,17 +1425,14 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         {
             let heap = thread.heap();
 
-            known
-                .array_iterator_map
+            let js = &state.known;
+            js.array_iterator_map
                 .init(array_iterator_map.as_tagged(heap));
-            known
-                .array_iterator_prototype
+            js.array_iterator_prototype
                 .init(array_iterator_prototype.as_tagged(heap));
-            known
-                .iterator_result_map
+            js.iterator_result_map
                 .init(iterator_result_map.as_tagged(heap));
-            known
-                .for_in_enumerator_map
+            js.for_in_enumerator_map
                 .init(for_in_enumerator_map.as_tagged(heap));
         }
 
@@ -1722,10 +1730,10 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             ("unscopables", "Symbol.unscopables"),
         ] {
             let value = match name {
-                "iterator" => scope.handle(known.iterator_symbol.get(thread.heap()).erase()),
+                "iterator" => scope.handle(state.known.iterator_symbol.get(thread.heap()).erase()),
                 "toPrimitive" => scope.handle(known.to_primitive_symbol.get(thread.heap()).erase()),
                 "toStringTag" => {
-                    scope.handle(known.to_string_tag_symbol.get(thread.heap()).erase())
+                    scope.handle(state.known.to_string_tag_symbol.get(thread.heap()).erase())
                 }
                 _ => {
                     let description = thread.intern(&scope, description);
@@ -1754,7 +1762,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         }
         // Symbol.prototype[@@toStringTag] = "Symbol".
         let to_string_tag_key: Handle<'_, SlotName> =
-            scope.handle(known.to_string_tag_symbol.get(thread.heap()));
+            scope.handle(state.known.to_string_tag_symbol.get(thread.heap()));
         let symbol_tag = thread.intern(&scope, "Symbol");
         Object::define_own_property(
             thread.heap(),
@@ -1805,7 +1813,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             PropertyDescriptor::non_enumerable(two),
         )?;
         Object::set_builtin_name(thread, &scope, revocable_fn, "revocable")?;
-        let revocable_name = scope.handle(known.strings.revocable.get(thread.heap()));
+        let revocable_name = scope.handle(state.known.strings.revocable.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,

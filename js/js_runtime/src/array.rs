@@ -420,6 +420,7 @@ pub fn array_values<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -429,7 +430,7 @@ pub fn array_values<'a>(
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let map = scope.handle(vm.known().array_iterator_map.get(heap));
+        let map = scope.handle(known.array_iterator_map.get(heap));
         heap.new_object(
             &scope,
             map,
@@ -451,6 +452,7 @@ pub fn array_iterator_next<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -463,7 +465,7 @@ pub fn array_iterator_next<'a>(
         if !iterator
             .as_tagged(heap)
             .map(heap)
-            .ptr_eq(vm.known().array_iterator_map.get(heap))
+            .ptr_eq(known.array_iterator_map.get(heap))
         {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
@@ -547,7 +549,7 @@ pub fn array_iterator_next<'a>(
                 (result, false)
             }
         };
-        let map = scope.handle(vm.known().iterator_result_map.get(heap));
+        let map = scope.handle(known.iterator_result_map.get(heap));
         let done_value = scope.handle(if done {
             vm.known().true_object.get(heap).erase()
         } else {
@@ -789,7 +791,7 @@ pub fn array_to_string<'a>(
         let func = if join.as_tagged(heap).is_callable(heap) {
             join
         } else {
-            scope.handle(vm.known().object_to_string.get(heap).erase())
+            scope.handle(known.object_to_string.get(heap).erase())
         };
         let call_args = scope.stage(&[obj.as_tagged(heap).erase()]);
         let outcome = match HostCtx::enter(

@@ -89,9 +89,6 @@ pub struct WellKnown {
     /// `%Array.prototype%`: an array object, parent of all array instance maps.
     pub array_prototype: GcSlot<Object>,
     /// Map of Date instances: ordinary extendable objects with one value
-    /// slot holding the epoch-milliseconds Float (prototype %Date.prototype%).
-    pub date_instance_map: GcSlot<Map>,
-    pub date_prototype: GcSlot<Object>,
     /// `%Function.prototype%` (ES 19.2.3): the canonical empty function — a
     /// callable, non-constructable function whose `[[Prototype]]` is
     /// `%Object.prototype%`; the `[[Prototype]]` of ordinary function objects.
@@ -99,17 +96,15 @@ pub struct WellKnown {
     /// The realm global object: global variables are properties on it
     /// (top-level `var`/assignments; lexical script-context globals later).
     pub global_object: GcSlot<Object>,
-    /// The intrinsic `eval` function used to recognize direct eval calls.
-    pub eval_function: GcSlot<Object>,
     /// `%Object.prototype.toString%` intrinsic, kept even if the property
-    /// is overwritten or deleted.
-    pub object_to_string: GcSlot<Object>,
     /// Loaded script contexts and their name index.
     pub script_context_table: GcSlot<ScriptContextTable>,
     /// Agent-record `[[GlobalSymbolRegistry]]`: a `FixedArray` of
     /// `[key, symbol]` pairs in registration order.
     /// TODO: this can be done better probably
     pub global_symbol_registry: GcSlot<FixedArray>,
+    /// Agent-record `[[GlobalSymbolRegistry]]`: a `FixedArray` of
+    /// `[key, symbol]` pairs in registration order.
     /// Initial map of `%Object.prototype%`: every fresh `{}` gets it
     /// (extendable, parent = object_prototype). Shared with `global_object`.
     pub object_initial_map: GcSlot<Map>,
@@ -125,10 +120,6 @@ pub struct WellKnown {
     pub class_constructor_map: GcSlot<Map>,
     /// The `@@toPrimitive` well-known symbol
     pub to_primitive_symbol: GcSlot<Symbol>,
-    /// The `@@iterator` well-known symbol (internal: no Symbol global yet)
-    pub iterator_symbol: GcSlot<Symbol>,
-    /// The `@@toStringTag` well-known symbol
-    pub to_string_tag_symbol: GcSlot<Symbol>,
     /// Inline-cache state sentinel (never user-visible): a feedback slot
     /// holding it permanently takes the slow path
     pub megamorphic_symbol: GcSlot<Symbol>,
@@ -138,15 +129,7 @@ pub struct WellKnown {
     pub holey_transition_symbol: GcSlot<Symbol>,
     pub dictionary_transition_symbol: GcSlot<Symbol>,
     pub number_dictionary_map: GcSlot<Map>,
-    /// Map of array-iterator objects (slots: [iterated array, next index])
-    pub array_iterator_map: GcSlot<Map>,
-    /// %ArrayIteratorPrototype% (holds `next`)
-    pub array_iterator_prototype: GcSlot<Object>,
-    /// Map of iterator-result objects `{ value, done }` (w+, e+, c+)
-    pub iterator_result_map: GcSlot<Map>,
     /// Hidden for-in enumerator: slots [level, keys, index, visited]
-    /// (ES 14.7.5.9 EnumerateObjectProperties; unreachable from JS)
-    pub for_in_enumerator_map: GcSlot<Map>,
     /// Proxy maps (kind PROXY + capability bits copied from the target;
     /// 0 descriptors, null prototype — a proxy owns nothing directly).
     pub proxy_map: GcSlot<Map>,
@@ -211,9 +194,6 @@ define_well_known_strings! {
     number => "number",
     string => "string",
     boolean => "boolean",
-    number_ctor => "Number",
-    boolean_ctor => "Boolean",
-    symbol_ctor => "Symbol",
     object => "object",
     function => "function",
     symbol => "symbol",
@@ -240,9 +220,6 @@ define_well_known_strings! {
     prevent_extensions => "preventExtensions",
     apply => "apply",
     construct => "construct",
-    revocable => "revocable",
-    revoke => "revoke",
-    proxy => "proxy",
 }
 
 /// A root slot holding the Smi placeholder: a valid strong word for a slot
@@ -324,12 +301,8 @@ impl WellKnown {
             symbol_prototype: smi_slot::<Object>(),
             object_prototype: smi_slot::<Object>(),
             array_prototype: smi_slot::<Object>(),
-            date_instance_map: smi_slot::<Map>(),
-            date_prototype: smi_slot::<Object>(),
             function_prototype: smi_slot::<Object>(),
             global_object: smi_slot::<Object>(),
-            eval_function: smi_slot::<Object>(),
-            object_to_string: smi_slot::<Object>(),
             script_context_table: smi_slot::<ScriptContextTable>(),
             global_symbol_registry: smi_slot::<FixedArray>(),
             object_initial_map: smi_slot::<Map>(),
@@ -337,16 +310,10 @@ impl WellKnown {
             non_constructor_function_map: smi_slot::<Map>(),
             class_constructor_map: smi_slot::<Map>(),
             to_primitive_symbol: smi_slot::<Symbol>(),
-            iterator_symbol: smi_slot::<Symbol>(),
-            to_string_tag_symbol: smi_slot::<Symbol>(),
             megamorphic_symbol: smi_slot::<Symbol>(),
             prototype_transition_symbol: smi_slot::<Symbol>(),
             holey_transition_symbol: smi_slot::<Symbol>(),
             dictionary_transition_symbol: smi_slot::<Symbol>(),
-            array_iterator_map: smi_slot::<Map>(),
-            array_iterator_prototype: smi_slot::<Object>(),
-            iterator_result_map: smi_slot::<Map>(),
-            for_in_enumerator_map: smi_slot::<Map>(),
             proxy_map: smi_slot::<Map>(),
             proxy_callable_map: smi_slot::<Map>(),
             proxy_constructor_map: smi_slot::<Map>(),
@@ -421,12 +388,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.symbol_prototype.as_raw());
         visitor.visit(self.object_prototype.as_raw());
         visitor.visit(self.array_prototype.as_raw());
-        visitor.visit(self.date_instance_map.as_raw());
-        visitor.visit(self.date_prototype.as_raw());
         visitor.visit(self.function_prototype.as_raw());
         visitor.visit(self.global_object.as_raw());
-        visitor.visit(self.eval_function.as_raw());
-        visitor.visit(self.object_to_string.as_raw());
         visitor.visit(self.script_context_table.as_raw());
         visitor.visit(self.global_symbol_registry.as_raw());
         visitor.visit(self.object_initial_map.as_raw());
@@ -434,16 +397,10 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.non_constructor_function_map.as_raw());
         visitor.visit(self.class_constructor_map.as_raw());
         visitor.visit(self.to_primitive_symbol.as_raw());
-        visitor.visit(self.iterator_symbol.as_raw());
-        visitor.visit(self.to_string_tag_symbol.as_raw());
         visitor.visit(self.megamorphic_symbol.as_raw());
         visitor.visit(self.prototype_transition_symbol.as_raw());
         visitor.visit(self.holey_transition_symbol.as_raw());
         visitor.visit(self.dictionary_transition_symbol.as_raw());
-        visitor.visit(self.array_iterator_map.as_raw());
-        visitor.visit(self.array_iterator_prototype.as_raw());
-        visitor.visit(self.iterator_result_map.as_raw());
-        visitor.visit(self.for_in_enumerator_map.as_raw());
         visitor.visit(self.proxy_map.as_raw());
         visitor.visit(self.proxy_callable_map.as_raw());
         visitor.visit(self.proxy_constructor_map.as_raw());
@@ -793,27 +750,8 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         })
         .as_handle(&scope);
 
-    let date_prototype_map = alloc_parent_map(
-        heap,
-        &scope,
-        MapKind::OBJECT.union(MapKind::EXTENDABLE),
-        object_prototype,
-    );
-    let date_prototype = alloc_object(heap, &scope, date_prototype_map);
-    // Date instances carry the [[DateValue]] in one in-object value slot
-    // (date.rs stores it via `new_object`); declaring it here keeps the
-    // map's layout in sync so later property stores transition correctly.
-    // The DATE flag is inherited by every transition map, so adding
-    // properties to a Date does not lose its internal slot.
-    let date_instance_map = alloc_parent_map_with_slots(
-        heap,
-        &scope,
-        MapKind::OBJECT
-            .union(MapKind::EXTENDABLE)
-            .union(MapKind::DATE),
-        date_prototype,
-        1,
-    );
+    // %Date.prototype% and the Date instance map are JS-runtime objects
+    // (`JsKnown::init` builds them).
 
     let error_prototype_map = alloc_parent_map(
         heap,
@@ -876,12 +814,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known
         .to_primitive_symbol
         .init_tagged(alloc_symbol(heap, &scope, "Symbol.toPrimitive").as_tagged(heap));
-    known
-        .iterator_symbol
-        .init_tagged(alloc_symbol(heap, &scope, "Symbol.iterator").as_tagged(heap));
-    known
-        .to_string_tag_symbol
-        .init_tagged(alloc_symbol(heap, &scope, "Symbol.toStringTag").as_tagged(heap));
     // IC state sentinel (never user-visible): a feedback slot holding it
     // permanently takes the slow path
     known
@@ -929,10 +861,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .object_prototype
         .init(object_prototype.as_tagged(heap));
     known.array_prototype.init(array_prototype.as_tagged(heap));
-    known.date_prototype.init(date_prototype.as_tagged(heap));
-    known
-        .date_instance_map
-        .init(date_instance_map.as_tagged(heap));
     known.error_map.init(error_map.as_tagged(heap));
 
     known.type_error_map.init(error_map.as_tagged(heap));
@@ -975,7 +903,6 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .empty_scope_info
         .init(empty_scope_info.as_tagged(heap));
     known.global_object.init(global_object.as_tagged(heap));
-    known.eval_function.init(known.undefined.get(heap));
     known
         .script_context_table
         .init(script_context_table.as_tagged(heap));
