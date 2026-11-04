@@ -489,7 +489,6 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
     let known = vm.known();
     let mut thread = vm.attach();
     let wks = &known.strings;
-    let roots = vm.roots();
     thread.handle_scope(|thread, scope| {
         let heap = thread.heap();
         let wks_empty: Handle<'_, Value> = scope.handle(wks.empty.get(heap).erase());
@@ -1359,7 +1358,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             &scope,
         );
         let array_iterator_prototype =
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+            scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(
             thread,
             &scope,
@@ -1389,7 +1388,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
 
         // array-iterator map: slots [iterated array, next index, kind],
         // prototype %ArrayIteratorPrototype%
-        let array_iterator_map = roots.create_handle(thread.heap().allocate::<Map>(MapInit {
+        let array_iterator_map = scope.handle(thread.heap().allocate::<Map>(MapInit {
             kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
             value_slot_count: 3,
             descriptors: &[],
@@ -1411,7 +1410,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                         (value_name, flags, scope.handle(Smi::new(0).into_tagged())),
                         (done_name, flags, scope.handle(Smi::new(1).into_tagged())),
                     ];
-                    roots.create_handle(token.allocate::<Map>(MapInit {
+                    scope.handle(token.allocate::<Map>(MapInit {
                         kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                         value_slot_count: 2,
                         descriptors: &descriptors,
@@ -1422,7 +1421,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         // for-in enumerator map: slots [level, keys, index, visited],
         // prototype Object.prototype (it must survive `x in Object.prototype`
         // style probes without special cases; the object is never exposed)
-        let for_in_enumerator_map = roots.create_handle(thread.heap().allocate::<Map>(MapInit {
+        let for_in_enumerator_map = scope.handle(thread.heap().allocate::<Map>(MapInit {
             kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
             value_slot_count: 4,
             descriptors: &[],
@@ -1452,8 +1451,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             },
             &scope,
         );
-        let math_object =
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+        let math_object = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(thread, &scope, math_object, "sqrt", idx.math_sqrt)?;
         Object::install_method(thread, &scope, math_object, "log", idx.math_log)?;
         Object::install_method(thread, &scope, math_object, "pow", idx.math_pow)?;
@@ -1514,7 +1512,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             &scope,
         );
         let console_object =
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+            scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(thread, &scope, console_object, "log", idx.console_log)?;
         let console_name = thread.intern(&scope, "console");
         // Safety: fresh interned word, rooted below before the define.
@@ -1563,7 +1561,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             &scope,
         );
         let performance_object =
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+            scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(
             thread,
             &scope,
@@ -1609,7 +1607,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             },
             &scope,
         );
-        let symbol_prototype = roots.create_handle(thread.heap().new_object(
+        let symbol_prototype = scope.handle(thread.heap().new_object(
             &scope,
             symbol_prototype_map,
             HandleSlice::EMPTY,

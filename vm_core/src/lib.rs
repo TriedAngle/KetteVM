@@ -41,9 +41,7 @@ pub use compare::Compare;
 pub use convert::{Coercion, Convert, Hint};
 pub use error::{Message, VmError};
 pub use errors::Errors;
-pub use handle::{
-    EscapableHandleScope, Handle, HandleData, HandleScope, HandleSet, HandleSlice, RootHandles,
-};
+pub use handle::{EscapableHandleScope, Handle, HandleData, HandleScope, HandleSlice};
 pub use heap::{
     AllocToken, AtomicGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot, GlobalHeap, Heap,
     MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
@@ -88,8 +86,6 @@ pub use heap_api::{
 };
 
 pub type Local<'scope, T> = Handle<'scope, T>;
-// pseudo-static
-pub type Global<T> = Handle<'static, T>;
 
 /// A bytecode frontend, selectable by type at the call site
 /// (`vm.eval::<JavascriptCompiler>(..)`).
@@ -127,7 +123,6 @@ const _: () = {
 
 pub struct SharedVM {
     heap: GlobalHeap,
-    roots: RootHandles,
     known: WellKnown,
     // TODO: investiage if Mutex is fine, maybe a lock-free mechanism exists
     threads: Mutex<Vec<Weak<ThreadState>>>,
@@ -413,7 +408,6 @@ impl SharedVM {
     fn visit_roots(&self, visitor: &mut dyn Visitor) {
         self.interner.visit_edges(visitor);
         self.known.visit_edges(visitor);
-        self.roots.visit_edges(visitor);
         self.heap.iterate_roots(visitor);
         for slot in self.weak_slots.lock().unwrap().iter() {
             visitor.visit(slot);
@@ -623,12 +617,10 @@ impl Clone for VM {
 impl VM {
     pub fn new<B: HeapBackend, I: Interpreter>(config: B::Config) -> Result<Self, AllocError> {
         let heap = GlobalHeap::from_backend::<B>(config)?;
-        let roots = unsafe { RootHandles::new(512, Smi::new(0).encode()) };
         let interner = StringInterner::new();
         let shared = Arc::new(SharedVM {
             heap,
             known: WellKnown::uninit(),
-            roots,
             threads: Mutex::new(Vec::new()),
             interner,
             prototype_registry: PrototypeRegistry::new(),
@@ -787,10 +779,6 @@ impl VM {
             .as_any()
             .downcast_ref::<R>()
             .expect("runtime not added to this VM")
-    }
-
-    pub fn roots(&self) -> &RootHandles {
-        &self.shared.roots
     }
 
     /// Arm the `stress-minor-gc` knob (no-op without the feature).

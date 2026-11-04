@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    AllocError, FixedArray, Float, GcHost, Handle, HandleScope, HandleSet, HandleSlice,
-    HeapBackend, HeapObject, HeapStats, LocalHeap, Map, MaybeWeak, Object, ObjectInit,
-    ObjectSlotsInit, PrototypeRegistry, RawCell, STRONG_PTR, SharedHeap, Smi, Tagged, Tlab, Value,
-    Visitor, WeakFixedArray, Word,
+    AllocError, FixedArray, Float, GcHost, Handle, HandleScope, HandleSlice, HeapBackend,
+    HeapObject, HeapStats, LocalHeap, Map, MaybeWeak, Object, ObjectInit, ObjectSlotsInit,
+    PrototypeRegistry, RawCell, STRONG_PTR, SharedHeap, Smi, Tagged, Tlab, Value, Visitor,
+    WeakFixedArray, Word,
 };
 
 use crate::bootstrap::WellKnown;
@@ -56,7 +56,7 @@ impl<'heap> AllocToken<'heap> {
     pub fn allocate_handle<'s, T: HeapObject>(
         &self,
         config: T::Init<'_>,
-        handles: &'s impl HandleSet,
+        handles: &'s HandleScope<'_>,
     ) -> Handle<'s, T> {
         self.allocate::<T>(config).as_handle(handles)
     }
@@ -169,11 +169,11 @@ impl<T> GcSlot<T> {
 
     /// The slot's current value, rooted in `scope`.
     #[inline]
-    pub fn get_handle<'s>(&self, heap: &Heap, scope: &'s impl HandleSet) -> Handle<'s, T>
+    pub fn get_handle<'s>(&self, heap: &Heap, scope: &'s HandleScope<'_>) -> Handle<'s, T>
     where
         T: 's,
     {
-        scope.create_handle(self.get(heap))
+        scope.handle(self.get(heap))
     }
 
     /// The slot itself used as a handle, with no scope-slot allocation. Only
@@ -748,7 +748,7 @@ impl Heap {
     pub fn allocate_handle<'s, T: HeapObject>(
         &mut self,
         config: T::Init<'_>,
-        handles: &'s impl HandleSet,
+        handles: &'s HandleScope<'_>,
     ) -> Handle<'s, T> {
         self.allocate::<T>(config).as_handle(handles)
     }
@@ -825,11 +825,11 @@ impl Heap {
     #[inline]
     pub fn allocate_object<'a>(
         &mut self,
-        handles: &'a impl HandleSet,
+        handles: &'a HandleScope<'_>,
         config: ObjectSlotsInit<'a, '_>,
     ) -> Tagged<'_, Object> {
         let slots: Handle<'a, FixedArray> = if config.values.is_empty() {
-            handles.create_handle(self.known().empty_fixed_array.get(self))
+            handles.handle(self.known().empty_fixed_array.get(self))
         } else {
             self.allocate_handle::<FixedArray>(config.values, handles)
         };
@@ -844,11 +844,11 @@ impl Heap {
     #[inline]
     pub fn new_object<'a>(
         &mut self,
-        handles: &'a impl HandleSet,
+        handles: &'a HandleScope<'_>,
         map: Handle<'a, Map>,
         values: HandleSlice<'a>,
     ) -> Tagged<'_, Object> {
-        let elements = handles.create_handle(self.known().empty_fixed_array.get(self));
+        let elements = handles.handle(self.known().empty_fixed_array.get(self));
         self.allocate_object(
             handles,
             ObjectSlotsInit {
@@ -866,17 +866,17 @@ impl Heap {
     #[inline]
     pub fn new_object_prealloc<'a>(
         &mut self,
-        handles: &'a impl HandleSet,
+        handles: &'a HandleScope<'_>,
         map: Handle<'a, Map>,
         capacity: usize,
     ) -> Tagged<'_, Object> {
         let capacity = capacity.max(map.as_tagged(self).value_slot_count());
         let slots: Handle<'a, FixedArray> = if capacity == 0 {
-            handles.create_handle(self.known().empty_fixed_array.get(self))
+            handles.handle(self.known().empty_fixed_array.get(self))
         } else {
             self.allocate_hole_array(capacity).as_handle(handles)
         };
-        let elements = handles.create_handle(self.known().empty_fixed_array.get(self));
+        let elements = handles.handle(self.known().empty_fixed_array.get(self));
         self.allocate::<Object>(ObjectInit {
             map,
             slots,

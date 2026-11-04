@@ -4,7 +4,7 @@ use crate::{Heap, HeapObject, MapKind, Object, VmError};
 
 // imports flattened
 use crate::Handle;
-use crate::HandleSet;
+use crate::HandleScope;
 use crate::SlotName;
 
 // The word/tag representation is shared with the heap ABI crate; the VM
@@ -428,11 +428,11 @@ impl<'a, T: HeapObject> Tagged<'a, T> {
     }
 
     /// A rooted copy: the value may now cross GC safepoints.
-    pub fn as_handle<'s>(self, scope: &'s impl HandleSet) -> Handle<'s, T>
+    pub fn as_handle<'s>(self, scope: &'s HandleScope<'_>) -> Handle<'s, T>
     where
         T: 's,
     {
-        scope.create_handle(self)
+        scope.handle(self)
     }
 }
 

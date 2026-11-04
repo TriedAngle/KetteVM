@@ -2,13 +2,11 @@ use core::{
     cell::{Cell, UnsafeCell},
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use crate::stack::Args;
 use crate::{
-    EdgeVisitable, GcSlot, Global, HANDLE_BLOCK_SIZE, Heap, HeapObject, Register, Tagged, Value,
-    Visitor,
+    EdgeVisitable, GcSlot, HANDLE_BLOCK_SIZE, Heap, HeapObject, Register, Tagged, Value, Visitor,
 };
 
 /// A rooted reference to a `T` that survives relocation by the GC.
@@ -325,67 +323,6 @@ impl Drop for EscapableHandleScope<'_, '_> {
         inner.next = self.prev_next;
         inner.limit = self.prev_limit;
         inner.blocks.truncate(self.prev_block_count);
-    }
-}
-
-pub struct RootHandles {
-    slots: Box<[GcSlot]>,
-    next: AtomicUsize,
-}
-
-unsafe impl Send for RootHandles {}
-unsafe impl Sync for RootHandles {}
-
-impl RootHandles {
-    pub unsafe fn new(capacity: usize, fill: Value) -> Self {
-        Self {
-            slots: (0..capacity)
-                .map(|_| unsafe { GcSlot::from_value(fill) })
-                .collect(),
-            next: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Global<T> {
-        let value = value.into();
-        let i = self.next.fetch_add(1, Ordering::Relaxed);
-        assert!(i < self.slots.len(), "root handle table exhausted");
-        let slot = GcSlot::raw_get(&self.slots[i]);
-        unsafe { *slot = value.raw() };
-        unsafe { Handle::from_location(NonNull::new_unchecked(slot)) }
-    }
-}
-
-impl EdgeVisitable for RootHandles {
-    fn visit_edges(&self, visitor: &mut dyn Visitor) {
-        for slot in &self.slots[..self.next.load(Ordering::Relaxed)] {
-            visitor.visit(slot.as_raw());
-        }
-    }
-}
-
-pub trait HandleSet {
-    fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T>;
-}
-
-impl<T: HandleSet + ?Sized> HandleSet for &T {
-    fn create_handle<'x, U: 'x>(&self, value: impl Into<Tagged<'x, U>>) -> Handle<'_, U> {
-        (**self).create_handle(value)
-    }
-}
-
-impl HandleSet for HandleScope<'_> {
-    fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T> {
-        self.handle(value)
-    }
-}
-
-impl HandleSet for RootHandles {
-    fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T> {
-        // Slots in the root table are stable and never reclaimed, so the
-        // returned handle is valid for the borrow of `self` (in practice:
-        // pseudo-static, see `Global<T>`).
-        RootHandles::create_handle(self, value)
     }
 }
 

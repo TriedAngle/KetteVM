@@ -322,9 +322,6 @@ impl WellKnown {
     }
 }
 
-// The slots are only mutated during single-threaded bootstrap or through
-// explicit root writes; the collector visits them from the stop-the-world
-// host root callback, exactly like `RootHandles`.
 unsafe impl Send for WellKnown {}
 unsafe impl Sync for WellKnown {}
 

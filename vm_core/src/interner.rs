@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::{
-    DenseString, EdgeVisitable, Handle, HandleSet, Heap, StringData, Visitor, string_content_hash,
+    DenseString, EdgeVisitable, Handle, HandleScope, Heap, StringData, Visitor, string_content_hash,
 };
 
 use crate::heap::MaybeWeakGcSlot;
@@ -47,7 +47,7 @@ impl StringInterner {
     pub fn intern<'s>(
         &self,
         heap: &mut Heap,
-        scope: &'s impl HandleSet,
+        scope: &'s HandleScope<'_>,
         data: StringData<'_>,
     ) -> Handle<'s, DenseString> {
         let staged: Result<Handle<'s, DenseString>, (InternKey, i64)> = {
@@ -67,7 +67,7 @@ impl StringInterner {
     pub fn intern_str<'s>(
         &self,
         heap: &mut Heap,
-        scope: &'s impl HandleSet,
+        scope: &'s HandleScope<'_>,
         s: &str,
     ) -> Handle<'s, DenseString> {
         if s.is_ascii() {
@@ -80,7 +80,7 @@ impl StringInterner {
     pub fn intern_value<'s>(
         &self,
         heap: &mut Heap,
-        scope: &'s impl HandleSet,
+        scope: &'s HandleScope<'_>,
         s: &Handle<'_, DenseString>,
     ) -> Handle<'s, DenseString> {
         let staged: Result<Handle<'s, DenseString>, (InternKey, i64)> = {
@@ -102,7 +102,7 @@ impl StringInterner {
     fn insert_new<'s>(
         &self,
         heap: &mut Heap,
-        scope: &'s impl HandleSet,
+        scope: &'s HandleScope<'_>,
         key: InternKey,
         hash: i64,
     ) -> Handle<'s, DenseString> {
@@ -124,7 +124,7 @@ impl StringInterner {
 
 fn probe_unlocked<'s>(
     heap: &Heap,
-    scope: &'s impl HandleSet,
+    scope: &'s HandleScope<'_>,
     table: &mut InternTable,
     hash: i64,
     data: StringData<'_>,
