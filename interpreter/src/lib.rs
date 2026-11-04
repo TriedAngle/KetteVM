@@ -1321,7 +1321,7 @@ fn op_create_empty_array_literal(frame: Frame) {
     let state = frame.ctx().state();
     let v = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
-        let map = scope.handle(roots.js_array_map.get(heap));
+        let map = roots.js_array_map.get_handle(heap, &scope);
         heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
     });
     frame.set_acc(v);
@@ -1358,7 +1358,7 @@ fn op_create_empty_object_literal(frame: Frame) {
     let state = frame.ctx().state();
     let val = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
-        let map = scope.handle(roots.object_initial_map.get(heap));
+        let map = roots.object_initial_map.get_handle(heap, &scope);
         heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
     });
     frame.set_acc(val);
@@ -1554,7 +1554,7 @@ fn op_create_function_context(frame: Frame) {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
         let slots = if count == 0 {
-            scope.handle(roots.empty_fixed_array.get(heap))
+            roots.empty_fixed_array.get_handle(heap, &scope)
         } else {
             let values = scope.stage(&vec![roots.the_hole.get(heap).erase(); count]);
             heap.allocate_handle::<FixedArray>(values, &scope)

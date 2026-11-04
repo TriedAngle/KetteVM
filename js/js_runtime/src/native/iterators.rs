@@ -18,7 +18,7 @@ pub fn get_iterator<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let obj = scope.handle(args.get(heap, 0));
-        let symbol = scope.handle(known.iterator_symbol.get(heap).erase());
+        let symbol = known.iterator_symbol.get_handle(heap, &scope).erase();
         let method = rt_try!(
             vm,
             heap,
@@ -67,7 +67,7 @@ pub fn iterator_next<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let iter = scope.handle(args.get(heap, 0));
-        let next_name = scope.handle(vm.known().strings.next.get(heap).erase());
+        let next_name = vm.known().strings.next.get_handle(heap, &scope).erase();
         let next = rt_try!(
             vm,
             heap,
@@ -122,7 +122,7 @@ pub fn iterator_done<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
-        let done_name = scope.handle(known.strings.done.get(heap).erase());
+        let done_name = known.strings.done.get_handle(heap, &scope).erase();
         let v = match rt_try!(
             vm,
             heap,
@@ -148,7 +148,7 @@ pub fn iterator_value<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
-        let value_name = scope.handle(vm.known().strings.value.get(heap).erase());
+        let value_name = vm.known().strings.value.get_handle(heap, &scope).erase();
         let v = match rt_try!(
             vm,
             heap,

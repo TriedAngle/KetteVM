@@ -66,7 +66,7 @@ impl Errors {
                     Some(message) => scope.handle(message),
                     None => return Ok(None),
                 };
-                let message_key = scope.handle(known.strings.message.get(heap));
+                let message_key = known.strings.message.get_handle(heap, &scope);
                 Object::define_own_property(
                     heap,
                     &scope,
@@ -78,7 +78,7 @@ impl Errors {
             // InstallErrorCause: `options` must be an Object and
             // `HasProperty(options, "cause")` walks its prototype chain.
             if !options.as_tagged(heap).is_primitive(heap) {
-                let cause_key = scope.handle(known.strings.cause.get(heap));
+                let cause_key = known.strings.cause.get_handle(heap, &scope);
                 let found = match Object::has_property(vm, heap, state, options, cause_key.erase())?
                 {
                     Coercion::Threw => return Ok(None),
@@ -140,7 +140,7 @@ impl Errors {
         name: &str,
     ) -> Result<Tagged<'a, Value>, VmError> {
         state.handle_scope(|scope| {
-            let map = scope.handle(vm.known().reference_error_map.get(heap));
+            let map = vm.known().reference_error_map.get_handle(heap, &scope);
             Self::with_message(
                 vm,
                 heap,
@@ -164,7 +164,7 @@ impl Errors {
         message: &str,
     ) -> Result<Tagged<'a, Value>, VmError> {
         let message = vm.interner().intern_str(heap, scope, message).erase();
-        let options = scope.handle(vm.known().undefined.get(heap).erase());
+        let options = vm.known().undefined.get_handle(heap, &scope).erase();
         Ok(Self::create(vm, heap, state, None, map, message, options)?
             .expect("error materialization must not fail"))
     }

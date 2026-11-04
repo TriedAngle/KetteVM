@@ -113,7 +113,7 @@ pub fn function_to_string<'a>(
     // TODO: step 2 ([[SourceText]]) is not modelled, so user functions also
     // get the implementation-defined NativeFunction form.
     state.handle_scope(|scope| {
-        let name_key = scope.handle(vm.known().strings.name.get(heap));
+        let name_key = vm.known().strings.name.get_handle(heap, &scope);
         let name = match Object::ordinary_own_descriptor(
             heap,
             &scope,
@@ -323,7 +323,7 @@ fn copy_bound_name_and_length<'a>(
     let Some(bound_object) = scope.cast::<Object>(heap, bound.as_tagged(heap)) else {
         return raise_runtime(vm, heap, state, VmError::Type);
     };
-    let length_key = scope.handle(vm.known().strings.length.get(heap));
+    let length_key = vm.known().strings.length.get_handle(heap, &scope);
     let mut length = 0.0;
     // TODO: HasOwnProperty must run the getOwnPropertyDescriptor trap when the
     // target is a proxy; this reads its ordinary own descriptor instead.
@@ -366,7 +366,7 @@ fn copy_bound_name_and_length<'a>(
     ) {
         return raise_runtime(vm, heap, state, err);
     }
-    let name_key = scope.handle(vm.known().strings.name.get(heap));
+    let name_key = vm.known().strings.name.get_handle(heap, &scope);
     let target_name =
         match Object::get_property(vm, heap, state, target, target, name_key.erase(), false) {
             Ok(Coercion::Value(value)) => scope.handle(value),

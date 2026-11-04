@@ -1,4 +1,4 @@
-use crate::{ByteSpan, CharStream, ParseError, SymbolTable, Token, TokenKind, TokenValue};
+use crate::{ByteSpan, CharStream, ParseError, Symbol, SymbolTable, Token, TokenKind, TokenValue};
 
 pub type ScanResult = Result<Token, ParseError>;
 
@@ -536,7 +536,7 @@ impl<S: CharStream> Scanner<S> {
         true
     }
 
-    fn intern_span(&mut self, span: ByteSpan) -> crate::Symbol {
+    fn intern_span(&mut self, span: ByteSpan) -> Symbol {
         Self::with_span_bytes(&mut self.stream, &mut self.scratch, span, |b| {
             self.symbols.intern(b)
         })

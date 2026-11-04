@@ -443,7 +443,7 @@ fn descriptor_object<'s>(
     partial: &PartialDescriptor<'_>,
 ) -> Result<Handle<'s, Value>, VmError> {
     {
-        let map = scope.handle(heap.known().object_initial_map.get(heap));
+        let map = heap.known().object_initial_map.get_handle(heap, &scope);
         let obj = heap
             .new_object(scope, map, HandleSlice::EMPTY)
             .as_handle(scope);
@@ -501,7 +501,7 @@ fn define_internal_h<'s>(
     if obj.as_tagged(heap).is_primitive(heap) {
         return Err(VmError::Type);
     }
-    let undefined = scope.handle(heap.known().undefined.get(heap).erase());
+    let undefined = heap.known().undefined.get_handle(heap, &scope).erase();
     // `length` is an array's exotic own property: route a value define
     // through ArraySetLength instead of adding a normal descriptor.
     if obj
@@ -960,7 +960,7 @@ fn apply_h<'a>(
     let (target, handler) = enter_trap(scope, heap, proxy, Trap::Apply)?;
     let this_arg = match args.first() {
         Some(h) => *h,
-        None => scope.handle(heap.known().undefined.get(heap).erase()),
+        None => heap.known().undefined.get_handle(heap, &scope).erase(),
     };
     match get_trap(vm, heap, state, scope, &handler, Trap::Apply)? {
         TrapLookup::Threw => Ok(Coercion::Threw),

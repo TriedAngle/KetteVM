@@ -51,6 +51,16 @@ impl<'heap> AllocToken<'heap> {
         unsafe { Tagged::from_raw_ptr(ptr) }
     }
 
+    /// [`AllocToken::allocate`] with the value rooted in `scope`.
+    #[inline]
+    pub fn allocate_handle<'s, T: HeapObject>(
+        &self,
+        config: T::Init<'_>,
+        handles: &'s impl HandleSet,
+    ) -> Handle<'s, T> {
+        self.allocate::<T>(config).as_handle(handles)
+    }
+
     pub fn remaining(&self) -> usize {
         self.end as usize - self.next.get() as usize
     }
@@ -157,10 +167,20 @@ impl<T> GcSlot<T> {
         &self.cell
     }
 
-    /// A handle to a slot whose storage is guaranteed to be stable forever
-    /// (a well-known/root slot). Object-embedded slots are not `'static`
-    /// and therefore cannot be turned into handles this way.
-    pub fn as_handle(&'static self) -> Handle<'static, T> {
+    /// The slot's current value, rooted in `scope`.
+    #[inline]
+    pub fn get_handle<'s>(&self, heap: &Heap, scope: &'s impl HandleSet) -> Handle<'s, T>
+    where
+        T: 's,
+    {
+        scope.create_handle(self.get(heap))
+    }
+
+    /// The slot itself used as a handle, with no scope-slot allocation. Only
+    /// possible for slots in storage that is stable forever (a root table);
+    /// object-embedded slots are not `'static` and cannot use this.
+    #[inline]
+    pub fn root_handle(&'static self) -> Handle<'static, T> {
         // Safety: `'static` storage is stable across collections and the
         // slot is GC-visited by construction.
         unsafe { Handle::from_location(NonNull::from(self).cast()) }

@@ -2,8 +2,8 @@ use core::alloc::Layout;
 
 use crate::{
     ContextObject, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
-    HeapObject, INFO_GLOBAL, ObjectKind, Smi, Tagged, Value, Visitor, VmError, info_is_immutable,
-    info_is_lexical,
+    HeapObject, INFO_GLOBAL, Message, ObjectKind, Smi, Tagged, Value, Visitor, VmError,
+    info_is_immutable, info_is_lexical,
 };
 
 const INITIAL_HASH_CAPACITY: usize = 16;
@@ -399,7 +399,7 @@ pub fn global_lexical_set<'a>(
         return Err(VmError::Reference);
     }
     if info_is_immutable(found.info) {
-        return Err(VmError::Message(crate::Message::ConstAssign));
+        return Err(VmError::Message(Message::ConstAssign));
     }
     slot.set(heap, context.erase(), value);
     Ok(Some(GlobalLexicalBinding {

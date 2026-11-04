@@ -718,7 +718,7 @@ pub fn slow_create_block_context(frame: Frame) {
             )
             .expect("frame context slot holds a ContextObject");
         let slots = if count == 0 {
-            scope.handle(roots.empty_fixed_array.get(heap))
+            roots.empty_fixed_array.get_handle(heap, &scope)
         } else {
             let values = scope.stage(&vec![roots.the_hole.get(heap).erase(); count]);
             heap.allocate_handle::<FixedArray>(values, &scope)
@@ -726,7 +726,7 @@ pub fn slow_create_block_context(frame: Frame) {
         heap.allocate::<ContextObject>(ContextInit {
             outer: Some(outer),
             slots,
-            scope_info: scope.handle(roots.empty_scope_info.get(heap)),
+            scope_info: roots.empty_scope_info.get_handle(heap, &scope),
         })
         .erase()
     });
@@ -820,7 +820,7 @@ fn load_keyed_body<'a>(
         }
         let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
+            Ok(Coercion::Threw) => roots.exception.get_handle(heap, &scope).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         out.as_tagged(heap).erase()
@@ -944,7 +944,7 @@ pub fn slow_named_load(frame: Frame) {
         let out = match Object::get_property(vm, heap, state, recv, recv, name.erase(), false) {
             Ok(result) => match result {
                 Coercion::Value(v) => scope.handle(v),
-                Coercion::Threw => scope.handle(roots.exception.get(heap).erase()),
+                Coercion::Threw => roots.exception.get_handle(heap, &scope).erase(),
             },
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
@@ -1022,7 +1022,7 @@ pub fn global_load_body<'a>(
         ) {
             Ok(result) => match result {
                 Coercion::Value(v) => scope.handle(v),
-                Coercion::Threw => scope.handle(roots.exception.get(heap).erase()),
+                Coercion::Threw => roots.exception.get_handle(heap, &scope).erase(),
             },
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
@@ -1412,7 +1412,7 @@ pub fn slow_store_global(frame: Frame) {
                 .erase()
                 .as_name(),
         );
-        let global = scope.handle(roots.global_object.get(heap).erase());
+        let global = roots.global_object.get_handle(heap, &scope).erase();
         let name_value = name.as_tagged(heap).erase();
         match vm_core::global_lexical_set(heap, name_value, value.as_tagged(heap)) {
             Ok(Some(binding)) => {
@@ -1581,7 +1581,7 @@ pub fn slow_construct(frame: Frame) {
             .cast::<Object>(heap, callee.as_tagged(heap))
             .expect("constructible callee is an object");
         let receiver = if derived {
-            scope.handle(roots.the_hole.get(heap).erase())
+            roots.the_hole.get_handle(heap, &scope).erase()
         } else {
             match Object::create_construct_receiver_value(vm, heap, state, callee_obj.erase()) {
                 Ok(Some(r)) => scope.handle(r),

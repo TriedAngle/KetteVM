@@ -92,7 +92,7 @@ fn append_records_pred_and_shares_transitions() {
     let (root, map_a, map_ab, map_a_again) = thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root_handle = thread.heap().known().object_initial_map.as_handle();
+        let root_handle = thread.heap().known().object_initial_map.root_handle();
 
         let obj = thread
             .heap()
@@ -133,7 +133,7 @@ fn redefine_records_pred() {
 
     let (map_a, map_a_readonly) = thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
-        let root = thread.heap().known().object_initial_map.as_handle();
+        let root = thread.heap().known().object_initial_map.root_handle();
         let obj = thread
             .heap()
             .new_object(&scope, root, HandleSlice::EMPTY)
@@ -176,7 +176,7 @@ fn delete_records_pred() {
     let (map_ab, map_b) = thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root = thread.heap().known().object_initial_map.as_handle();
+        let root = thread.heap().known().object_initial_map.root_handle();
         let obj = thread
             .heap()
             .new_object(&scope, root, HandleSlice::EMPTY)
@@ -211,7 +211,7 @@ fn live_transition_subtree_survives_gc() {
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root_handle = thread.heap().known().object_initial_map.as_handle();
+        let root_handle = thread.heap().known().object_initial_map.root_handle();
 
         let obj = thread
             .heap()
@@ -256,7 +256,7 @@ fn dead_transition_targets_are_cleared_by_gc() {
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root_handle = thread.heap().known().object_initial_map.as_handle();
+        let root_handle = thread.heap().known().object_initial_map.root_handle();
 
         let live = thread
             .heap()
@@ -299,7 +299,7 @@ fn unused_whole_subtree_is_collected() {
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root_handle = thread.heap().known().object_initial_map.as_handle();
+        let root_handle = thread.heap().known().object_initial_map.root_handle();
 
         thread.handle_scope(|thread, inner| {
             let obj = thread

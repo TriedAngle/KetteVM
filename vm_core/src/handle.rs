@@ -396,6 +396,12 @@ pub trait HandleSet {
     fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T>;
 }
 
+impl<T: HandleSet + ?Sized> HandleSet for &T {
+    fn create_handle<'x, U: 'x>(&self, value: impl Into<Tagged<'x, U>>) -> Handle<'_, U> {
+        (**self).create_handle(value)
+    }
+}
+
 impl HandleSet for HandleScope<'_> {
     fn create_handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T> {
         self.handle(value)

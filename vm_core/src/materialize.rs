@@ -35,8 +35,8 @@ impl Materialize {
         runtime: RuntimeId,
     ) -> Result<Handle<'s, Object>, VmError> {
         let empty = {
-            let (vm, heap, _state) = thread.split();
-            scope.handle(vm.known().empty_context.get(heap))
+            let (_vm, heap, _state) = thread.split();
+            heap.known().empty_context.get_handle(heap, scope)
         };
         Self::closure(thread, scope, program, runtime, empty)
     }
@@ -78,7 +78,7 @@ impl Materialize {
             FunctionId::SCRIPT,
         )?;
 
-        let map = scope.handle(vm.known().function_map.get(heap));
+        let map = heap.known().function_map.get_handle(heap, scope);
         let slots = scope.stage(&[
             info.as_tagged(heap).erase(),
             context.as_tagged(heap).erase(),
@@ -160,13 +160,17 @@ fn materialize_function<'s>(
                 heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), scope)
                     .erase()
             }
-            Constant::ObjectPrototype => {
-                scope.handle(vm.known().object_prototype.get(heap).erase())
-            }
-            Constant::FunctionPrototype => {
-                scope.handle(vm.known().function_prototype.get(heap).erase())
-            }
-            Constant::GlobalObject => scope.handle(vm.known().global_object.get(heap).erase()),
+            Constant::ObjectPrototype => heap
+                .known()
+                .object_prototype
+                .get_handle(heap, scope)
+                .erase(),
+            Constant::FunctionPrototype => heap
+                .known()
+                .function_prototype
+                .get_handle(heap, scope)
+                .erase(),
+            Constant::GlobalObject => heap.known().global_object.get_handle(heap, scope).erase(),
         };
         materialized.push(value);
     }

@@ -171,7 +171,7 @@ fn delete_identifier_sloppy<'a>(
             }
             // unresolved: the global object's own property decides
             Ok(None) => {
-                let global = scope.handle(vm.known().global_object.get(heap).erase());
+                let global = vm.known().global_object.get_handle(heap, &scope).erase();
                 Object::delete_property(vm, heap, state, global, name)
             }
             Err(err) => Err(err),
@@ -651,7 +651,7 @@ fn extension_property<'s>(
         vm_core::lookup::Hit::Data { value, .. }
         | vm_core::lookup::Hit::Element { value, .. }
         | vm_core::lookup::Hit::Parent { value, .. } => Some(scope.handle(value)),
-        _ => Some(scope.handle(heap.known().undefined.get(heap).erase())),
+        _ => Some(heap.known().undefined.root_handle().erase()),
     }
 }
 
@@ -768,7 +768,7 @@ fn set_function_name<'a>(
         let Some(fn_obj) = scope.cast::<Object>(heap, fn_value.as_tagged(heap)) else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
-        let name_key = scope.handle(vm.known().strings.name.get(heap));
+        let name_key = vm.known().strings.name.get_handle(heap, &scope);
         // the closure's own placeholder is never writable nor an accessor,
         // so only explicit member defines match here
         let explicit = match Object::ordinary_own_descriptor(
@@ -1148,7 +1148,7 @@ fn construct_super_construct<'a>(
             return raise_runtime(vm, heap, state, VmError::Type);
         };
         let (receiver, allocated) = if derived {
-            (scope.handle(vm.known().the_hole.get(heap).erase()), false)
+            (vm.known().the_hole.get_handle(heap, &scope).erase(), false)
         } else {
             // TODO: native constructors allocate their own receiver, so this
             // synthesized object is unused (and Array reads
@@ -1338,7 +1338,7 @@ fn load_dynamic_name<'a>(
             Some(DynamicBinding::Extension { value, .. }) => value.as_tagged(heap),
             None => {
                 // unresolved: fall back to a global object property
-                let global = scope.handle(vm.known().global_object.get(heap).erase());
+                let global = vm.known().global_object.get_handle(heap, &scope).erase();
                 get_property_lenient(
                     HostCtx::new(vm, state.runtime(vm, heap), heap, state),
                     global,
@@ -1408,7 +1408,7 @@ fn store_dynamic_name<'a>(
             }
             match ctx.outer.get(heap) {
                 Some(outer) => context = outer,
-                None => break scope.handle(vm.known().global_object.get(heap).erase()),
+                None => break vm.known().global_object.get_handle(heap, &scope).erase(),
             }
         };
         if let Some(found) = heap
@@ -1684,7 +1684,7 @@ fn declare_eval_binding<'a>(
         let extension = match ctx.extension.get(heap) {
             Some(extension) => extension.as_handle(&scope),
             None => {
-                let map = scope.handle(vm.known().object_initial_map.get(heap));
+                let map = vm.known().object_initial_map.get_handle(heap, &scope);
                 let extension = heap
                     .new_object(&scope, map, HandleSlice::EMPTY)
                     .as_handle(&scope);
@@ -1705,7 +1705,7 @@ fn declare_eval_binding<'a>(
         let key = scope.handle(name.as_tagged(heap).as_name());
         let value = match value {
             Some(value) => value,
-            None => scope.handle(vm.known().undefined.get(heap).erase()),
+            None => vm.known().undefined.get_handle(heap, &scope).erase(),
         };
         let defined = rt_try!(
             vm,
@@ -1818,7 +1818,7 @@ fn create_rest_parameter<'a>(
             .map(|i| scope.handle(state.stack().reg(heap, base, (first + i + 1) as i32)))
             .collect();
         let elements = heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), &scope);
-        let map = scope.handle(vm.known().js_array_map.get(heap));
+        let map = vm.known().js_array_map.get_handle(heap, &scope);
         heap.allocate_object(
             &scope,
             ObjectSlotsInit {

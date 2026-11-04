@@ -1,8 +1,8 @@
 use core::alloc::Layout;
 
 use crate::{
-    EdgeVisitable, GcSlot, Handle, HandleScope, Heap, HeapObject, ObjectKind, Smi, Tagged, Value,
-    Visitor,
+    EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, ObjectKind, Smi, Tagged,
+    Value, Visitor,
 };
 
 /// The sparse-array elements backing store: an open-addressing hash
@@ -18,7 +18,7 @@ use crate::{
 /// triangular: `first = hash & (cap-1)`, `next = (e + n) & (cap-1)`.
 #[repr(C)]
 pub struct NumberDictionary {
-    pub header: crate::Header,
+    pub header: Header,
     pub capacity: GcSlot<Smi>,
     pub nof: GcSlot<Smi>,
     pub nod: GcSlot<Smi>,
@@ -393,7 +393,7 @@ impl HeapObject for NumberDictionary {
         }
     }
 
-    fn header(&self) -> &crate::Header {
+    fn header(&self) -> &Header {
         &self.header
     }
 

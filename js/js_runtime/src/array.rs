@@ -74,14 +74,23 @@ pub fn array_constructor<'a>(
     state.handle_scope(|scope| {
         let proto = match new_target {
             Some(nt) => {
-                let name = scope.handle(vm.known().strings.prototype.get(heap).erase());
+                let name = vm
+                    .known()
+                    .strings
+                    .prototype
+                    .get_handle(heap, &scope)
+                    .erase();
                 match Object::get_property(vm, heap, state, nt, nt, name, false) {
                     Ok(Coercion::Value(v)) => scope.handle(v),
                     Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
                     Err(err) => return raise_runtime(vm, heap, state, err),
                 }
             }
-            None => scope.handle(vm.known().array_prototype.get(heap).erase()),
+            None => heap
+                .known()
+                .array_prototype
+                .get_handle(heap, &scope)
+                .erase(),
         };
         let proto = scope.cast::<Object>(heap, proto.as_tagged(heap));
 
@@ -155,7 +164,7 @@ pub fn array_push<'a>(
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
 
-        let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
+        let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
         let mut length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
             Ok(Some(length)) => length,
             Ok(None) => return vm.known().exception.get(heap).erase(),
@@ -308,7 +317,7 @@ pub fn array_pop<'a>(
         };
 
         // LengthOfArrayLike (ES 7.3.18): Get(obj, "length") then ToLength.
-        let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
+        let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
         let length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
             Ok(Some(length)) => length,
             Ok(None) => return vm.known().exception.get(heap).erase(),
@@ -392,7 +401,7 @@ fn array_pop_fast<'s>(
     }
     let len = obj.as_ref().length();
     if len == 0 {
-        return Some(scope.handle(heap.known().undefined.get(heap).erase()));
+        return Some(heap.known().undefined.root_handle().erase());
     }
     let last = len - 1;
     let elements = obj.as_ref().elements_array(heap)?;
@@ -430,7 +439,7 @@ pub fn array_values<'a>(
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let map = scope.handle(known.array_iterator_map.get(heap));
+        let map = known.array_iterator_map.get_handle(heap, &scope);
         heap.new_object(
             &scope,
             map,
@@ -480,7 +489,7 @@ pub fn array_iterator_next<'a>(
                 slots.at(heap, 2).raw(),
             )
         };
-        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+        let undefined = vm.known().undefined.get_handle(heap, &scope).erase();
 
         let (result, done) = if array.as_tagged(heap).ptr_eq(undefined.as_tagged(heap)) {
             (undefined, true)
@@ -549,7 +558,7 @@ pub fn array_iterator_next<'a>(
                 (result, false)
             }
         };
-        let map = scope.handle(known.iterator_result_map.get(heap));
+        let map = known.iterator_result_map.get_handle(heap, &scope);
         let done_value = scope.handle(if done {
             vm.known().true_object.get(heap).erase()
         } else {
@@ -629,9 +638,9 @@ pub fn array_map<'a>(
         let this_arg = if args.len() > 2 {
             args.get_handle(heap, 2)
         } else {
-            scope.handle(vm.known().undefined.get(heap).erase())
+            vm.known().undefined.get_handle(heap, &scope).erase()
         };
-        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
 
         // TODO: ArraySpeciesCreate (ES 23.1.3.34) once species is supported.
         let result = heap.new_array(&scope, HandleSlice::EMPTY).as_handle(&scope);
@@ -702,8 +711,8 @@ pub fn array_reduce<'a>(
         if !callback.as_tagged(heap).is_callable(heap) {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
-        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
-        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let undefined = vm.known().undefined.get_handle(heap, &scope).erase();
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let mut k = 0u64;
 
         let mut accumulator = if args.len() > 2 {
@@ -782,7 +791,7 @@ pub fn array_to_string<'a>(
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let join_key = scope.handle(known.strings.join.get(heap).erase());
+        let join_key = known.strings.join.get_handle(heap, &scope).erase();
         let join = match Object::get_property(vm, heap, state, obj, obj, join_key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
@@ -791,7 +800,7 @@ pub fn array_to_string<'a>(
         let func = if join.as_tagged(heap).is_callable(heap) {
             join
         } else {
-            scope.handle(known.object_to_string.get(heap).erase())
+            known.object_to_string.get_handle(heap, &scope).erase()
         };
         let call_args = scope.stage(&[obj.as_tagged(heap).erase()]);
         let outcome = match HostCtx::enter(
@@ -1096,8 +1105,8 @@ pub fn array_sort<'a>(
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
-        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let undefined = vm.known().undefined.get_handle(heap, &scope).erase();
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
 
         // SortIndexedProperties with skip-holes: read present values in
         // index order, keeping `undefined` separate so it stays at the end.

@@ -393,9 +393,10 @@ fn append_prototype_child<'s, T: 's>(
                         Smi::new(0).into_tagged().as_maybe_weak(),
                         child.as_tagged(heap).erase().as_weak(),
                     ];
-                    token
-                        .allocate::<WeakFixedArray>(WeakFixedArrayInit { values: &values })
-                        .as_handle(scope)
+                    token.allocate_handle::<WeakFixedArray>(
+                        WeakFixedArrayInit { values: &values },
+                        scope,
+                    )
                 },
             );
             let host = info.as_tagged(heap).erase();
@@ -418,9 +419,10 @@ fn append_prototype_child<'s, T: 's>(
                         values.push(old.element_slot(i).get(heap));
                     }
                     values.push(child.as_tagged(heap).erase().as_weak());
-                    token
-                        .allocate::<WeakFixedArray>(WeakFixedArrayInit { values: &values })
-                        .as_handle(scope)
+                    token.allocate_handle::<WeakFixedArray>(
+                        WeakFixedArrayInit { values: &values },
+                        scope,
+                    )
                 },
             );
             let host = info.as_tagged(heap).erase();

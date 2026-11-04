@@ -18,7 +18,7 @@
 //! speculatively and ordinary expression parsing resumes when no `:`
 //! follows. Slots must precede `|params|`, which must precede the body.
 
-use crate::ast::{Ast, BinaryOp, Node, NodeId, ObjectParts, SlotKind, UnaryOp};
+use crate::ast::{Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, SlotKind, UnaryOp};
 use crate::plumbing::ParseError;
 use crate::token::{ByteSpan, Token, TokenKind, TokenValue};
 use crate::{CharStream, Scanner, Symbol, SymbolTable};
@@ -386,7 +386,7 @@ impl<S: CharStream> Parser<S> {
         }
     }
 
-    fn parse_args(&mut self) -> Result<(crate::ast::NodeList, u32), ParseError> {
+    fn parse_args(&mut self) -> Result<(NodeList, u32), ParseError> {
         self.expect(TokenKind::LParen)?;
         let mut args = Vec::new();
         if self.peek()?.kind != TokenKind::RParen {
@@ -599,7 +599,7 @@ impl<S: CharStream> Parser<S> {
     }
 
     /// `|a, b|` between the delimiting pipes; `||` is the empty list.
-    fn parse_params(&mut self) -> Result<crate::ast::NodeList, ParseError> {
+    fn parse_params(&mut self) -> Result<NodeList, ParseError> {
         if self.eat(TokenKind::OrOr)? {
             return Ok(self.ast.list(&[]));
         }

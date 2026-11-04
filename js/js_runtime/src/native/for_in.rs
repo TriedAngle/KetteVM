@@ -2,6 +2,7 @@
 //! the prototype chain lazily, one own-key snapshot per level.
 
 use crate::JSRuntime;
+use crate::known::JsKnown;
 use vm_core::lookup::own_property_enumerable;
 use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
@@ -57,7 +58,7 @@ pub fn for_in_enumerate<'a>(
         let staged = scope.stage_handles(&keys);
         let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
         let empty = vm.known().empty_fixed_array.get(heap);
-        let map = scope.handle(known.for_in_enumerator_map.get(heap));
+        let map = known.for_in_enumerator_map.get_handle(heap, &scope);
         let words = [
             level.as_tagged(heap).erase(),
             keys.as_tagged(heap).erase(),
@@ -80,7 +81,7 @@ fn for_in_initial_level<'a, 's>(
     heap: &'a Heap,
     scope: &'s HandleScope<'_>,
     roots: &WellKnown,
-    known: &crate::known::JsKnown,
+    known: &JsKnown,
     subject: Tagged<'a, Value>,
 ) -> Option<Tagged<'a, Value>> {
     if DenseString::from_receiver(heap, subject).is_some() {
@@ -114,7 +115,7 @@ fn for_in_initial_level<'a, 's>(
         return None;
     }
     let ctor = scope.handle(ctor);
-    let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
+    let proto_key = roots.strings.prototype.get_handle(heap, &scope).erase();
     let proto = Object::get_data_property(heap, scope, ctor, proto_key);
     if proto.is_strong_ptr() {
         Some(proto)
@@ -339,14 +340,14 @@ fn for_in_next_level<'s>(
     if level.get_as::<DenseString>(heap).is_some() {
         // String.prototype via the global object (both plain data
         // lookups; no user code can run)
-        let global = scope.handle(roots.global_object.get(heap).erase());
-        let ctor_key = scope.handle(roots.strings.string.get(heap).erase());
+        let global = roots.global_object.get_handle(heap, &scope).erase();
+        let ctor_key = roots.strings.string.get_handle(heap, &scope).erase();
         let string_ctor = Object::get_data_property(heap, scope, global, ctor_key);
         if !string_ctor.is_strong_ptr() {
             return Ok(None);
         }
         let string_ctor = scope.handle(string_ctor);
-        let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
+        let proto_key = roots.strings.prototype.get_handle(heap, &scope).erase();
         let proto = Object::get_data_property(heap, scope, string_ctor, proto_key);
         return Ok(proto
             .is_strong_ptr()

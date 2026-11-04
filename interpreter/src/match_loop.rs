@@ -7,9 +7,37 @@ use bytecode::Opcode;
 use vm_core::interpreter::{base, unwind};
 
 use crate::RootsArg;
+use crate::slow::match_slow_construct;
 use crate::utils::{
     ConstructStart, StagedCall, bound_apply_staged, call_scatter_start, call_window_start,
     construct_native, construct_start, proxy_apply_staged, resolve_target,
+};
+use crate::{
+    match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
+    match_op_bitwise_and, match_op_bitwise_and_immediate, match_op_bitwise_or,
+    match_op_bitwise_or_immediate, match_op_bitwise_xor, match_op_bitwise_xor_immediate,
+    match_op_call_native, match_op_compare_jump, match_op_create_block_context,
+    match_op_create_closure, match_op_create_empty_array_literal,
+    match_op_create_empty_object_literal, match_op_create_function_context,
+    match_op_create_sized_array_literal, match_op_dec_loc, match_op_div, match_op_div_immediate,
+    match_op_equal, match_op_equal_strict, match_op_exp, match_op_exp_immediate,
+    match_op_greater_than, match_op_greater_than_or_equal, match_op_inc_loc, match_op_instance_of,
+    match_op_jump, match_op_jump_if_falsy, match_op_jump_if_not_undefined, match_op_jump_if_truthy,
+    match_op_less_than, match_op_less_than_or_equal, match_op_load, match_op_load_constant,
+    match_op_load_context, match_op_load_context_slot, match_op_load_current_closure,
+    match_op_load_element_imm, match_op_load_false, match_op_load_global,
+    match_op_load_global_no_throw, match_op_load_hole, match_op_load_keyed_property,
+    match_op_load_keyed_property_reg, match_op_load_named_property, match_op_load_new_target,
+    match_op_load_null, match_op_load_smi, match_op_load_true, match_op_load_undefined,
+    match_op_load_zero, match_op_mod, match_op_mod_immediate, match_op_move, match_op_mul,
+    match_op_mul_immediate, match_op_negate, match_op_pop_context, match_op_push_context,
+    match_op_shift_left, match_op_shift_left_immediate, match_op_shift_right,
+    match_op_shift_right_immediate, match_op_shift_right_logical,
+    match_op_shift_right_logical_immediate, match_op_store, match_op_store_context_slot,
+    match_op_store_global, match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
+    match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
+    match_op_sub_immediate, match_op_sub_loc, match_op_test_reference_equal, match_op_test_typeof,
+    match_op_throw, match_op_throw_reference_error_if_hole,
 };
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, FrameMeta, Handle, HandleSlice,
@@ -262,23 +290,21 @@ fn step<'h, const STRIDE: usize>(
     let op = unsafe { Opcode::from_byte_unchecked(*(*ip).add(if STRIDE == 2 { 1 } else { 0 })) };
 
     *ip = match op {
-        Opcode::Load => crate::match_op_load::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Move => crate::match_op_move::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Store => crate::match_op_store::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Add => crate::match_op_add::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Load => match_op_load::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Move => match_op_move::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Store => match_op_store::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Add => match_op_add::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::CallNative => {
-            let next = crate::match_op_call_native::<STRIDE>(*ip, *regs, acc, ctx, roots);
+            let next = match_op_call_native::<STRIDE>(*ip, *regs, acc, ctx, roots);
             *regs = unsafe { Regs::new(ctx.regs_ptr()) };
             *frame_base = ctx.frame_base();
             next
         }
-        Opcode::Jump => crate::match_op_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::JumpIfTruthy => {
-            crate::match_op_jump_if_truthy::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::JumpIfFalsy => crate::match_op_jump_if_falsy::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Jump => match_op_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::JumpIfTruthy => match_op_jump_if_truthy::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::JumpIfFalsy => match_op_jump_if_falsy::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::JumpIfNotUndefined => {
-            crate::match_op_jump_if_not_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_jump_if_not_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::JumpLoop => op_jump_loop::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Return => {
@@ -335,134 +361,114 @@ fn step<'h, const STRIDE: usize>(
             *frame_base = ctx.frame_base();
             next
         }
-        Opcode::LoadSmi => crate::match_op_load_smi::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadZero => crate::match_op_load_zero::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadConstant => {
-            crate::match_op_load_constant::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadUndefined => {
-            crate::match_op_load_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadNull => crate::match_op_load_null::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadTrue => crate::match_op_load_true::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadFalse => crate::match_op_load_false::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadGlobal => crate::match_op_load_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Sub => crate::match_op_sub::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Mul => crate::match_op_mul::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Div => crate::match_op_div::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Mod => crate::match_op_mod::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Exp => crate::match_op_exp::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Negate => crate::match_op_negate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::AddImmediate => {
-            crate::match_op_add_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::SubImmediate => {
-            crate::match_op_sub_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::MulImmediate => {
-            crate::match_op_mul_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::DivImmediate => {
-            crate::match_op_div_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ModImmediate => {
-            crate::match_op_mod_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ExpImmediate => {
-            crate::match_op_exp_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::AddLoc => crate::match_op_add_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::SubLoc => crate::match_op_sub_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseOr => crate::match_op_bitwise_or::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseXor => crate::match_op_bitwise_xor::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseAnd => crate::match_op_bitwise_and::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ShiftLeft => crate::match_op_shift_left::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ShiftRight => crate::match_op_shift_right::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadSmi => match_op_load_smi::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadZero => match_op_load_zero::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadConstant => match_op_load_constant::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadUndefined => match_op_load_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadNull => match_op_load_null::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadTrue => match_op_load_true::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadFalse => match_op_load_false::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadGlobal => match_op_load_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Sub => match_op_sub::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Mul => match_op_mul::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Div => match_op_div::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Mod => match_op_mod::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Exp => match_op_exp::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Negate => match_op_negate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::AddImmediate => match_op_add_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::SubImmediate => match_op_sub_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::MulImmediate => match_op_mul_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::DivImmediate => match_op_div_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::ModImmediate => match_op_mod_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::ExpImmediate => match_op_exp_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::AddLoc => match_op_add_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::SubLoc => match_op_sub_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::BitwiseOr => match_op_bitwise_or::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::BitwiseXor => match_op_bitwise_xor::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::BitwiseAnd => match_op_bitwise_and::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::ShiftLeft => match_op_shift_left::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::ShiftRight => match_op_shift_right::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::ShiftRightLogical => {
-            crate::match_op_shift_right_logical::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_shift_right_logical::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::BitwiseOrImmediate => {
-            crate::match_op_bitwise_or_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_bitwise_or_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::BitwiseXorImmediate => {
-            crate::match_op_bitwise_xor_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_bitwise_xor_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::BitwiseAndImmediate => {
-            crate::match_op_bitwise_and_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_bitwise_and_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::ShiftLeftImmediate => {
-            crate::match_op_shift_left_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_shift_left_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::ShiftRightImmediate => {
-            crate::match_op_shift_right_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_shift_right_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::ShiftRightLogicalImmediate => {
-            crate::match_op_shift_right_logical_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_shift_right_logical_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::Equal => crate::match_op_equal::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LessThan => crate::match_op_less_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::GreaterThan => crate::match_op_greater_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Equal => match_op_equal::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LessThan => match_op_less_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::GreaterThan => match_op_greater_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LessThanOrEqual => {
-            crate::match_op_less_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_less_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::GreaterThanOrEqual => {
-            crate::match_op_greater_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_greater_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::EqualStrict => crate::match_op_equal_strict::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::EqualStrict => match_op_equal_strict::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::TestReferenceEqual => {
-            crate::match_op_test_reference_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_test_reference_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::TestTypeof => crate::match_op_test_typeof::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::InstanceOf => crate::match_op_instance_of::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CompareJump => crate::match_op_compare_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::IncLoc => crate::match_op_inc_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::DecLoc => crate::match_op_dec_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::TestTypeof => match_op_test_typeof::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::InstanceOf => match_op_instance_of::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::CompareJump => match_op_compare_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::IncLoc => match_op_inc_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::DecLoc => match_op_dec_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadKeyedProperty => {
-            crate::match_op_load_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::LoadKeyedPropertyReg => {
-            crate::match_op_load_keyed_property_reg::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_keyed_property_reg::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::LoadElementImm => {
-            crate::match_op_load_element_imm::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
+        Opcode::LoadElementImm => match_op_load_element_imm::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadNamedProperty => {
-            crate::match_op_load_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreNamedProperty => {
-            crate::match_op_store_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_store_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreKeyedProperty => {
-            crate::match_op_store_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_store_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreNamedPropertyNoShadow => {
-            crate::match_op_store_named_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_store_named_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreKeyedPropertyNoShadow => {
-            crate::match_op_store_keyed_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_store_keyed_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::StoreGlobal => crate::match_op_store_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CreateClosure => {
-            crate::match_op_create_closure::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::Throw => crate::match_op_throw::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::AddParent => crate::match_op_add_parent::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::StoreGlobal => match_op_store_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::CreateClosure => match_op_create_closure::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::Throw => match_op_throw::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::AddParent => match_op_add_parent::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadContextSlot => {
-            crate::match_op_load_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::StoreContextSlot => {
-            crate::match_op_store_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_store_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::PushContext => crate::match_op_push_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::PopContext => crate::match_op_pop_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::PushContext => match_op_push_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::PopContext => match_op_pop_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::CreateFunctionContext => {
-            crate::match_op_create_function_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_create_function_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::CreateEmptyArrayLiteral => {
-            crate::match_op_create_empty_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_create_empty_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::CreateSizedArrayLiteral => {
-            crate::match_op_create_sized_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_create_sized_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::Construct => {
             let next = op_construct::<STRIDE>(*ip, *regs, acc, ctx, roots);
@@ -471,24 +477,22 @@ fn step<'h, const STRIDE: usize>(
             next
         }
         Opcode::CreateEmptyObjectLiteral => {
-            crate::match_op_create_empty_object_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_create_empty_object_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::CreateBlockContext => {
-            crate::match_op_create_block_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_create_block_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
-        Opcode::LoadHole => crate::match_op_load_hole::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadNewTarget => {
-            crate::match_op_load_new_target::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadContext => crate::match_op_load_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadHole => match_op_load_hole::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadNewTarget => match_op_load_new_target::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::LoadContext => match_op_load_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadCurrentClosure => {
-            crate::match_op_load_current_closure::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_current_closure::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::ThrowReferenceErrorIfHole => {
-            crate::match_op_throw_reference_error_if_hole::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_throw_reference_error_if_hole::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::LoadGlobalNoThrow => {
-            crate::match_op_load_global_no_throw::<STRIDE>(*ip, *regs, acc, ctx, roots)
+            match_op_load_global_no_throw::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
         Opcode::Wide => {
             step::<2>(ctx, ip, regs, acc, frame_base, roots);
@@ -811,7 +815,7 @@ fn op_construct<'h, const STRIDE: usize>(
             // instruction pointer before the slow body decodes operands.
             ctx.reload_code();
             let ip = offset(ctx.code_ptr(), pc);
-            crate::slow::match_slow_construct::<STRIDE>(ip, regs, acc, ctx, roots, f64::NAN)
+            match_slow_construct::<STRIDE>(ip, regs, acc, ctx, roots, f64::NAN)
         }
         Err(e) => raise!(ctx, acc, pc, e),
     }

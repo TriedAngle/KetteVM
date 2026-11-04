@@ -48,8 +48,11 @@ impl JsKnown {
             let symbol = Symbol::new(heap, scope, Some(description));
             slot.init_tagged(symbol.as_tagged(heap));
         }
-        // %Date.prototype% and the Date instance map (JS-only objects)
-        let object_prototype = scope.handle(heap.known().object_prototype.get(heap).erase());
+        let object_prototype = heap
+            .known()
+            .object_prototype
+            .get_handle(heap, &scope)
+            .erase();
         let date_prototype_map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),

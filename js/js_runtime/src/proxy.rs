@@ -1,5 +1,4 @@
-//! ES 28.2: the Proxy constructor, Proxy.revocable, and the
-//! revoke-closure prelude.
+//! ES 28.2: the Proxy constructor and Proxy.revocable.
 
 use vm_core::HostCtx;
 use vm_core::Object;
@@ -96,14 +95,18 @@ pub fn proxy_revocable<'a>(
         );
         let bound_args =
             scope.handle(heap.new_array(&scope, scope.stage(&[proxy.as_tagged(heap)])));
-        let map = scope.handle(vm.known().bound_function_map.get(heap));
+        let map = vm.known().bound_function_map.get_handle(heap, &scope);
         let slots = scope.stage(&[
             target.as_tagged(heap).erase(),
             vm.known().undefined.get(heap).erase(),
             bound_args.as_tagged(heap).erase(),
         ]);
         let bound = scope.handle(heap.new_object(&scope, map, slots));
-        let prototype = scope.handle(vm.known().function_prototype.get(heap).erase());
+        let prototype = vm
+            .known()
+            .function_prototype
+            .get_handle(heap, &scope)
+            .erase();
         rt_try!(
             vm,
             heap,
@@ -111,7 +114,7 @@ pub fn proxy_revocable<'a>(
             Object::set_prototype(heap, &scope, bound, prototype)
         );
         // name "revoke", length 0 (the bound argument), neither enumerable
-        let name_key = scope.handle(vm.known().strings.name.get(heap));
+        let name_key = vm.known().strings.name.get_handle(heap, &scope);
         let name_value = scope.handle(
             vm.interner()
                 .intern_str(heap, &scope, "revoke")
@@ -125,7 +128,7 @@ pub fn proxy_revocable<'a>(
             configurable: true,
         };
         let _ = Object::define_own_property(heap, &scope, bound, name_key, builtin_attrs);
-        let length_key = scope.handle(vm.known().strings.length.get(heap));
+        let length_key = vm.known().strings.length.get_handle(heap, &scope);
         let zero: Handle<'_, Value> = scope.handle(Smi::new(0));
         let length_attrs = PropertyDescriptor::Data {
             value: zero,
@@ -136,11 +139,11 @@ pub fn proxy_revocable<'a>(
         let _ = Object::define_own_property(heap, &scope, bound, length_key, length_attrs);
         let revoke = bound.as_tagged(heap).erase();
         let revoke = scope.handle(revoke);
-        let map = scope.handle(vm.known().object_initial_map.get(heap));
+        let map = vm.known().object_initial_map.get_handle(heap, &scope);
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
-        let proxy_name = scope.handle(known.strings.proxy.get(heap));
+        let proxy_name = known.strings.proxy.get_handle(heap, &scope);
         let _ = Object::define_own_property(
             heap,
             &scope,
@@ -148,7 +151,7 @@ pub fn proxy_revocable<'a>(
             proxy_name,
             PropertyDescriptor::data(proxy.erase()),
         );
-        let revoke_name = scope.handle(known.strings.revoke.get(heap));
+        let revoke_name = known.strings.revoke.get_handle(heap, &scope);
         let _ = Object::define_own_property(
             heap,
             &scope,

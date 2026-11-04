@@ -410,14 +410,16 @@ impl EdgeVisitable for WellKnown {
 }
 
 fn alloc_map<'s>(heap: &mut Heap, scope: &'s HandleScope<'_>, kind: MapKind) -> Handle<'s, Map> {
-    let prototype = scope.handle(heap.known().null.get(heap).erase());
-    heap.allocate::<Map>(MapInit {
-        kind,
-        value_slot_count: 0,
-        descriptors: &[],
-        prototype,
-    })
-    .as_handle(scope)
+    let prototype = heap.known().null.get_handle(heap, &scope).erase();
+    heap.allocate_handle::<Map>(
+        MapInit {
+            kind,
+            value_slot_count: 0,
+            descriptors: &[],
+            prototype,
+        },
+        scope,
+    )
 }
 
 /// A builtin map whose `value_slot_count` doubles as per-kind metadata (the
@@ -428,14 +430,16 @@ fn alloc_map_with_slots<'s>(
     kind: MapKind,
     value_slot_count: usize,
 ) -> Handle<'s, Map> {
-    let prototype = scope.handle(heap.known().null.get(heap).erase());
-    heap.allocate::<Map>(MapInit {
-        kind,
-        value_slot_count,
-        descriptors: &[],
-        prototype,
-    })
-    .as_handle(scope)
+    let prototype = heap.known().null.get_handle(heap, &scope).erase();
+    heap.allocate_handle::<Map>(
+        MapInit {
+            kind,
+            value_slot_count,
+            descriptors: &[],
+            prototype,
+        },
+        scope,
+    )
 }
 
 fn alloc_parent_map<'s>(
@@ -454,13 +458,15 @@ fn alloc_parent_map_with_slots<'s>(
     parent: Handle<'_, Object>,
     value_slot_count: usize,
 ) -> Handle<'s, Map> {
-    heap.allocate::<Map>(MapInit {
-        kind,
-        value_slot_count,
-        descriptors: &[],
-        prototype: parent.erase(),
-    })
-    .as_handle(scope)
+    heap.allocate_handle::<Map>(
+        MapInit {
+            kind,
+            value_slot_count,
+            descriptors: &[],
+            prototype: parent.erase(),
+        },
+        scope,
+    )
 }
 
 fn alloc_object<'s>(
@@ -487,14 +493,15 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let scope = unsafe { HandleScope::from_raw(NonNull::from(&data)) };
     let known = heap.known();
 
-    let map_map = heap
-        .allocate::<Map>(MapInit {
+    let map_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::MAP,
             value_slot_count: 0,
             descriptors: &[],
             prototype: scope.handle(Smi::new(0)),
-        })
-        .as_handle(&scope);
+        },
+        &scope,
+    );
     map_map.as_tagged(heap).header.map.set(
         heap,
         map_map.as_tagged(heap).erase(),
@@ -502,39 +509,43 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     );
     known.map_map.init(map_map.as_tagged(heap));
 
-    let the_hole_map = heap
-        .allocate::<Map>(MapInit {
+    let the_hole_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::ODDBALL,
             value_slot_count: 0,
             descriptors: &[],
             prototype: scope.handle(Smi::new(0)),
-        })
-        .as_handle(&scope);
-    let the_hole = heap
-        .allocate::<Object>(ObjectInit {
+        },
+        &scope,
+    );
+    let the_hole = heap.allocate_handle::<Object>(
+        ObjectInit {
             map: the_hole_map,
             slots: smi_handle::<FixedArray>(&scope),
             elements: smi_handle::<FixedArray>(&scope),
             length: 0,
-        })
-        .as_handle(&scope);
+        },
+        &scope,
+    );
 
-    let null_map = heap
-        .allocate::<Map>(MapInit {
+    let null_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::ODDBALL,
             value_slot_count: 0,
             descriptors: &[],
             prototype: scope.handle(Smi::new(0)),
-        })
-        .as_handle(&scope);
-    let null = heap
-        .allocate::<Object>(ObjectInit {
+        },
+        &scope,
+    );
+    let null = heap.allocate_handle::<Object>(
+        ObjectInit {
             map: null_map,
             slots: smi_handle::<FixedArray>(&scope),
             elements: smi_handle::<FixedArray>(&scope),
             length: 0,
-        })
-        .as_handle(&scope);
+        },
+        &scope,
+    );
 
     // Publish the sentinels before anything reads them through `known()`
     // (`clear()` takes the heap and fetches the hole from there).
@@ -567,11 +578,12 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .prototype_info_map
         .init(prototype_info_map.as_tagged(heap));
-    let invalid_prototype_validity_cell = heap
-        .allocate::<Cell>(CellInit {
+    let invalid_prototype_validity_cell = heap.allocate_handle::<Cell>(
+        CellInit {
             value: Value::CLEARED,
-        })
-        .as_handle(&scope);
+        },
+        &scope,
+    );
     known
         .invalid_prototype_validity_cell
         .init(invalid_prototype_validity_cell.as_tagged(heap));
@@ -602,8 +614,8 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let handler_map_3 = alloc_map_with_slots(heap, &scope, MapKind::DATA_HANDLER, 3);
     let number_dictionary_map = alloc_map(heap, &scope, MapKind::NUMBER_DICTIONARY);
 
-    let function_map = heap
-        .allocate::<Map>(MapInit {
+    let function_map = heap.allocate_handle::<Map>(
+        MapInit {
             // TODO: arrow/generator functions get a non-constructor map
             // once the compiler distinguishes them
             kind: MapKind::OBJECT
@@ -613,20 +625,22 @@ pub fn bootstrap_basics(heap: &mut Heap) {
             value_slot_count: 2,
             descriptors: &[],
             prototype: null.erase(),
-        })
-        .as_handle(&scope);
-    let non_constructor_function_map = heap
-        .allocate::<Map>(MapInit {
+        },
+        &scope,
+    );
+    let non_constructor_function_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::OBJECT
                 .union(MapKind::CALLABLE)
                 .union(MapKind::EXTENDABLE),
             value_slot_count: 2,
             descriptors: &[],
             prototype: null.erase(),
-        })
-        .as_handle(&scope);
-    let class_constructor_map = heap
-        .allocate::<Map>(MapInit {
+        },
+        &scope,
+    );
+    let class_constructor_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::OBJECT
                 .union(MapKind::CALLABLE)
                 .union(MapKind::CONSTRUCTOR)
@@ -636,8 +650,9 @@ pub fn bootstrap_basics(heap: &mut Heap) {
             value_slot_count: 3,
             descriptors: &[],
             prototype: null.erase(),
-        })
-        .as_handle(&scope);
+        },
+        &scope,
+    );
 
     known.smi_map.init(smi_map.as_tagged(heap));
     known.float_map.init(float_map.as_tagged(heap));
@@ -711,9 +726,7 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
             .union(MapKind::EXTENDABLE)
             .union(MapKind::IMMUTABLE_PROTO),
     );
-    let empty_slots = heap
-        .allocate::<FixedArray>(HandleSlice::EMPTY)
-        .as_handle(&scope);
+    let empty_slots = heap.allocate_handle::<FixedArray>(HandleSlice::EMPTY, &scope);
     known.empty_fixed_array.init(empty_slots.as_tagged(heap));
     known
         .global_symbol_registry
@@ -727,31 +740,31 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         object_prototype,
     );
     let array_prototype = alloc_object(heap, &scope, array_prototype_map);
-    let length_name = scope.handle(known.strings.length.get(heap));
+    let length_name = known.strings.length.get_handle(heap, &scope);
     let array_length_info = heap
         // the front end fills in the native getter/setter once it has
         // registered its runtime table (`AccessorInfo::set_natives`)
-        .allocate::<AccessorInfo>(AccessorInfoInit {
-            getter: None,
-            setter: None,
-        })
-        .as_handle(&scope);
+        .allocate_handle::<AccessorInfo>(
+            AccessorInfoInit {
+                getter: None,
+                setter: None,
+            },
+            &scope,
+        );
     let array_length_descriptor: [(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>); 1] = [(
         length_name,
         SlotFlags::ACCESSOR.union(SlotFlags::WRITABLE),
         scope.handle(array_length_info.as_tagged(heap).erase()),
     )];
-    let js_array_map = heap
-        .allocate::<Map>(MapInit {
+    let js_array_map = heap.allocate_handle::<Map>(
+        MapInit {
             kind: MapKind::ARRAY.union(MapKind::EXTENDABLE),
             value_slot_count: 0,
             descriptors: &array_length_descriptor,
             prototype: array_prototype.erase(),
-        })
-        .as_handle(&scope);
-
-    // %Date.prototype% and the Date instance map are JS-runtime objects
-    // (`JsKnown::init` builds them).
+        },
+        &scope,
+    );
 
     let error_prototype_map = alloc_parent_map(
         heap,
@@ -760,10 +773,10 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         object_prototype,
     );
     let error_prototype = alloc_object(heap, &scope, error_prototype_map);
-    let name_key = scope.handle(known.strings.name.get(heap));
-    let message_key = scope.handle(known.strings.message.get(heap));
-    let error_name = scope.handle(known.strings.error.get(heap));
-    let empty = scope.handle(known.strings.empty.get(heap));
+    let name_key = known.strings.name.get_handle(heap, &scope);
+    let message_key = known.strings.message.get_handle(heap, &scope);
+    let error_name = known.strings.error.get_handle(heap, &scope);
+    let empty = known.strings.empty.get_handle(heap, &scope);
     for (key, value) in [(name_key, error_name.erase()), (message_key, empty.erase())] {
         Object::define_own_property(
             heap,
@@ -831,25 +844,22 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .dictionary_transition_symbol
         .init_tagged(alloc_symbol(heap, &scope, "<normalize-dictionary>").as_tagged(heap));
 
-    let empty_scope_info = heap
-        .allocate::<ScopeInfo>(ScopeInfoInit {
+    let empty_scope_info = heap.allocate_handle::<ScopeInfo>(
+        ScopeInfoInit {
             names: HandleSlice::EMPTY,
             infos: &[],
             flags: 0,
-        })
-        .as_handle(&scope);
-    let empty_context = heap
-        .allocate::<ContextObject>(ContextInit {
+        },
+        &scope,
+    );
+    let empty_context = heap.allocate_handle::<ContextObject>(
+        ContextInit {
             outer: None,
             slots: empty_slots,
             scope_info: empty_scope_info,
-        })
-        .as_handle(&scope);
-
-    // %Function.prototype% (ES 19.2.3) is the canonical empty function: a
-    // callable, non-constructable native whose [[Prototype]] is
-    // %Object.prototype%. It is built by `VmCore::setup`, which can register
-    // the native and patch the function maps' [[Prototype]].
+        },
+        &scope,
+    );
 
     known.undefined.init(undefined.as_tagged(heap));
     known.undefined_map.init(undefined_map.as_tagged(heap));
@@ -918,6 +928,4 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     null_object
         .elements
         .set(heap, null_erased, empty_fixed_array);
-    // the function maps' [[Prototype]] (%Function.prototype%) is patched by
-    // `VmCore::setup`, which owns the canonical empty function
 }

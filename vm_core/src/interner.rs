@@ -106,9 +106,7 @@ impl StringInterner {
         key: InternKey,
         hash: i64,
     ) -> Handle<'s, DenseString> {
-        let handle = heap
-            .allocate::<DenseString>((key.data(), hash))
-            .as_handle(scope);
+        let handle = heap.allocate_handle::<DenseString>((key.data(), hash), scope);
         let mut table = self.table.lock().unwrap();
         let raced = probe_unlocked(heap, scope, &mut table, hash, key.data());
         match raced {

@@ -835,7 +835,7 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: &Handle<'_, Object>,
     ) {
-        let name = scope.handle(heap.known().strings.length.get(heap));
+        let name = heap.known().strings.length.get_handle(heap, &scope);
         let map = receiver.as_tagged(heap).map(heap);
         let Some((index, descriptor)) = map
             .descriptors()
@@ -1036,7 +1036,7 @@ impl Object {
         let formal_length = info_ref.formal_length();
         let function_name = match info_ref.name(heap) {
             Some(name) => scope.handle(name),
-            None => scope.handle(heap.known().strings.empty.get(heap).erase()),
+            None => heap.known().strings.empty.get_handle(heap, &scope).erase(),
         };
         let map = scope.handle(if kind.is_class_constructor() {
             heap.known().class_constructor_map.get(heap)
@@ -1061,8 +1061,8 @@ impl Object {
         };
         let function = heap.new_object(scope, map, args).as_handle(scope);
 
-        let length_key = scope.handle(heap.known().strings.length.get(heap));
-        let name_key = scope.handle(heap.known().strings.name.get(heap));
+        let length_key = heap.known().strings.length.get_handle(heap, &scope);
+        let name_key = heap.known().strings.name.get_handle(heap, &scope);
         if !Object::define_own_property(
             heap,
             scope,
@@ -1093,12 +1093,12 @@ impl Object {
         }
 
         if kind.needs_prototype() {
-            let proto_map = scope.handle(heap.known().object_initial_map.get(heap));
+            let proto_map = heap.known().object_initial_map.get_handle(heap, &scope);
             let proto = heap
                 .new_object(scope, proto_map, HandleSlice::EMPTY)
                 .as_handle(scope);
-            let constructor = scope.handle(heap.known().strings.constructor.get(heap));
-            let prototype = scope.handle(heap.known().strings.prototype.get(heap));
+            let constructor = heap.known().strings.constructor.get_handle(heap, &scope);
+            let prototype = heap.known().strings.prototype.get_handle(heap, &scope);
             if !Object::define_own_property(
                 heap,
                 scope,
@@ -1151,7 +1151,10 @@ impl Object {
                 state,
                 value,
                 value,
-                scope.handle(heap.known().to_primitive_symbol.get(heap).erase()),
+                heap.known()
+                    .to_primitive_symbol
+                    .get_handle(heap, &scope)
+                    .erase(),
                 false,
             )? {
                 Coercion::Threw => return Ok(Coercion::Threw),
@@ -1372,7 +1375,11 @@ impl Object {
                 state,
                 callable,
                 callable,
-                scope.handle(heap.known().strings.prototype.get(heap).erase()),
+                heap.known()
+                    .strings
+                    .prototype
+                    .get_handle(heap, &scope)
+                    .erase(),
                 false,
             )? {
                 Coercion::Threw => return Ok(None),
@@ -1428,7 +1435,12 @@ impl Object {
         map: Handle<'_, Map>,
         slots: HandleSlice<'_>,
     ) -> Result<Option<Handle<'s, Object>>, VmError> {
-        let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
+        let proto_name = heap
+            .known()
+            .strings
+            .prototype
+            .get_handle(heap, &scope)
+            .erase();
         let proto =
             Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;
         let proto = match proto {
@@ -1488,7 +1500,7 @@ impl Object {
                 .and_then(|obj| obj.callable_info(heap))
                 .is_some_and(|info| info.function_kind().is_derived_class_constructor());
             let receiver = if derived {
-                scope.handle(heap.known().the_hole.get(heap).erase())
+                heap.known().the_hole.get_handle(heap, &scope).erase()
             } else {
                 let Some(receiver) =
                     Self::create_construct_receiver_value(vm, heap, state, new_target)?
@@ -1531,7 +1543,7 @@ impl Object {
         new_target: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
-            let map = scope.handle(heap.known().object_initial_map.get(heap));
+            let map = heap.known().object_initial_map.get_handle(heap, &scope);
             let obj = Self::create_from_constructor(
                 vm,
                 heap,

@@ -23,12 +23,13 @@ impl Runtime for KetteRuntime {
     fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError> {
         state.declare_globals = vm.register_native(declare_globals);
         let print = vm.register_native(console_print);
-        let known = vm.known();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let object_prototype = {
                 let heap = thread.heap();
-                scope.handle(known.object_prototype.get(heap))
+                heap.known()
+                    .object_prototype
+                    .get_handle(thread.heap(), &scope)
             };
             let map = thread.heap().allocate_handle::<Map>(
                 MapInit {
@@ -45,7 +46,7 @@ impl Runtime for KetteRuntime {
             let console_name = scope.handle(console_name.as_tagged(thread.heap()));
             let global = {
                 let heap = thread.heap();
-                scope.handle(known.global_object.get(heap))
+                heap.known().global_object.get_handle(thread.heap(), &scope)
             };
             // a bare global `print(x)`, same native as `Console.print`
             Object::install_method(thread, &scope, global, "print", print)?;

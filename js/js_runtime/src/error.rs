@@ -19,7 +19,7 @@ pub fn error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().error_map.get(heap));
+        let map = vm.known().error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -35,7 +35,7 @@ pub fn eval_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().eval_error_map.get(heap));
+        let map = vm.known().eval_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -51,7 +51,7 @@ pub fn range_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().range_error_map.get(heap));
+        let map = vm.known().range_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -67,7 +67,7 @@ pub fn reference_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().reference_error_map.get(heap));
+        let map = vm.known().reference_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -83,7 +83,7 @@ pub fn syntax_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().syntax_error_map.get(heap));
+        let map = vm.known().syntax_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -99,7 +99,7 @@ pub fn type_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().type_error_map.get(heap));
+        let map = vm.known().type_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -115,7 +115,7 @@ pub fn uri_error_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().uri_error_map.get(heap));
+        let map = vm.known().uri_error_map.get_handle(heap, &scope);
         make_error(vm, heap, state, &scope, new_target, map, args)
     })
 }
@@ -172,7 +172,7 @@ pub fn error_to_string<'a>(
         if receiver.as_tagged(heap).is_primitive(heap) {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
-        let name_key = scope.handle(vm.known().strings.name.get(heap).erase());
+        let name_key = vm.known().strings.name.get_handle(heap, &scope).erase();
         let name_default = vm.interner().intern_str(heap, &scope, "Error").erase();
         let name = match string_property(vm, heap, state, &scope, receiver, name_key, name_default)
         {
@@ -180,8 +180,8 @@ pub fn error_to_string<'a>(
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let message_key = scope.handle(vm.known().strings.message.get(heap).erase());
-        let message_default = scope.handle(vm.known().strings.empty.get(heap).erase());
+        let message_key = vm.known().strings.message.get_handle(heap, &scope).erase();
+        let message_default = vm.known().strings.empty.get_handle(heap, &scope).erase();
         let message = match string_property(
             vm,
             heap,

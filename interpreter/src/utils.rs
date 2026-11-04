@@ -402,7 +402,7 @@ fn construct_receiver_args<'a>(
     state.handle_scope(|scope| {
         let heap = x.heap_mut();
         let receiver: Handle<'_, Value> = if derived {
-            scope.handle(roots.the_hole.get(heap).erase())
+            roots.the_hole.get_handle(heap, &scope).erase()
         } else {
             let callee_word = regs.get(callee_reg, heap);
             let Some(callee) = scope.cast::<Object>(heap, callee_word) else {

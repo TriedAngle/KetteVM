@@ -413,7 +413,7 @@ impl Object {
                     Ok(Coercion::Value(value.as_tagged(heap)))
                 }
                 Hit::Accessor { pair, .. } => {
-                    let undefined = scope.handle(heap.known().undefined.get(heap).erase());
+                    let undefined = heap.known().undefined.get_handle(heap, &scope).erase();
                     let getter = scope.handle(pair.get.get(heap));
                     if getter.as_tagged(heap) == undefined.as_tagged(heap) {
                         return Ok(Coercion::Value(undefined.as_tagged(heap)));
@@ -672,7 +672,7 @@ impl Object {
             return Ok(Some(s.len() as u64));
         }
         // TODO: typed-array fast path once [[TypedArrayName]] exists.
-        let length_key = scope.handle(vm.known().strings.length.get(heap).erase());
+        let length_key = heap.known().strings.length.get_handle(heap, &scope).erase();
         let length_value = match Self::get_property(vm, heap, state, obj, obj, length_key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => return Ok(None),

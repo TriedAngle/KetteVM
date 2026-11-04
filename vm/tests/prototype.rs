@@ -33,7 +33,7 @@ fn null_word(thread: &mut Thread) -> Value {
 
 fn object_with(thread: &mut Thread, proto: Value, props: &[(&str, i64)]) -> Value {
     thread.handle_scope(|thread, scope| {
-        let map = thread.heap().known().object_initial_map.as_handle();
+        let map = thread.heap().known().object_initial_map.root_handle();
         let obj = thread
             .heap()
             .new_object(&scope, map, HandleSlice::EMPTY)

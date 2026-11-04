@@ -2,12 +2,14 @@
 //! instantiation (ES 9.1.1.4.16, shared by the JS front end and Kette) and
 //! the array exotic object's `length` accessor.
 
+use crate::lookup::{Hit, Lookup};
 use crate::tools::KetteTools;
 use crate::{
     AccessorInfo, Args, CallableInfoObject, ContextObject, Convert, EdgeVisitable, FixedArray,
     Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind,
-    Object, PropertyDescriptor, Runtime, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
-    frame_context_value, info_is_lexical, info_mode, raise_runtime, rt_try,
+    Object, PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SlotFlags, Smi, Tagged, VM,
+    Value, Visitor, VmError, frame_context_value, info_is_lexical, info_mode, raise_runtime,
+    rt_try,
 };
 
 // ---- array `length` ----
@@ -111,7 +113,7 @@ fn function_prototype_call<'a>(
 }
 
 impl Runtime for VmCore {
-    const ID: crate::RuntimeId = crate::RuntimeId(0);
+    const ID: RuntimeId = RuntimeId(0);
 
     fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), VmError> {
         let call_index = vm.register_native(function_prototype_call);
@@ -128,8 +130,12 @@ impl Runtime for VmCore {
             let heap = thread.heap();
             // the canonical empty function object: callable, non-constructable,
             // [[Prototype]] = %Object.prototype%
-            let object_prototype = scope.handle(vm.known().object_prototype.get(heap).erase());
-            let empty_context = scope.handle(vm.known().empty_context.get(heap).erase());
+            let object_prototype = heap
+                .known()
+                .object_prototype
+                .get_handle(heap, &scope)
+                .erase();
+            let empty_context = heap.known().empty_context.get_handle(heap, &scope).erase();
             let map = heap.allocate_handle::<Map>(
                 MapInit {
                     kind: MapKind::OBJECT
@@ -164,8 +170,8 @@ impl Runtime for VmCore {
             }
             // `bootstrap` installs the `length` accessor on the array map
             // with no natives; point it at the ones registered above
-            let map = scope.handle(vm.known().js_array_map.get(heap));
-            let name = scope.handle(vm.known().strings.length.get(heap));
+            let map = heap.known().js_array_map.get_handle(heap, &scope);
+            let name = heap.known().strings.length.get_handle(heap, &scope);
             if let Some(info) = map
                 .as_tagged(heap)
                 .as_ref()
@@ -224,12 +230,12 @@ pub fn global_property_flags(
     scope: &HandleScope<'_>,
     name: Handle<'_, Value>,
 ) -> Option<SlotFlags> {
-    let global = scope.handle(heap.known().global_object.get(heap).erase());
-    let mut lookup = crate::lookup::Lookup::new(heap, scope, global, name, true);
+    let global = heap.known().global_object.get_handle(heap, &scope).erase();
+    let mut lookup = Lookup::new(heap, scope, global, name, true);
     match lookup.next(heap, scope) {
-        crate::lookup::Hit::Data { flags, .. }
-        | crate::lookup::Hit::Accessor { flags, .. }
-        | crate::lookup::Hit::NativeAccessor { flags, .. } => Some(flags),
+        Hit::Data { flags, .. }
+        | Hit::Accessor { flags, .. }
+        | Hit::NativeAccessor { flags, .. } => Some(flags),
         _ => None,
     }
 }
@@ -282,7 +288,7 @@ pub fn create_global_var_binding(
         return Err(VmError::Type);
     }
     let key = scope.handle(name.as_tagged(heap).as_name());
-    let value = scope.handle(heap.known().undefined.get(heap).erase());
+    let value = heap.known().undefined.get_handle(heap, &scope).erase();
     if Object::define_own_property(
         heap,
         scope,
@@ -378,7 +384,7 @@ pub fn declare_globals<'a>(
                 })
                 .collect()
         };
-        let table = scope.handle(vm.known().script_context_table.get(heap));
+        let table = heap.known().script_context_table.get_handle(heap, &scope);
         let repl_entry = context
             .as_tagged(heap)
             .scope_info
@@ -434,7 +440,7 @@ pub fn declare_globals<'a>(
                 vm,
                 heap,
                 state,
-                crate::ScriptContextTable::add(heap, &scope, table, context)
+                ScriptContextTable::add(heap, &scope, table, context)
             );
             vm.known().script_context_table.init(table.as_tagged(heap));
         }

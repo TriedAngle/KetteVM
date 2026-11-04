@@ -72,11 +72,15 @@ impl Object {
                 kind,
                 value_slot_count: 2,
                 descriptors: &[],
-                prototype: scope.handle(heap.known().function_prototype.get(heap).erase()),
+                prototype: heap
+                    .known()
+                    .function_prototype
+                    .get_handle(heap, &scope)
+                    .erase(),
             },
             scope,
         );
-        let empty_context = scope.handle(heap.known().empty_context.get(heap));
+        let empty_context = heap.known().empty_context.get_handle(heap, &scope);
         let obj = heap.new_object(
             scope,
             map,
@@ -148,17 +152,15 @@ impl Object {
 
         // proto.constructor = fn; fn.prototype = proto
         // (built-in methods/constructor properties are non-enumerable, ES 20+)
-        let constructor_name =
-            scope.handle(thread.heap().known().strings.constructor.get(thread.heap()));
+        let constructor_name = heap.known().strings.constructor.get_handle(heap, scope);
         Object::define_own_property(
-            thread.heap(),
+            heap,
             scope,
             proto,
             constructor_name,
             PropertyDescriptor::method(fn_obj.erase()),
         )?;
-        let prototype_name =
-            scope.handle(thread.heap().known().strings.prototype.get(thread.heap()));
+        let prototype_name = heap.known().strings.prototype.get_handle(heap, scope);
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -174,8 +176,8 @@ impl Object {
 
         // global.Name = fn
         let global = {
-            let (vm, heap, _state) = thread.split();
-            scope.handle(vm.known().global_object.get(heap))
+            let heap = thread.heap();
+            heap.known().global_object.get_handle(heap, &scope)
         };
         // Safety: fresh interned word, rooted below before any allocation.
         let name = scope.handle(name_str.as_tagged(thread.heap()));
@@ -199,7 +201,12 @@ impl Object {
         let name_str = thread.intern(scope, name);
         // Safety: fresh interned word, rooted below before any allocation.
         let name_str: Handle<'_, DenseString> = scope.handle(name_str.as_tagged(thread.heap()));
-        let name_key = scope.handle(thread.heap().known().strings.name.get(thread.heap()));
+        let name_key = thread
+            .heap()
+            .known()
+            .strings
+            .name
+            .get_handle(thread.heap(), scope);
         Object::define_own_property(
             thread.heap(),
             scope,

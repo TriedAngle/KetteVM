@@ -18,8 +18,8 @@ fn callable(
     register_count: usize,
     handlers: Option<&[HandlerEntryInit]>,
 ) -> Value {
-    let _the_hole = thread.heap().known().the_hole.as_handle();
-    let empty_context = thread.heap().known().empty_context.as_handle();
+    let _the_hole = thread.heap().known().the_hole.root_handle();
+    let empty_context = thread.heap().known().empty_context.root_handle();
     let runtime = thread.vm().runtime_id::<vm::VmCore>();
     let code = thread.heap().allocate_handle::<Code>(
         CodeInit {
@@ -47,7 +47,7 @@ fn callable(
         },
         scope,
     );
-    let map = thread.heap().known().function_map.as_handle();
+    let map = thread.heap().known().function_map.root_handle();
     let values = {
         let heap = thread.heap();
         scope.stage(&[
@@ -55,7 +55,7 @@ fn callable(
             empty_context.as_tagged(heap).erase(),
         ])
     };
-    let empty_fixed_array = thread.heap().known().empty_fixed_array.as_handle();
+    let empty_fixed_array = thread.heap().known().empty_fixed_array.root_handle();
     thread
         .heap()
         .allocate_object(

@@ -89,7 +89,7 @@ impl Args {
     #[inline(always)]
     pub fn get_handle<'s>(&'s self, heap: &Heap, i: usize) -> Handle<'s, Value> {
         if i >= self.count {
-            return heap.known().undefined.as_handle().erase();
+            return heap.known().undefined.root_handle().erase();
         }
         // Safety: the window slots are GC-visited for the call duration.
         unsafe {

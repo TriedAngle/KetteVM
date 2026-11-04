@@ -157,7 +157,7 @@ impl<'a> HostCtx<'a> {
                     let result = match Object::construct_forward(
                         vm, heap, state, target, &combined, new_target,
                     )? {
-                        Coercion::Threw => scope.handle(heap.known().exception.get(heap).erase()),
+                        Coercion::Threw => heap.known().exception.get_handle(heap, &scope).erase(),
                         Coercion::Value(value) => scope.handle(value),
                     };
                     Ok(result.as_tagged(heap).erase())

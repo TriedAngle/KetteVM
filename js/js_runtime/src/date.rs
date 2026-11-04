@@ -598,7 +598,7 @@ pub fn date_constructor<'a>(
         }
     };
     state.handle_scope(|scope| {
-        let map = scope.handle(known.date_instance_map.get(heap));
+        let map = known.date_instance_map.get_handle(heap, &scope);
         let time = scope.handle(heap.new_number(time));
         let slots = scope.stage(&[time.as_tagged(heap)]);
         let object = match Object::create_from_constructor(
@@ -1335,7 +1335,7 @@ pub fn date_to_json<'a>(
         {
             return vm.known().null.get(heap).erase();
         }
-        let name = scope.handle(known.strings.to_iso_string.get(heap).erase());
+        let name = known.strings.to_iso_string.get_handle(heap, &scope).erase();
         let method = match Object::get_property(vm, heap, state, object, object, name, false) {
             Ok(Coercion::Value(value)) => scope.handle(value),
             Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),

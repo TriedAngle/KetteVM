@@ -351,13 +351,14 @@ fn build_data_handler<'s>(
                 .iter()
                 .map(|word| word.as_tagged(heap).erase().as_weak())
                 .collect();
-            token
-                .allocate::<DataHandler>(DataHandlerInit {
+            token.allocate_handle::<DataHandler>(
+                DataHandlerInit {
                     smi_handler,
                     validity_cell,
                     data: &words,
-                })
-                .as_handle(scope)
+                },
+                scope,
+            )
         }),
     )
 }

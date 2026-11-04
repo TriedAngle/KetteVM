@@ -113,7 +113,7 @@ pub fn object_to_string<'a>(
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         // Let tag be ? Get(O, @@toStringTag).
-        let symbol = scope.handle(known.to_string_tag_symbol.get(heap).erase());
+        let symbol = known.to_string_tag_symbol.get_handle(heap, &scope).erase();
         let tag = match rt_try!(
             vm,
             heap,
@@ -162,7 +162,7 @@ pub fn object_constructor<'a>(
         // fresh ordinary object.
         heap.new_object(
             &scope,
-            scope.handle(vm.known().object_initial_map.get(heap)),
+            vm.known().object_initial_map.get_handle(heap, &scope),
             HandleSlice::EMPTY,
         )
         .erase()
@@ -191,7 +191,7 @@ pub fn object_get_prototype_of<'a>(
                 return raise_runtime(vm, heap, state, VmError::Type);
             }
         }
-        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => exception,
@@ -223,7 +223,7 @@ pub fn object_proto_get<'a>(
                 return raise_runtime(vm, heap, state, VmError::Type);
             }
         }
-        let exception = scope.handle(vm.known().exception.get(heap).erase());
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => exception,
@@ -314,7 +314,7 @@ pub fn object_create<'a>(
                 return raise_runtime(vm, heap, state, VmError::Type);
             }
         }
-        let map = scope.handle(vm.known().object_initial_map.get(heap));
+        let map = vm.known().object_initial_map.get_handle(heap, &scope);
         let empty: [Tagged<'_, Value>; 0] = [];
         let obj = scope.handle(heap.new_object(&scope, map, scope.stage(&empty)));
         let obj = scope
@@ -524,7 +524,7 @@ pub fn plain_object<'a>(
     fields: &[(&'static str, Handle<'_, Value>)],
 ) -> Result<Tagged<'a, Value>, VmError> {
     state.handle_scope(|scope| {
-        let map = scope.handle(vm.known().object_initial_map.get(heap));
+        let map = vm.known().object_initial_map.get_handle(heap, &scope);
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
@@ -575,8 +575,8 @@ pub fn object_get_own_property_descriptor<'a>(
         let desc = DenseString::own_descriptor(heap, &scope, target_v, key_v)
             .or_else(|| Object::ordinary_own_descriptor(heap, &scope, target_v, key_v));
         // root the oddball singletons once for the descriptor fields
-        let true_v = scope.handle(vm.known().true_object.get(heap).erase());
-        let false_v = scope.handle(vm.known().false_object.get(heap).erase());
+        let true_v = vm.known().true_object.get_handle(heap, &scope).erase();
+        let false_v = vm.known().false_object.get_handle(heap, &scope).erase();
         let bool_ = |b| if b { true_v } else { false_v };
         match desc {
             Some(PropertyDescriptor::Data {
