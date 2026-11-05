@@ -3,7 +3,7 @@
 
 use crate::JSRuntime;
 use crate::known::JsKnown;
-use vm_core::lookup::own_property_enumerable;
+use vm_core::access::own_property_enumerable;
 use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
     Tagged, VM, Value, VmError, WellKnown, raise_runtime, rt_try,

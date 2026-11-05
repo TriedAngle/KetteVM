@@ -1,20 +1,10 @@
 use core::alloc::Layout;
 
 use crate::{
-    AccessorInfo, AccessorPair, AllocToken, Compare, DETAILS_CONFIGURABLE, ElementsKind,
-    FixedArray, Handle, HandleScope, Heap, Key, Map, MapInit, MapKind, MaybeWeak, Message, Object,
-    Prototype, SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray,
-    WeakFixedArrayInit,
+    AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
+    Map, MapInit, MapKind, MaybeWeak, Message, Object, Prototype, SlotFlags, SlotName, Smi, Symbol,
+    Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
 };
-
-/// Store semantics:
-/// - Self-style writes through to an inherited writable slot
-/// - JS-style shadows it with a new own property on the receiver.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum StoreSemantics {
-    WriteThrough,
-    Shadow,
-}
 
 pub enum SiblingChange<'s> {
     Prototype(Handle<'s, Value>),
@@ -414,7 +404,7 @@ impl Transition {
             .set(heap, receiver.as_tagged(heap).erase(), target);
     }
 
-    fn write_slot(
+    pub fn write_slot(
         heap: &mut Heap,
         receiver: Handle<Object>,
         index: usize,
@@ -583,7 +573,7 @@ impl Transition {
         }
     }
 
-    fn define(
+    pub fn define(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
@@ -780,17 +770,6 @@ impl<'s> PropertyDescriptor<'s> {
     }
 }
 
-enum DefineAction<'s> {
-    /// Valid, nothing to change.
-    Nothing,
-    /// data→data with unchanged attributes: write the existing slot.
-    WriteDataSlot { value: Handle<'s, Value> },
-    /// Replace the descriptor with the new one (data or accessor).
-    Redefine { desc: PropertyDescriptor<'s> },
-    /// Change flags on a native accessor while keeping its accessor info.
-    NativeAccessor { flags: SlotFlags },
-}
-
 impl Object {
     pub fn add_own_property(
         heap: &mut Heap,
@@ -855,186 +834,11 @@ impl Object {
         let pairs = heap.allocate_handle::<FixedArray>(scope.stage_handles(&pairs), scope);
         Self::set_prototype(heap, scope, receiver, pairs.erase())
     }
-
-    pub fn define_own_property(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: Handle<Object>,
-        name: Handle<SlotName>,
-        desc: PropertyDescriptor<'_>,
-    ) -> Result<bool, VmError> {
-        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
-            let current = Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i);
-            match current {
-                Some(current) => {
-                    if !element_define_valid(heap, &current, &desc) {
-                        return Ok(false);
-                    }
-                }
-                None => {
-                    if !can_add_element(heap, receiver.as_tagged(heap), i) {
-                        return Ok(false);
-                    }
-                }
-            }
-            return Self::define_element(heap, scope, receiver, i, desc);
-        }
-        let current = receiver
-            .as_tagged(heap)
-            .map(heap)
-            .descriptors()
-            .iter()
-            .enumerate()
-            .find(|(_, d)| d.name(heap).ptr_eq(name.as_tagged(heap)))
-            .map(|(index, d)| (index, d.flags(), scope.handle(d.value.get(heap))));
-        let Some((index, cur_flags, cur_desc_value)) = current else {
-            return Self::add_own_property(heap, scope, receiver, name, desc);
-        };
-
-        let Some(action) = ({
-            validate_define(
-                heap,
-                receiver.as_tagged(heap),
-                name.as_tagged(heap),
-                cur_flags,
-                cur_desc_value,
-                desc,
-            )
-        }) else {
-            return Ok(false);
-        };
-        Self::apply_define(heap, scope, receiver, name, index, action);
-        Ok(true)
-    }
-
-    pub fn delete_own_property(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: Handle<Object>,
-        key: Handle<'_, Value>,
-    ) -> Result<bool, VmError> {
-        let name = 'name: {
-            let key = key.as_tagged(heap).classify_key(heap)?;
-            match key {
-                Key::Element(i) => {
-                    let obj = receiver.as_tagged(heap);
-                    if let Some(dict) = obj.element_dictionary(heap) {
-                        // non-configurable entries reject the delete (ES 10.5.2.10)
-                        if let Some(entry) = dict.find(heap, i)
-                            && dict.details_at(heap, entry) & DETAILS_CONFIGURABLE == 0
-                        {
-                            return Ok(false);
-                        }
-                        dict.delete(heap, i);
-                        Prototype::element_mutated(heap, obj);
-                        break 'name None;
-                    }
-                    // indices beyond the visible range were never own
-                    // properties (arrays: `length`; others: capacity)
-                    if i < obj.max_element_index(heap)
-                        && obj.map(heap).kind().is_dense_elements()
-                        && let Some(elements) = obj.elements_array(heap)
-                        && i < elements.len()
-                    {
-                        elements.set(heap, i, heap.known().the_hole.get(heap).erase());
-                        Object::promote_holey(heap, scope, &receiver);
-                        Prototype::element_mutated(heap, receiver.as_tagged(heap));
-                    }
-                    break 'name None;
-                }
-                Key::Name(name) => Some(scope.handle(name)),
-            }
-        };
-        let Some(name) = name else {
-            return Ok(true);
-        };
-        Self::delete_named_property(heap, scope, receiver, name)
-    }
-
-    fn delete_named_property(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: Handle<Object>,
-        name: Handle<SlotName>,
-    ) -> Result<bool, VmError> {
-        let configurable = receiver
-            .as_tagged(heap)
-            .map(heap)
-            .descriptors()
-            .iter()
-            .find(|d| d.name(heap).ptr_eq(name.as_tagged(heap)))
-            .map(|d| d.flags().is_configurable());
-        if configurable != Some(true) {
-            return Ok(configurable.is_none());
-        }
-        Transition::remove_property(heap, scope, receiver, name);
-        Ok(true)
-    }
-}
-
-/// ES 3.c of ValidateAndApplyPropertyDescriptor, element edition: a
-/// non-configurable existing element only accepts a compatible
-/// redefinition (same kind and attributes; same value when
-/// non-writable; identical pair halves).
-fn element_define_valid(
-    heap: &Heap,
-    current: &PropertyDescriptor<'_>,
-    desc: &PropertyDescriptor<'_>,
-) -> bool {
-    use PropertyDescriptor as D;
-    let configurable = |d: &D| match d {
-        D::Data { configurable, .. } | D::Accessor { configurable, .. } => *configurable,
-    };
-    if configurable(current) {
-        return true;
-    }
-    if configurable(desc) {
-        return false;
-    }
-    match (current, desc) {
-        (
-            D::Data {
-                value: cv,
-                writable: cw,
-                enumerable: ce,
-                ..
-            },
-            D::Data {
-                value: nv,
-                writable: nw,
-                enumerable: ne,
-                ..
-            },
-        ) => {
-            ce == ne
-                && (*cw
-                    || (!*nw && Compare::same_value(heap, cv.as_tagged(heap), nv.as_tagged(heap))))
-        }
-        (
-            D::Accessor {
-                get: cg,
-                set: cs,
-                enumerable: ce,
-                ..
-            },
-            D::Accessor {
-                get: ng,
-                set: ns,
-                enumerable: ne,
-                ..
-            },
-        ) => {
-            ce == ne
-                && cg.as_tagged(heap).ptr_eq(ng.as_tagged(heap))
-                && cs.as_tagged(heap).ptr_eq(ns.as_tagged(heap))
-        }
-        _ => false,
-    }
 }
 
 /// ES 10.4.2.1 steps 2-3 and 10.1.6.1 step 2: a new element needs an
 /// extensible receiver and, for arrays, a writable `length`.
-fn can_add_element(heap: &Heap, receiver: Tagged<'_, Object>, index: usize) -> bool {
+pub fn can_add_element(heap: &Heap, receiver: Tagged<'_, Object>, index: usize) -> bool {
     if receiver.is_array(heap)
         && index >= receiver.length()
         && !receiver.map(heap).length_writable(heap)
@@ -1045,31 +849,6 @@ fn can_add_element(heap: &Heap, receiver: Tagged<'_, Object>, index: usize) -> b
 }
 
 impl Object {
-    fn apply_define(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: Handle<Object>,
-        name: Handle<SlotName>,
-        index: usize,
-        action: DefineAction,
-    ) {
-        match action {
-            DefineAction::Nothing => {}
-            DefineAction::WriteDataSlot { value } => {
-                // the in-place data write needs no map change
-                Transition::write_slot(heap, receiver, index, value);
-            }
-            DefineAction::Redefine { desc } => {
-                Transition::define(heap, scope, receiver, name, desc, Change::Replace { index })
-            }
-            DefineAction::NativeAccessor { flags } => {
-                Transition::replace_native_accessor_flags(
-                    heap, scope, receiver, name, index, flags,
-                );
-            }
-        }
-    }
-
     /// - `proto` must be:
     /// - arbitrary normal `Object` for JS semantics
     /// - `FixedArray` of objects (Self-style multiple parents),
@@ -1169,120 +948,6 @@ impl Object {
             .set(heap, host, target.as_tagged(heap));
         Ok(())
     }
-}
-
-fn validate_define<'a, 's>(
-    heap: &'a Heap,
-    receiver: Tagged<'a, Object>,
-    name: Tagged<'a, SlotName>,
-    cur_flags: SlotFlags,
-    cur_desc_value: Handle<'s, Value>,
-    desc: PropertyDescriptor<'s>,
-) -> Option<DefineAction<'s>> {
-    let cur_configurable = cur_flags.is_configurable();
-
-    if cur_flags.is_accessor() {
-        if cur_configurable {
-            return Some(DefineAction::Redefine { desc });
-        }
-        if cur_desc_value
-            .as_tagged(heap)
-            .get_as::<AccessorInfo>(heap)
-            .is_some()
-        {
-            let PropertyDescriptor::Data {
-                value,
-                writable,
-                enumerable,
-                configurable,
-            } = desc
-            else {
-                return None;
-            };
-            if configurable || enumerable != cur_flags.is_enumerable() {
-                return None;
-            }
-            let current = receiver.array_length(heap, name)?;
-            if !Compare::same_value(heap, value.as_tagged(heap), current) {
-                return None;
-            }
-            if writable == cur_flags.is_writable() {
-                return Some(DefineAction::Nothing);
-            }
-            if !writable && cur_flags.is_writable() {
-                return Some(DefineAction::NativeAccessor {
-                    flags: cur_flags.without_writable(),
-                });
-            }
-            return None;
-        }
-        let PropertyDescriptor::Accessor {
-            get,
-            set,
-            enumerable,
-            configurable,
-        } = desc
-        else {
-            return None;
-        };
-        if configurable || enumerable != cur_flags.is_enumerable() {
-            return None;
-        }
-        // Native accessors are handled above; this is a user accessor pair.
-        let cur_pair = cur_desc_value
-            .as_tagged(heap)
-            .get_as::<AccessorPair>(heap)?;
-        if !Compare::same_value(heap, get.as_tagged(heap), cur_pair.get.get(heap))
-            || !Compare::same_value(heap, set.as_tagged(heap), cur_pair.set.get(heap))
-        {
-            return None;
-        }
-        return Some(DefineAction::Nothing);
-    }
-
-    if let PropertyDescriptor::Accessor { .. } = desc {
-        if !cur_configurable {
-            return None;
-        }
-        return Some(DefineAction::Redefine { desc });
-    }
-
-    let PropertyDescriptor::Data {
-        value,
-        writable,
-        enumerable,
-        configurable,
-    } = desc
-    else {
-        unreachable!("descriptor kind checked above")
-    };
-    if !cur_configurable {
-        if configurable || enumerable != cur_flags.is_enumerable() {
-            return None;
-        }
-        if !cur_flags.is_writable() {
-            if writable {
-                return None;
-            }
-
-            let offset = cur_desc_value
-                .as_tagged(heap)
-                .to_i64()
-                .expect("data row offset") as usize;
-            if !Compare::same_value(
-                heap,
-                value.as_tagged(heap),
-                receiver.slot(heap, offset).get(heap),
-            ) {
-                return None;
-            }
-            return Some(DefineAction::Nothing);
-        }
-    }
-    if desc.flags() == cur_flags {
-        return Some(DefineAction::WriteDataSlot { value });
-    }
-    Some(DefineAction::Redefine { desc })
 }
 
 #[derive(Debug, Default, Clone, Copy)]

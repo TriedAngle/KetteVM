@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, Weak};
 use core::cell::Cell as StdCell;
 use core::ptr::NonNull;
 
+pub mod access;
 pub mod api;
 pub mod bootstrap;
 pub mod compare;
@@ -32,6 +33,7 @@ pub use objects::proxy;
 pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
 
+pub use access::StoreSemantics;
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
@@ -73,9 +75,7 @@ pub use objects::{
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
-pub use transition::{
-    Change, PartialDescriptor, PropertyDescriptor, SiblingChange, StoreSemantics, Transition,
-};
+pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
     MaybeWeak, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value, WEAK_BIT, WEAK_PTR,
     Word, encode_smi,
