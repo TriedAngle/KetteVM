@@ -1077,8 +1077,12 @@ impl FnBuilder {
                     out.push(Opcode::Wide as u8);
                 }
                 out.push(jump.op as u8);
-                for k in 0..jump.prefix_len as usize {
-                    push_operand_bytes(&mut out, kinds[k], jump.prefix[k], wide);
+                for (&kind, &operand) in kinds
+                    .iter()
+                    .zip(&jump.prefix)
+                    .take(jump.prefix_len as usize)
+                {
+                    push_operand_bytes(&mut out, kind, operand, wide);
                 }
                 if wide {
                     let off = i16::try_from(offset).map_err(|_| BuildError::JumpOutOfRange)?;

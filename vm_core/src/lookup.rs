@@ -672,7 +672,7 @@ impl Object {
             return Ok(Some(s.len() as u64));
         }
         // TODO: typed-array fast path once [[TypedArrayName]] exists.
-        let length_key = heap.known().strings.length.get_handle(heap, &scope).erase();
+        let length_key = heap.known().strings.length.get_handle(heap, scope).erase();
         let length_value = match Self::get_property(vm, heap, state, obj, obj, length_key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => return Ok(None),

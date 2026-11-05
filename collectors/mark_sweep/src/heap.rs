@@ -198,8 +198,7 @@ impl MarkSweepState {
         let want = survivors
             .saturating_mul(2)
             .div_ceil(chunk_size)
-            .max(MIN_YOUNG_CHUNKS)
-            .min(MAX_YOUNG_CHUNKS);
+            .clamp(MIN_YOUNG_CHUNKS, MAX_YOUNG_CHUNKS);
         self.young_limit.store(want, Ordering::Relaxed);
     }
 
@@ -469,7 +468,7 @@ impl MarkSweepState {
                 self.update_threshold(live);
             }
             let Some(ptr) = ptr else {
-                let Some(chunk) = claimed else { return None };
+                let chunk = claimed?;
                 let host = host.expect("claimed pending chunk without host");
                 let live = ChunkedHeap::sweep_claimed(&chunk, &host);
                 let completed = {
@@ -962,9 +961,7 @@ impl LocalHeap for MarkSweepLocal {
     }
 
     fn cancel_executions(&self, protocol: &dyn Fn()) {
-        self.state
-            .safepoint
-            .cancel_executions(&self.node, || protocol());
+        self.state.safepoint.cancel_executions(&self.node, protocol);
     }
 
     fn force_collect(&self) {

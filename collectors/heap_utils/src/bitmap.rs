@@ -82,7 +82,7 @@ impl Bitmap {
             "address {addr:#x} not granule-aligned"
         );
         let bit = (addr - self.base) >> self.shift;
-        ((bit >> 6) as usize, (bit & 63) as u32)
+        (bit >> 6, (bit & 63) as u32)
     }
 }
 

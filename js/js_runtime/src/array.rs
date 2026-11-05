@@ -585,8 +585,7 @@ pub fn array_iterator_symbol_iterator<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx { heap, .. } = ctx;
-    let arg = args.get(heap, 0);
-    arg
+    args.get(heap, 0)
 }
 
 /// `Array.prototype.join ( separator )`

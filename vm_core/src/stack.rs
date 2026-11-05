@@ -440,6 +440,7 @@ impl Stack {
     /// Push a callee frame from scattered call-site registers: the
     /// parameters are written straight from the caller's operands.
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     pub fn push_scattered_frame(
         &self,
         heap: &Heap,

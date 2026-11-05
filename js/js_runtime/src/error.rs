@@ -227,8 +227,5 @@ fn string_property<'s>(
     if value.as_tagged(heap) == vm.known().undefined.get(heap) {
         return Ok(Some(default));
     }
-    Ok(match Object::to_string(vm, heap, state, value)? {
-        Some(string) => Some(scope.handle(string)),
-        None => None,
-    })
+    Ok(Object::to_string(vm, heap, state, value)?.map(|string| scope.handle(string)))
 }

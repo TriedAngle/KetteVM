@@ -40,11 +40,11 @@ const _: () = {
         "header must be fixed-size"
     );
     assert!(
-        HEADER_SIZE % ALIGN == 0,
+        HEADER_SIZE.is_multiple_of(ALIGN),
         "usable region must start 16-aligned"
     );
     assert!(
-        (CHUNK_SIZE - HEADER_SIZE) % ALIGN == 0,
+        (CHUNK_SIZE - HEADER_SIZE).is_multiple_of(ALIGN),
         "usable region must end 16-aligned"
     );
     assert!(REMEMBERED_WORDS * 64 * 8 >= CHUNK_SIZE - HEADER_SIZE);
@@ -88,7 +88,7 @@ impl ChunkHeader {
             addr >= self.object_base() && addr & 0b111 == 0,
             "unaligned remembered slot"
         );
-        ((bit >> 6) as usize, (bit & 63) as u32)
+        (bit >> 6, (bit & 63) as u32)
     }
 
     pub fn remember(&self, slot_addr: usize) {
@@ -121,7 +121,7 @@ impl ChunkHeader {
             "unaligned mark address"
         );
         let bit = (addr - self.object_base()) >> 4;
-        ((bit >> 6) as usize, (bit & 63) as u32)
+        (bit >> 6, (bit & 63) as u32)
     }
 
     pub fn mark_set(&self, addr: usize) -> bool {
@@ -426,10 +426,10 @@ impl ChunkedHeap {
         if let Some(ptr) = self.allocate_swept(layout, young_only) {
             return (Some(ptr), None);
         }
-        if host.is_some() {
-            if let Some(chunk) = self.claim_pending(young_only) {
-                return (None, Some(chunk));
-            }
+        if host.is_some()
+            && let Some(chunk) = self.claim_pending(young_only)
+        {
+            return (None, Some(chunk));
         }
         match self.activate_chunk(true) {
             Some(chunk) => {
@@ -557,12 +557,10 @@ impl ChunkedHeap {
 
     pub fn flag_all_pending(&mut self) {
         let mut count = 0usize;
-        for slot in &self.slots {
-            if let Some(chunk) = slot {
-                debug_assert_ne!(chunk.state(), SWEEPING, "cycle started mid-sweep");
-                chunk.state.store(PENDING, Ordering::Relaxed);
-                count += 1;
-            }
+        for chunk in self.slots.iter().flatten() {
+            debug_assert_ne!(chunk.state(), SWEEPING, "cycle started mid-sweep");
+            chunk.state.store(PENDING, Ordering::Relaxed);
+            count += 1;
         }
         self.pending_chunks = count;
         self.sweep_live = 0;

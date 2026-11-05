@@ -164,7 +164,7 @@ impl Errors {
         message: &str,
     ) -> Result<Tagged<'a, Value>, VmError> {
         let message = vm.interner().intern_str(heap, scope, message).erase();
-        let options = vm.known().undefined.get_handle(heap, &scope).erase();
+        let options = vm.known().undefined.get_handle(heap, scope).erase();
         Ok(Self::create(vm, heap, state, None, map, message, options)?
             .expect("error materialization must not fail"))
     }

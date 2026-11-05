@@ -75,12 +75,12 @@ impl Object {
                 prototype: heap
                     .known()
                     .function_prototype
-                    .get_handle(heap, &scope)
+                    .get_handle(heap, scope)
                     .erase(),
             },
             scope,
         );
-        let empty_context = heap.known().empty_context.get_handle(heap, &scope);
+        let empty_context = heap.known().empty_context.get_handle(heap, scope);
         let obj = heap.new_object(
             scope,
             map,
@@ -177,7 +177,7 @@ impl Object {
         // global.Name = fn
         let global = {
             let heap = thread.heap();
-            heap.known().global_object.get_handle(heap, &scope)
+            heap.known().global_object.get_handle(heap, scope)
         };
         // Safety: fresh interned word, rooted below before any allocation.
         let name = scope.handle(name_str.as_tagged(thread.heap()));

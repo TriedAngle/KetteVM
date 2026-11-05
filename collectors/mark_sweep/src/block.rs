@@ -87,7 +87,7 @@ impl FreeList {
                 if available >= need {
                     let remainder = available - need;
                     let given = if remainder >= 2 * ALIGN {
-                        let remainder_header = run.byte_add(need) as *mut FreeHeader;
+                        let remainder_header = run.byte_add(need);
                         *remainder_header = FreeHeader {
                             size: remainder,
                             next: (*run).next,

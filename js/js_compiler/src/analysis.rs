@@ -493,6 +493,7 @@ impl<'a, 'p> Collector<'a, 'p> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_function(
         &mut self,
         node: NodeId,
@@ -1795,20 +1796,20 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         if self.block_contexts.contains(&decl_scope) {
             return Some(self.scoping.get_node_id(decl_scope));
         }
-        if let Some(&idx) = self.class_of_scope.get(&decl_scope) {
-            if self.classes[idx.0 as usize].slot_count > 0 {
-                return Some(self.classes[idx.0 as usize].node);
-            }
+        if let Some(&idx) = self.class_of_scope.get(&decl_scope)
+            && self.classes[idx.0 as usize].slot_count > 0
+        {
+            return Some(self.classes[idx.0 as usize].node);
         }
-        if let Some(head) = self.for_heads.get(&decl_scope) {
-            if head.creates_context() {
-                return Some(head.node);
-            }
+        if let Some(head) = self.for_heads.get(&decl_scope)
+            && head.creates_context()
+        {
+            return Some(head.node);
         }
-        if let Some(&fid) = self.fn_scope_to_fid.get(&decl_scope) {
-            if self.creates_context.contains(&fid) {
-                return Some(self.f_node(fid));
-            }
+        if let Some(&fid) = self.fn_scope_to_fid.get(&decl_scope)
+            && self.creates_context.contains(&fid)
+        {
+            return Some(self.f_node(fid));
         }
         // Non-context block: its slots are register- or function-context
         // allocated by the owning function.

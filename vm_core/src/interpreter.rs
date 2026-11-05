@@ -64,8 +64,11 @@ pub struct Ops<const STRIDE: usize> {
 }
 
 impl<const STRIDE: usize> Ops<STRIDE> {
+    /// # Safety
+    /// `ip` points at an instruction of the executing frame's bytecode, and
+    /// stays valid for the lifetime of the returned `Ops`.
     #[inline(always)]
-    pub fn new(ip: *const u8, op: Opcode) -> Ops<STRIDE> {
+    pub unsafe fn new(ip: *const u8, op: Opcode) -> Ops<STRIDE> {
         debug_assert_eq!(
             if STRIDE == 2 {
                 unsafe { *ip.add(1) }

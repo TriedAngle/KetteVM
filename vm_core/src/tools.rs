@@ -53,13 +53,13 @@ impl KetteTools {
         scope: &HandleScope<'_>,
         natives: [NativeIndex; 3],
     ) -> Result<(), VmError> {
-        let global = roots.global_object.get_handle(heap, &scope);
+        let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
                 descriptors: &[],
-                prototype: roots.object_prototype.get_handle(heap, &scope).erase(),
+                prototype: roots.object_prototype.get_handle(heap, scope).erase(),
             },
             scope,
         );

@@ -88,6 +88,7 @@ impl Materialize {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_function<'s>(
     vm: &VM,
     heap: &mut Heap,

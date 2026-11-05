@@ -18,19 +18,28 @@ impl FixedByteArray {
             .0
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.size.to_smi().value() as usize
     }
 
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline(always)]
     fn data_ptr(&self) -> *mut u8 {
         UnsafeCell::raw_get(self.values.as_ptr())
     }
 
+    #[inline(always)]
     pub fn get(&self, i: usize) -> u8 {
         debug_assert!(i < self.len());
         unsafe { *self.data_ptr().add(i) }
     }
+
+    #[inline(always)]
     pub fn set(&self, i: usize, b: u8) {
         debug_assert!(i < self.len());
         unsafe { *self.data_ptr().add(i) = b }
@@ -41,11 +50,12 @@ impl FixedByteArray {
         self.data_ptr()
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.data_ptr(), self.len()) }
     }
 
+    #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.len()) }
     }

@@ -71,8 +71,8 @@ fn eval_global_context<'s>(
         },
         scope,
     );
-    let outer = vm.known().empty_context.get_handle(heap, &scope);
-    let slots = vm.known().empty_fixed_array.get_handle(heap, &scope);
+    let outer = vm.known().empty_context.get_handle(heap, scope);
+    let slots = vm.known().empty_fixed_array.get_handle(heap, scope);
     heap.allocate_handle::<ContextObject>(
         ContextInit {
             outer: Some(outer),

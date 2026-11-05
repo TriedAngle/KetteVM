@@ -148,6 +148,7 @@ pub fn resolve_target<'a>(
 /// eagerly-read operand values, shared context. `METHOD` selects the
 /// method form (and its extra operand); everything up to the rooted
 /// or consumed words is allocation-free.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
     x: &'a Ctx<'_, '_>,
@@ -205,6 +206,7 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
 
 /// The contiguous-window call start (`Call`): the window lives in the
 /// caller's frame (already rooted), so no staging is needed.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn call_window_start<'a, const STRIDE: usize>(
     x: &'a Ctx<'_, '_>,
@@ -258,8 +260,8 @@ pub fn call_window_start<'a, const STRIDE: usize>(
 /// the call, re-read the callee register, restore the stack top.
 #[cold]
 #[inline(never)]
-pub fn proxy_apply_staged<'a>(
-    x: &'a mut Ctx<'_, '_>,
+pub fn proxy_apply_staged(
+    x: &mut Ctx<'_, '_>,
     roots: RootsArg<'_>,
     regs: Regs,
     callee_reg: i32,
@@ -284,8 +286,8 @@ pub fn proxy_apply_staged<'a>(
     v
 }
 
-pub fn bound_apply_staged<'a>(
-    x: &'a mut Ctx<'_, '_>,
+pub fn bound_apply_staged(
+    x: &mut Ctx<'_, '_>,
     roots: RootsArg<'_>,
     regs: Regs,
     callee_reg: i32,
@@ -387,8 +389,8 @@ pub enum ConstructStart {
 
 /// Synthesize the `this` (or stage the hole for a derived constructor)
 /// and stage the `[receiver, args...]` parameter window at the stack top.
-fn construct_receiver_args<'a>(
-    x: &'a mut Ctx<'_, '_>,
+fn construct_receiver_args(
+    x: &mut Ctx<'_, '_>,
     base: usize,
     args_base: i32,
     count: usize,
@@ -451,8 +453,8 @@ fn construct_receiver_args<'a>(
 /// frame directly (receiver synthesis cached per closure); native
 /// constructors are called with `new_target`; everything else falls back
 /// to `cold::construct` in `slow_construct`.
-pub fn construct_start<'a>(
-    x: &'a mut Ctx<'_, '_>,
+pub fn construct_start(
+    x: &mut Ctx<'_, '_>,
     pc: usize,
     size: usize,
     regs: Regs,

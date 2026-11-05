@@ -51,7 +51,7 @@ impl JsKnown {
         let object_prototype = heap
             .known()
             .object_prototype
-            .get_handle(heap, &scope)
+            .get_handle(heap, scope)
             .erase();
         let date_prototype_map = heap.allocate_handle::<Map>(
             MapInit {
@@ -140,8 +140,10 @@ pub struct JsStrings {
     pub revoke: GcSlot<SlotName>,
 }
 
+type NameSlotFn = for<'s> fn(&'s JsStrings) -> &'s GcSlot<SlotName>;
+
 impl JsStrings {
-    const NAMES: [(&'static str, fn(&Self) -> &GcSlot<SlotName>); 9] = [
+    const NAMES: [(&'static str, NameSlotFn); 9] = [
         ("done", |s| &s.done),
         ("join", |s| &s.join),
         ("toISOString", |s| &s.to_iso_string),

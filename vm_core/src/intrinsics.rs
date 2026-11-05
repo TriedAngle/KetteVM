@@ -188,18 +188,17 @@ impl Runtime for VmCore {
 }
 
 // ---- global declarations ----
+pub type GlobalDeclarations<'s> = (
+    Vec<Handle<'s, Value>>,
+    Vec<Handle<'s, Value>>,
+    Vec<Handle<'s, CallableInfoObject>>,
+);
+
 pub fn read_global_declarations<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
     meta: Tagged<'_, FixedArray>,
-) -> Result<
-    (
-        Vec<Handle<'s, Value>>,
-        Vec<Handle<'s, Value>>,
-        Vec<Handle<'s, CallableInfoObject>>,
-    ),
-    VmError,
-> {
+) -> Result<GlobalDeclarations<'s>, VmError> {
     let var_count = meta.at(heap, 0).to_i64().unwrap_or(0).max(0) as usize;
     let mut pos = 1;
     let mut vars = Vec::with_capacity(var_count);
@@ -230,7 +229,7 @@ pub fn global_property_flags(
     scope: &HandleScope<'_>,
     name: Handle<'_, Value>,
 ) -> Option<SlotFlags> {
-    let global = heap.known().global_object.get_handle(heap, &scope).erase();
+    let global = heap.known().global_object.get_handle(heap, scope).erase();
     let mut lookup = Lookup::new(heap, scope, global, name, true);
     match lookup.next(heap, scope) {
         Hit::Data { flags, .. }
@@ -288,7 +287,7 @@ pub fn create_global_var_binding(
         return Err(VmError::Type);
     }
     let key = scope.handle(name.as_tagged(heap).as_name());
-    let value = heap.known().undefined.get_handle(heap, &scope).erase();
+    let value = heap.known().undefined.get_handle(heap, scope).erase();
     if Object::define_own_property(
         heap,
         scope,

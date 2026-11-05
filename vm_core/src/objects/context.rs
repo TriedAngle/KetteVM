@@ -281,6 +281,10 @@ impl HandlerTable {
         self.size.to_smi().value() as usize
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn entry_ptr(&self) -> *mut HandlerEntry {
         self.entries.as_ptr() as *mut HandlerEntry
     }

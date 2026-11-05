@@ -501,7 +501,6 @@ pub fn object_get_own_property_names<'a>(
         vm, heap, state, ..
     } = ctx;
     let target = args.get(heap, 1);
-    let target = target;
     // array `length` is a real (accessor) descriptor on the array map, so
     // `own_property_keys` already lists it
     let names: Vec<Value> = own_property_keys(heap, vm.known(), target);

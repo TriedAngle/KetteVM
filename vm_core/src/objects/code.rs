@@ -37,6 +37,11 @@ impl Code {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
     fn data_ptr(&self) -> *mut u8 {
         UnsafeCell::raw_get(self.values.as_ptr())
     }

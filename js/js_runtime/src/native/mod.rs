@@ -904,7 +904,6 @@ fn define_own_property<'a>(
                         .get_as::<AccessorPair>(heap)
                         .ok_or(VmError::Type)
                 );
-                let pair = pair;
                 PartialDescriptor {
                     value: None,
                     get: Some(scope.handle(pair.get.get(heap))),
@@ -959,7 +958,6 @@ fn define_own_property<'a>(
                     .get_as::<AccessorPair>(heap)
                     .ok_or(VmError::Type)
             );
-            let pair = pair;
             PropertyDescriptor::Accessor {
                 get: scope.handle(pair.get.get(heap)),
                 set: scope.handle(pair.set.get(heap)),

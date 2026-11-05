@@ -347,9 +347,12 @@ fn expand(form: HandlerForm, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
     };
     // every generated fn is 32-byte aligned; the handler form governs
     // only the rewriting — the emission is one shape
+    // `ip` is the running frame's instruction pointer: its validity is the
+    // dispatch invariant, so the body may deref it without being `unsafe`.
     Ok(quote! {
         #(#attrs)*
         #[rustfmt::skip]
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         #[rustc_align(32)]
         #vis extern "rust-preserve-none" fn #name<'h, const STRIDE: usize>(
             ip: *const u8,
@@ -569,7 +572,8 @@ impl Rewriter {
                         "`opcode_check` asserts the instruction against a known opcode: use #[handler(Opcode)]",
                     ));
                 }
-                no_args(method, &args).map(|_| quote!(Ops::<STRIDE>::new(ip, Opcode::#op)))
+                no_args(method, &args)
+                    .map(|_| quote!(unsafe { Ops::<STRIDE>::new(ip, Opcode::#op) }))
             }
 
             // accumulator / float writes
@@ -589,7 +593,9 @@ impl Rewriter {
                 no_args(method, &args)?;
                 let n = const_arg(method, turbo)?;
                 match op {
-                    Some(op) => Ok(quote!(Ops::<STRIDE>::new(ip, Opcode::#op).#method::<#n>())),
+                    Some(op) => Ok(quote!(
+                        unsafe { Ops::<STRIDE>::new(ip, Opcode::#op).#method::<#n>() }
+                    )),
                     None => Ok(quote!(Ops::<STRIDE>::from_ip(ip).#method::<#n>())),
                 }
             }
@@ -674,7 +680,7 @@ impl MatchRewriter {
             "ctx_ref" => no_args(method, &args).map(|_| quote!(&*ctx)),
 
             "opcode_check" => no_args(method, &args)
-                .map(|_| quote!(vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op))),
+                .map(|_| quote!(unsafe { vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op) })),
 
             "set_acc" => one_arg(method, args).map(|a| quote!(*acc = vm_core::Acc::set(#a))),
             "set_acc_smi" => {
@@ -686,7 +692,7 @@ impl MatchRewriter {
                 no_args(method, &args)?;
                 let n = const_arg(method, turbo)?;
                 Ok(quote!(
-                    vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op).#method::<#n>()
+                    unsafe { vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op).#method::<#n>() }
                 ))
             }
 
@@ -766,7 +772,7 @@ impl MatchRewriter {
                             ctx.set_throw_pc(#pc);
                             crate::match_loop::throw_ptr()
                         } else {
-                            crate::match_loop::offset(ctx.code_ptr(), __next_pc)
+                            crate::match_loop::offset(ctx, __next_pc)
                         }
                     };
                 ))
@@ -809,7 +815,7 @@ fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<T
     };
     Ok(quote! {
         #[rustfmt::skip]
-        #[allow(unused_variables, unused_mut)]
+        #[allow(unused_variables, unused_mut, clippy::not_unsafe_ptr_arg_deref)]
         #attr
         pub fn #match_name<'h, const STRIDE: usize>(
             ip: *const u8,

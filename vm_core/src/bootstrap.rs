@@ -407,7 +407,7 @@ impl EdgeVisitable for WellKnown {
 }
 
 fn alloc_map<'s>(heap: &mut Heap, scope: &'s HandleScope<'_>, kind: MapKind) -> Handle<'s, Map> {
-    let prototype = heap.known().null.get_handle(heap, &scope).erase();
+    let prototype = heap.known().null.get_handle(heap, scope).erase();
     heap.allocate_handle::<Map>(
         MapInit {
             kind,
@@ -427,7 +427,7 @@ fn alloc_map_with_slots<'s>(
     kind: MapKind,
     value_slot_count: usize,
 ) -> Handle<'s, Map> {
-    let prototype = heap.known().null.get_handle(heap, &scope).erase();
+    let prototype = heap.known().null.get_handle(heap, scope).erase();
     heap.allocate_handle::<Map>(
         MapInit {
             kind,

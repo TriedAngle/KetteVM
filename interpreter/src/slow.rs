@@ -179,6 +179,7 @@ pub fn compare_body<'a>(
 /// The `IncLoc`/`DecLoc` cold tail shared by both handlers: writes the
 /// incremented register and returns the numeric *old* value (postfix
 /// semantics). The smi tail covers tagged-range overflow.
+#[allow(clippy::too_many_arguments)]
 pub fn incdec_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -229,6 +230,7 @@ fn set_outcome_kind(applied: vm_core::proxy::Flow<SetApplied>) -> Result<StoreOu
 /// The named-store tail: generic `[[Set]]` (setters, traps, defines),
 /// then the IC fill (a transition is cached against the map the store
 /// produced; a setter ran before the fill).
+#[allow(clippy::too_many_arguments)]
 pub fn store_named_tail_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -249,6 +251,7 @@ pub fn store_named_tail_body<'a>(
 
 /// [`store_named_tail_body`] with the contextual-store flag (strict
 /// undeclared globals raise `ReferenceError` inside).
+#[allow(clippy::too_many_arguments)]
 pub fn store_named_tail<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -786,6 +789,7 @@ pub fn slow_dec_loc(frame: Frame) {
 
 // --- loads ---
 
+#[allow(clippy::too_many_arguments)]
 fn load_keyed_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -803,7 +807,7 @@ fn load_keyed_body<'a>(
         if let Ok(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) {
             InlineCache::update_load_element(
                 heap,
-                &scope,
+                scope,
                 state
                     .stack()
                     .frame_header(base)
@@ -814,13 +818,13 @@ fn load_keyed_body<'a>(
                 i,
             );
             let name = scope.handle(key.as_tagged(heap).erase().as_name());
-            if let Some(unit) = DenseString::index_element(heap, &scope, recv, name) {
+            if let Some(unit) = DenseString::index_element(heap, scope, recv, name) {
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
         let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => roots.exception.get_handle(heap, &scope).erase(),
+            Ok(Coercion::Threw) => roots.exception.get_handle(heap, scope).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         out.as_tagged(heap).erase()
@@ -971,6 +975,7 @@ pub fn slow_named_load(frame: Frame) {
     reenter!(pc)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn global_load_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -1093,6 +1098,7 @@ pub fn slow_global_load_no_throw(frame: Frame) {
 
 // --- stores ---
 
+#[allow(clippy::too_many_arguments)]
 pub fn keyed_store_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,

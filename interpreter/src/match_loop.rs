@@ -52,8 +52,8 @@ impl Interpreter for MatchInterpreter {
 }
 
 #[inline(always)]
-pub fn offset(code: *const u8, pc: usize) -> *const u8 {
-    unsafe { code.add(pc) }
+pub fn offset(ctx: &Ctx<'_, '_>, pc: usize) -> *const u8 {
+    unsafe { ctx.code_ptr().add(pc) }
 }
 
 /// Successor sentinel meaning "this instruction threw"
@@ -65,7 +65,7 @@ pub fn throw_ptr() -> *const u8 {
 /// Decode the current instruction into caller-named locals
 macro_rules! decode {
     ($op:ident, $ip:expr, $ops:ident, $next:ident) => {
-        let $ops = Ops::<STRIDE>::new($ip, Opcode::$op);
+        let $ops = unsafe { Ops::<STRIDE>::new($ip, Opcode::$op) };
         let $next =
             unsafe { $ip.add(base::<STRIDE>() + STRIDE * const { Opcode::$op.operands().len() }) };
     };
@@ -139,7 +139,7 @@ macro_rules! reenter {
             $ctx.set_throw_pc($pc);
             throw_ptr()
         } else {
-            offset($ctx.code_ptr(), $next_pc)
+            offset($ctx, $next_pc)
         }
     }};
 }
@@ -155,9 +155,9 @@ macro_rules! raise {
     }};
 }
 
-pub fn execute<'a, 't>(
+pub fn execute<'a>(
     vm: &VM,
-    runtime: &'t dyn ErasedRuntimeState,
+    runtime: &dyn ErasedRuntimeState,
     heap: &'a mut Heap,
     state: &ThreadState,
     callable: Handle<'_, Object>,
@@ -266,7 +266,7 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc, VmError> {
                     frame_base = ctx.frame_base();
                     regs = unsafe { Regs::new(ctx.regs_ptr()) };
                     ctx.reload_code();
-                    ip = offset(ctx.code_ptr(), pc);
+                    ip = offset(ctx, pc);
                 }
                 Unwind::Escaped => {
                     return Ok(Acc::set(roots.exception.get(ctx.heap()).erase()));
@@ -557,7 +557,7 @@ fn op_jump_loop<'h, const STRIDE: usize>(
             ctx.set_throw_pc(pc);
             return throw_ptr();
         }
-        return offset(ctx.code_ptr(), target_pc);
+        return offset(ctx, target_pc);
     }
     dispatch!(unsafe { ip.offset(off as isize) })
 }
@@ -778,7 +778,7 @@ fn op_return<'h>(
 
     let caller = ctx.stack().pop_frame(ctx.frame_base());
     ctx.switch_frame(caller.base);
-    offset(ctx.code_ptr(), caller.pc)
+    offset(ctx, caller.pc)
 }
 
 #[inline(always)]
@@ -812,7 +812,7 @@ fn op_construct<'h, const STRIDE: usize>(
             // The receiver synthesis may have collected; re-derive the
             // instruction pointer before the slow body decodes operands.
             ctx.reload_code();
-            let ip = offset(ctx.code_ptr(), pc);
+            let ip = offset(ctx, pc);
             match_slow_construct::<STRIDE>(ip, regs, acc, ctx, roots, f64::NAN)
         }
         Err(e) => raise!(ctx, acc, pc, e),

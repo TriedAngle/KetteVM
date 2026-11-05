@@ -1291,6 +1291,7 @@ impl InlineCache {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn try_store<'a>(
         heap: &'a mut Heap,
         scope: &HandleScope<'_>,

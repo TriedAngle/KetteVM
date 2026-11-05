@@ -524,10 +524,10 @@ pub fn generate<'a>(
     let mut scopes_by_fid: Vec<Vec<ScopeId>> = (0..n).map(|_| Vec::new()).collect();
     for sid in 0..scoping.scopes_len() {
         let sid = ScopeId::from_usize(sid);
-        if let Some(&fid) = facts.scope_owner.get(&sid) {
-            if fid != Fid(u32::MAX) {
-                scopes_by_fid[fid.0 as usize].push(sid);
-            }
+        if let Some(&fid) = facts.scope_owner.get(&sid)
+            && fid != Fid(u32::MAX)
+        {
+            scopes_by_fid[fid.0 as usize].push(sid);
         }
     }
     // register-allocated for heads (no context) and bindings nested under
@@ -1071,7 +1071,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let mut vars: Vec<Box<[u8]>> = Vec::new();
         for sym in self.c.facts.hoist_vars.get(&self.fid).into_iter().flatten() {
             let name: Box<[u8]> = self.c.scoping.symbol_name(*sym).as_bytes().into();
-            if funcs.iter().any(|d| d.name == name) || vars.iter().any(|n| *n == name) {
+            if funcs.iter().any(|d| d.name == name) || vars.contains(&name) {
                 continue;
             }
             vars.push(name);
@@ -2625,9 +2625,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             _ => None,
         };
-        let hint = if default.is_some_and(|d| self.is_anon_function(d)) && bind_name.is_some() {
-            let idx = self.b.name(&bind_name.unwrap());
-            NameHint::Const(idx)
+        let hint = if let Some(name) = &bind_name
+            && default.is_some_and(|d| self.is_anon_function(d))
+        {
+            NameHint::Const(self.b.name(name))
         } else {
             NameHint::None
         };
@@ -2753,7 +2754,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let feedback = self.b.new_feedback();
                 self.b.store_keyed_property(*obj, *key, feedback);
             }
-            StoreTarget::PrivateKeyed { obj, key: _, .. } => {
+            StoreTarget::PrivateKeyed { obj, .. } => {
                 // (obj, key, value): obj rides the top slot, the key one
                 // above the pre-staged obj was staged by the target
                 // preparation, the value is the accumulator
@@ -3244,7 +3245,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     Some(r) => r,
                     None => {
                         g.expr(&s.object)?;
-                        g.b.stage_acc(&temps)
+                        g.b.stage_acc(temps)
                     }
                 };
                 let feedback = g.b.new_feedback();
@@ -3258,7 +3259,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     Some(r) => r,
                     None => {
                         g.expr(&cm.object)?;
-                        g.b.stage_acc(&temps)
+                        g.b.stage_acc(temps)
                     }
                 };
                 g.expr(&cm.expression)?;
@@ -4336,9 +4337,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // head: subject → enumerator (undefined for nullish subjects;
             // ForInNext(undefined) is immediately done)
             g.expr(&s.right)?;
-            let subject = g.b.stage_acc(&temps);
+            let subject = g.b.stage_acc(temps);
             g.b.call_native(g.c.ids.for_in_enumerate, RegList::new(subject, 1));
-            let enumerator = g.b.stage_acc(&temps);
+            let enumerator = g.b.stage_acc(temps);
 
             // loop: next key or undefined
             let back = g.b.new_label();
@@ -4356,7 +4357,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             g.b.jump_if_not_undefined(have_key);
             g.b.jump(breaks);
             g.b.bind(have_key);
-            let key = g.b.stage_acc(&temps);
+            let key = g.b.stage_acc(temps);
 
             // per iteration with a lexical head: replace the context with
             // a fresh sibling (same outer) and initialize the binding
@@ -4765,7 +4766,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
             // handler entry: the exception arrives in the accumulator
             g.b.handler_entry(t);
-            let thrown = g.b.stage_acc(&temps);
+            let thrown = g.b.stage_acc(temps);
             g.b.pop_context(try_ctx);
             if let Some(h) = &s.handler {
                 let catch_guard = g.enter_block_context(h.scope_id.get(), temps.temp());
@@ -4781,7 +4782,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     g.b.load(thrown);
                     match &param.pattern {
                         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
-                            let value = g.b.stage_acc(&temps);
+                            let value = g.b.stage_acc(temps);
                             g.emit_binding_pattern(&param.pattern, value)?;
                         }
                         BindingPattern::BindingIdentifier(b) => {
@@ -5089,7 +5090,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.with_temps(|g, temps| {
                     // (ctor, instance): ctor rides the top slot
                     g.emit_this_load_own();
-                    let instance = g.b.stage_acc(&temps);
+                    let instance = g.b.stage_acc(temps);
                     g.b.load_current_closure();
                     let ctor = temps.temp();
                     g.b.store(ctor);
@@ -5109,7 +5110,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.with_temps(|g, temps| {
                 // (ctor, instance): ctor rides the top slot
                 g.emit_this_load_own();
-                let instance = g.b.stage_acc(&temps);
+                let instance = g.b.stage_acc(temps);
                 g.b.load_current_closure();
                 let ctor = temps.temp();
                 g.b.store(ctor);
@@ -5210,12 +5211,12 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // field-initializer functions (`return <init>;`): an anonymous
         // function value is named after the field key (ES 15.7.19)
         let field_key = self.c.facts.functions[self.fid.0 as usize].field_key;
-        if field_key.is_some() {
+        if let Some(field_key) = field_key {
             match &self.c.facts.functions[self.fid.0 as usize].body {
                 FnBody::FieldInit(e) => {
                     self.expr(e)?;
                     if self.is_anon_function(e) {
-                        self.emit_set_name_for_key_node(field_key.unwrap());
+                        self.emit_set_name_for_key_node(field_key);
                     }
                     self.pop_frame_context();
                     self.b.ret();

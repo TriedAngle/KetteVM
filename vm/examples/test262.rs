@@ -450,8 +450,6 @@ fn real_main() -> i32 {
                 .collect();
             let harness = &harness;
             let harness_dir = harness_dir.as_deref();
-            let progress = progress;
-            let audit = audit;
             let handle = std::thread::Builder::new()
                 .stack_size(1 << 30)
                 .spawn_scoped(scope, move || {

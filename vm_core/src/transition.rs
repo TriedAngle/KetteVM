@@ -914,10 +914,7 @@ impl Object {
         key: Handle<'_, Value>,
     ) -> Result<bool, VmError> {
         let name = 'name: {
-            let key = match key.as_tagged(heap).classify_key(heap) {
-                Ok(key) => key,
-                Err(err) => return Err(err),
-            };
+            let key = key.as_tagged(heap).classify_key(heap)?;
             match key {
                 Key::Element(i) => {
                     let obj = receiver.as_tagged(heap);
@@ -1232,9 +1229,9 @@ fn validate_define<'a, 's>(
             return None;
         }
         // Native accessors are handled above; this is a user accessor pair.
-        let Some(cur_pair) = cur_desc_value.as_tagged(heap).get_as::<AccessorPair>(heap) else {
-            return None;
-        };
+        let cur_pair = cur_desc_value
+            .as_tagged(heap)
+            .get_as::<AccessorPair>(heap)?;
         if !Compare::same_value(heap, get.as_tagged(heap), cur_pair.get.get(heap))
             || !Compare::same_value(heap, set.as_tagged(heap), cur_pair.set.get(heap))
         {

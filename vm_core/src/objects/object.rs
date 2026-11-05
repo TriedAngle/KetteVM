@@ -62,7 +62,7 @@ impl Object {
     }
 
     #[inline]
-    pub fn runtime_index<'a>(&self, heap: &'a Heap) -> Option<usize> {
+    pub fn runtime_index(&self, heap: &Heap) -> Option<usize> {
         if !self.map(heap).kind().is_native() {
             return None;
         }
@@ -82,7 +82,7 @@ impl Object {
     }
 
     #[inline(always)]
-    pub fn is_array<'a>(&self, heap: &'a Heap) -> bool {
+    pub fn is_array(&self, heap: &Heap) -> bool {
         self.map(heap).kind().is_array()
     }
 
@@ -496,6 +496,7 @@ impl Object {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn grow_elements(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -692,9 +693,9 @@ impl Object {
                 configurable,
             } => (
                 value,
-                DETAILS_WRITABLE * writable as i64
-                    | DETAILS_ENUMERABLE * enumerable as i64
-                    | DETAILS_CONFIGURABLE * configurable as i64,
+                (DETAILS_WRITABLE * writable as i64)
+                    | (DETAILS_ENUMERABLE * enumerable as i64)
+                    | (DETAILS_CONFIGURABLE * configurable as i64),
                 false,
             ),
             PropertyDescriptor::Accessor {
@@ -707,8 +708,8 @@ impl Object {
                 (
                     pair.erase(),
                     DETAILS_ACCESSOR
-                        | DETAILS_ENUMERABLE * enumerable as i64
-                        | DETAILS_CONFIGURABLE * configurable as i64,
+                        | (DETAILS_ENUMERABLE * enumerable as i64)
+                        | (DETAILS_CONFIGURABLE * configurable as i64),
                     true,
                 )
             }
@@ -810,7 +811,7 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: &Handle<'_, Object>,
     ) {
-        let name = heap.known().strings.length.get_handle(heap, &scope);
+        let name = heap.known().strings.length.get_handle(heap, scope);
         let map = receiver.as_tagged(heap).map(heap);
         let Some((index, descriptor)) = map
             .descriptors()
@@ -1002,7 +1003,7 @@ impl Object {
         let formal_length = info_ref.formal_length();
         let function_name = match info_ref.name(heap) {
             Some(name) => scope.handle(name),
-            None => heap.known().strings.empty.get_handle(heap, &scope).erase(),
+            None => heap.known().strings.empty.get_handle(heap, scope).erase(),
         };
         let map = scope.handle(if kind.is_class_constructor() {
             heap.known().class_constructor_map.get(heap)
@@ -1027,8 +1028,8 @@ impl Object {
         };
         let function = heap.new_object(scope, map, args).as_handle(scope);
 
-        let length_key = heap.known().strings.length.get_handle(heap, &scope);
-        let name_key = heap.known().strings.name.get_handle(heap, &scope);
+        let length_key = heap.known().strings.length.get_handle(heap, scope);
+        let name_key = heap.known().strings.name.get_handle(heap, scope);
         if !Object::define_own_property(
             heap,
             scope,
@@ -1059,12 +1060,12 @@ impl Object {
         }
 
         if kind.needs_prototype() {
-            let proto_map = heap.known().object_initial_map.get_handle(heap, &scope);
+            let proto_map = heap.known().object_initial_map.get_handle(heap, scope);
             let proto = heap
                 .new_object(scope, proto_map, HandleSlice::EMPTY)
                 .as_handle(scope);
-            let constructor = heap.known().strings.constructor.get_handle(heap, &scope);
-            let prototype = heap.known().strings.prototype.get_handle(heap, &scope);
+            let constructor = heap.known().strings.constructor.get_handle(heap, scope);
+            let prototype = heap.known().strings.prototype.get_handle(heap, scope);
             if !Object::define_own_property(
                 heap,
                 scope,
@@ -1405,7 +1406,7 @@ impl Object {
             .known()
             .strings
             .prototype
-            .get_handle(heap, &scope)
+            .get_handle(heap, scope)
             .erase();
         let proto =
             Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;

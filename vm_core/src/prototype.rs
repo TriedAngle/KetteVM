@@ -312,7 +312,6 @@ fn lazy_register_prototype_user_locked<'s>(
         let registered = slot >= 1 && {
             let users = proto_info.as_tagged(heap).prototype_users(heap);
             users.is_some_and(|users| {
-                let users = users;
                 (slot as usize) < users.len()
                     && users
                         .element_slot(slot as usize)
@@ -350,7 +349,6 @@ fn append_prototype_child<'s, T: 's>(
     let plan = match info.as_tagged(heap).prototype_users(heap) {
         None => Plan::Init,
         Some(array) => {
-            let array = array;
             let len = array.len();
             if len == 0 {
                 Plan::Init
@@ -379,7 +377,6 @@ fn append_prototype_child<'s, T: 's>(
                 .as_tagged(heap)
                 .prototype_users(heap)
                 .expect("planned against an existing registry");
-            let array = array;
             let next = array.element_slot(slot).get(heap).to_i64().unwrap_or(0);
             array.set_weak(heap, slot, child.as_tagged(heap).erase());
             array.set(heap, 0, Smi::new(next).into_tagged().as_maybe_weak());
@@ -413,7 +410,6 @@ fn append_prototype_child<'s, T: 's>(
                         .as_tagged(heap)
                         .prototype_users(heap)
                         .expect("planned against an existing registry");
-                    let old = old;
                     let mut values: Vec<Tagged<'_, MaybeWeak<Value>>> = Vec::with_capacity(len + 1);
                     for i in 0..len {
                         values.push(old.element_slot(i).get(heap));
@@ -445,11 +441,10 @@ fn mark_slot_empty(heap: &Heap, array: Tagged<'_, WeakFixedArray>, index: usize)
 }
 
 fn invalidate_one_prototype_validity_cell(heap: &Heap, map: Tagged<'_, Map>) {
-    if let Some(cell) = map.published_validity_cell(heap) {
-        let cell = cell;
-        if cell.is_valid(heap) {
-            cell.clear();
-        }
+    if let Some(cell) = map.published_validity_cell(heap)
+        && cell.is_valid(heap)
+    {
+        cell.clear();
     }
 }
 
@@ -465,7 +460,6 @@ fn invalidate_prototype_chains(heap: &Heap, map: Tagged<'_, Map>) {
         let Some(users) = info.prototype_users(heap) else {
             return;
         };
-        let users = users;
         for i in 1..users.len() {
             let Some(child) = users.element_slot(i).get(heap).as_strong() else {
                 continue;

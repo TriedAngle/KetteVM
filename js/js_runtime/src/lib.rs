@@ -422,13 +422,15 @@ pub struct BuiltinIndices {
 }
 
 /// Install one NativeError class: constructor, prototype, and [[ErrorData]] map.
+type ErrorClass<'s> = (Handle<'s, Object>, Handle<'s, Object>, Handle<'s, Map>);
+
 fn install_error_class<'s>(
     thread: &mut Thread,
     scope: &'s HandleScope<'_>,
     index: NativeIndex,
     class: &str,
     parent: Handle<'_, Object>,
-) -> Result<(Handle<'s, Object>, Handle<'s, Object>, Handle<'s, Map>), VmError> {
+) -> Result<ErrorClass<'s>, VmError> {
     let (constructor, prototype) =
         Object::install_constructor(thread, scope, index, class, parent)?;
     let name = thread.intern(scope, class);
@@ -439,7 +441,7 @@ fn install_error_class<'s>(
         .known()
         .strings
         .name
-        .get_handle(thread.heap(), &scope);
+        .get_handle(thread.heap(), scope);
     Object::define_own_property(
         thread.heap(),
         scope,
@@ -452,7 +454,7 @@ fn install_error_class<'s>(
         .known()
         .strings
         .message
-        .get_handle(thread.heap(), &scope);
+        .get_handle(thread.heap(), scope);
     let empty = scope.handle(
         thread
             .heap()

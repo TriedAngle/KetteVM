@@ -65,9 +65,9 @@ impl Object {
     }
 }
 
-fn descriptor_field<'h, 's>(
+fn descriptor_field<'s>(
     vm: &VM,
-    heap: &'h mut Heap,
+    heap: &mut Heap,
     state: &ThreadState,
     scope: &'s HandleScope<'_>,
     attrs: Handle<'_, Value>,

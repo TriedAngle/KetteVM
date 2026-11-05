@@ -421,6 +421,7 @@ impl<'a, T: HeapObject> Tagged<'a, T> {
         Self::from_ptr(heap, NonNull::from(r))
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(self) -> &'a T {
         // Safety: a `Tagged<'a, T: HeapObject>` is always a strong heap
         // pointer valid for `'a` (Smi/weak words have no `HeapObject` type).

@@ -157,9 +157,7 @@ pub fn proxy_revoke<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state: _, ..
-    } = ctx;
+    let HostCtx { vm, heap, .. } = ctx;
     let proxy = args.get_handle(heap, 1);
     Proxy::revoke(heap, proxy);
     vm.known().undefined.get(heap).erase()

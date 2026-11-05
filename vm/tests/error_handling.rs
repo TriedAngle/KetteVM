@@ -382,7 +382,7 @@ fn exception_unwinds_to_caller() {
         // the try region covers the call site (pc 4); the handler binds the
         // exception from a suspended frame via the recorded call-site pc
         // (register operands carry the anchor bias: r0 = REGISTER_BASE)
-        let r0 = (bytecode::REGISTER_FILE_START - 0) as u32;
+        let r0 = bytecode::REGISTER_FILE_START as u32;
         let mut program = Vec::new();
         emit(&mut program, Opcode::LoadConstant, &[0]);
         emit(&mut program, Opcode::Store, &[r0]);

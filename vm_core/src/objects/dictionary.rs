@@ -181,10 +181,8 @@ impl NumberDictionary {
             if key == heap.known().undefined.get(heap) {
                 return None;
             }
-            if let Some(k) = key.to_i64().map(|v| v as usize) {
-                if k == index {
-                    return Some(entry);
-                }
+            if key.to_i64().map(|v| v as usize) == Some(index) {
+                return Some(entry);
             }
             entry = (entry + step) & mask;
             step += 1;
@@ -211,8 +209,7 @@ impl NumberDictionary {
 
     pub fn compute_capacity(at_least: usize) -> usize {
         let raw = at_least + (at_least >> 1);
-        let cap = raw.max(MIN_CAPACITY).next_power_of_two();
-        cap
+        raw.max(MIN_CAPACITY).next_power_of_two()
     }
 
     pub fn has_sufficient_capacity(&self, n: usize) -> bool {
