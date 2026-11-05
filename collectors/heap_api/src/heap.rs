@@ -1,11 +1,10 @@
 use core::{
     alloc::Layout,
     cell::UnsafeCell,
-    ptr::NonNull,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::{Tlab, Word};
+use crate::{ObjectAddr, Tlab, Word};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {
@@ -94,9 +93,9 @@ pub struct GcHost {
     /// Enumerate every root
     pub visit_roots: fn(ctx: *const (), visitor: &mut dyn Visitor),
     /// Size and alignment of the object starting at `addr`
-    pub layout_of: fn(addr: NonNull<()>) -> Layout,
+    pub layout_of: fn(addr: ObjectAddr) -> Layout,
     /// Trace the object at `addr`
-    pub visit_object: fn(addr: NonNull<()>, visitor: &mut dyn Visitor),
+    pub visit_object: fn(addr: ObjectAddr, visitor: &mut dyn Visitor),
 }
 
 unsafe impl Send for GcHost {}

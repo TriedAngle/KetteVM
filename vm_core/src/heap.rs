@@ -645,7 +645,7 @@ impl Heap {
         );
         let size = layout.size().next_multiple_of(Tlab::ALIGN);
         if let Some(ptr) = self.tlab.try_alloc(size) {
-            return Ok(ptr);
+            return Ok(ptr.as_non_null());
         }
         self.allocate_slow(size)
     }
@@ -661,7 +661,7 @@ impl Heap {
             .try_alloc(size)
             .expect("collector must supply a TLAB of at least min_size");
         self.tlab = tlab;
-        Ok(ptr)
+        Ok(ptr.as_non_null())
     }
 
     /// Root table access for allocator/init paths and heap-internal code
@@ -900,7 +900,7 @@ impl Heap {
             return None;
         }
         let size = Float::layout_for(&f).size().next_multiple_of(Tlab::ALIGN);
-        let raw = self.tlab.try_alloc(size)?;
+        let raw = self.tlab.try_alloc(size)?.as_non_null();
         let mut ptr = raw.cast::<Float>();
         // Safety: raw memory just reserved; no GC can run here.
         unsafe { ptr.as_mut() }.init(self, &f);
@@ -923,7 +923,7 @@ impl Heap {
             return None;
         }
         let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
-        let raw = self.tlab.try_alloc(size)?;
+        let raw = self.tlab.try_alloc(size)?.as_non_null();
         let map = self.known().js_array_map.get(self);
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
@@ -944,7 +944,7 @@ impl Heap {
             return None;
         }
         let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
-        let raw = self.tlab.try_alloc(size)?;
+        let raw = self.tlab.try_alloc(size)?.as_non_null();
         let map = self.known().object_initial_map.get(self);
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
@@ -970,8 +970,8 @@ impl Heap {
             .size()
             .next_multiple_of(Tlab::ALIGN);
         let obj_size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
-        let elems_raw = self.tlab.try_alloc(elems_size)?;
-        let Some(obj_raw) = self.tlab.try_alloc(obj_size) else {
+        let elems_raw = self.tlab.try_alloc(elems_size)?.as_non_null();
+        let Some(obj_raw) = self.tlab.try_alloc(obj_size).map(|p| p.as_non_null()) else {
             // The elements reservation is orphaned until the next minor
             // GC; the caller takes the general path.
             return None;

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use heap_api::{
-    AllocError, GcHost, HeapBackend, HeapStats, LocalHeap, RawCell, SharedHeap, Tlab, Visitor, Word,
+    AllocError, GcHost, HeapBackend, HeapPtr, HeapStats, LocalHeap, RawCell, SharedHeap, Tlab,
+    Visitor, Word,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -21,16 +22,13 @@ impl Default for DummyHeapConfig {
 }
 
 pub struct DummyHeapState {
-    start: NonNull<u8>,
+    start: HeapPtr<u8>,
     layout: Layout,
     offset: AtomicUsize,
 }
 
-unsafe impl Send for DummyHeapState {}
-unsafe impl Sync for DummyHeapState {}
-
 impl DummyHeapState {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+    fn allocate(&self, layout: Layout) -> Result<HeapPtr<u8>, AllocError> {
         let mut offset = self.offset.load(Ordering::Relaxed);
         loop {
             let aligned = offset.next_multiple_of(layout.align());
@@ -47,7 +45,8 @@ impl DummyHeapState {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    return Ok(unsafe { NonNull::new_unchecked(self.start.as_ptr().add(aligned)) });
+                    // Safety: the bump stays inside the backing allocation.
+                    return Ok(unsafe { self.start.offset(aligned) });
                 }
                 Err(current) => offset = current,
             }
@@ -63,14 +62,14 @@ impl DummyHeapState {
     }
 
     pub fn contains(&self, addr: Word) -> bool {
-        let start = self.start.as_ptr() as Word;
+        let start = self.start.addr() as Word;
         (start..start + self.layout.size() as Word).contains(&addr)
     }
 }
 
 impl Drop for DummyHeapState {
     fn drop(&mut self) {
-        unsafe { std::alloc::dealloc(self.start.as_ptr(), self.layout) };
+        unsafe { std::alloc::dealloc(self.start.as_non_null().as_ptr(), self.layout) };
     }
 }
 
@@ -84,6 +83,8 @@ impl DummyHeap {
             .expect("invalid heap size in DummyHeapConfig");
         let start = NonNull::new(unsafe { std::alloc::alloc(layout) })
             .ok_or(AllocError::OutOfMemory(layout))?;
+        // Safety: the allocation above owns `layout.size()` bytes.
+        let start = unsafe { HeapPtr::from_non_null(start) };
         Ok(Self {
             inner: Arc::new(DummyHeapState {
                 start,

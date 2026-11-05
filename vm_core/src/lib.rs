@@ -67,8 +67,8 @@ pub use objects::{
     PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
     ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotDescriptor,
     SlotFlags, SlotName, StringData, StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit,
-    WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode, new_feedback_vector,
-    object_kind, object_layout, string_content_hash, visit_object,
+    WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode, object_kind,
+    object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};
@@ -82,7 +82,8 @@ pub use value::{
 };
 
 pub use heap_api::{
-    AllocError, GcHost, HeapBackend, HeapStats, LocalHeap, RawCell, SharedHeap, Tlab, Visitor,
+    AllocError, CellRef, GcHost, HeapBackend, HeapPtr, HeapStats, LocalHeap, ObjectAddr, RawCell,
+    SharedHeap, Tlab, Visitor,
 };
 
 pub type Local<'scope, T> = Handle<'scope, T>;
@@ -436,11 +437,11 @@ fn host_visit_roots(ctx: *const (), visitor: &mut dyn Visitor) {
     shared.visit_roots(visitor);
 }
 
-fn host_layout_of(addr: NonNull<()>) -> core::alloc::Layout {
+fn host_layout_of(addr: ObjectAddr) -> core::alloc::Layout {
     unsafe { object_layout(addr) }
 }
 
-fn host_visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
+fn host_visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
     unsafe { visit_object(addr, visitor) }
 }
 

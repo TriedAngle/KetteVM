@@ -1,11 +1,11 @@
 use core::ptr::NonNull;
 
-use heap_api::AllocError;
+use heap_api::{AllocError, HeapPtr};
 
 /// Lazily-committed anonymous memory mapping. Pages are provided by the OS
 /// on first touch; nothing is committed up front.
 pub struct MMapBuffer {
-    start: NonNull<u8>,
+    start: HeapPtr<u8>,
     size: usize,
 }
 
@@ -28,13 +28,12 @@ impl MMapBuffer {
                 core::alloc::Layout::from_size_align(size, page).unwrap(),
             ));
         }
-        Ok(Self {
-            start: unsafe { NonNull::new_unchecked(ptr.cast()) },
-            size,
-        })
+        // Safety: mmap returned a live mapping of `size` bytes.
+        let start = unsafe { HeapPtr::from_non_null(NonNull::new_unchecked(ptr.cast())) };
+        Ok(Self { start, size })
     }
 
-    pub fn start(&self) -> NonNull<u8> {
+    pub fn start(&self) -> HeapPtr<u8> {
         self.start
     }
 
@@ -43,14 +42,23 @@ impl MMapBuffer {
     }
 
     pub fn contains(&self, addr: usize) -> bool {
-        let base = self.start.as_ptr() as usize;
-        (base..base + self.size).contains(&addr)
+        (self.start.addr()..self.start.addr() + self.size).contains(&addr)
     }
 
-    pub fn decommit(&self, addr: NonNull<u8>, len: usize) {
-        debug_assert!(self.contains(addr.as_ptr() as usize));
+    /// The `len` bytes at `offset`, as a pointer into the mapping.
+    pub fn region(&self, offset: usize, len: usize) -> HeapPtr<u8> {
+        assert!(
+            offset.checked_add(len).is_some_and(|end| end <= self.size),
+            "region outside the mapping"
+        );
+        // Safety: the mapping covers `offset..offset + len` and never moves.
+        unsafe { self.start.offset(offset) }
+    }
+
+    pub fn decommit(&self, addr: HeapPtr<u8>, len: usize) {
+        debug_assert!(self.contains(addr.addr()));
         unsafe {
-            libc::madvise(addr.as_ptr().cast(), len, libc::MADV_DONTNEED);
+            libc::madvise(addr.as_non_null().as_ptr().cast(), len, libc::MADV_DONTNEED);
         }
     }
 }
@@ -58,7 +66,7 @@ impl MMapBuffer {
 impl Drop for MMapBuffer {
     fn drop(&mut self) {
         unsafe {
-            libc::munmap(self.start.as_ptr().cast(), self.size);
+            libc::munmap(self.start.as_non_null().as_ptr().cast(), self.size);
         }
     }
 }

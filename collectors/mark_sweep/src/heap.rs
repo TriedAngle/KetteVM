@@ -1,19 +1,18 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use core::alloc::Layout;
-use core::ptr::NonNull;
 use std::thread::JoinHandle;
 
 use heap_api::{
-    AllocError, CLEARED, GcHost, HeapBackend, HeapStats, LocalHeap, RawCell, STRONG_PTR,
-    SharedHeap, TAG_MASK, Tlab, Visitor, WEAK_PTR, Word,
+    AllocError, CLEARED, CellRef, GcHost, HeapBackend, HeapPtr, HeapStats, LocalHeap, ObjectAddr,
+    RawCell, STRONG_PTR, SharedHeap, TAG_MASK, Tlab, Visitor, WEAK_PTR, Word,
 };
 
 use heap_utils::{LocalNode, Safepoint};
 
 use crate::block::{ALIGN, need_for};
-use crate::chunk::{Chunk, ChunkHeader, ChunkedHeap};
+use crate::chunk::{Chunk, ChunkHeader, ChunkedHeap, Reservation};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MarkSweepConfig {
@@ -34,9 +33,8 @@ const MIN_YOUNG_CHUNKS: usize = 8;
 const MAX_YOUNG_CHUNKS: usize = 32;
 
 pub struct MarkSweepState {
-    /// `[base, end)` of the reservation
-    heap_base: usize,
-    heap_end: usize,
+    /// The reservation the chunks are carved from
+    reservation: Reservation,
     alloc: Mutex<ChunkedHeap>,
     safepoint: Safepoint,
     host: Mutex<Option<GcHost>>,
@@ -50,27 +48,41 @@ pub struct MarkSweepState {
     /// threshold update. A cheap proxy for the live set used to decide when
     /// to run a full collection — avoids scanning every chunk.
     gc_allocated: AtomicUsize,
-    sweep_signal: Mutex<SweepSignal>,
-    sweep_cond: Condvar,
+    sweep_signal: Arc<SweepSignal>,
     sweeper: Mutex<Option<JoinHandle<()>>>,
     background_sweeps: AtomicUsize,
 }
 
+/// Wakes and stops the background sweeper. Held by the sweeper thread
+/// itself, so it outlives the state it wakes.
 struct SweepSignal {
+    state: Mutex<SweepSignalState>,
+    cond: Condvar,
+}
+
+struct SweepSignalState {
     epoch: usize,
     shutdown: bool,
 }
 
-unsafe impl Send for MarkSweepState {}
-unsafe impl Sync for MarkSweepState {}
+impl SweepSignal {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SweepSignalState {
+                epoch: 0,
+                shutdown: false,
+            }),
+            cond: Condvar::new(),
+        }
+    }
+}
 
 impl MarkSweepState {
     pub fn new(config: MarkSweepConfig) -> Result<Arc<Self>, AllocError> {
         let alloc = ChunkedHeap::new(config.heap_size)?;
-        let (heap_base, heap_end) = alloc.reservation();
+        let reservation = alloc.reservation();
         let this = Arc::new(Self {
-            heap_base,
-            heap_end,
+            reservation,
             alloc: Mutex::new(alloc),
             safepoint: Safepoint::new(),
             host: Mutex::new(None),
@@ -81,30 +93,29 @@ impl MarkSweepState {
             young_limit: AtomicUsize::new(MIN_YOUNG_CHUNKS),
             gc_threshold: AtomicUsize::new(MIN_GC_THRESHOLD),
             gc_allocated: AtomicUsize::new(0),
-            sweep_signal: Mutex::new(SweepSignal {
-                epoch: 0,
-                shutdown: false,
-            }),
-            sweep_cond: Condvar::new(),
+            sweep_signal: Arc::new(SweepSignal::new()),
             sweeper: Mutex::new(None),
             background_sweeps: AtomicUsize::new(0),
         });
         let weak = Arc::downgrade(&this);
-        this.safepoint.set_work(Box::new(move || {
-            let Some(state) = weak.upgrade() else { return };
-            let Some(job) = state.mark_job.lock().unwrap().clone() else {
-                return;
-            };
-            if !job.done.load(Ordering::Acquire) {
-                state.mark_assists.fetch_add(1, Ordering::Relaxed);
-                join_marking(&job, false);
+        this.safepoint.set_work(Box::new({
+            let weak = weak.clone();
+            move || {
+                let Some(state) = weak.upgrade() else { return };
+                let Some(job) = state.mark_job.lock().unwrap().clone() else {
+                    return;
+                };
+                if !job.done.load(Ordering::Acquire) {
+                    state.mark_assists.fetch_add(1, Ordering::Relaxed);
+                    join_marking(&job, false);
+                }
             }
         }));
         let sweeper = std::thread::Builder::new()
             .name("mark-sweep-sweeper".into())
             .spawn({
-                let state = Arc::as_ptr(&this) as usize;
-                move || sweeper_loop(state as *const MarkSweepState)
+                let signal = Arc::clone(&this.sweep_signal);
+                move || sweeper_loop(&weak, &signal)
             })
             .ok();
         *this.sweeper.lock().unwrap() = sweeper;
@@ -115,17 +126,13 @@ impl MarkSweepState {
         *self.host.lock().unwrap() = Some(host);
     }
 
-    fn in_reservation(&self, addr: usize) -> bool {
-        addr >= self.heap_base && addr < self.heap_end
-    }
-
     fn header_of(&self, addr: usize) -> &ChunkHeader {
-        ChunkHeader::at(self.heap_base, addr)
+        self.reservation.header(addr)
     }
 
     pub fn is_young_addr(&self, addr: usize) -> bool {
         debug_assert!(
-            self.in_reservation(addr),
+            self.reservation.contains(addr),
             "young-check on a non-heap address {addr:#x}"
         );
         self.header_of(addr).young()
@@ -133,7 +140,7 @@ impl MarkSweepState {
 
     pub fn write_barrier(&self, slot: &RawCell, value: Word) {
         let value_addr = (value & !TAG_MASK) as usize;
-        debug_assert!(self.in_reservation(value_addr));
+        debug_assert!(self.reservation.contains(value_addr));
         let slot_addr = slot as *const RawCell as usize;
         let slot_header = self.header_of(slot_addr);
         if !slot_header.young() && self.header_of(value_addr).young() {
@@ -267,10 +274,9 @@ impl MarkSweepState {
         // bind first: the temporary guard must not outlive the
         // statement, the scanner below re-enters the alloc lock
         let remembered = self.alloc.lock().unwrap().remembered_slots();
-        for slot_addr in remembered {
-            let cell = unsafe { &*(slot_addr as *const RawCell) };
+        for cell in remembered {
             let mut scanner = MinorScanner { job: &mut job };
-            scanner.visit(cell);
+            scanner.visit(cell.as_ref());
         }
         job.drain();
 
@@ -278,13 +284,13 @@ impl MarkSweepState {
         // strong closure: forwarded targets move the cell, dead
         // targets clear it
         for cell in job.deferred_weak {
-            let cell = unsafe { &*cell };
+            let cell = cell.as_ref();
             let word = cell.load();
             if word & TAG_MASK == WEAK_PTR && word != CLEARED {
                 let addr = (word & !TAG_MASK) as usize;
-                let young = self.is_young_addr(addr);
-                if young {
-                    let header = unsafe { *(addr as *const Word) };
+                if self.is_young_addr(addr) {
+                    let target = self.reservation.object(addr);
+                    let header = target.header_word();
                     if header & TAG_MASK == FORWARD_TAG {
                         cell.store_raw((header & !TAG_MASK) as Word | WEAK_PTR);
                     } else {
@@ -385,9 +391,9 @@ impl MarkSweepState {
     }
 
     fn wake_sweeper(&self) {
-        let mut signal = self.sweep_signal.lock().unwrap();
+        let mut signal = self.sweep_signal.state.lock().unwrap();
         signal.epoch += 1;
-        self.sweep_cond.notify_all();
+        self.sweep_signal.cond.notify_all();
     }
 
     fn drain_pending(&self) {
@@ -452,7 +458,7 @@ impl MarkSweepState {
         self.gc_allocated.load(Ordering::Relaxed) > self.gc_threshold.load(Ordering::Relaxed)
     }
 
-    fn alloc_block(&self, layout: Layout, young: bool) -> Option<NonNull<u8>> {
+    fn alloc_block(&self, layout: Layout, young: bool) -> Option<HeapPtr<u8>> {
         let host = self.try_host();
         loop {
             let (ptr, claimed, completed) = {
@@ -516,20 +522,22 @@ impl MarkSweepState {
     }
 }
 
-fn sweeper_loop(state: *const MarkSweepState) {
-    let state = unsafe { &*state };
+fn sweeper_loop(state: &Weak<MarkSweepState>, signal: &Arc<SweepSignal>) {
     let mut seen_epoch = 0;
     loop {
         {
-            let mut signal = state.sweep_signal.lock().unwrap();
-            while signal.epoch == seen_epoch && !signal.shutdown {
-                signal = state.sweep_cond.wait(signal).unwrap();
+            let mut sig = signal.state.lock().unwrap();
+            while sig.epoch == seen_epoch && !sig.shutdown {
+                sig = signal.cond.wait(sig).unwrap();
             }
-            if signal.shutdown {
+            if sig.shutdown {
                 return;
             }
-            seen_epoch = signal.epoch;
+            seen_epoch = sig.epoch;
         }
+        // Hold the state only while sweeping: waiting on the signal must not
+        // keep it alive, or dropping the heap could never signal the thread.
+        let Some(state) = state.upgrade() else { return };
         state.drain_pending();
     }
 }
@@ -537,9 +545,9 @@ fn sweeper_loop(state: *const MarkSweepState) {
 impl Drop for MarkSweepState {
     fn drop(&mut self) {
         {
-            let mut signal = self.sweep_signal.lock().unwrap();
+            let mut signal = self.sweep_signal.state.lock().unwrap();
             signal.shutdown = true;
-            self.sweep_cond.notify_all();
+            self.sweep_signal.cond.notify_all();
         }
         if let Some(handle) = self.sweeper.lock().unwrap().take() {
             let _ = handle.join();
@@ -552,28 +560,22 @@ const MARK_SPILL: usize = 512;
 const ASSIST_SPINS: usize = 256;
 
 struct MarkJob {
-    heap_base: usize,
-    heap_end: usize,
+    reservation: Reservation,
     host: GcHost,
-    worklist: Mutex<Vec<usize>>,
+    worklist: Mutex<Vec<ObjectAddr>>,
     /// Weak cells seen while tracing (roots and live objects alike):
     /// liveness cannot be decided mid-closure, so they are recorded here
     /// and settled against the mark bits once the closure drains.
-    deferred_weak: Mutex<Vec<*const RawCell>>,
+    deferred_weak: Mutex<Vec<CellRef>>,
     roots_scanned: AtomicBool,
     active: AtomicUsize,
     done: AtomicBool,
 }
 
-unsafe impl Send for MarkJob {}
-unsafe impl Sync for MarkJob {}
-
 impl MarkJob {
     fn new(heap: &ChunkedHeap, host: GcHost) -> Self {
-        let (heap_base, heap_end) = heap.reservation();
         Self {
-            heap_base,
-            heap_end,
+            reservation: heap.reservation(),
             host,
             worklist: Mutex::new(Vec::new()),
             deferred_weak: Mutex::new(Vec::new()),
@@ -584,29 +586,29 @@ impl MarkJob {
     }
 
     fn in_heap(&self, addr: usize) -> bool {
-        addr >= self.heap_base && addr < self.heap_end
+        self.reservation.contains(addr)
     }
 
     fn header_of(&self, addr: usize) -> &ChunkHeader {
-        ChunkHeader::at(self.heap_base, addr)
+        self.reservation.header(addr)
     }
 
-    fn claim_word(&self, word: Word) -> Option<usize> {
+    fn claim_word(&self, word: Word) -> Option<ObjectAddr> {
         if word & TAG_MASK != STRONG_PTR {
             return None;
         }
         let addr = (word & !TAG_MASK) as usize;
-        self.in_heap(addr)
-            .then(|| self.header_of(addr))
-            .filter(|header| header.mark_set(addr))
-            .map(|_| addr)
+        if !self.in_heap(addr) || !self.header_of(addr).mark_set(addr) {
+            return None;
+        }
+        Some(self.reservation.object(addr))
     }
 
-    fn claim(&self, cell: &RawCell) -> Option<usize> {
+    fn claim(&self, cell: &RawCell) -> Option<ObjectAddr> {
         self.claim_word(cell.load())
     }
 
-    fn steal(&self, local: &mut Vec<usize>) {
+    fn steal(&self, local: &mut Vec<ObjectAddr>) {
         let mut worklist = self.worklist.lock().unwrap();
         let take = MARK_BATCH.min(worklist.len());
         if take > 0 {
@@ -615,7 +617,7 @@ impl MarkJob {
         }
     }
 
-    fn spill(&self, local: &mut Vec<usize>) {
+    fn spill(&self, local: &mut Vec<ObjectAddr>) {
         let mut worklist = self.worklist.lock().unwrap();
         let split = local.len() / 2;
         worklist.append(&mut local.split_off(split));
@@ -629,7 +631,7 @@ impl MarkJob {
             .drain(..)
             .collect::<Vec<_>>();
         for cell in cells {
-            let cell = unsafe { &*cell };
+            let cell = cell.as_ref();
             let word = cell.load();
             if word & TAG_MASK == WEAK_PTR && word != CLEARED {
                 let addr = (word & !TAG_MASK) as usize;
@@ -659,14 +661,14 @@ impl Visitor for RootScanner<'_> {
                 .deferred_weak
                 .lock()
                 .unwrap()
-                .push(cell as *const RawCell);
+                .push(CellRef::from_ref(cell));
         }
     }
 }
 
 struct Marker<'a> {
     job: &'a MarkJob,
-    local: Vec<usize>,
+    local: Vec<ObjectAddr>,
 }
 
 impl Visitor for Marker<'_> {
@@ -685,7 +687,7 @@ impl Visitor for Marker<'_> {
                 .deferred_weak
                 .lock()
                 .unwrap()
-                .push(cell as *const RawCell);
+                .push(CellRef::from_ref(cell));
         }
     }
 }
@@ -721,8 +723,7 @@ fn join_marking(job: &MarkJob, persistent: bool) {
         }
         spins = 0;
         let addr = marker.local.pop().unwrap();
-        let object = unsafe { NonNull::new_unchecked(addr as *mut ()) };
-        (job.host.visit_object)(object, &mut marker);
+        (job.host.visit_object)(addr, &mut marker);
     }
     job.active.fetch_sub(1, Ordering::Release);
 }
@@ -732,9 +733,9 @@ struct MinorJob<'a> {
     host: GcHost,
     /// Promotion chunks with their bump cursors
     promote: Vec<(Arc<Chunk>, usize)>,
-    worklist: Vec<usize>,
+    worklist: Vec<ObjectAddr>,
     /// Weak cells whose young targets settle after the strong closure.
-    deferred_weak: Vec<*const RawCell>,
+    deferred_weak: Vec<CellRef>,
     survivors: usize,
 }
 
@@ -743,30 +744,36 @@ impl MinorJob<'_> {
         self.state.is_young_addr(addr)
     }
 
-    fn evacuate(&mut self, addr: usize) -> usize {
-        let header = unsafe { *(addr as *const Word) };
+    fn evacuate(&mut self, addr: ObjectAddr) -> ObjectAddr {
+        let header = addr.header_word();
         if header & TAG_MASK == FORWARD_TAG {
-            return (header & !TAG_MASK) as usize;
+            return self.state.reservation.object((header & !TAG_MASK) as usize);
         }
-        let layout = (self.host.layout_of)(unsafe { NonNull::new_unchecked(addr as *mut ()) });
+        let layout = (self.host.layout_of)(addr);
         let size = need_for(layout);
         let new = self.promote_alloc(size);
+        // Safety: `new` is a fresh promotion block of at least `size` bytes.
         unsafe {
-            core::ptr::copy_nonoverlapping(addr as *const u8, new as *mut u8, layout.size());
-            *(addr as *mut Word) = new as Word | FORWARD_TAG;
+            core::ptr::copy_nonoverlapping(
+                addr.as_non_null().as_ptr().cast::<u8>(),
+                new.as_non_null().as_ptr().cast::<u8>(),
+                layout.size(),
+            );
+            addr.set_header_word(new.addr() as Word | FORWARD_TAG);
         }
         self.survivors += size;
         self.worklist.push(new);
         new
     }
 
-    fn promote_alloc(&mut self, size: usize) -> usize {
+    fn promote_alloc(&mut self, size: usize) -> ObjectAddr {
         if let Some((chunk, cursor)) = self.promote.last_mut() {
             let next = *cursor + size;
             if next <= chunk.object_size() {
-                let at = chunk.object_base() + *cursor;
+                // Safety: the cursor stays inside the chunk's object region.
+                let at = unsafe { chunk.object_base_ptr().offset(*cursor) };
                 *cursor = next;
-                return at;
+                return at.cast();
             }
         }
         let chunk = self
@@ -776,17 +783,16 @@ impl MinorJob<'_> {
             .unwrap()
             .activate_promotion_chunk()
             .expect("promotion chunks guaranteed by the pre-flight gate");
-        let at = chunk.object_base();
+        let at = chunk.object_base_ptr();
         self.promote.push((chunk, size));
-        at
+        at.cast()
     }
 
     fn drain(&mut self) {
         let visit_object = self.host.visit_object;
         while let Some(addr) = self.worklist.pop() {
-            let object = unsafe { NonNull::new_unchecked(addr as *mut ()) };
             let mut scanner = MinorScanner { job: self };
-            visit_object(object, &mut scanner);
+            visit_object(addr, &mut scanner);
         }
     }
 }
@@ -802,12 +808,13 @@ impl Visitor for MinorScanner<'_, '_> {
         if tag == STRONG_PTR {
             let addr = (word & !TAG_MASK) as usize;
             if self.job.is_young(addr) {
-                cell.store_raw(self.job.evacuate(addr) as Word | STRONG_PTR);
+                let addr = self.job.state.reservation.object(addr);
+                cell.store_raw(self.job.evacuate(addr).addr() as Word | STRONG_PTR);
             }
         } else if tag == WEAK_PTR && word != CLEARED {
             let addr = (word & !TAG_MASK) as usize;
             if self.job.is_young(addr) {
-                self.job.deferred_weak.push(cell as *const RawCell);
+                self.job.deferred_weak.push(CellRef::from_ref(cell));
             }
         }
     }
@@ -825,7 +832,7 @@ const TRANSIENT_ATTEMPTS: usize = 2;
 
 enum TerminalAllocation {
     Absorbed,
-    Done(Option<NonNull<u8>>),
+    Done(Option<HeapPtr<u8>>),
 }
 
 impl MarkSweepLocal {
@@ -1009,7 +1016,7 @@ impl SharedHeap for MarkSweep {
             return false;
         }
         let addr = (value & !TAG_MASK) as usize;
-        self.inner.in_reservation(addr) && self.inner.header_of(addr).young()
+        self.inner.reservation.contains(addr) && self.inner.header_of(addr).young()
     }
 
     fn stats(&self) -> HeapStats {

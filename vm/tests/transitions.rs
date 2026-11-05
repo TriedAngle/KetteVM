@@ -1,14 +1,13 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{
-    Handle, HandleScope, HandleSlice, Heap, Map, Object, PropertyDescriptor, SlotName, Smi, Tagged,
-    Thread, VM, Value,
+    DefaultInterpreter, Handle, HandleScope, HandleSlice, Heap, Map, Object, PropertyDescriptor,
+    SlotName, Smi, Tagged, Thread, VM, Value,
 };
 
-fn thread() -> (VM, Thread) {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
+fn test_vm() -> Thread {
+    let vm = VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default()).unwrap();
     vm.arm_gc_stress();
-    let thread = vm.attach();
-    (vm, thread)
+    vm.attach()
 }
 
 fn intern_name<'s>(
@@ -29,28 +28,6 @@ fn map_handle<'s>(
     let heap = thread.heap();
     let map = obj.as_tagged(heap).map(heap);
     scope.handle(map)
-}
-
-fn object_map_word(thread: &mut Thread, obj: Handle<'_, Object>) -> Value {
-    let heap = thread.heap();
-    obj.as_tagged(heap).map(heap).raw()
-}
-
-fn pred_word(thread: &mut Thread, map: Value) -> Option<Value> {
-    let heap = thread.heap();
-    let map = unsafe { Tagged::<Value>::from_value_unchecked(map) }
-        .get_as::<Map>(heap)
-        .expect("map");
-    map.pred(heap).map(|p| p.raw())
-}
-
-fn root_word(thread: &mut Thread, map: Value) -> Value {
-    let heap = thread.heap();
-    let mut current: Tagged<'_, Map> = unsafe { Tagged::from_value_unchecked(map) };
-    while let Some(pred) = current.pred(heap) {
-        current = pred;
-    }
-    current.raw()
 }
 
 fn add_prop(
@@ -87,16 +64,16 @@ fn transition_target<'a>(
 
 #[test]
 fn append_records_pred_and_shares_transitions() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
-    let (root, map_a, map_ab, map_a_again) = thread.handle_scope(|thread, scope| {
+    thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
-        let root_handle = thread.heap().known().object_initial_map.root_handle();
+        let root = thread.heap().known().object_initial_map.root_handle();
 
         let obj = thread
             .heap()
-            .new_object(&scope, root_handle, HandleSlice::EMPTY)
+            .new_object(&scope, root, HandleSlice::EMPTY)
             .as_handle(&scope);
         add_prop(thread, &scope, obj, name_a, 1);
         let map_a = map_handle(thread, &scope, obj);
@@ -105,33 +82,47 @@ fn append_records_pred_and_shares_transitions() {
 
         let other = thread
             .heap()
-            .new_object(&scope, root_handle, HandleSlice::EMPTY)
+            .new_object(&scope, root, HandleSlice::EMPTY)
             .as_handle(&scope);
         add_prop(thread, &scope, other, name_a, 3);
         let map_a_again = map_handle(thread, &scope, other);
 
         let heap = thread.heap();
-        (
-            root_handle.as_tagged(heap).raw(),
-            map_a.as_tagged(heap).raw(),
-            map_ab.as_tagged(heap).raw(),
-            map_a_again.as_tagged(heap).raw(),
-        )
-    });
+        assert!(root.as_tagged(heap).pred(heap).is_none());
+        assert!(
+            map_a
+                .as_tagged(heap)
+                .pred(heap)
+                .is_some_and(|p| p.ptr_eq(root.as_tagged(heap)))
+        );
+        assert!(
+            map_ab
+                .as_tagged(heap)
+                .pred(heap)
+                .is_some_and(|p| p.ptr_eq(map_a.as_tagged(heap)))
+        );
 
-    assert_eq!(pred_word(&mut thread, root), None);
-    assert_eq!(pred_word(&mut thread, map_a), Some(root));
-    assert_eq!(pred_word(&mut thread, map_ab), Some(map_a));
-    assert_eq!(root_word(&mut thread, map_ab), root);
-    assert_eq!(map_a_again, map_a);
-    assert_eq!(pred_word(&mut thread, map_a_again), Some(root));
+        let mut current = map_ab.as_tagged(heap);
+        while let Some(pred) = current.pred(heap) {
+            current = pred;
+        }
+        assert!(current.ptr_eq(root.as_tagged(heap)));
+
+        assert!(map_a_again.as_tagged(heap).ptr_eq(map_a.as_tagged(heap)));
+        assert!(
+            map_a_again
+                .as_tagged(heap)
+                .pred(heap)
+                .is_some_and(|p| p.ptr_eq(root.as_tagged(heap)))
+        );
+    });
 }
 
 #[test]
 fn redefine_records_pred() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
-    let (map_a, map_a_readonly) = thread.handle_scope(|thread, scope| {
+    thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let root = thread.heap().known().object_initial_map.root_handle();
         let obj = thread
@@ -159,21 +150,21 @@ fn redefine_records_pred() {
         let map_a_readonly = map_handle(thread, &scope, obj);
 
         let heap = thread.heap();
-        (
-            map_a.as_tagged(heap).raw(),
-            map_a_readonly.as_tagged(heap).raw(),
-        )
+        assert!(!map_a_readonly.as_tagged(heap).ptr_eq(map_a.as_tagged(heap)));
+        assert!(
+            map_a_readonly
+                .as_tagged(heap)
+                .pred(heap)
+                .is_some_and(|p| p.ptr_eq(map_a.as_tagged(heap)))
+        );
     });
-
-    assert_ne!(map_a_readonly, map_a);
-    assert_eq!(pred_word(&mut thread, map_a_readonly), Some(map_a));
 }
 
 #[test]
 fn delete_records_pred() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
-    let (map_ab, map_b) = thread.handle_scope(|thread, scope| {
+    thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
         let name_b = intern_name(thread, &scope, "b");
         let root = thread.heap().known().object_initial_map.root_handle();
@@ -197,16 +188,19 @@ fn delete_records_pred() {
         let map_b = map_handle(thread, &scope, obj);
 
         let heap = thread.heap();
-        (map_ab.as_tagged(heap).raw(), map_b.as_tagged(heap).raw())
+        assert!(!map_b.as_tagged(heap).ptr_eq(map_ab.as_tagged(heap)));
+        assert!(
+            map_b
+                .as_tagged(heap)
+                .pred(heap)
+                .is_some_and(|p| p.ptr_eq(map_ab.as_tagged(heap)))
+        );
     });
-
-    assert_ne!(map_b, map_ab);
-    assert_eq!(pred_word(&mut thread, map_b), Some(map_ab));
 }
 
 #[test]
 fn live_transition_subtree_survives_gc() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
@@ -222,26 +216,25 @@ fn live_transition_subtree_survives_gc() {
 
         thread.heap().collect();
 
-        let map_ab = object_map_word(thread, obj);
+        let map_ab = map_handle(thread, &scope, obj);
         let heap = thread.heap();
         let root = root_handle.as_tagged(heap);
         assert!(
             transition_target(heap, root, name_a.as_tagged(heap)).is_some(),
             "root -> {{a}} must survive while an object uses {{a, b}}"
         );
-        let mut current: Tagged<'_, Map> = unsafe { Tagged::from_value_unchecked(map_ab) };
+        let mut current = map_ab.as_tagged(heap);
         while let Some(pred) = current.pred(heap) {
             current = pred;
         }
-        assert_eq!(
-            current.raw(),
-            root.raw(),
+        assert!(
+            current.ptr_eq(root),
             "the pred chain must still reach the root"
         );
-        let map_ab = unsafe { Tagged::<Value>::from_value_unchecked(map_ab) }
-            .get_as::<Map>(heap)
-            .expect("map");
-        let map_a = map_ab.pred(heap).expect("intermediate map alive");
+        let map_a = map_ab
+            .as_tagged(heap)
+            .pred(heap)
+            .expect("intermediate map alive");
         assert!(
             transition_target(heap, map_a, name_b.as_tagged(heap)).is_some(),
             "{{a}} -> {{a, b}} must survive"
@@ -251,7 +244,7 @@ fn live_transition_subtree_survives_gc() {
 
 #[test]
 fn dead_transition_targets_are_cleared_by_gc() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");
@@ -294,7 +287,7 @@ fn dead_transition_targets_are_cleared_by_gc() {
 
 #[test]
 fn unused_whole_subtree_is_collected() {
-    let (_vm, mut thread) = thread();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let name_a = intern_name(thread, &scope, "a");

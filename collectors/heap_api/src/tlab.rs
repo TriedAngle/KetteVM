@@ -1,4 +1,4 @@
-use core::ptr::{self, NonNull};
+use crate::HeapPtr;
 
 /// A thread-local allocation window: memory the owning thread bumps into
 /// objects without touching the collector.
@@ -9,13 +9,9 @@ use core::ptr::{self, NonNull};
 /// that alignment, so `try_alloc` never needs to realign the cursor.
 #[derive(Debug)]
 pub struct Tlab {
-    cursor: *mut u8,
-    end: *mut u8,
+    cursor: Option<HeapPtr<u8>>,
+    end: usize,
 }
-
-// SAFETY: the cursors are plain addresses into the owning thread's heap; a
-// Tlab is only ever touched by the thread that owns it.
-unsafe impl Send for Tlab {}
 
 impl Tlab {
     /// The allocation alignment guaranteed by the heap: every object starts
@@ -24,42 +20,40 @@ impl Tlab {
 
     pub const fn empty() -> Self {
         Self {
-            cursor: ptr::null_mut(),
-            end: ptr::null_mut(),
+            cursor: None,
+            end: 0,
         }
     }
 
     /// A window covering `[start, start + len)`. `start` must be
     /// `ALIGN`-aligned and `len` a multiple of it.
-    pub fn new(start: NonNull<u8>, len: usize) -> Self {
-        debug_assert_eq!(start.as_ptr() as usize % Self::ALIGN, 0);
+    pub fn new(start: HeapPtr<u8>, len: usize) -> Self {
+        debug_assert_eq!(start.addr() % Self::ALIGN, 0);
         debug_assert_eq!(len % Self::ALIGN, 0);
         Self {
-            cursor: start.as_ptr(),
-            end: unsafe { start.as_ptr().add(len) },
+            cursor: Some(start),
+            end: start.addr() + len,
         }
     }
 
     /// Reserve `size` bytes (a multiple of `ALIGN`) from the window, or
     /// `None` when it does not fit. Never touches the collector.
     #[inline(always)]
-    pub fn try_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
-        let cursor = self.cursor;
-        if cursor.is_null() {
-            return None;
-        }
-        let next = unsafe { cursor.add(size) };
+    pub fn try_alloc(&mut self, size: usize) -> Option<HeapPtr<u8>> {
+        let cursor = self.cursor?;
+        let next = cursor.addr() + size;
         if next > self.end {
             return None;
         }
-        self.cursor = next;
-        NonNull::new(cursor)
+        // Safety: the window is one collector allocation; `next` is in it.
+        self.cursor = Some(unsafe { cursor.offset(size) });
+        Some(cursor)
     }
 
     /// Drop the window: after a park or collection the collector may
     /// reclaim the span, so the owner must treat it as gone.
     pub fn invalidate(&mut self) {
-        self.cursor = ptr::null_mut();
-        self.end = ptr::null_mut();
+        self.cursor = None;
+        self.end = 0;
     }
 }

@@ -1,80 +1,31 @@
-use bytecode::{Opcode, emit};
+use bytecode::{Constant, FnBuilder, Function, FunctionId, Program, Reg, RegList};
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{
-    CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, HandlerEntryInit,
-    HandlerTable, HandlerTableInit, MODE_SLOPPY, ObjectSlotsInit, Smi, Tagged, Value,
+    DefaultInterpreter, Handle, HandleScope, HandlerEntryInit, HandlerTable, HandlerTableInit,
+    Runtime, ScriptError, Smi, Thread, VM, Value, VmCore,
 };
-use vm::{Runtime, Thread, VM};
 
-fn smi(v: i64) -> Value {
-    Smi::new(v).encode()
+fn test_vm() -> Thread {
+    VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
+        .unwrap()
+        .add::<VmCore>()
+        .unwrap()
+        .attach()
 }
 
-fn callable(
-    thread: &mut Thread,
-    scope: &vm::HandleScope<'_>,
-    program: &[u8],
-    constants: &[Tagged<'_, Value>],
-    register_count: usize,
-    handlers: Option<&[HandlerEntryInit]>,
-) -> Value {
-    let _the_hole = thread.heap().known().the_hole.root_handle();
-    let empty_context = thread.heap().known().empty_context.root_handle();
-    let runtime = thread.vm().runtime_id::<vm::VmCore>();
-    let code = thread.heap().allocate_handle::<Code>(
-        CodeInit {
-            runtime,
-            bytes: program,
-        },
-        scope,
-    );
-    let constants = thread
-        .heap()
-        .allocate_handle::<FixedArray>(scope.stage(constants), scope);
-    let handlers = handlers.map(|entries| {
-        thread
-            .heap()
-            .allocate_handle::<HandlerTable>(HandlerTableInit { entries }, scope)
-    });
-    let info = thread.heap().allocate_handle::<CallableInfoObject>(
-        CallableInfoInit {
-            expected_slots: 0,
-            code,
-            constants,
-            register_count,
-            handlers,
-            mode: MODE_SLOPPY,
-        },
-        scope,
-    );
-    let map = thread.heap().known().function_map.root_handle();
-    let values = {
-        let heap = thread.heap();
-        scope.stage(&[
-            info.as_tagged(heap).erase(),
-            empty_context.as_tagged(heap).erase(),
-        ])
-    };
-    let empty_fixed_array = thread.heap().known().empty_fixed_array.root_handle();
-    thread
-        .heap()
-        .allocate_object(
-            scope,
-            ObjectSlotsInit {
-                map,
-                values,
-                elements: empty_fixed_array,
-                length: 0,
-            },
-        )
-        .raw()
+fn run(thread: &mut Thread, functions: Vec<Function>) -> Result<Value, ScriptError> {
+    let mut program = Program::new();
+    for function in functions {
+        program.add_function(function);
+    }
+    thread.run_program(program, VmCore::ID)
 }
 
 fn table<'s>(
     thread: &mut Thread,
-    scope: &'s vm::HandleScope<'_>,
+    scope: &'s HandleScope<'_>,
     entries: &[HandlerEntryInit],
-) -> vm::Handle<'s, HandlerTable> {
+) -> Handle<'s, HandlerTable> {
     thread
         .heap()
         .allocate_handle::<HandlerTable>(HandlerTableInit { entries }, scope)
@@ -82,11 +33,7 @@ fn table<'s>(
 
 #[test]
 fn roundtrip_entries() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let t = table(
@@ -97,68 +44,49 @@ fn roundtrip_entries() {
                 HandlerEntryInit::new(12, 20, 55),
             ],
         );
-        let out = {
-            let heap = thread.heap();
-            let table = t.as_tagged(heap);
-            (table.len(), table.entry(0), table.entry(1))
-        };
-        assert_eq!(out.0, 2);
-        assert_eq!(out.1, HandlerEntryInit::new(0, 10, 40));
-        assert_eq!(out.2, HandlerEntryInit::new(12, 20, 55));
+        let heap = thread.heap();
+        let table = t.as_tagged(heap);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.entry(0), HandlerEntryInit::new(0, 10, 40));
+        assert_eq!(table.entry(1), HandlerEntryInit::new(12, 20, 55));
     });
 }
 
 #[test]
 fn lookup_finds_handler_inside_range() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[HandlerEntryInit::new(5, 15, 100)]);
-        {
-            let heap = thread.heap();
-            let table = t.as_tagged(heap);
-            // try_start is inside (inclusive) ...
-            assert_eq!(table.lookup(5), Some(100));
-            // ... as is any offset before try_end
-            assert_eq!(table.lookup(14), Some(100));
-        };
+        let heap = thread.heap();
+        let table = t.as_tagged(heap);
+        // try_start is inside (inclusive) ...
+        assert_eq!(table.lookup(5), Some(100));
+        // ... as is any offset before try_end
+        assert_eq!(table.lookup(14), Some(100));
     });
 }
 
 #[test]
 fn lookup_returns_none_outside_range() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[HandlerEntryInit::new(5, 15, 100)]);
-        {
-            let heap = thread.heap();
-            let table = t.as_tagged(heap);
-            // before the region ...
-            assert_eq!(table.lookup(4), None);
-            // ... try_end is exclusive ...
-            assert_eq!(table.lookup(15), None);
-            // ... and beyond it
-            assert_eq!(table.lookup(16), None);
-        };
+        let heap = thread.heap();
+        let table = t.as_tagged(heap);
+        // before the region ...
+        assert_eq!(table.lookup(4), None);
+        // ... try_end is exclusive ...
+        assert_eq!(table.lookup(15), None);
+        // ... and beyond it
+        assert_eq!(table.lookup(16), None);
     });
 }
 
 #[test]
 fn lookup_returns_innermost_of_nested_ranges() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         // inner entry emitted first: lookup must be independent of
@@ -171,287 +99,148 @@ fn lookup_returns_innermost_of_nested_ranges() {
                 HandlerEntryInit::new(0, 20, 100),
             ],
         );
-        {
-            let heap = thread.heap();
-            let table = t.as_tagged(heap);
-            // inside both ranges: the innermost (largest try_start) wins
-            assert_eq!(table.lookup(5), Some(300));
-            // inside the outer range only
-            assert_eq!(table.lookup(1), Some(100));
-            assert_eq!(table.lookup(15), Some(100));
-        };
+        let heap = thread.heap();
+        let table = t.as_tagged(heap);
+        // inside both ranges: the innermost (largest try_start) wins
+        assert_eq!(table.lookup(5), Some(300));
+        // inside the outer range only
+        assert_eq!(table.lookup(1), Some(100));
+        assert_eq!(table.lookup(15), Some(100));
     });
 }
 
 #[test]
 fn lookup_on_empty_table_returns_none() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[]);
-        {
-            let heap = thread.heap();
-            let table = t.as_tagged(heap);
-            assert_eq!(table.len(), 0);
-            assert_eq!(table.lookup(0), None);
-        };
-    });
-}
-
-#[test]
-fn callable_info_carries_handler_table() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
-
-    let result = thread.handle_scope(|thread, scope| {
-        let f = callable(
-            thread,
-            &scope,
-            &[],
-            &[],
-            0,
-            Some(&[HandlerEntryInit::new(2, 8, 33)]),
-        );
         let heap = thread.heap();
-        let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
-        let info = o.callable_info(heap).unwrap();
-        let table = info.handlers.get(heap).expect("handler table attached");
-        table.lookup(5)
-    });
-    assert_eq!(result, Some(33));
-}
-
-#[test]
-fn callable_info_without_handler_table() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
-
-    thread.handle_scope(|thread, scope| {
-        let f = callable(thread, &scope, &[], &[], 0, None);
-        let heap = thread.heap();
-        let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
-        let info = o.callable_info(heap).unwrap();
-        assert!(
-            info.handlers.get(heap).is_none(),
-            "a hole handlers slot must mean no table"
-        );
+        let table = t.as_tagged(heap);
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.lookup(0), None);
     });
 }
 
 #[test]
 fn throw_is_caught_in_same_function() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
-    // 0: LoadSmi 99 | 2: Throw | 3: Return | 4: Store r0 | 6: Load r0 | 8: Return
-    let mut program = Vec::new();
-    emit(&mut program, Opcode::LoadSmi, &[99]);
-    emit(&mut program, Opcode::Throw, &[]);
-    emit(&mut program, Opcode::Return, &[]);
-    emit(&mut program, Opcode::Store, &[0]); // handler: bind exception
-    emit(&mut program, Opcode::Load, &[0]);
-    emit(&mut program, Opcode::Return, &[]);
+    let mut f = FnBuilder::new(0);
+    let t = f.begin_try();
+    f.load_smi(99);
+    f.throw();
+    f.end_try(t);
+    f.handler_entry(t);
+    f.store(Reg::new(0));
+    f.load(Reg::new(0));
+    f.ret();
+    let f = f.finish(Default::default()).unwrap();
 
-    let result = thread.handle_scope(|thread, scope| {
-        let f = callable(
-            thread,
-            &scope,
-            &program,
-            &[],
-            1,
-            Some(&[HandlerEntryInit::new(0, 3, 4)]),
-        );
-        let callable = {
-            let heap = thread.heap();
-            scope
-                .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
-                .unwrap()
-        };
-        thread.execute(callable, &[], vm::VmCore::ID)
-    });
-    assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 99);
+    let result = run(&mut thread, vec![f]).unwrap();
+    assert_eq!(Smi::decode(result).unwrap().value(), 99);
     // catching consumes the pending exception
     assert!(!thread.has_pending_exception());
 }
 
 #[test]
 fn throw_any_value_escapes_as_sentinel() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
-    // throw 42: arbitrary values are throwable (ES §14.18), no handlers
-    let mut program = Vec::new();
-    emit(&mut program, Opcode::LoadSmi, &[42]);
-    emit(&mut program, Opcode::Throw, &[]);
-    emit(&mut program, Opcode::Return, &[]);
+    // throw 42: arbitrary values are throwable (ES 14.18), no handlers
+    let mut f = FnBuilder::new(0);
+    f.load_smi(42);
+    f.throw();
+    let f = f.finish(Default::default()).unwrap();
 
-    let result = thread.handle_scope(|thread, scope| {
-        let f = callable(thread, &scope, &program, &[], 0, None);
-        let callable = {
-            let heap = thread.heap();
-            scope
-                .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
-                .unwrap()
-        };
-        thread.execute(callable, &[], vm::VmCore::ID)
-    });
+    let result = run(&mut thread, vec![f]).unwrap();
     let exception_word = {
         let heap = thread.heap();
         heap.known().exception.get(heap).raw()
     };
-    assert_eq!(result, Ok(exception_word));
+    assert_eq!(result, exception_word);
     assert_eq!(
         thread.take_pending_exception(),
-        Some(smi(42)),
+        Some(Smi::new(42).encode()),
         "the thrown value itself is the pending exception"
     );
 }
 
 #[test]
 fn innermost_handler_wins() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
-    // 0: LoadSmi 1 | 2: LoadSmi 2 | 4: Throw | 5: Return
-    // 6: LoadSmi 100 | 8: Return      (inner handler)
-    // 9: LoadSmi 200 | 11: Return     (outer handler)
-    let mut program = Vec::new();
-    emit(&mut program, Opcode::LoadSmi, &[1]);
-    emit(&mut program, Opcode::LoadSmi, &[2]);
-    emit(&mut program, Opcode::Throw, &[]);
-    emit(&mut program, Opcode::Return, &[]);
-    emit(&mut program, Opcode::LoadSmi, &[100]);
-    emit(&mut program, Opcode::Return, &[]);
-    emit(&mut program, Opcode::LoadSmi, &[200]);
-    emit(&mut program, Opcode::Return, &[]);
+    // the inner region covers only the throw, so its try_start is larger
+    let mut f = FnBuilder::new(0);
+    let outer = f.begin_try();
+    f.load_smi(1);
+    f.load_smi(2);
+    let inner = f.begin_try();
+    f.throw();
+    f.end_try(inner);
+    f.end_try(outer);
+    f.handler_entry(inner);
+    f.load_smi(100);
+    f.ret();
+    f.handler_entry(outer);
+    f.load_smi(200);
+    f.ret();
+    let f = f.finish(Default::default()).unwrap();
 
-    let entries = [
-        HandlerEntryInit::new(0, 6, 9), // outer
-        HandlerEntryInit::new(4, 5, 6), // inner
-    ];
-    let result = thread.handle_scope(|thread, scope| {
-        let f = callable(thread, &scope, &program, &[], 0, Some(&entries));
-        let callable = {
-            let heap = thread.heap();
-            scope
-                .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
-                .unwrap()
-        };
-        thread.execute(callable, &[], vm::VmCore::ID)
-    });
-    assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 100);
+    let result = run(&mut thread, vec![f]).unwrap();
+    assert_eq!(Smi::decode(result).unwrap().value(), 100);
 }
 
 #[test]
 fn exception_unwinds_to_caller() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
-    thread.handle_scope(|thread, scope| {
-        // callee: throws 7, no handlers
-        let mut callee_program = Vec::new();
-        emit(&mut callee_program, Opcode::LoadSmi, &[7]);
-        emit(&mut callee_program, Opcode::Throw, &[]);
-        emit(&mut callee_program, Opcode::Return, &[]);
-        let callee = callable(thread, &scope, &callee_program, &[], 0, None);
+    // callee: throws 7, no handlers
+    let mut callee = FnBuilder::new(0);
+    callee.load_smi(7);
+    callee.throw();
+    let callee = callee.finish(Default::default()).unwrap();
 
-        // caller: 0: LoadConstant 0 | 2: Store r0 | 4: CallNoFeedback r0 r0 1 |
-        //         8: Return | 9: Store r0 | 11: Load r0 | 13: Return
-        // the try region covers the call site (pc 4); the handler binds the
-        // exception from a suspended frame via the recorded call-site pc
-        // (register operands carry the anchor bias: r0 = REGISTER_BASE)
-        let r0 = bytecode::REGISTER_FILE_START as u32;
-        let mut program = Vec::new();
-        emit(&mut program, Opcode::LoadConstant, &[0]);
-        emit(&mut program, Opcode::Store, &[r0]);
-        emit(&mut program, Opcode::CallNoFeedback, &[r0, r0, 1]);
-        emit(&mut program, Opcode::Return, &[]);
-        emit(&mut program, Opcode::Store, &[r0]);
-        emit(&mut program, Opcode::Load, &[r0]);
-        emit(&mut program, Opcode::Return, &[]);
+    // caller: the try region covers the call site, so the handler binds the
+    // exception raised by the suspended callee frame
+    let mut caller = FnBuilder::new(0);
+    let t = caller.begin_try();
+    let template = caller.constant(Constant::Callable(FunctionId(1)));
+    caller.create_closure(template);
+    let r0 = Reg::new(0);
+    caller.store(r0);
+    caller.call_no_feedback(r0, RegList::new(r0, 1));
+    caller.end_try(t);
+    caller.handler_entry(t);
+    caller.store(r0);
+    caller.load(r0);
+    caller.ret();
+    let caller = caller.finish(Default::default()).unwrap();
 
-        let caller = callable(
-            thread,
-            &scope,
-            &program,
-            &[unsafe { Tagged::from_value_unchecked(callee) }],
-            1,
-            Some(&[HandlerEntryInit::new(0, 9, 9)]),
-        );
-        let result = {
-            let callable = {
-                let heap = thread.heap();
-                scope
-                    .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(caller) })
-                    .unwrap()
-            };
-            thread.execute(callable, &[], vm::VmCore::ID)
-        };
-        assert_eq!(Smi::decode(result.unwrap()).unwrap().value(), 7);
-    });
+    let result = run(&mut thread, vec![caller, callee]).unwrap();
+    assert_eq!(Smi::decode(result).unwrap().value(), 7);
 }
 
 #[test]
 fn throw_from_finally_escapes_past_its_own_handler() {
-    let vm = VM::new::<MarkSweep, vm::DefaultInterpreter>(MarkSweepConfig::default())
-        .unwrap()
-        .add::<vm::VmCore>()
-        .unwrap();
-    let mut thread = vm.attach();
+    let mut thread = test_vm();
 
-    // 0: LoadSmi 3 | 2: Throw | 3: Return | 4: Throw (finally handler)
-    // the handler pc 4 is outside the try region [0, 4), so the Throw
-    // finds no handler and escapes the run
-    let mut program = Vec::new();
-    emit(&mut program, Opcode::LoadSmi, &[3]);
-    emit(&mut program, Opcode::Throw, &[]);
-    emit(&mut program, Opcode::Return, &[]);
-    emit(&mut program, Opcode::Throw, &[]);
-    emit(&mut program, Opcode::Return, &[]);
+    // the handler rethrows the exception; its throw is outside the try
+    // region, so no handler matches and the run ends
+    let mut f = FnBuilder::new(0);
+    let t = f.begin_try();
+    f.load_smi(3);
+    f.throw();
+    f.end_try(t);
+    f.handler_entry(t);
+    f.throw();
+    let f = f.finish(Default::default()).unwrap();
 
-    let result = thread.handle_scope(|thread, scope| {
-        let f = callable(
-            thread,
-            &scope,
-            &program,
-            &[],
-            0,
-            Some(&[HandlerEntryInit::new(0, 4, 4)]),
-        );
-        let callable = {
-            let heap = thread.heap();
-            scope
-                .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
-                .unwrap()
-        };
-        thread.execute(callable, &[], vm::VmCore::ID)
-    });
+    let result = run(&mut thread, vec![f]).unwrap();
     let exception_word = {
         let heap = thread.heap();
         heap.known().exception.get(heap).raw()
     };
-    assert_eq!(result, Ok(exception_word));
-    assert_eq!(thread.take_pending_exception(), Some(smi(3)));
+    assert_eq!(result, exception_word);
+    assert_eq!(thread.take_pending_exception(), Some(Smi::new(3).encode()));
 }

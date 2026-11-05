@@ -1,7 +1,6 @@
 use core::alloc::Layout;
-use core::ptr::{self, NonNull};
 
-use heap_api::GcHost;
+use heap_api::{GcHost, HeapPtr, ObjectAddr};
 
 use crate::chunk::ChunkHeader;
 
@@ -20,29 +19,33 @@ pub fn need_for(layout: Layout) -> usize {
 #[repr(C)]
 pub struct FreeHeader {
     size: usize,
-    next: *mut FreeHeader,
+    next: Option<HeapPtr<FreeHeader>>,
 }
 
 pub struct FreeList {
-    head: *mut FreeHeader,
+    head: Option<HeapPtr<FreeHeader>>,
     free_bytes: usize,
     live_bytes: usize,
 }
 
 impl FreeList {
-    pub fn covering(base: NonNull<u8>, size: usize) -> Self {
-        let head = base.as_ptr() as *mut FreeHeader;
-        unsafe {
-            *head = FreeHeader {
-                size,
-                next: ptr::null_mut(),
-            };
-        }
+    fn header_at(addr: usize) -> HeapPtr<FreeHeader> {
+        // Safety: free runs live in the chunk's object region.
+        unsafe { HeapPtr::from_addr(addr) }
+    }
+
+    fn prepend(head: Option<HeapPtr<FreeHeader>>, at: HeapPtr<FreeHeader>, size: usize) -> Self {
+        // Safety: `at` starts a free run of `size` bytes.
+        unsafe { at.write(FreeHeader { size, next: head }) };
         Self {
-            head,
+            head: Some(at),
             free_bytes: size,
             live_bytes: 0,
         }
+    }
+
+    pub fn covering(base: HeapPtr<u8>, size: usize) -> Self {
+        Self::prepend(None, base.cast(), size)
     }
 
     pub fn free_bytes(&self) -> usize {
@@ -53,77 +56,84 @@ impl FreeList {
         self.live_bytes
     }
 
-    pub fn from_promotion(addr: usize, size: usize, live: usize) -> Self {
-        let head = addr as *mut FreeHeader;
-        unsafe {
-            *head = FreeHeader {
-                size,
-                next: ptr::null_mut(),
-            };
-        }
-        Self {
-            head,
-            free_bytes: size,
-            live_bytes: live,
-        }
+    pub fn from_promotion(base: HeapPtr<u8>, size: usize, live: usize) -> Self {
+        let mut list = Self::prepend(None, base.cast(), size);
+        list.live_bytes = live;
+        list
     }
 
     pub fn full(live_bytes: usize) -> Self {
         Self {
-            head: ptr::null_mut(),
+            head: None,
             free_bytes: 0,
             live_bytes,
         }
     }
 
     /// First-fit
-    pub fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    pub fn allocate(&mut self, layout: Layout) -> Option<HeapPtr<u8>> {
         let need = need_for(layout);
-        let mut link: *mut *mut FreeHeader = ptr::from_mut(&mut self.head);
-        let mut run = self.head;
-        while !run.is_null() {
-            unsafe {
-                let available = (*run).size;
-                if available >= need {
-                    let remainder = available - need;
-                    let given = if remainder >= 2 * ALIGN {
-                        let remainder_header = run.byte_add(need);
-                        *remainder_header = FreeHeader {
+        let mut prev: Option<HeapPtr<FreeHeader>> = None;
+        let mut run = self.head?;
+        loop {
+            let available = run.as_ref().size;
+            if available >= need {
+                let remainder = available - need;
+                let next = run.as_ref().next;
+                let given = if remainder >= 2 * ALIGN {
+                    let rest = Self::header_at(run.addr() + need);
+                    // Safety: `rest` is the unused tail of `run`.
+                    unsafe {
+                        rest.write(FreeHeader {
                             size: remainder,
-                            next: (*run).next,
-                        };
-                        *link = remainder_header;
-                        need
-                    } else {
-                        *link = (*run).next;
-                        available
+                            next,
+                        })
                     };
-                    self.free_bytes -= given;
-                    self.live_bytes += given;
-                    return Some(NonNull::new_unchecked(run.cast::<u8>()));
-                }
-                link = ptr::from_mut(&mut (*run).next);
-                run = (*run).next;
+                    Self::splice(&mut prev, Some(rest), &mut self.head);
+                    need
+                } else {
+                    Self::splice(&mut prev, next, &mut self.head);
+                    available
+                };
+                self.free_bytes -= given;
+                self.live_bytes += given;
+                return Some(run.cast());
             }
+            let next = run.as_ref().next?;
+            prev = Some(run);
+            run = next;
         }
-        None
+    }
+
+    /// Point `prev.next` (or the head, when `prev` is `None`) at `new`.
+    fn splice(
+        prev: &mut Option<HeapPtr<FreeHeader>>,
+        new: Option<HeapPtr<FreeHeader>>,
+        head: &mut Option<HeapPtr<FreeHeader>>,
+    ) {
+        match prev {
+            // Safety: the free-list mutex is held.
+            Some(prev) => unsafe { prev.as_mut() }.next = new,
+            None => *head = new,
+        }
     }
 
     /// Rebuilds the free list from the chunk's mark bits
     pub fn sweep(&mut self, header: &ChunkHeader, usable: usize, host: &GcHost) {
         let start = header.object_base();
         let end = start + usable;
-        self.head = ptr::null_mut();
+        self.head = None;
         self.free_bytes = 0;
         let mut live = 0usize;
-        let mut tail: *mut FreeHeader = ptr::null_mut();
+        let mut tail: Option<HeapPtr<FreeHeader>> = None;
         let mut gap_start = start;
         for addr in header.mark_iter(usable) {
-            let object = unsafe { NonNull::new_unchecked(addr as *mut ()) };
+            // Safety: mark bits only cover the chunk's object region.
+            let object = unsafe { ObjectAddr::from_addr(addr) };
             let object_size = (host.layout_of)(object).size().next_multiple_of(ALIGN);
             let gap = addr - gap_start;
             if gap >= 2 * ALIGN {
-                push_free(self, &mut tail, gap_start, gap);
+                self.push_free(&mut tail, gap_start, gap);
             } else {
                 live += gap;
             }
@@ -132,27 +142,24 @@ impl FreeList {
         }
         let gap = end - gap_start;
         if gap >= 2 * ALIGN {
-            push_free(self, &mut tail, gap_start, gap);
+            self.push_free(&mut tail, gap_start, gap);
         } else {
             live += gap;
         }
         self.live_bytes = live;
     }
-}
 
-fn push_free(list: &mut FreeList, tail: &mut *mut FreeHeader, addr: usize, size: usize) {
-    let header = addr as *mut FreeHeader;
-    unsafe {
-        *header = FreeHeader {
-            size,
-            next: ptr::null_mut(),
-        };
-        if (*tail).is_null() {
-            list.head = header;
-        } else {
-            (**tail).next = header;
+    fn push_free(&mut self, tail: &mut Option<HeapPtr<FreeHeader>>, addr: usize, size: usize) {
+        let header = Self::header_at(addr);
+        // Safety: `addr` starts a gap of `size` bytes, written under the
+        // free-list mutex.
+        unsafe { header.write(FreeHeader { size, next: None }) };
+        match *tail {
+            // Safety: the free-list mutex is held.
+            Some(mut tail) => unsafe { tail.as_mut() }.next = Some(header),
+            None => self.head = Some(header),
         }
+        *tail = Some(header);
+        self.free_bytes += size;
     }
-    *tail = header;
-    list.free_bytes += size;
 }

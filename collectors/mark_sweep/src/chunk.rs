@@ -2,9 +2,8 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use core::alloc::Layout;
-use core::ptr::NonNull;
 
-use heap_api::{AllocError, GcHost};
+use heap_api::{AllocError, CellRef, GcHost, HeapPtr, ObjectAddr};
 use heap_utils::MMapBuffer;
 
 use crate::block::{ALIGN, FreeList, need_for};
@@ -52,25 +51,14 @@ const _: () = {
 };
 
 impl ChunkHeader {
-    pub fn at(heap_base: usize, addr: usize) -> &'static Self {
-        let chunk_base = heap_base + (addr - heap_base) / CHUNK_SIZE * CHUNK_SIZE;
-        unsafe { &*(chunk_base as *const Self) }
-    }
-
-    fn of_chunk(chunk_base: usize) -> &'static Self {
-        unsafe { &*(chunk_base as *const Self) }
-    }
-
-    fn init(chunk_base: usize, young: bool) {
-        let header = Self::of_chunk(chunk_base);
-        for word in &header.remembered {
+    fn init(&self, young: bool) {
+        for word in &self.remembered {
             word.store(0, Ordering::Release);
         }
-        for word in &header.mark {
+        for word in &self.mark {
             word.store(0, Ordering::Release);
         }
-        header
-            .flags
+        self.flags
             .store(if young { FLAG_YOUNG } else { 0 }, Ordering::Release);
     }
 
@@ -154,6 +142,59 @@ impl ChunkHeader {
     }
 }
 
+/// The mapped region the chunks are carved from. Cheap to copy, so the
+/// collector threads can each hold their own view of it.
+#[derive(Clone, Copy)]
+pub struct Reservation {
+    base: usize,
+    size: usize,
+}
+
+impl Reservation {
+    pub fn base(&self) -> usize {
+        self.base
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn end(&self) -> usize {
+        self.base + self.size
+    }
+
+    pub fn contains(&self, addr: usize) -> bool {
+        addr >= self.base && addr < self.end()
+    }
+
+    pub fn chunk_base(&self, addr: usize) -> usize {
+        self.base + (addr - self.base) / CHUNK_SIZE * CHUNK_SIZE
+    }
+
+    /// The header of the chunk containing `addr`.
+    pub fn header(&self, addr: usize) -> &ChunkHeader {
+        debug_assert!(self.contains(addr), "address outside the reservation");
+        // Safety: the reservation is mapped read-write for its whole length
+        // and each chunk starts with its header.
+        unsafe { &*(self.chunk_base(addr) as *const ChunkHeader) }
+    }
+
+    /// The object starting at `addr`.
+    pub fn object(&self, addr: usize) -> ObjectAddr {
+        debug_assert!(self.contains(addr), "object outside the reservation");
+        debug_assert_eq!(addr % ALIGN, 0, "unaligned object address");
+        // Safety: inside the reservation and aligned.
+        unsafe { ObjectAddr::from_addr(addr) }
+    }
+
+    /// The traced slot at `addr`.
+    pub fn cell(&self, addr: usize) -> CellRef {
+        debug_assert!(self.contains(addr), "cell outside the reservation");
+        // Safety: inside the reservation.
+        unsafe { CellRef::from_addr(addr) }
+    }
+}
+
 struct HeaderBits<'a> {
     words: &'a [AtomicU64],
     base: usize,
@@ -188,38 +229,38 @@ impl Iterator for HeaderBits<'_> {
 
 pub struct Chunk {
     index: usize,
-    base: NonNull<u8>,
+    base: HeapPtr<u8>,
+    header: HeapPtr<ChunkHeader>,
+    object_base: HeapPtr<u8>,
     size: usize,
     free: Mutex<FreeList>,
     free_bytes: AtomicUsize,
     state: AtomicU8,
 }
 
-unsafe impl Send for Chunk {}
-unsafe impl Sync for Chunk {}
-
 impl Chunk {
-    fn new(index: usize, base: NonNull<u8>, size: usize, young: bool) -> Self {
-        let base_addr = base.as_ptr() as usize;
-        ChunkHeader::init(base_addr, young);
+    fn new(index: usize, base: HeapPtr<u8>, size: usize, young: bool) -> Self {
+        let header = base.cast::<ChunkHeader>();
+        header.as_ref().init(young);
+        // Safety: a chunk is header-then-objects; `size` covers both.
+        let object_base = unsafe { base.offset(HEADER_SIZE) };
         Self {
-            free: Mutex::new(FreeList::covering(
-                NonNull::new(unsafe { base.as_ptr().add(HEADER_SIZE) }).unwrap(),
-                size - HEADER_SIZE,
-            )),
+            free: Mutex::new(FreeList::covering(object_base, size - HEADER_SIZE)),
             free_bytes: AtomicUsize::new(size - HEADER_SIZE),
             state: AtomicU8::new(SWEPT),
             index,
             base,
+            header,
+            object_base,
             size,
         }
     }
 
-    pub fn base(&self) -> usize {
-        self.base.as_ptr() as usize
+    pub fn base_addr(&self) -> usize {
+        self.base.addr()
     }
 
-    pub fn base_ptr(&self) -> NonNull<u8> {
+    pub fn base(&self) -> HeapPtr<u8> {
         self.base
     }
 
@@ -228,11 +269,15 @@ impl Chunk {
     }
 
     pub fn header(&self) -> &ChunkHeader {
-        ChunkHeader::of_chunk(self.base())
+        self.header.as_ref()
     }
 
     pub fn object_base(&self) -> usize {
-        self.base() + HEADER_SIZE
+        self.object_base.addr()
+    }
+
+    pub fn object_base_ptr(&self) -> HeapPtr<u8> {
+        self.object_base
     }
 
     pub fn object_size(&self) -> usize {
@@ -284,20 +329,27 @@ impl ChunkedHeap {
         self.young_chunks
     }
 
-    pub fn reservation(&self) -> (usize, usize) {
-        let base = self.buffer.start().as_ptr() as usize;
-        (base, base + self.buffer.size())
+    pub fn reservation(&self) -> Reservation {
+        Reservation {
+            base: self.buffer.start().addr(),
+            size: self.buffer.size(),
+        }
     }
 
     pub fn is_young_addr(&self, addr: usize) -> bool {
-        let (base, end) = self.reservation();
-        addr >= base && addr < end && ChunkHeader::at(base, addr).young()
+        self.reservation().header(addr).young()
     }
 
-    pub fn remembered_slots(&self) -> Vec<usize> {
+    pub fn remembered_slots(&self) -> Vec<CellRef> {
+        let reservation = self.reservation();
         let mut slots = Vec::new();
         for chunk in self.slots.iter().flatten() {
-            slots.extend(chunk.header().remembered_iter(chunk.object_size()));
+            slots.extend(
+                chunk
+                    .header()
+                    .remembered_iter(chunk.object_size())
+                    .map(|addr| reservation.cell(addr)),
+            );
         }
         slots
     }
@@ -332,7 +384,9 @@ impl ChunkedHeap {
     pub fn finish_promotion(&mut self, chunk: &Chunk, cursor: usize) {
         let remainder = chunk.object_size() - cursor;
         let free = if remainder >= 2 * ALIGN {
-            FreeList::from_promotion(chunk.object_base() + cursor, remainder, cursor)
+            // Safety: the cursor stays inside the chunk's object region.
+            let base = unsafe { chunk.object_base_ptr().offset(cursor) };
+            FreeList::from_promotion(base, remainder, cursor)
         } else {
             FreeList::full(chunk.object_size())
         };
@@ -385,12 +439,12 @@ impl ChunkedHeap {
     }
 
     pub fn in_heap(&self, addr: usize) -> bool {
-        let base = self.buffer.start().as_ptr() as usize;
+        let base = self.buffer.start().addr();
         addr >= base && addr < base + self.carved * self.chunk_size
     }
 
     pub fn chunk_of(&self, addr: usize) -> &Chunk {
-        let base = self.buffer.start().as_ptr() as usize;
+        let base = self.buffer.start().addr();
         let index = (addr - base) / self.chunk_size;
         debug_assert!(index < self.slots.len(), "address outside reservation");
         self.slots[index]
@@ -403,7 +457,7 @@ impl ChunkedHeap {
         &mut self,
         layout: Layout,
         host: Option<&GcHost>,
-    ) -> (Option<NonNull<u8>>, Option<Arc<Chunk>>) {
+    ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
         self.allocate_impl(layout, host, false)
     }
 
@@ -413,7 +467,7 @@ impl ChunkedHeap {
         &mut self,
         layout: Layout,
         host: Option<&GcHost>,
-    ) -> (Option<NonNull<u8>>, Option<Arc<Chunk>>) {
+    ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
         self.allocate_impl(layout, host, true)
     }
 
@@ -422,7 +476,7 @@ impl ChunkedHeap {
         layout: Layout,
         host: Option<&GcHost>,
         young_only: bool,
-    ) -> (Option<NonNull<u8>>, Option<Arc<Chunk>>) {
+    ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
         if let Some(ptr) = self.allocate_swept(layout, young_only) {
             return (Some(ptr), None);
         }
@@ -442,7 +496,7 @@ impl ChunkedHeap {
         }
     }
 
-    fn allocate_swept(&mut self, layout: Layout, young_only: bool) -> Option<NonNull<u8>> {
+    fn allocate_swept(&mut self, layout: Layout, young_only: bool) -> Option<HeapPtr<u8>> {
         let need = need_for(layout);
         for slot in &self.slots {
             let Some(chunk) = slot else { continue };
@@ -511,7 +565,7 @@ impl ChunkedHeap {
             if removed.is_young() {
                 self.young_chunks -= 1;
             }
-            self.buffer.decommit(removed.base, removed.size);
+            self.buffer.decommit(removed.base(), removed.size);
             drop(removed);
             self.pooled.push(index);
         } else {
@@ -528,12 +582,10 @@ impl ChunkedHeap {
         self.completed_live.take()
     }
 
-    fn chunk_region(&self, index: usize) -> (NonNull<u8>, usize) {
-        let base = unsafe { self.buffer.start().as_ptr().add(index * self.chunk_size) };
-        let size = self
-            .chunk_size
-            .min(self.reserve_size() - index * self.chunk_size);
-        (unsafe { NonNull::new_unchecked(base) }, size)
+    fn chunk_region(&self, index: usize) -> (HeapPtr<u8>, usize) {
+        let offset = index * self.chunk_size;
+        let size = self.chunk_size.min(self.reserve_size() - offset);
+        (self.buffer.region(offset, size), size)
     }
 
     fn activate_chunk(&mut self, young: bool) -> Option<Arc<Chunk>> {

@@ -1,8 +1,8 @@
 use core::alloc::Layout;
-use core::ptr::NonNull;
 
 use heap_api::{
-    AllocError, CLEARED, GcHost, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, WEAK_PTR, Word,
+    AllocError, CLEARED, GcHost, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, WEAK_PTR,
+    Word,
 };
 
 use mark_sweep::heap::{MarkSweepConfig, MarkSweepLocal, MarkSweepState};
@@ -33,12 +33,12 @@ impl Roots {
         boxed
     }
 
-    fn strong(&mut self, ptr: NonNull<u8>) {
+    fn strong(&mut self, ptr: HeapPtr<u8>) {
         self.slots
             .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | STRONG_PTR) });
     }
 
-    fn weak(&mut self, ptr: NonNull<u8>) -> usize {
+    fn weak(&mut self, ptr: HeapPtr<u8>) -> usize {
         self.slots
             .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | WEAK_PTR) });
         self.slots.len() - 1
@@ -52,13 +52,13 @@ fn visit_roots(ctx: *const (), visitor: &mut dyn Visitor) {
     }
 }
 
-fn layout_of(_addr: NonNull<()>) -> Layout {
+fn layout_of(_addr: HeapPtr<()>) -> Layout {
     Layout::from_size_align(NODE_SIZE, 8).unwrap()
 }
 
 /// Traces the first payload word as a tagged link so chains form a real
 /// object graph. Passes the in-heap cell so moving visitors can rewrite it.
-fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
+fn visit_object(addr: HeapPtr<()>, visitor: &mut dyn Visitor) {
     let cell = unsafe { &*(addr.as_ptr().cast::<Word>().add(1) as *const RawCell) };
     if cell.load() & TAG_MASK == STRONG_PTR {
         visitor.visit(cell);
@@ -77,7 +77,7 @@ fn backend(
 
 /// The VM's allocation fast path in miniature: bump the window, refilling
 /// through the collector on a miss.
-fn alloc(local: &MarkSweepLocal, tlab: &mut Tlab, size: usize) -> Result<NonNull<u8>, AllocError> {
+fn alloc(local: &MarkSweepLocal, tlab: &mut Tlab, size: usize) -> Result<HeapPtr<u8>, AllocError> {
     if let Some(ptr) = tlab.try_alloc(size) {
         return Ok(ptr);
     }
@@ -98,21 +98,21 @@ fn collect_minor(local: &MarkSweepLocal, tlab: &mut Tlab) {
 }
 
 /// Allocates a node whose link word is `link`.
-fn node(local: &MarkSweepLocal, tlab: &mut Tlab, link: Word) -> NonNull<u8> {
+fn node(local: &MarkSweepLocal, tlab: &mut Tlab, link: Word) -> HeapPtr<u8> {
     let ptr = alloc(local, tlab, NODE_SIZE.next_multiple_of(Tlab::ALIGN)).unwrap();
     unsafe { *(ptr.as_ptr().cast::<Word>().add(1)) = link };
     ptr
 }
 
-fn link_word(ptr: NonNull<u8>) -> Word {
+fn link_word(ptr: HeapPtr<u8>) -> Word {
     unsafe { *(ptr.as_ptr().cast::<Word>().add(1)) }
 }
 
-fn strong_word(ptr: NonNull<u8>) -> Word {
+fn strong_word(ptr: HeapPtr<u8>) -> Word {
     ptr.as_ptr() as Word | STRONG_PTR
 }
 
-fn link_cell(ptr: NonNull<u8>) -> &'static RawCell {
+fn link_cell(ptr: HeapPtr<u8>) -> &'static RawCell {
     unsafe { &*(ptr.as_ptr().cast::<Word>().add(1) as *const RawCell) }
 }
 
@@ -136,7 +136,7 @@ fn minor_moves_rooted_survivors_and_frees_young_chunks() {
     // b's link followed a to its new address
     let moved_a = roots.slots[0].load();
     assert_eq!(
-        link_word(NonNull::new((moved_b & !TAG_MASK) as *mut u8).unwrap()),
+        link_word(unsafe { HeapPtr::from_addr((moved_b & !TAG_MASK) as usize) }),
         moved_a
     );
     let _ = moved_a;
@@ -152,7 +152,7 @@ fn remembered_edge_survives_full_gc() {
     roots.strong(old);
     collect_minor(&local, &mut tlab);
     let old_moved = (roots.slots[0].load() & !TAG_MASK) as usize;
-    let old_ptr = NonNull::new(old_moved as *mut u8).unwrap();
+    let old_ptr = unsafe { HeapPtr::from_addr(old_moved) };
 
     // a young target referenced ONLY by the old node's link slot, recorded
     // by the write barrier
@@ -181,7 +181,7 @@ fn write_barrier_keeps_old_to_young_target_alive() {
     roots.strong(old);
     collect_minor(&local, &mut tlab);
     let old_moved = (roots.slots[0].load() & !TAG_MASK) as usize;
-    let old_ptr = NonNull::new(old_moved as *mut u8).unwrap();
+    let old_ptr = unsafe { HeapPtr::from_addr(old_moved) };
 
     // a young target referenced ONLY by the old node's link slot, recorded
     // by the write barrier exactly like GcSlot::set would
@@ -241,8 +241,8 @@ fn chains_relocate_consistently() {
     let mut word = roots.slots[0].load();
     let mut count = 0usize;
     while word & TAG_MASK == STRONG_PTR {
-        let ptr = NonNull::new((word & !TAG_MASK) as *mut u8).unwrap();
-        assert!(state.contains(ptr.as_ptr() as usize));
+        let ptr = unsafe { HeapPtr::from_addr((word & !TAG_MASK) as usize) };
+        assert!(state.contains(ptr.addr()));
         word = link_word(ptr);
         count += 1;
     }

@@ -34,7 +34,7 @@ pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     EntryClass, NumberDictionary, NumberDictionaryInit,
 };
-pub use feedback::{FeedbackVector, FeedbackVectorInit, new_feedback_vector};
+pub use feedback::{FeedbackVector, FeedbackVectorInit};
 pub use float::Float;
 pub use helpers::WrapperKind;
 pub use map::{
@@ -53,7 +53,9 @@ pub use symbol::Symbol;
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use crate::{EdgeVisitable, GcSlot, Heap, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word};
+use crate::{
+    EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
+};
 
 pub trait HeapObject: 'static {
     type Init<'a>;
@@ -172,7 +174,7 @@ impl ObjectKind {
     }
 }
 
-pub unsafe fn object_kind(addr: NonNull<()>) -> ObjectKind {
+pub unsafe fn object_kind(addr: ObjectAddr) -> ObjectKind {
     let header = unsafe { &*addr.cast::<Header>().as_ptr() };
     // Safety: GC-callback context — there is no heap borrow to anchor at,
     // so the map word read from the visited header is promoted unsafely.
@@ -182,7 +184,7 @@ pub unsafe fn object_kind(addr: NonNull<()>) -> ObjectKind {
         .kind()
 }
 
-pub unsafe fn object_layout(addr: NonNull<()>) -> Layout {
+pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
     let kind = unsafe { object_kind(addr) };
     unsafe {
         match kind {
@@ -223,7 +225,7 @@ pub unsafe fn object_layout(addr: NonNull<()>) -> Layout {
     }
 }
 
-pub unsafe fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
+pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
     let kind = unsafe { object_kind(addr) };
     unsafe {
         match kind {

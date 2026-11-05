@@ -1,9 +1,8 @@
 use core::alloc::Layout;
-use core::ptr::NonNull;
 
 use heap_api::{
-    AllocError, CLEARED, GcHost, HeapBackend, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor,
-    WEAK_PTR, Word,
+    AllocError, CLEARED, GcHost, HeapBackend, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab,
+    Visitor, WEAK_PTR, Word,
 };
 
 use mark_sweep::heap::{MarkSweep, MarkSweepConfig, MarkSweepLocal, MarkSweepState};
@@ -14,7 +13,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 static SIZES: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn register(addr: NonNull<u8>, size: usize) {
+fn register(addr: HeapPtr<u8>, size: usize) {
     SIZES.lock().unwrap().insert(addr.as_ptr() as usize, size);
 }
 
@@ -45,12 +44,12 @@ impl Roots {
         boxed
     }
 
-    fn strong(&mut self, ptr: NonNull<u8>) {
+    fn strong(&mut self, ptr: HeapPtr<u8>) {
         self.slots
             .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | STRONG_PTR) });
     }
 
-    fn weak(&mut self, ptr: NonNull<u8>) -> usize {
+    fn weak(&mut self, ptr: HeapPtr<u8>) -> usize {
         self.slots
             .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | WEAK_PTR) });
         self.slots.len() - 1
@@ -63,7 +62,7 @@ fn alloc(
     local: &MarkSweepLocal,
     tlab: &mut Tlab,
     layout: Layout,
-) -> Result<NonNull<u8>, AllocError> {
+) -> Result<HeapPtr<u8>, AllocError> {
     let size = layout.size().next_multiple_of(Tlab::ALIGN);
     if let Some(ptr) = tlab.try_alloc(size) {
         return Ok(ptr);
@@ -91,21 +90,21 @@ fn rooted(
     tlab: &mut Tlab,
     roots: &mut Roots,
     layout: Layout,
-) -> NonNull<u8> {
+) -> HeapPtr<u8> {
     let ptr = alloc(local, tlab, layout).unwrap();
     register(ptr, layout.size());
     roots.strong(ptr);
     ptr
 }
 
-fn host_with(roots: &Roots, visit_object: fn(NonNull<()>, &mut dyn Visitor)) -> GcHost {
+fn host_with(roots: &Roots, visit_object: fn(HeapPtr<()>, &mut dyn Visitor)) -> GcHost {
     fn visit_roots(ctx: *const (), visitor: &mut dyn Visitor) {
         let roots = unsafe { &*(ctx as *const Roots) };
         for slot in &roots.slots {
             visitor.visit(slot);
         }
     }
-    fn layout_of(addr: NonNull<()>) -> Layout {
+    fn layout_of(addr: HeapPtr<()>) -> Layout {
         let size = registered_size(addr.as_ptr() as usize);
         Layout::from_size_align(size, 8).unwrap()
     }
@@ -118,7 +117,7 @@ fn host_with(roots: &Roots, visit_object: fn(NonNull<()>, &mut dyn Visitor)) -> 
 }
 
 fn host_for(roots: &Roots) -> GcHost {
-    fn visit_object(_addr: NonNull<()>, _visitor: &mut dyn Visitor) {}
+    fn visit_object(_addr: HeapPtr<()>, _visitor: &mut dyn Visitor) {}
     host_with(roots, visit_object)
 }
 
@@ -136,10 +135,10 @@ macro_rules! fixed_host {
                     visitor.visit(slot);
                 }
             }
-            fn layout_of(_addr: NonNull<()>) -> Layout {
+            fn layout_of(_addr: HeapPtr<()>) -> Layout {
                 Layout::from_size_align($size, 8).unwrap()
             }
-            fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
+            fn visit_object(addr: HeapPtr<()>, visitor: &mut dyn Visitor) {
                 let cell = unsafe { &*(addr.as_ptr().cast::<Word>().add(1) as *const RawCell) };
                 if cell.load() & TAG_MASK == STRONG_PTR {
                     visitor.visit(cell);
@@ -308,7 +307,7 @@ fn weak_refs_to_dead_objects_are_cleared() {
     assert_eq!(state.stats().used, 16);
 }
 
-fn weak_word(target: NonNull<u8>) -> Word {
+fn weak_word(target: HeapPtr<u8>) -> Word {
     target.as_ptr() as Word | WEAK_PTR
 }
 

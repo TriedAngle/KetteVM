@@ -81,7 +81,6 @@ struct HandleDataImpl {
     blocks: Vec<HandleBlock>,
     next: *mut Value,
     limit: *mut Value,
-    level: usize,
     fill: Register,
 }
 
@@ -165,7 +164,6 @@ impl HandleData {
             blocks: Vec::new(),
             next: std::ptr::null_mut(),
             limit: std::ptr::null_mut(),
-            level: 0,
             fill: unsafe { Register::from_value(fill) },
         };
         inner.extend();
@@ -177,10 +175,6 @@ impl HandleData {
     #[allow(clippy::mut_from_ref)]
     fn inner(&self) -> &mut HandleDataImpl {
         unsafe { &mut *self.inner.get() }
-    }
-
-    pub fn level(&self) -> usize {
-        self.inner().level
     }
 }
 
@@ -202,7 +196,6 @@ impl<'d> HandleScope<'d> {
     #[inline]
     pub unsafe fn from_raw(data: NonNull<HandleData>) -> Self {
         let inner = unsafe { &*data.as_ptr() }.inner();
-        inner.level += 1;
         Self {
             data,
             prev_next: inner.next,
@@ -263,7 +256,6 @@ impl<'d> HandleScope<'d> {
         let data = unsafe { &*self.data.as_ptr() };
         let escape_slot = data.inner().allocate_slot();
         let inner = data.inner();
-        inner.level += 1;
         EscapableHandleScope {
             parent: self,
             escape_slot,
@@ -278,7 +270,6 @@ impl<'d> HandleScope<'d> {
 impl Drop for HandleScope<'_> {
     fn drop(&mut self) {
         let inner = unsafe { &*self.data.as_ptr() }.inner();
-        inner.level -= 1;
         inner.next = self.prev_next;
         inner.limit = self.prev_limit;
         inner.blocks.truncate(self.prev_block_count);
@@ -319,7 +310,6 @@ impl<'i, 'o> EscapableHandleScope<'i, 'o> {
 impl Drop for EscapableHandleScope<'_, '_> {
     fn drop(&mut self) {
         let inner = self.data().inner();
-        inner.level -= 1;
         inner.next = self.prev_next;
         inner.limit = self.prev_limit;
         inner.blocks.truncate(self.prev_block_count);

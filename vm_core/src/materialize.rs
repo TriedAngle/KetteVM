@@ -9,10 +9,10 @@
 //! function table and knows nothing about the language that produced it.
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FixedArray, FunctionKind,
-    Handle, HandleScope, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap,
-    Object, RuntimeId, ScopeInfo, ScopeInfoInit, Value, VmError, decode_wtf8, mode_from_strict,
-    new_feedback_vector,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FeedbackVector,
+    FeedbackVectorInit, FixedArray, FunctionKind, Handle, HandleScope, HandleSlice,
+    HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, RuntimeId, ScopeInfo,
+    ScopeInfoInit, Value, VmError, decode_wtf8, mode_from_strict,
 };
 
 use bytecode::{CallableKind, Constant, FunctionId, Program};
@@ -206,7 +206,13 @@ fn materialize_function<'s>(
         },
         scope,
     );
-    if let Some(feedback) = new_feedback_vector(heap, scope, function.feedback_count as usize) {
+    if function.feedback_count > 0 {
+        let feedback = heap.allocate_handle::<FeedbackVector>(
+            FeedbackVectorInit {
+                length: function.feedback_count as usize,
+            },
+            scope,
+        );
         info.as_tagged(heap).set_feedback(heap, feedback);
     }
     let name: Option<Handle<'s, DenseString>> = program

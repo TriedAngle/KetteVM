@@ -5,8 +5,9 @@ use interpreter::BecomeInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::Runtime;
 use vm_core::{
-    CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
-    MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged, Thread, VM, Value, new_feedback_vector,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, FeedbackVector, FeedbackVectorInit,
+    FixedArray, Handle, HandleScope, Heap, MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged,
+    Thread, VM, Value,
 };
 
 /// The `#[handler]`-based interpreter plugs into `VM::new` like any
@@ -57,7 +58,13 @@ fn callable<'s>(
         },
         scope,
     );
-    if let Some(vector) = new_feedback_vector(thread.heap(), scope, feedback_slots) {
+    if feedback_slots > 0 {
+        let vector = thread.heap().allocate_handle::<FeedbackVector>(
+            FeedbackVectorInit {
+                length: feedback_slots,
+            },
+            scope,
+        );
         let heap: &Heap = thread.heap();
         info.as_tagged(heap).set_feedback(heap, vector);
     }

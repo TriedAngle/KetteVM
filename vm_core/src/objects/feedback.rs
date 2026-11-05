@@ -1,8 +1,8 @@
 use core::alloc::Layout;
 
 use crate::{
-    EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, Map, MaybeWeak,
-    MaybeWeakGcSlot, ObjectKind, Smi, Tagged, Value, Visitor, WeakFixedArray,
+    EdgeVisitable, GcSlot, Header, Heap, HeapObject, Map, MaybeWeak, MaybeWeakGcSlot, ObjectKind,
+    Smi, Tagged, Value, Visitor, WeakFixedArray,
 };
 
 /// `[feedback, feedback_extra]` and encodes its IC state in
@@ -146,17 +146,4 @@ impl FeedbackVector {
             heap.known().megamorphic_symbol.get(heap).erase(),
         );
     }
-}
-
-/// Allocate a hole-filled feedback vector; `None` when the function needs no
-/// slots.
-pub fn new_feedback_vector<'s>(
-    heap: &mut Heap,
-    scope: &'s HandleScope<'_>,
-    slot_count: usize,
-) -> Option<Handle<'s, FeedbackVector>> {
-    if slot_count == 0 {
-        return None;
-    }
-    Some(heap.allocate_handle::<FeedbackVector>(FeedbackVectorInit { length: slot_count }, scope))
 }
