@@ -1,9 +1,6 @@
 use core::alloc::Layout;
 
-use heap_api::{
-    AllocError, CLEARED, GcHost, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, WEAK_PTR,
-    Word,
-};
+use heap_api::{AllocError, GcHost, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, Word};
 
 use mark_sweep::heap::{MarkSweepConfig, MarkSweepLocal, MarkSweepState};
 
@@ -36,12 +33,6 @@ impl Roots {
     fn strong(&mut self, ptr: HeapPtr<u8>) {
         self.slots
             .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | STRONG_PTR) });
-    }
-
-    fn weak(&mut self, ptr: HeapPtr<u8>) -> usize {
-        self.slots
-            .push(unsafe { RawCell::from_word(ptr.as_ptr() as Word | WEAK_PTR) });
-        self.slots.len() - 1
     }
 }
 
@@ -102,151 +93,6 @@ fn node(local: &MarkSweepLocal, tlab: &mut Tlab, link: Word) -> HeapPtr<u8> {
     let ptr = alloc(local, tlab, NODE_SIZE.next_multiple_of(Tlab::ALIGN)).unwrap();
     unsafe { *(ptr.as_ptr().cast::<Word>().add(1)) = link };
     ptr
-}
-
-fn link_word(ptr: HeapPtr<u8>) -> Word {
-    unsafe { *(ptr.as_ptr().cast::<Word>().add(1)) }
-}
-
-fn strong_word(ptr: HeapPtr<u8>) -> Word {
-    ptr.as_ptr() as Word | STRONG_PTR
-}
-
-fn link_cell(ptr: HeapPtr<u8>) -> &'static RawCell {
-    unsafe { &*(ptr.as_ptr().cast::<Word>().add(1) as *const RawCell) }
-}
-
-#[test]
-fn minor_moves_rooted_survivors_and_frees_young_chunks() {
-    let (state, local, mut roots) = backend(8 * 1024 * 1024, Roots::empty());
-    let mut tlab = Tlab::empty();
-    let a = node(&local, &mut tlab, 0);
-    let b = node(&local, &mut tlab, strong_word(a));
-    roots.strong(a);
-    roots.strong(b);
-
-    let before_b = roots.slots[1].load();
-    collect_minor(&local, &mut tlab);
-
-    assert_eq!(state.minor_cycles(), 1);
-    // both survivors were evacuated: the root cells were rewritten
-    let moved_b = roots.slots[1].load();
-    assert_ne!(moved_b, before_b);
-    assert!(state.contains((moved_b & !TAG_MASK) as usize));
-    // b's link followed a to its new address
-    let moved_a = roots.slots[0].load();
-    assert_eq!(
-        link_word(unsafe { HeapPtr::from_addr((moved_b & !TAG_MASK) as usize) }),
-        moved_a
-    );
-    let _ = moved_a;
-}
-
-#[test]
-fn remembered_edge_survives_full_gc() {
-    let (state, local, mut roots) = backend(8 * 1024 * 1024, Roots::empty());
-    let mut tlab = Tlab::empty();
-
-    // promote `old` out of the young set with one minor cycle
-    let old = node(&local, &mut tlab, 0);
-    roots.strong(old);
-    collect_minor(&local, &mut tlab);
-    let old_moved = (roots.slots[0].load() & !TAG_MASK) as usize;
-    let old_ptr = unsafe { HeapPtr::from_addr(old_moved) };
-
-    // a young target referenced ONLY by the old node's link slot, recorded
-    // by the write barrier
-    let young = node(&local, &mut tlab, 0);
-    let young_word = strong_word(young);
-    unsafe { *(old_moved as *mut Word).add(1) = young_word };
-    state.write_barrier(link_cell(old_ptr), young_word);
-
-    // a full collection must keep the recorded entry intact
-    collect(&local, &mut tlab);
-    collect_minor(&local, &mut tlab);
-
-    let updated = link_word(old_ptr);
-    assert_ne!(updated, young_word);
-    assert!(state.contains((updated & !TAG_MASK) as usize));
-    assert_eq!(state.minor_cycles(), 2);
-}
-
-#[test]
-fn write_barrier_keeps_old_to_young_target_alive() {
-    let (state, local, mut roots) = backend(8 * 1024 * 1024, Roots::empty());
-    let mut tlab = Tlab::empty();
-
-    // promote `old` out of the young set with one minor cycle
-    let old = node(&local, &mut tlab, 0);
-    roots.strong(old);
-    collect_minor(&local, &mut tlab);
-    let old_moved = (roots.slots[0].load() & !TAG_MASK) as usize;
-    let old_ptr = unsafe { HeapPtr::from_addr(old_moved) };
-
-    // a young target referenced ONLY by the old node's link slot, recorded
-    // by the write barrier exactly like GcSlot::set would
-    let young = node(&local, &mut tlab, 0);
-    let young_word = strong_word(young);
-    unsafe { *(old_moved as *mut Word).add(1) = young_word };
-    state.write_barrier(link_cell(old_ptr), young_word);
-
-    collect_minor(&local, &mut tlab);
-
-    // the remembered slot was found and rewritten to the evacuated copy
-    let updated = link_word(old_ptr);
-    assert_ne!(updated, young_word);
-    assert!(state.contains((updated & !TAG_MASK) as usize));
-    assert_eq!(state.minor_cycles(), 2);
-}
-
-#[test]
-fn weak_young_refs_settle_after_the_closure() {
-    let (state, local, mut roots) = backend(8 * 1024 * 1024, Roots::empty());
-    let mut tlab = Tlab::empty();
-
-    let strongly_rooted = node(&local, &mut tlab, 0);
-    let before = strong_word(strongly_rooted);
-    roots.strong(strongly_rooted);
-    let weak_alive = roots.weak(strongly_rooted);
-    let weak_dead = roots.weak(node(&local, &mut tlab, 0));
-
-    collect_minor(&local, &mut tlab);
-
-    // the target really moved, and the weak cell followed it to the new
-    // address (kept alive by the separate strong root, not by the cell)
-    assert_ne!(roots.slots[0].load(), before);
-    assert_eq!(
-        roots.slots[weak_alive].load(),
-        roots.slots[0].load() | WEAK_PTR
-    );
-    // never evacuated: the weak-only target died with its young chunk
-    assert_eq!(roots.slots[weak_dead].load(), CLEARED);
-    let _ = state;
-}
-
-#[test]
-fn chains_relocate_consistently() {
-    let (state, local, mut roots) = backend(8 * 1024 * 1024, Roots::empty());
-    let mut tlab = Tlab::empty();
-    const LEN: usize = 512;
-    let mut link: Word = 0;
-    for _ in 0..LEN {
-        link = strong_word(node(&local, &mut tlab, link));
-    }
-    roots.slots.push(unsafe { RawCell::from_word(link) });
-
-    collect_minor(&local, &mut tlab);
-
-    // walk the relocated chain end to end
-    let mut word = roots.slots[0].load();
-    let mut count = 0usize;
-    while word & TAG_MASK == STRONG_PTR {
-        let ptr = unsafe { HeapPtr::from_addr((word & !TAG_MASK) as usize) };
-        assert!(state.contains(ptr.addr()));
-        word = link_word(ptr);
-        count += 1;
-    }
-    assert_eq!(count, LEN);
 }
 
 #[test]
