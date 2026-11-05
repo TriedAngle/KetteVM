@@ -337,25 +337,29 @@ pub fn object_create<'a>(
 /// Own enumerable-property keys in specification order: integer indices
 /// ascending, then string keys in insertion order (ES 8.6.2, the
 /// descriptors array is insertion-ordered).
-pub fn own_property_keys(heap: &Heap, roots: &WellKnown, target: Tagged<'_, Value>) -> Vec<Value> {
+pub fn own_property_keys<'a>(
+    heap: &'a Heap,
+    roots: &WellKnown,
+    target: Tagged<'a, Value>,
+) -> Vec<Tagged<'a, Value>> {
     let mut keys = Vec::new();
     // String exotic own keys: indices then the non-enumerable "length"
     // (ES 10.4.3.5). Wrappers may also carry ordinary own descriptors.
     if let Some(s) = DenseString::from_receiver(heap, target) {
         keys.reserve(s.len() + 1);
         for i in 0..s.len() {
-            keys.push(Smi::new(i as i64).encode());
+            keys.push(Smi::new(i as i64).into_tagged());
         }
-        keys.push(roots.strings.length.raw());
+        keys.push(roots.strings.length.get(heap).erase());
     }
     // element indices ascending, then named descriptors in insertion
     // order (ES OrdinaryOwnPropertyKeys)
     if let Some(obj) = target.as_heap_object() {
         for i in obj.element_keys(heap) {
-            keys.push(Smi::new(i as i64).encode());
+            keys.push(Smi::new(i as i64).into_tagged());
         }
         for d in obj.map(heap).descriptors() {
-            keys.push(d.name(heap).raw());
+            keys.push(d.name(heap).erase());
         }
     }
     keys
@@ -500,17 +504,14 @@ pub fn object_get_own_property_names<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let target = args.get(heap, 1);
+    let target = args.get_handle(heap, 1);
     // array `length` is a real (accessor) descriptor on the array map, so
     // `own_property_keys` already lists it
-    let names: Vec<Value> = own_property_keys(heap, vm.known(), target);
     state.handle_scope(|scope| {
-        let staged = scope.stage(
-            &names
-                .iter()
-                .map(|v| unsafe { Tagged::<Value>::from_value_unchecked(*v) })
-                .collect::<Vec<_>>(),
-        );
+        let staged = {
+            let names = own_property_keys(heap, vm.known(), target.as_tagged(heap));
+            scope.stage(&names)
+        };
         heap.new_array(&scope, staged).erase()
     })
 }
@@ -564,15 +565,17 @@ pub fn object_get_own_property_descriptor<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        // Safety: both are rooted in `scope`; the values are re-anchored so
-        // the &mut heap borrow below does not overlap the target/key reads.
-        let target_v = unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) };
-        let key_v = unsafe { Tagged::<Value>::from_value_unchecked(key.raw()) };
         // String exotic own keys (`length`, in-range indices) take
         // precedence; a String wrapper may also carry ordinary own
         // descriptors, so fall through when the key is neither.
-        let desc = DenseString::own_descriptor(heap, &scope, target_v, key_v)
-            .or_else(|| Object::ordinary_own_descriptor(heap, &scope, target_v, key_v));
+        let desc = DenseString::own_descriptor(heap, &scope, target, key.erase()).or_else(|| {
+            Object::ordinary_own_descriptor(
+                heap,
+                &scope,
+                target.as_tagged(heap),
+                key.as_tagged(heap).erase(),
+            )
+        });
         // root the oddball singletons once for the descriptor fields
         let true_v = vm.known().true_object.get_handle(heap, &scope).erase();
         let false_v = vm.known().false_object.get_handle(heap, &scope).erase();
@@ -816,8 +819,6 @@ pub fn object_is_extensible<'a>(
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
             return Convert::boolean(heap, false);
         }
-        // Safety: rooted argument word, consumed by the call.
-        let target = unsafe { Tagged::<Value>::from_value_unchecked(target.raw()) };
         let extensible = match rt_try!(
             vm,
             heap,

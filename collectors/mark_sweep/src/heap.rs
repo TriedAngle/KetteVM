@@ -276,7 +276,9 @@ impl MarkSweepState {
         let remembered = self.alloc.lock().unwrap().remembered_slots();
         for cell in remembered {
             let mut scanner = MinorScanner { job: &mut job };
-            scanner.visit(cell.as_ref());
+            // Safety: remembered slots live in collector memory and are
+            // GC-visited for the lifetime of the chunk.
+            scanner.visit(unsafe { cell.as_ref() });
         }
         job.drain();
 
@@ -284,7 +286,8 @@ impl MarkSweepState {
         // strong closure: forwarded targets move the cell, dead
         // targets clear it
         for cell in job.deferred_weak {
-            let cell = cell.as_ref();
+            // Safety: deferred weak cells are root slots owned by the heap.
+            let cell = unsafe { cell.as_ref() };
             let word = cell.load();
             if word & TAG_MASK == WEAK_PTR && word != CLEARED {
                 let addr = (word & !TAG_MASK) as usize;
@@ -631,7 +634,8 @@ impl MarkJob {
             .drain(..)
             .collect::<Vec<_>>();
         for cell in cells {
-            let cell = cell.as_ref();
+            // Safety: deferred weak cells are root slots owned by the heap.
+            let cell = unsafe { cell.as_ref() };
             let word = cell.load();
             if word & TAG_MASK == WEAK_PTR && word != CLEARED {
                 let addr = (word & !TAG_MASK) as usize;

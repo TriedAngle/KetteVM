@@ -1436,11 +1436,8 @@ impl Proxy {
         vm: &VM,
         heap: &'a mut Heap,
         state: &ThreadState,
-        obj: Tagged<'_, Value>,
+        obj: Handle<'_, Value>,
     ) -> Result<Coercion<'a>, VmError> {
-        state.handle_scope(|scope| {
-            let obj = scope.handle(obj);
-            is_extensible_entry_h(vm, heap, state, &scope, &obj)
-        })
+        state.handle_scope(|scope| is_extensible_entry_h(vm, heap, state, &scope, &obj))
     }
 }

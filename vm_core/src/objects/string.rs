@@ -204,19 +204,27 @@ impl DenseString {
     pub fn own_descriptor<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
-        receiver: Tagged<'_, Value>,
-        key: Tagged<'_, Value>,
+        receiver: Handle<'_, Value>,
+        key: Handle<'_, Value>,
     ) -> Option<PropertyDescriptor<'s>> {
-        let s = Self::from_receiver(heap, receiver)?;
-        match s.own_key(heap, key.as_name())? {
+        let (own, unit) = {
+            let s = Self::from_receiver(heap, receiver.as_tagged(heap))?;
+            let own = s.own_key(heap, key.as_tagged(heap).as_name())?;
+            let unit = match own {
+                StringOwn::Index(i) => Some(s.code_unit(heap, i)),
+                StringOwn::Length(_) => None,
+            };
+            (own, unit)
+        };
+        match own {
             StringOwn::Length(len) => Some(PropertyDescriptor::Data {
                 value: scope.handle(Smi::new(len as i64).into_tagged()),
                 writable: false,
                 enumerable: false,
                 configurable: false,
             }),
-            StringOwn::Index(i) => {
-                let unit = s.code_unit(heap, i);
+            StringOwn::Index(_) => {
+                let unit = unit.expect("index descriptors carry their code unit");
                 let value = DenseString::from_units(heap, scope, &[unit]).erase();
                 Some(PropertyDescriptor::Data {
                     value,

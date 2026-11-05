@@ -57,15 +57,16 @@ impl<T> HeapPtr<T> {
         Self(unsafe { NonNull::new_unchecked(addr as *mut T) })
     }
 
+    /// Reinterpret the pointee as `U`.
     pub fn cast<U>(self) -> HeapPtr<U> {
         HeapPtr(self.0.cast())
     }
 
-    /// The pointee. Sound because every `HeapPtr` is minted pointing into
-    /// collector memory; see [`HeapPtr::from_addr`].
+    /// # Safety
+    /// The pointer must still name a live `T`: no collection may have run
+    /// since its crreation, and the pointee must be fully initialized.
     #[allow(clippy::should_implement_trait)]
-    pub fn as_ref(&self) -> &T {
-        // Safety: the constructor obligations above.
+    pub unsafe fn as_ref(&self) -> &T {
         unsafe { self.0.as_ref() }
     }
 

@@ -16,6 +16,7 @@ pub fn need_for(layout: Layout) -> usize {
 }
 
 /// Header of a free run
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct FreeHeader {
     size: usize,
@@ -76,10 +77,13 @@ impl FreeList {
         let mut prev: Option<HeapPtr<FreeHeader>> = None;
         let mut run = self.head?;
         loop {
-            let available = run.as_ref().size;
+            // Safety: free runs live in collector memory for the lifetime
+            // of the chunk; no collection touches free-list headers.
+            let header = unsafe { run.read() };
+            let available = header.size;
             if available >= need {
                 let remainder = available - need;
-                let next = run.as_ref().next;
+                let next = header.next;
                 let given = if remainder >= 2 * ALIGN {
                     let rest = Self::header_at(run.addr() + need);
                     // Safety: `rest` is the unused tail of `run`.
@@ -99,7 +103,7 @@ impl FreeList {
                 self.live_bytes += given;
                 return Some(run.cast());
             }
-            let next = run.as_ref().next?;
+            let next = header.next?;
             prev = Some(run);
             run = next;
         }

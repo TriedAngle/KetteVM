@@ -333,13 +333,10 @@ fn construct_cache_record(
     obj: Handle<'_, Object>,
 ) {
     // The first-use cache-table allocation may collect; take it before
-    // capturing any raw words that must survive the allocations below.
+    // capturing any words that must survive the allocations below.
     state.construct_cache_ensure_table(heap);
 
-    // Safety: fresh synthesized-receiver word; read before any allocation
-    // below, and no collection can run until then.
-    let map: Tagged<Map> =
-        unsafe { Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw()) };
+    let map = obj.as_tagged(heap).map(heap);
     // find the closure's `.prototype` data-property slot
     let proto_name = roots.strings.prototype.get(heap);
     let closure_map = callee.as_tagged(heap).map(heap);
@@ -351,25 +348,21 @@ fn construct_cache_record(
         }
     }
     let Some(offset) = found else { return };
-    let proto_word = callee
-        .as_tagged(heap)
-        .as_ref()
-        .slot(heap, offset)
-        .get(heap)
-        .raw();
+    let proto_word = callee.as_tagged(heap).slot(heap, offset).get(heap);
     if !proto_word.is_strong_ptr() {
         return; // non-object prototype: ES falls back, stays uncached
     }
-    let proto: Handle<'_, Value> =
-        scope.handle(unsafe { Tagged::from_value_unchecked(proto_word) });
+    let proto = scope.handle(proto_word);
 
-    // Allocation-free from here: read the raw words last, immediately
-    // before the (allocation-free) insert.
-    let callee_obj: Tagged<Object> =
-        unsafe { Tagged::from_value_unchecked(callee.as_tagged(heap).raw()) };
-    let proto_word: Tagged<Value> =
-        unsafe { Tagged::from_value_unchecked(proto.as_tagged(heap).raw()) };
-    state.construct_cache_insert(heap, callee_obj, proto_word, offset, map);
+    // Allocation-free from here: insert the cache entry through the
+    // already-anchored words.
+    state.construct_cache_insert(
+        heap,
+        callee.as_tagged(heap),
+        proto.as_tagged(heap),
+        offset,
+        map,
+    );
 }
 
 // --- construct ---

@@ -225,8 +225,7 @@ impl ThreadState {
         if word.raw() == heap.known().the_hole.get(heap).raw() {
             return None;
         }
-        // Safety: the slot only ever holds this module's table.
-        let table: Tagged<'a, WeakFixedArray> = unsafe { core::mem::transmute(word.raw()) };
+        let table = word.get_as::<WeakFixedArray>(heap)?;
         let t = table;
         let mask = t.len() / 5 - 1;
         let mut i = ((closure.raw().to_bits() >> 5) as usize) & mask;
@@ -247,10 +246,9 @@ impl ThreadState {
                     if closure.slot(heap, offset).raw() != proto.raw() {
                         return None;
                     }
-                    // Safety: written only by `construct_cache_insert` with
-                    // the synthesized receiver's map.
-                    let initial: Tagged<'a, Map> =
-                        unsafe { core::mem::transmute(t.get(heap, base + 4).raw()) };
+                    // The initial map is written only by
+                    // `construct_cache_insert`, into a strong slot.
+                    let initial = t.get(heap, base + 4).as_strong()?.get_as::<Map>(heap)?;
                     return Some(initial);
                 }
                 // dead entry: keep probing
@@ -284,45 +282,37 @@ impl ThreadState {
     /// The table must already exist ([`Self::construct_cache_ensure_table`]).
     pub fn construct_cache_insert(
         &self,
-        heap: &mut Heap,
+        heap: &Heap,
         closure: Tagged<'_, Object>,
         proto: Tagged<'_, Value>,
         proto_slot: usize,
         initial_map: Tagged<'_, Map>,
     ) {
-        self.handle_scope(|scope| {
-            let closure = scope.handle(closure);
-            let proto = scope.handle(proto);
-            let initial_map = scope.handle(initial_map);
-            let the_hole = heap.known().the_hole.get(heap).raw();
-            let word = self.construct_cache.get(heap);
-            debug_assert_ne!(word.raw(), the_hole, "cache table must be ensured");
-            let _ = (word, the_hole);
-            // allocation-free from here: every word is read through a root
-            let table: Tagged<WeakFixedArray> =
-                unsafe { Tagged::from_value_unchecked(self.construct_cache.get(heap).raw()) };
-            let t = table;
-            let mask = t.len() / 5 - 1;
-            let fn_map = closure.as_tagged(heap).map(heap);
-            let mut i = ((closure.as_tagged(heap).raw().to_bits() >> 5) as usize) & mask;
-            for _ in 0..=mask {
-                let base = i * 5;
-                let entry = t.get(heap, base);
-                let slot = t.element_slot(base);
-                let free =
-                    entry.raw() == the_hole || (entry.raw().is_weak_ptr() && slot.is_cleared());
-                if free {
-                    t.set_weak(heap, base, closure.as_tagged(heap).erase());
-                    t.set_strong(heap, base + 1, fn_map.erase());
-                    t.set_strong(heap, base + 2, proto.as_tagged(heap));
-                    t.set_strong(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
-                    t.set_strong(heap, base + 4, initial_map.as_tagged(heap).erase());
-                    return;
-                }
-                i = (i + 1) & mask;
+        let the_hole = heap.known().the_hole.get(heap).raw();
+        let word = self.construct_cache.get(heap);
+        debug_assert_ne!(word.raw(), the_hole, "cache table must be ensured");
+        let table = word
+            .get_as::<WeakFixedArray>(heap)
+            .expect("construct cache slot holds the table");
+        let mask = table.len() / 5 - 1;
+        let fn_map = closure.map(heap);
+        let mut i = ((closure.raw().to_bits() >> 5) as usize) & mask;
+        for _ in 0..=mask {
+            let base = i * 5;
+            let entry = table.get(heap, base);
+            let slot = table.element_slot(base);
+            let free = entry.raw() == the_hole || (entry.raw().is_weak_ptr() && slot.is_cleared());
+            if free {
+                table.set_weak(heap, base, closure.erase());
+                table.set_strong(heap, base + 1, fn_map.erase());
+                table.set_strong(heap, base + 2, proto);
+                table.set_strong(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
+                table.set_strong(heap, base + 4, initial_map.erase());
+                return;
             }
-            // full: drop inserts (rare — 64 constructor kinds)
-        })
+            i = (i + 1) & mask;
+        }
+        // full: drop inserts (rare — 64 constructor kinds)
     }
 
     pub fn set_last_error(&self, err: VmError) {

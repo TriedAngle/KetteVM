@@ -241,7 +241,7 @@ pub struct Chunk {
 impl Chunk {
     fn new(index: usize, base: HeapPtr<u8>, size: usize, young: bool) -> Self {
         let header = base.cast::<ChunkHeader>();
-        header.as_ref().init(young);
+        unsafe { header.as_ref() }.init(young);
         // Safety: a chunk is header-then-objects; `size` covers both.
         let object_base = unsafe { base.offset(HEADER_SIZE) };
         Self {
@@ -269,7 +269,9 @@ impl Chunk {
     }
 
     pub fn header(&self) -> &ChunkHeader {
-        self.header.as_ref()
+        // Safety: the chunk header lives in the reservation for the chunk's
+        // whole lifetime and is not moved by collection.
+        unsafe { self.header.as_ref() }
     }
 
     pub fn object_base(&self) -> usize {
