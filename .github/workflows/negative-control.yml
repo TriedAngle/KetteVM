@@ -1,0 +1,240 @@
+name: negative-control
+
+# The negative-control gate (ported from JonasOberhauser/agent-scripts
+# #143/#156): every test touched or added by a PR must FAIL on at
+# least one companion fault branch — proving the test can actually
+# fail — OR be its own negative control (fail in its own last-touch
+# commit, the test-first RED shape).
+#
+# PR message contract (opt-in per PR):
+#
+#     Negative Control:
+#     ```
+#     /branch/A
+#     /branch/B
+#     ```
+#
+# Rules:
+#   1. The diff PR-head ↔ branch must be COMPLETELY outside tests —
+#      all test code 100% identical; any test diff rejects the PR.
+#   2. Every test file modified or ADDED by the PR (deletions exempt)
+#      must fail on at least one of those branches when run there.
+#   3. A touched test that passes on every branch rejects the PR.
+#   4. Self-control: a touched test that FAILS in the LAST commit that
+#      touched it is its own negative control — no branch required.
+#      Only the last touching commit counts (introduce-a-wrong-failing
+#      test then fix the TEST does not); a non-building own-commit
+#      proves nothing.
+#   5. A declared branch that does not exist rejects (gracefully); a
+#      branch that does not BUILD rejects (a broken control proves
+#      nothing).
+#
+# KetteVM's two test kinds (both live under tests/ directories):
+#   - `<crate>/tests/<name>.rs`  → cargo test -p <crate> --test <name>
+#   - `tests/regression/**.js`   → cargo run -p vm --example
+#                                  regression -- <file> (exit code)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: negative-control-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: /target
+
+jobs:
+  gate:
+    name: negative control (tests must be able to fail)
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 40
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the base..head, branch, and self-control diffs need history
+          persist-credentials: false
+
+      - name: Parse the Negative Control block
+        id: parse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          pr = json.loads(subprocess.run(
+              ["gh", "api", f"repos/{os.environ['GITHUB_REPOSITORY']}/pulls/"
+               f"{os.environ['PR_NUMBER']}"],
+              check=True, capture_output=True, text=True).stdout)
+          body = pr.get("body") or ""
+
+          branches = []
+          in_block = False
+          seen_marker = False
+          for line in body.splitlines():
+              stripped = line.strip()
+              # A NEW marker resets any earlier block: PR bodies quote
+              # the contract (example blocks) — the LAST declaration
+              # is the real one.
+              if stripped.lower().startswith("negative control") and stripped.endswith(":"):
+                  seen_marker = True
+                  branches = []
+                  in_block = False
+                  continue
+              if not seen_marker:
+                  continue
+              if stripped.startswith("```"):
+                  in_block = not in_block
+                  continue
+              if in_block and stripped.startswith("/"):
+                  branches.append(stripped)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"branches={json.dumps(branches)}\n")
+          print("negative-control branches:", branches or "(none)")
+          PY
+
+      - name: Gate — identical tests, every touched test fails somewhere
+        env:
+          BRANCHES: ${{ steps.parse.outputs.branches }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          branches = json.loads(os.environ["BRANCHES"])
+          base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
+
+          def sh(*cmd, check=True):
+              return subprocess.run(cmd, capture_output=True, text=True, check=check)
+
+          # ── The PR's touched tests (added/modified; deletions exempt). ──
+          diff = sh("git", "diff", "--name-only", "--diff-filter=ACMR", base, head).stdout
+          touched = sorted(l for l in diff.splitlines() if "/tests/" in f"/{l}")
+
+          if not touched:
+              print("no touched test files — gate passes vacuously")
+              sys.exit(0)
+          print("touched tests:")
+          for t in touched:
+              print("  ", t)
+
+          # ── Rule 1: each branch's diff vs the PR head is entirely ──
+          # ── outside tests (test code 100% identical).            ──
+          for b in branches:
+              ref = b[1:] if b.startswith("/") else b
+              fetch = sh("git", "fetch", "--depth=1", "origin", ref, check=False)
+              if fetch.returncode != 0:
+                  print(f"REJECT: branch {ref} not found"); sys.exit(1)
+              sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+              d = sh("git", "diff", "--name-only", head, sha).stdout
+              test_diff = [l for l in d.splitlines() if "/tests/" in f"/{l}"]
+              if test_diff:
+                  print(f"REJECT: {ref} differs from the PR in test code:")
+                  for t in test_diff:
+                      print("  ", t)
+                  sys.exit(1)
+          if branches:
+              print("rule 1 ok: every branch is test-identical to the PR head")
+          else:
+              print("no declared branches — self-control is the only path")
+
+          # ── Map a test file to how it RUNS on this repo. ──
+          def runner_of(file):
+              # tests/regression/*.js → the regression example
+              if file.startswith("tests/regression/") and file.endswith(".js"):
+                  return ("regression", file)
+              # <crate>/tests/<name>.rs → a cargo test target
+              parts = file.split("/tests/")
+              if len(parts) == 2 and parts[0] and parts[1].endswith(".rs"):
+                  pkg = parts[0].split("/")[-1]
+                  return ("cargo", (pkg, parts[1][:-3]))
+              return None
+
+          def run_target(target, check=False):
+              if target[0] == "regression":
+                  return sh("cargo", "run", "--locked", "-p", "vm", "--example",
+                            "regression", "--", target[1], check=check)
+              pkg, stem = target[1]
+              return sh("cargo", "test", "--locked", "-p", pkg, "--test", stem,
+                        check=check)
+
+          def build(check=False):
+              return sh("cargo", "build", "--locked", "--workspace", "--all-targets",
+                        check=check)
+
+          tgts = [(f, runner_of(f)) for f in touched]
+          tgts = [(f, r) for f, r in tgts if r is not None]
+          if not tgts:
+              print("touched files map to no runnable target — gate passes (review covers them)")
+              sys.exit(0)
+
+          # ── Rule 4: self-control — the LAST commit touching the test ──
+          # ── (a preserved RED proof needs no branch).                 ──
+          self_caught = set()
+          for f, target in tgts:
+              out = sh("git", "rev-list", base + ".." + head, "--", f).stdout
+              shas = out.split()
+              if not shas:
+                  continue
+              sha = shas[0]
+              sh("git", "checkout", "-q", "--detach", sha)
+              if build(check=False).returncode != 0:
+                  print(f"  self-control {f}: last-touch commit does not build — no proof, branches required")
+                  continue
+              if run_target(target, check=False).returncode != 0:
+                  print(f"  self-control {f}: FAILS in its own last-touch commit — its own negative control")
+                  self_caught.add(f)
+
+          sh("git", "checkout", "-q", head)
+          need_branches = [(f, t) for f, t in tgts if f not in self_caught]
+          if not need_branches:
+              print("gate ok: every touched test is its own negative control")
+              sys.exit(0)
+          if not branches:
+              print("REJECT: touched tests with neither self-control nor declared branches:")
+              for f, _ in need_branches:
+                  print("  ", f)
+              sys.exit(1)
+
+          # ── Rules 2+3: run each remaining test on each branch; every ──
+          # ── one must fail somewhere.                                ──
+          results = {f: False for f, _ in need_branches}
+          for b in branches:
+              ref = b[1:] if b.startswith("/") else b
+              sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+              sh("git", "checkout", "-q", "--detach", sha)
+              print(f"=== {ref}: building")
+              if build(check=False).returncode != 0:
+                  # A branch that does not build is a broken negative
+                  # control — REJECT (a fault that breaks compilation
+                  # proves nothing about the tests).
+                  print(f"REJECT: branch {ref} does not build — a broken "
+                        "negative control proves nothing")
+                  sys.exit(1)
+              for f, target in need_branches:
+                  failed = run_target(target, check=False).returncode != 0
+                  print(f"  {f}: {'FAIL (caught)' if failed else 'pass'}")
+                  if failed:
+                      results[f] = True
+
+          missed = [f for f, caught in results.items() if not caught]
+          if missed:
+              print("REJECT: touched tests that pass on EVERY negative-control branch:")
+              for m in missed:
+                  print("  ", m)
+              sys.exit(1)
+          print("gate ok: every touched test fails on at least one branch")
+          PY
