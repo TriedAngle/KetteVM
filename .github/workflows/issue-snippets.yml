@@ -1,0 +1,57 @@
+name: issue-snippets
+
+# Every code snippet in the issues a PR references is a live test:
+# kettevm and node must agree on it (see ci/github/issue-snippets.mjs).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to check"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-snippets-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: /target
+
+jobs:
+  issue-snippets:
+    name: issue snippets (kettevm vs node)
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 30
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build kettevm (release, match)
+        run: cargo build --release -p vm --locked
+
+      - name: Node (the oracle)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fence-parser unit tests
+        run: node ci/github/issue-snippets.test.mjs
+
+      - name: Issue-snippet conformance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SNIPPET_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          KETTEVM: /target/release/kettevm
+        run: node ci/github/issue-snippets.mjs
