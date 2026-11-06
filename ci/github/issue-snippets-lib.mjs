@@ -5,7 +5,33 @@ export const LANGS = new Set(["", "js", "javascript", "kette"]);
 // code with ```js.
 export const LANG_JS_ALIASES = new Set(["js", "javascript", ""]);
 
-export const NOT_A_TEST = /^NOT\s+A\s+TEST/;
+/// The ignore marker's sentence — every literal space below may be
+/// any mix of whitespace and JS comment delimiters (`//`, `/*`, `*/`)
+/// in arbitrary combination, so `// Note: this test case ...`,
+/// `/*Note: this test case ...*/` and `Note://this/*test*/case...`
+/// all mark a snippet explanatory.
+const MARKER_WORDS = [
+    "Note:",
+    "this",
+    "test",
+    "case",
+    "may",
+    "have",
+    "permitted",
+    "differences",
+    "to",
+    "other",
+    "engines",
+];
+/// One inter-word separator: any run (including the empty run —
+/// "any number of whitespaces" counts zero) of whitespace or comment
+/// tokens.
+const MARKER_SEP = "(?:\\s|//|\\*|/\\*|\\*/)*";
+/// The full marker, built once: an optional leading separator, then
+/// the words joined by separators.
+export const NOT_A_TEST = new RegExp(
+    "^(?:" + MARKER_SEP + ")?" + MARKER_WORDS.join("(?:" + MARKER_SEP + ")"),
+);
 
 /// GitHub's issue-closing keywords. A reference in this form makes
 /// GitHub AUTO-CLOSE the issue when the PR merges — and means the fix

@@ -45,9 +45,27 @@ for (const c of cases) {
     if (!ok) failed++;
 }
 
+const MARKER = "Note: this test case may have permitted differences to other engines";
 const markerCases = [
-    ["NOT A TEST: illustrative", true],
-    ["NOT   A   TEST", true],
+    // The canonical sentence.
+    [MARKER, true],
+    // Every literal space may vanish entirely.
+    ["Note:thistestcasemayhavepermitteddifferencestootherengines", true],
+    // ...or become any whitespace run.
+    ["Note:\tthis   test case may have permitted differences to other engines", true],
+    // ...or any mix of the comment delimiters // /* */ — arbitrarily.
+    ["// Note: this test case may have permitted differences to other engines", true],
+    ["/* Note: this test case may have permitted differences to other engines */", true],
+    ["Note://this/*test*/case may have permitted differences to other engines", true],
+    ["*///Note://this//test//case//may//have//permitted//differences//to//other//engines", true],
+    ["Note: /*this*/ //test/*case*/ may have permitted differences to other engines", true],
+    // The old marker no longer matches (single rename, no compat).
+    ["NOT A TEST: illustrative", false],
+    ["NOT   A   TEST", false],
+    // Near-miss sentences must NOT match.
+    ["Notes: this test case may have permitted differences to other engines", false],
+    ["Note: this test case may NOT have permitted differences to other engines", false],
+    ["Note: this test case may have permitted differences", false],
     ["not a test (lowercase does not match the spec regex)", false],
     ["console.log(1);", false],
 ];

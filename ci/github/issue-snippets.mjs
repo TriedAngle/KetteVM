@@ -238,7 +238,9 @@ for (const n of refs) {
                 id,
                 "syntax error in BOTH engines — not a runnable test. To exclude " +
                     "it from the conformance run, make the snippet's first line " +
-                    "`NOT A TEST` (e.g. `NOT A TEST: illustrative`)."
+                    "`Note: this test case may have permitted differences to other " +
+                    "engines` (each space may be any mix of whitespace or the " +
+                    "comment delimiters `//`, `/*`, `*/` — e.g. `// Note: this ...`)."
             );
             return;
         }
@@ -299,7 +301,7 @@ for (const n of refs) {
 
 console.log("\n── summary ──────────────────────────────────────");
 for (const p of passes) console.log(`PASS ${p}`);
-for (const s of skips) console.log(`SKIP ${s} (NOT A TEST)`);
+for (const s of skips) console.log(`SKIP ${s} (Note-marker: permitted differences)`);
 for (const r of reported) console.log(r);
 for (const f of failures) console.log(`FAIL ${f}`);
 console.log(
