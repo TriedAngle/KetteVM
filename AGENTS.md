@@ -59,3 +59,24 @@ pub fn array_constructor<'a>(...) { ... }
 
 if some steps in the ecma script are currently not supported by the VM and we only follow the spec partially, 
 always note with a `// TODO: <missing feature description>` at exactly the place that missmatches the spec.
+
+## Test PRs: prove the tests can fail (negative control)
+
+Every test-only or test-adding PR must include a **fault-injection
+check (CI-enforced by the `negative-control` gate): inject a
+production fault the OLD tests miss; the new tests must go red while
+every existing test stays green.** Declare the fault branches in the
+PR body under a `Negative Control:` fenced block — the gate verifies
+the branches are test-identical to the PR and that every touched test
+FAILS on at least one of them. A touched test that fails in its own
+LAST touching commit is its own negative control (the test-first RED
+commit satisfies the gate without branches).
+
+Test files = anything under a `tests/` directory:
+- `<crate>/tests/<name>.rs` runs as `cargo test -p <crate> --test <name>`
+- `tests/regression/**.js` runs via `cargo run -p vm --example regression -- <file>`
+
+Rules: a declared branch must be test-identical to the PR head (any
+test diff rejects); a missing branch or a non-building branch rejects
+(a broken control proves nothing); deletions are exempt; no
+declaration + uncaught touched tests rejects.
