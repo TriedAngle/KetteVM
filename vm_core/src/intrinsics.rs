@@ -57,19 +57,11 @@ pub fn array_length_set<'a>(
         let value = scope.handle(value);
         // ToUint32 and ToNumber each coerce the value (an object runs
         // valueOf twice); unequal results are an invalid length
-        let new_len = match Object::to_numeric(vm, heap, state, value) {
-            Ok(Some(n)) => Convert::number_to_uint32(n),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let number_len = match Object::to_numeric(vm, heap, state, value) {
+        let new_len = match Object::anything_to_array_length(vm, heap, state, value) {
             Ok(Some(n)) => n,
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        if number_len != new_len as f64 {
-            return raise_runtime(vm, heap, state, VmError::Overflow);
-        }
         // the descriptor is read after the coercions (re-entrant code may
         // have redefined it); a non-writable length refuses a different value
         let length_name = vm.known().strings.length.get(heap);
@@ -288,7 +280,7 @@ pub fn create_global_var_binding(
     }
     let key = scope.handle(name.as_tagged(heap).as_name());
     let value = heap.known().undefined.get_handle(heap, scope).erase();
-    if Object::define_own_property(
+    if Object::define_own_property_ordinary(
         heap,
         scope,
         global,
@@ -332,7 +324,7 @@ pub fn create_global_function_binding(
         },
     };
     let key = scope.handle(name.as_tagged(heap).as_name());
-    if Object::define_own_property(heap, scope, global, key, desc)? {
+    if Object::define_own_property_ordinary(heap, scope, global, key, desc)? {
         Ok(())
     } else {
         Err(VmError::Type)

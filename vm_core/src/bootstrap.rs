@@ -775,7 +775,7 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     let error_name = known.strings.error.get_handle(heap, &scope);
     let empty = known.strings.empty.get_handle(heap, &scope);
     for (key, value) in [(name_key, error_name.erase()), (message_key, empty.erase())] {
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             heap,
             &scope,
             error_prototype,

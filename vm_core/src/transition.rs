@@ -668,18 +668,21 @@ impl Transition {
                 }
             }
         } else if !cur_is_data && desc.is_accessor_descriptor() {
-            let is_absent = |h: Option<Handle<'_, Value>>| {
-                h.is_none_or(|h| h.as_tagged(heap).ptr_eq(undefined))
-            };
-            if is_absent(current.get)
-                && let Some(g) = desc.get
-                && !g.as_tagged(heap).ptr_eq(undefined)
+            if let Some(g) = desc.get
+                && !Compare::same_value(
+                    heap,
+                    g.as_tagged(heap),
+                    current.get.map_or(undefined, |h| h.as_tagged(heap)),
+                )
             {
                 return false;
             }
-            if is_absent(current.set)
-                && let Some(s) = desc.set
-                && !s.as_tagged(heap).ptr_eq(undefined)
+            if let Some(s) = desc.set
+                && !Compare::same_value(
+                    heap,
+                    s.as_tagged(heap),
+                    current.set.map_or(undefined, |h| h.as_tagged(heap)),
+                )
             {
                 return false;
             }
@@ -730,6 +733,24 @@ impl<'s> PropertyDescriptor<'s> {
             enumerable: false,
             configurable: true,
         }
+    }
+
+    pub const fn is_data_descriptor(&self) -> bool {
+        matches!(self, Self::Data { .. })
+    }
+
+    pub const fn is_accessor_descriptor(&self) -> bool {
+        matches!(self, Self::Accessor { .. })
+    }
+
+    pub const fn is_configurable(&self) -> bool {
+        match self {
+            Self::Data { configurable, .. } | Self::Accessor { configurable, .. } => *configurable,
+        }
+    }
+
+    pub const fn is_writable(&self) -> bool {
+        matches!(self, Self::Data { writable: true, .. })
     }
 
     pub const fn flags(self) -> SlotFlags {

@@ -113,7 +113,7 @@ pub fn proxy_revocable<'a>(
             enumerable: false,
             configurable: true,
         };
-        let _ = Object::define_own_property(heap, &scope, bound, name_key, builtin_attrs);
+        let _ = Object::define_own_property_ordinary(heap, &scope, bound, name_key, builtin_attrs);
         let length_key = vm.known().strings.length.get_handle(heap, &scope);
         let zero: Handle<'_, Value> = scope.handle(Smi::new(0));
         let length_attrs = PropertyDescriptor::Data {
@@ -122,7 +122,7 @@ pub fn proxy_revocable<'a>(
             enumerable: false,
             configurable: true,
         };
-        let _ = Object::define_own_property(heap, &scope, bound, length_key, length_attrs);
+        let _ = Object::define_own_property_ordinary(heap, &scope, bound, length_key, length_attrs);
         let revoke = bound.as_tagged(heap).erase();
         let revoke = scope.handle(revoke);
         let map = vm.known().object_initial_map.get_handle(heap, &scope);
@@ -130,7 +130,7 @@ pub fn proxy_revocable<'a>(
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
         let proxy_name = known.strings.proxy.get_handle(heap, &scope);
-        let _ = Object::define_own_property(
+        let _ = Object::define_own_property_ordinary(
             heap,
             &scope,
             obj,
@@ -138,7 +138,7 @@ pub fn proxy_revocable<'a>(
             PropertyDescriptor::data(proxy.erase()),
         );
         let revoke_name = known.strings.revoke.get_handle(heap, &scope);
-        let _ = Object::define_own_property(
+        let _ = Object::define_own_property_ordinary(
             heap,
             &scope,
             obj,

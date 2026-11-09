@@ -13,17 +13,20 @@ pub enum Hit<'h> {
     /// Named data property in a map descriptor.
     Data {
         holder: Tagged<'h, Object>,
+        index: usize,
         offset: usize,
         value: Tagged<'h, Value>,
         flags: SlotFlags,
     },
     Accessor {
         holder: Tagged<'h, Object>,
+        index: usize,
         pair: Tagged<'h, AccessorPair>,
         flags: SlotFlags,
     },
     NativeAccessor {
         holder: Tagged<'h, Object>,
+        index: usize,
         info: Tagged<'h, AccessorInfo>,
         flags: SlotFlags,
     },
@@ -182,6 +185,7 @@ impl<'s> Lookup<'s> {
                         .expect("accessor dictionary entry holds a pair");
                     return Some(Hit::Accessor {
                         holder: o,
+                        index: i,
                         pair,
                         flags: flags.union(SlotFlags::ACCESSOR),
                     });
@@ -206,7 +210,7 @@ impl<'s> Lookup<'s> {
             return None;
         }
 
-        for d in o.map(heap).descriptors() {
+        for (index, d) in o.map(heap).descriptors().iter().enumerate() {
             if !d.name(heap).ptr_eq(name) {
                 continue;
             }
@@ -215,12 +219,14 @@ impl<'s> Lookup<'s> {
                 if let Some(pair) = value.get_as::<AccessorPair>(heap) {
                     return Some(Hit::Accessor {
                         holder: o,
+                        index,
                         pair,
                         flags: d.flags(),
                     });
                 }
                 return Some(Hit::NativeAccessor {
                     holder: o,
+                    index,
                     info: value
                         .get_as::<AccessorInfo>(heap)
                         .expect("accessor descriptor holds a pair or accessor info"),
@@ -230,6 +236,7 @@ impl<'s> Lookup<'s> {
             let offset = d.offset();
             return Some(Hit::Data {
                 holder: o,
+                index,
                 offset,
                 value: o.slot(heap, offset).get(heap),
                 flags: d.flags(),

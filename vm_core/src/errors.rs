@@ -67,7 +67,7 @@ impl Errors {
                     None => return Ok(None),
                 };
                 let message_key = known.strings.message.get_handle(heap, &scope);
-                Object::define_own_property(
+                Object::define_own_property_ordinary(
                     heap,
                     &scope,
                     object,
@@ -97,7 +97,7 @@ impl Errors {
                         Coercion::Threw => return Ok(None),
                         Coercion::Value(cause) => scope.handle(cause),
                     };
-                    Object::define_own_property(
+                    Object::define_own_property_ordinary(
                         heap,
                         &scope,
                         object,

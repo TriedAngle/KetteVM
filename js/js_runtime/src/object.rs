@@ -7,9 +7,10 @@ use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind, Object,
-    PropertyDescriptor, Prototype, ProxyObject, SlotName, Smi, StringOwn, Tagged, ThreadState, VM,
-    Value, VmError, WellKnown, WrapperKind,
+    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind,
+    MaybeOwnProperty, Object, PartialDescriptor, PropertyDescriptor, Prototype, ProxyObject,
+    ShouldThrow, SlotName, Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown, WrapperKind,
+    descriptor_object,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -193,8 +194,8 @@ pub fn object_get_prototype_of<'a>(
         }
         let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => exception,
+            Ok(Flow::Value(v)) => scope.handle(v),
+            Ok(Flow::Threw) => exception,
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         result.as_tagged(heap)
@@ -225,8 +226,8 @@ pub fn object_proto_get<'a>(
         }
         let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => exception,
+            Ok(Flow::Value(v)) => scope.handle(v),
+            Ok(Flow::Threw) => exception,
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         result.as_tagged(heap)
@@ -380,40 +381,18 @@ fn own_property(
     state: &ThreadState,
     scope: &HandleScope<'_>,
     receiver: Handle<'_, Value>,
-    key: Handle<'_, SlotName>,
-    key_value: Handle<'_, Value>,
+    key: Handle<'_, Value>,
 ) -> Result<OwnProperty, VmError> {
-    if let Some(s) = DenseString::from_receiver(heap, receiver.as_tagged(heap))
-        && let Some(own) = s.as_ref().own_key(heap, key.as_tagged(heap))
-    {
-        return Ok(match own {
-            StringOwn::Index(_) => OwnProperty::Found { enumerable: true },
-            StringOwn::Length(_) => OwnProperty::Found { enumerable: false },
-        });
-    }
-    if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
-        return Ok(
-            match Proxy::own_descriptor(vm, heap, state, scope, receiver, key_value)? {
-                Flow::Threw => OwnProperty::Threw,
-                Flow::Value(Some(desc)) => OwnProperty::Found {
-                    enumerable: desc.enumerable == Some(true),
-                },
-                Flow::Value(None) => OwnProperty::Missing,
-            },
-        );
-    }
     Ok(
-        match Object::ordinary_own_descriptor(
-            heap,
-            scope,
-            receiver.as_tagged(heap),
-            key_value.as_tagged(heap),
-        ) {
-            Some(PropertyDescriptor::Data { enumerable, .. })
-            | Some(PropertyDescriptor::Accessor { enumerable, .. }) => {
-                OwnProperty::Found { enumerable }
-            }
-            None => OwnProperty::Missing,
+        match Object::get_own_property(vm, heap, state, scope, receiver, key)? {
+            MaybeOwnProperty::Threw => OwnProperty::Threw,
+            MaybeOwnProperty::Found(own) => OwnProperty::Found {
+                enumerable: match own.desc {
+                    PropertyDescriptor::Data { enumerable, .. }
+                    | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+                },
+            },
+            MaybeOwnProperty::Missing => OwnProperty::Missing,
         },
     )
 }
@@ -448,7 +427,7 @@ pub fn object_has_own_property<'a>(
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         let key_value = scope.handle(key.as_tagged(heap).erase());
-        match own_property(vm, heap, state, &scope, receiver, key, key_value) {
+        match own_property(vm, heap, state, &scope, receiver, key_value) {
             Ok(OwnProperty::Found { .. }) => Convert::boolean(heap, true),
             Ok(OwnProperty::Missing) => Convert::boolean(heap, false),
             Ok(OwnProperty::Threw) => vm.known().exception.get(heap).erase(),
@@ -486,7 +465,7 @@ pub fn object_property_is_enumerable<'a>(
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         let key_value = scope.handle(key.as_tagged(heap).erase());
-        match own_property(vm, heap, state, &scope, receiver, key, key_value) {
+        match own_property(vm, heap, state, &scope, receiver, key_value) {
             Ok(OwnProperty::Found { enumerable }) => Convert::boolean(heap, enumerable),
             Ok(OwnProperty::Missing) => Convert::boolean(heap, false),
             Ok(OwnProperty::Threw) => vm.known().exception.get(heap).erase(),
@@ -516,30 +495,8 @@ pub fn object_get_own_property_names<'a>(
     })
 }
 
-/// Build a plain `{ key: value, ... }` object from static field names.
-pub fn plain_object<'a>(
-    vm: &'a VM,
-    heap: &'a mut Heap,
-    state: &'a ThreadState,
-    fields: &[(&'static str, Handle<'_, Value>)],
-) -> Result<Tagged<'a, Value>, VmError> {
-    state.handle_scope(|scope| {
-        let map = vm.known().object_initial_map.get_handle(heap, &scope);
-        let obj = heap
-            .new_object(&scope, map, HandleSlice::EMPTY)
-            .as_handle(&scope);
-        for (name, value) in fields {
-            let name = vm.interner().intern_str(heap, &scope, name);
-            let name = scope.handle(name.as_tagged(heap));
-            Object::define_own_property(heap, &scope, obj, name, PropertyDescriptor::data(*value))?;
-        }
-        Ok(obj.as_tagged(heap).erase())
-    })
-}
-
-/// `Object.getOwnPropertyDescriptor(O, P)` (ES 20.1.2.5): the shared
-/// raw descriptor reader (`ordinary_own_descriptor`) converted
-/// to a descriptor object via FromPropertyDescriptor semantics.
+/// `Object.getOwnPropertyDescriptor(O, P)` (ES 20.1.2.5): [[GetOwnProperty]]
+/// converted with FromPropertyDescriptor.
 pub fn object_get_own_property_descriptor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -565,67 +522,26 @@ pub fn object_get_own_property_descriptor<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        // String exotic own keys (`length`, in-range indices) take
-        // precedence; a String wrapper may also carry ordinary own
-        // descriptors, so fall through when the key is neither.
-        let desc = DenseString::own_descriptor(heap, &scope, target, key.erase()).or_else(|| {
-            Object::ordinary_own_descriptor(
-                heap,
-                &scope,
-                target.as_tagged(heap),
-                key.as_tagged(heap).erase(),
-            )
-        });
-        // root the oddball singletons once for the descriptor fields
-        let true_v = vm.known().true_object.get_handle(heap, &scope).erase();
-        let false_v = vm.known().false_object.get_handle(heap, &scope).erase();
-        let bool_ = |b| if b { true_v } else { false_v };
-        match desc {
-            Some(PropertyDescriptor::Data {
-                value,
-                writable,
-                enumerable,
-                configurable,
-            }) => match plain_object(
-                vm,
-                heap,
-                state,
-                &[
-                    ("value", value),
-                    ("writable", bool_(writable)),
-                    ("enumerable", bool_(enumerable)),
-                    ("configurable", bool_(configurable)),
-                ],
-            ) {
-                Ok(v) => scope.handle(v),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            }
-            .as_tagged(heap),
-            Some(PropertyDescriptor::Accessor {
-                get,
-                set,
-                enumerable,
-                configurable,
-            }) => match plain_object(
-                vm,
-                heap,
-                state,
-                &[
-                    ("get", get),
-                    ("set", set),
-                    ("enumerable", bool_(enumerable)),
-                    ("configurable", bool_(configurable)),
-                ],
-            ) {
-                Ok(v) => scope.handle(v),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            }
-            .as_tagged(heap),
-            None => vm.known().undefined.get(heap).erase(),
+        let key_value = scope.handle(key.as_tagged(heap).erase());
+        let own = match Object::get_own_property(vm, heap, state, &scope, target, key_value) {
+            Ok(own) => own,
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let own = match own {
+            MaybeOwnProperty::Threw => return vm.known().exception.get(heap).erase(),
+            MaybeOwnProperty::Missing => return vm.known().undefined.get(heap).erase(),
+            MaybeOwnProperty::Found(own) => own,
+        };
+        let partial = PartialDescriptor::from(&own.desc);
+        match descriptor_object(heap, &scope, &partial) {
+            Ok(v) => v.as_tagged(heap),
+            Err(err) => raise_runtime(vm, heap, state, err),
         }
     })
 }
 
+// TODO: implement Object.defineProperties (ES 20.1.2.3) and
+// Reflect.defineProperty (ES 28.1.3.3) on top of Object::define_property.
 /// `Object.defineProperty(O, P, Attributes)` (ES 20.1.2.4):
 /// ToPropertyDescriptor + [[DefineOwnProperty]] (through the
 /// `defineProperty` trap for proxy receivers, ES 20.2.5.6).
@@ -638,41 +554,24 @@ pub fn object_define_property<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        // root the target, key, and descriptor: the key coercion and the
-        // descriptor conversion below allocate (user getters run), which
-        // would leave raw copies stale
-        let target = args.get(heap, 1);
-        let target = scope.handle(target);
-        let attrs = args.get(heap, 3);
-        let attrs = scope.handle(attrs);
-        let raw_key = args.get(heap, 2);
-        let raw_key = scope.handle(raw_key);
-        let Some(key) = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::to_property_key(vm, heap, state, raw_key)
-        ) else {
-            return vm.known().exception.get(heap).erase();
-        };
-        // root the name: the tagged result anchors the `&mut` borrow
-        let key = scope.handle(key);
-        // shared ToPropertyDescriptor; proxies and ordinary targets both
-        // complete/validate inside define_own_property
-        let partial = match rt_try!(
-            vm,
-            heap,
-            state,
-            Object::to_property_descriptor(vm, heap, state, &scope, attrs)
-        ) {
-            Some(partial) => partial,
-            None => return vm.known().exception.get(heap).erase(),
-        };
+        // root the target, key, and descriptor across the conversions below
+        let target = scope.handle(args.get(heap, 1));
+        let key = scope.handle(args.get(heap, 2));
+        let attrs = scope.handle(args.get(heap, 3));
         match rt_try!(
             vm,
             heap,
             state,
-            Proxy::define_own_property(vm, heap, state, &scope, target, key.erase(), partial)
+            Object::define_property(
+                vm,
+                heap,
+                state,
+                &scope,
+                target,
+                key,
+                attrs,
+                ShouldThrow::Throw,
+            )
         ) {
             Flow::Threw => vm.known().exception.get(heap).erase(),
             Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
@@ -765,15 +664,13 @@ pub fn object_prevent_extensions<'a>(
             state,
             Proxy::prevent_extensions(vm, heap, state, target)
         ) {
-            Coercion::Threw => None,
-            Coercion::Value(v) => Some(v),
+            Flow::Threw => None,
+            Flow::Value(v) => Some(v),
         };
         let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(v);
-        let cond_39 = v.as_tagged(heap).is_truthy(heap);
-        if !cond_39 {
+        if !v {
             raise_runtime(vm, heap, state, VmError::NotExtensible)
         } else {
             // re-read through the handle: the trap above ran user
@@ -814,7 +711,7 @@ pub fn object_is_extensible<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|scope| {
+    state.handle_scope(|_scope| {
         let target = args.get_handle(heap, 1);
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
             return Convert::boolean(heap, false);
@@ -825,13 +722,13 @@ pub fn object_is_extensible<'a>(
             state,
             Proxy::object_is_extensible(vm, heap, state, target)
         ) {
-            Coercion::Threw => None,
-            Coercion::Value(v) => Some(scope.handle(v)),
+            Flow::Threw => None,
+            Flow::Value(v) => Some(v),
         };
         let Some(v) = extensible else {
             return vm.known().exception.get(heap).erase();
         };
-        v.as_tagged(heap).erase()
+        Convert::boolean(heap, v)
     })
 }
 
@@ -929,15 +826,13 @@ pub fn object_seal<'a>(
             state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
         ) {
-            Coercion::Threw => None,
-            Coercion::Value(v) => Some(v),
+            Flow::Threw => None,
+            Flow::Value(v) => Some(v),
         };
         let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(v);
-        let cond_42 = v.as_tagged(heap).is_truthy(heap);
-        if !cond_42 {
+        if !v {
             return raise_runtime(vm, heap, state, VmError::NotExtensible);
         }
         // TODO: per-key [[DefineOwnProperty]] through the defineProperty
@@ -981,15 +876,13 @@ pub fn object_freeze<'a>(
             state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
         ) {
-            Coercion::Threw => None,
-            Coercion::Value(v) => Some(v),
+            Flow::Threw => None,
+            Flow::Value(v) => Some(v),
         };
         let Some(v) = v else {
             return vm.known().exception.get(heap).erase();
         };
-        let v = scope.handle(v);
-        let cond_45 = v.as_tagged(heap).is_truthy(heap);
-        if !cond_45 {
+        if !v {
             return raise_runtime(vm, heap, state, VmError::NotExtensible);
         }
         // re-read through the handle: the trap may have moved the receiver

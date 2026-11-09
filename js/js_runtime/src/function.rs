@@ -114,12 +114,14 @@ pub fn function_to_string<'a>(
     // get the implementation-defined NativeFunction form.
     state.handle_scope(|scope| {
         let name_key = vm.known().strings.name.get_handle(heap, &scope);
-        let name = match Object::ordinary_own_descriptor(
+        let name = match Object::own_property_ordinary(
             heap,
             &scope,
-            function.as_tagged(heap),
-            name_key.as_tagged(heap).erase(),
-        ) {
+            function,
+            scope.handle(name_key.as_tagged(heap).erase()),
+        )
+        .map(|own| own.desc)
+        {
             Some(PropertyDescriptor::Data { value, .. }) => value
                 .as_tagged(heap)
                 .get_as::<DenseString>(heap)
@@ -327,12 +329,13 @@ fn copy_bound_name_and_length<'a>(
     let mut length = 0.0;
     // TODO: HasOwnProperty must run the getOwnPropertyDescriptor trap when the
     // target is a proxy; this reads its ordinary own descriptor instead.
-    let has_length = Object::ordinary_own_descriptor(
+    let has_length = Object::own_property_ordinary(
         heap,
         scope,
-        target.as_tagged(heap),
-        length_key.as_tagged(heap).erase(),
+        target,
+        scope.handle(length_key.as_tagged(heap).erase()),
     )
+    .map(|own| own.desc)
     .is_some();
     if has_length {
         let target_length = match Object::get_property(
@@ -357,7 +360,7 @@ fn copy_bound_name_and_length<'a>(
         }
     }
     let length_value = scope.handle(heap.new_number(length));
-    if let Err(err) = Object::define_own_property(
+    if let Err(err) = Object::define_own_property_ordinary(
         heap,
         scope,
         bound_object,
@@ -379,7 +382,7 @@ fn copy_bound_name_and_length<'a>(
         None => "bound ".to_string(),
     };
     let name = DenseString::from_utf8(heap, scope, &name);
-    if let Err(err) = Object::define_own_property(
+    if let Err(err) = Object::define_own_property_ordinary(
         heap,
         scope,
         bound_object,

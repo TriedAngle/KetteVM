@@ -74,7 +74,7 @@ impl KetteTools {
             let method = Object::native_function(heap, scope, index)?;
             let name_str = interner.intern_str(heap, scope, name);
             let method_name = scope.handle(name_str.as_tagged(heap));
-            Object::define_own_property(
+            Object::define_own_property_ordinary(
                 heap,
                 scope,
                 tools,
@@ -85,7 +85,7 @@ impl KetteTools {
 
         let name_str = interner.intern_str(heap, scope, "KetteTools");
         let name = scope.handle(name_str.as_tagged(heap));
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             heap,
             scope,
             global,

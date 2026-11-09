@@ -5,7 +5,7 @@ use handler_derive::handler_match as handler;
 
 use bytecode::Opcode;
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
-use vm_core::proxy::Proxy;
+use vm_core::proxy::{Flow, Proxy};
 use vm_core::{
     AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
     Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
@@ -217,13 +217,13 @@ pub fn incdec_body<'a>(
 /// Map a `[[Set]]` outcome to the IC outcome kind. Strict-mode
 /// rejections raise inside `Object::set_property`, so `Flow::Threw`
 /// means a pending exception.
-fn set_outcome_kind(applied: vm_core::proxy::Flow<SetApplied>) -> Result<StoreOutcomeKind, ()> {
+fn set_outcome_kind(applied: Flow<SetApplied>) -> Result<StoreOutcomeKind, ()> {
     match applied {
-        vm_core::proxy::Flow::Threw => Err(()),
-        vm_core::proxy::Flow::Value(SetApplied::Rejected) => Ok(StoreOutcomeKind::Done),
-        vm_core::proxy::Flow::Value(SetApplied::Done) => Ok(StoreOutcomeKind::Done),
-        vm_core::proxy::Flow::Value(SetApplied::Transition) => Ok(StoreOutcomeKind::Transition),
-        vm_core::proxy::Flow::Value(SetApplied::CallSetter) => Ok(StoreOutcomeKind::CallSetter),
+        Flow::Threw => Err(()),
+        Flow::Value(SetApplied::Rejected) => Ok(StoreOutcomeKind::Done),
+        Flow::Value(SetApplied::Done) => Ok(StoreOutcomeKind::Done),
+        Flow::Value(SetApplied::Transition) => Ok(StoreOutcomeKind::Transition),
+        Flow::Value(SetApplied::CallSetter) => Ok(StoreOutcomeKind::CallSetter),
     }
 }
 
@@ -1369,13 +1369,6 @@ pub fn slow_store_named(frame: Frame) {
                 .as_name(),
         );
 
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
-                Ok(Coercion::Threw) => roots.exception.get(heap).erase(),
-                Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => raise_runtime(vm, heap, state, e),
-            };
-        }
         cached_store!(
             vm, heap, state, roots, &scope, base, fb_slot, recv, name, value, mode
         );
@@ -1555,8 +1548,8 @@ pub fn slow_construct(frame: Frame) {
         let args = state.stack().args(base, args_base, count);
         if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
             return match Proxy::construct(vm, heap, state, callee, args, callee) {
-                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Coercion::Value(v)) => Acc::set(v),
+                Ok(Flow::Threw) => Acc::set(roots.exception.get(heap).erase()),
+                Ok(Flow::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }

@@ -753,18 +753,21 @@ impl Object {
         if let Some(dict) = receiver.as_tagged(heap).element_dictionary(heap) {
             let old_len = receiver.as_tagged(heap).length();
             if new_len < old_len {
-                let mut effective = new_len;
-                let mut doomed: Vec<usize> = Vec::new();
+                let mut doomed: Vec<(usize, i64)> = Vec::new();
                 dict.as_ref().for_each_entry(heap, |k, _, details| {
                     if k >= new_len {
-                        if details & DETAILS_CONFIGURABLE == 0 {
-                            effective = effective.max(k + 1);
-                        } else {
-                            doomed.push(k);
-                        }
+                        doomed.push((k, details));
                     }
                 });
-                for k in doomed {
+                doomed.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                let mut effective = new_len;
+                let mut blocked = false;
+                for (k, details) in doomed {
+                    if details & DETAILS_CONFIGURABLE == 0 {
+                        effective = k + 1;
+                        blocked = true;
+                        break;
+                    }
                     dict.as_ref().delete(heap, k);
                 }
                 Prototype::element_mutated(heap, receiver.as_tagged(heap));
@@ -772,7 +775,7 @@ impl Object {
                 obj.as_ref()
                     .length
                     .set(heap, obj.erase(), Smi::new(effective as i64));
-                return Ok(effective == new_len);
+                return Ok(!blocked);
             }
             let obj = receiver.as_tagged(heap);
             obj.as_ref()
@@ -1030,7 +1033,7 @@ impl Object {
 
         let length_key = heap.known().strings.length.get_handle(heap, scope);
         let name_key = heap.known().strings.name.get_handle(heap, scope);
-        if !Object::define_own_property(
+        if !Object::define_own_property_ordinary(
             heap,
             scope,
             function,
@@ -1044,7 +1047,7 @@ impl Object {
         )? {
             return Err(VmError::Type);
         }
-        if !Object::define_own_property(
+        if !Object::define_own_property_ordinary(
             heap,
             scope,
             function,
@@ -1066,7 +1069,7 @@ impl Object {
                 .as_handle(scope);
             let constructor = heap.known().strings.constructor.get_handle(heap, scope);
             let prototype = heap.known().strings.prototype.get_handle(heap, scope);
-            if !Object::define_own_property(
+            if !Object::define_own_property_ordinary(
                 heap,
                 scope,
                 proto,
@@ -1080,7 +1083,7 @@ impl Object {
             )? {
                 return Err(VmError::Type);
             }
-            if !Object::define_own_property(
+            if !Object::define_own_property_ordinary(
                 heap,
                 scope,
                 function,
@@ -1257,8 +1260,6 @@ impl Object {
         state: &ThreadState,
         v: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, SlotName>>, VmError> {
-        // canonical indices keep the Smi spelling; Smis are
-        // pointer-free, valid at any lifetime, no rooting needed
         if let Ok(Key::Element(i)) = v.as_tagged(heap).classify_key(heap) {
             return Ok(Some(Tagged::from(Smi::new(i as i64))));
         }

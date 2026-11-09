@@ -2,8 +2,7 @@ use vm_core::HostCtx;
 use vm_core::proxy::Flow;
 use vm_core::{
     Args, Coercion, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap,
-    LanguageMode, Object, PropertyDescriptor, Prototype, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError,
+    LanguageMode, Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -1048,15 +1047,19 @@ pub fn array_slice<'a>(
                 Ok(None) => return vm.known().exception.get(heap).erase(),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             };
-            match Object::define_own_property(
+            let result_value = scope.handle(result.as_tagged(heap).erase());
+            let key_value = scope.handle(to_key.as_tagged(heap).erase());
+            match Object::create_data_property_or_throw(
+                vm,
                 heap,
+                state,
                 &scope,
-                result,
-                to_key,
-                PropertyDescriptor::data(value),
+                result_value,
+                key_value,
+                value,
             ) {
-                Ok(true) => {}
-                Ok(false) => return raise_runtime(vm, heap, state, VmError::Type),
+                Ok(Flow::Value(_)) => {}
+                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }
         }

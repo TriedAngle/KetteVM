@@ -153,7 +153,7 @@ impl Object {
         // proto.constructor = fn; fn.prototype = proto
         // (built-in methods/constructor properties are non-enumerable, ES 20+)
         let constructor_name = heap.known().strings.constructor.get_handle(heap, scope);
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             heap,
             scope,
             proto,
@@ -161,7 +161,7 @@ impl Object {
             PropertyDescriptor::method(fn_obj.erase()),
         )?;
         let prototype_name = heap.known().strings.prototype.get_handle(heap, scope);
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             thread.heap(),
             scope,
             fn_obj,
@@ -181,7 +181,7 @@ impl Object {
         };
         // Safety: fresh interned word, rooted below before any allocation.
         let name = scope.handle(name_str.as_tagged(thread.heap()));
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             thread.heap(),
             scope,
             global,
@@ -207,7 +207,7 @@ impl Object {
             .strings
             .name
             .get_handle(thread.heap(), scope);
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             thread.heap(),
             scope,
             function,
@@ -226,10 +226,9 @@ impl Object {
     ) -> Result<(), VmError> {
         let method = Self::native_function(thread.heap(), scope, index)?;
         let name_str = thread.intern(scope, name);
-        // Safety: fresh interned word, rooted below before any allocation.
         let method_name = scope.handle(name_str.as_tagged(thread.heap()));
         Self::set_builtin_name(thread, scope, method, name)?;
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             thread.heap(),
             scope,
             receiver,

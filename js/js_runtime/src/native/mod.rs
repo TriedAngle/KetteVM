@@ -338,19 +338,24 @@ fn copy_data_properties<'a>(
                 Coercion::Value(v) => scope.handle(v),
             };
             // CreateDataPropertyOrThrow
-            if !rt_try!(
+            let target_value = scope.handle(target.as_tagged(heap).erase());
+            let name_value = scope.handle(name.as_tagged(heap).erase());
+            match rt_try!(
                 vm,
                 heap,
                 state,
-                Object::define_own_property(
+                Object::create_data_property_or_throw(
+                    vm,
                     heap,
+                    state,
                     &scope,
-                    target,
-                    name,
-                    PropertyDescriptor::data(value)
+                    target_value,
+                    name_value,
+                    value
                 )
             ) {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                Flow::Threw => return vm.known().exception.get(heap).erase(),
+                Flow::Value(_) => {}
             }
         }
         target.as_tagged(heap).erase()
@@ -531,28 +536,17 @@ fn init_instance_fields<'a>(
             if value.as_tagged(heap).ptr_eq(vm.known().exception.get(heap)) {
                 return vm.known().exception.get(heap).erase();
             }
-            let instance_obj = scope
-                .cast::<Object>(heap, instance.as_tagged(heap))
-                .expect("class instance is an object");
-            let defined = rt_try!(
+            let key_value = scope.handle(key.as_tagged(heap).erase());
+            match rt_try!(
                 vm,
                 heap,
                 state,
-                Object::define_own_property(
-                    heap,
-                    &scope,
-                    instance_obj,
-                    key,
-                    PropertyDescriptor::Data {
-                        value,
-                        writable: true,
-                        enumerable: true,
-                        configurable: true,
-                    },
+                Object::create_data_property_or_throw(
+                    vm, heap, state, &scope, instance, key_value, value
                 )
-            );
-            if !defined {
-                return raise_runtime(vm, heap, state, VmError::Type);
+            ) {
+                Flow::Threw => return vm.known().exception.get(heap).erase(),
+                Flow::Value(_) => {}
             }
             i += 2;
         }
@@ -763,12 +757,15 @@ fn set_function_name<'a>(
         let name_key = vm.known().strings.name.get_handle(heap, &scope);
         // the closure's own placeholder is never writable nor an accessor,
         // so only explicit member defines match here
-        let explicit = match Object::ordinary_own_descriptor(
+        let fn_value = scope.handle(fn_obj.as_tagged(heap).erase());
+        let explicit = match Object::own_property_ordinary(
             heap,
             &scope,
-            fn_obj.as_tagged(heap).erase(),
-            name_key.as_tagged(heap).erase(),
-        ) {
+            fn_value,
+            scope.handle(name_key.as_tagged(heap).erase()),
+        )
+        .map(|own| own.desc)
+        {
             Some(PropertyDescriptor::Data { writable, .. }) => writable,
             Some(PropertyDescriptor::Accessor { .. }) => true,
             None => false,
@@ -780,7 +777,7 @@ fn set_function_name<'a>(
                 vm,
                 heap,
                 state,
-                Object::define_own_property(
+                Object::define_own_property_ordinary(
                     heap,
                     &scope,
                     fn_obj,
@@ -844,19 +841,15 @@ fn install_accessor<'a>(
             configurable: Some(true),
             ..PartialDescriptor::default()
         };
-        let defined = match rt_try!(
+        match rt_try!(
             vm,
             heap,
             state,
-            Proxy::define_own_property(vm, heap, state, &scope, target, key.erase(), partial)
+            Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
         ) {
-            Flow::Value(defined) => defined,
-            Flow::Threw => return vm.known().exception.get(heap).erase(),
-        };
-        if !defined {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            Flow::Threw => vm.known().exception.get(heap).erase(),
+            Flow::Value(_) => closure.as_tagged(heap),
         }
-        closure.as_tagged(heap)
     })
 }
 
@@ -889,66 +882,13 @@ fn define_own_property<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        // proxies run their `defineProperty` trap (ES 20.2.5.6); define
-        // sites are strict-mode: a rejected define throws
-        if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
-            let enumerable = flags & bytecode::PropertyFlags::DontEnum.bits() == 0;
-            let configurable = flags & bytecode::PropertyFlags::DontDelete.bits() == 0;
-            let partial = if flags & bytecode::PropertyFlags::Accessor.bits() != 0 {
-                let pair = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    value
-                        .as_tagged(heap)
-                        .get_as::<AccessorPair>(heap)
-                        .ok_or(VmError::Type)
-                );
-                PartialDescriptor {
-                    value: None,
-                    get: Some(scope.handle(pair.get.get(heap))),
-                    set: Some(scope.handle(pair.set.get(heap))),
-                    writable: None,
-                    enumerable: Some(enumerable),
-                    configurable: Some(configurable),
-                }
-            } else {
-                PartialDescriptor {
-                    value: Some(scope.handle(value.as_tagged(heap))),
-                    get: None,
-                    set: None,
-                    writable: Some(flags & bytecode::PropertyFlags::ReadOnly.bits() == 0),
-                    enumerable: Some(enumerable),
-                    configurable: Some(configurable),
-                }
-            };
-            return match rt_try!(
-                vm,
-                heap,
-                state,
-                Proxy::define_own_property(vm, heap, state, &scope, receiver, key.erase(), partial,)
-            ) {
-                Flow::Threw => vm.known().exception.get(heap).erase(),
-                Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
-                Flow::Value(true) => receiver.as_tagged(heap),
-            };
-        }
         // Type(O) must be Object (ES 20.1.2.4 [[DefineOwnProperty]])
         if receiver.as_tagged(heap).is_primitive(heap) {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
-        let name = match rt_try!(
-            vm,
-            heap,
-            state,
-            key.as_tagged(heap).erase().classify_key(heap)
-        ) {
-            Key::Element(i) => Tagged::from(Smi::new(i as i64)),
-            Key::Name(name) => name,
-        };
         let enumerable = flags & bytecode::PropertyFlags::DontEnum.bits() == 0;
         let configurable = flags & bytecode::PropertyFlags::DontDelete.bits() == 0;
-        let desc = if flags & bytecode::PropertyFlags::Accessor.bits() != 0 {
+        let partial = if flags & bytecode::PropertyFlags::Accessor.bits() != 0 {
             let pair = rt_try!(
                 vm,
                 heap,
@@ -958,34 +898,41 @@ fn define_own_property<'a>(
                     .get_as::<AccessorPair>(heap)
                     .ok_or(VmError::Type)
             );
-            PropertyDescriptor::Accessor {
-                get: scope.handle(pair.get.get(heap)),
-                set: scope.handle(pair.set.get(heap)),
-                enumerable,
-                configurable,
+            PartialDescriptor {
+                value: None,
+                get: Some(scope.handle(pair.get.get(heap))),
+                set: Some(scope.handle(pair.set.get(heap))),
+                writable: None,
+                enumerable: Some(enumerable),
+                configurable: Some(configurable),
             }
         } else {
-            PropertyDescriptor::Data {
-                value: scope.handle(value.as_tagged(heap)),
-                writable: flags & bytecode::PropertyFlags::ReadOnly.bits() == 0,
-                enumerable,
-                configurable,
+            PartialDescriptor {
+                value: Some(scope.handle(value.as_tagged(heap))),
+                get: None,
+                set: None,
+                writable: Some(flags & bytecode::PropertyFlags::ReadOnly.bits() == 0),
+                enumerable: Some(enumerable),
+                configurable: Some(configurable),
             }
         };
-        let name = scope.handle(name);
-        let receiver_obj = scope
-            .cast::<Object>(heap, receiver.as_tagged(heap))
-            .expect("checked object above");
-        let defined = rt_try!(
+        match rt_try!(
             vm,
             heap,
             state,
-            Object::define_own_property(heap, &scope, receiver_obj, name, desc)
-        );
-        if !defined {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            Object::define_property_or_throw(
+                vm,
+                heap,
+                state,
+                &scope,
+                receiver,
+                key.erase(),
+                partial
+            )
+        ) {
+            Flow::Threw => vm.known().exception.get(heap).erase(),
+            Flow::Value(_) => receiver.as_tagged(heap),
         }
-        receiver.as_tagged(heap)
     })
 }
 
@@ -1627,7 +1574,7 @@ fn declare_eval_binding<'a>(
                     vm,
                     heap,
                     state,
-                    Object::define_own_property(
+                    Object::define_own_property_ordinary(
                         heap,
                         &scope,
                         extension,
@@ -1691,7 +1638,13 @@ fn declare_eval_binding<'a>(
             vm,
             heap,
             state,
-            Object::define_own_property(heap, &scope, target, key, PropertyDescriptor::data(value),)
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                target,
+                key,
+                PropertyDescriptor::data(value),
+            )
         );
         if !defined {
             return raise_runtime(vm, heap, state, VmError::Type);

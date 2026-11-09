@@ -1,6 +1,6 @@
 use bytecode::Opcode;
 use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
-use vm_core::proxy::Proxy;
+use vm_core::proxy::{Flow, Proxy};
 use vm_core::{
     Acc, Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope,
     Heap, HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, WellKnown,
@@ -277,8 +277,8 @@ pub fn proxy_apply_staged(
     let v = state.handle_scope(|scope| {
         let callee = scope.handle(regs.get(callee_reg, x.heap()));
         match Proxy::apply(vm, x.heap_mut(), state, callee, staged) {
-            Ok(Coercion::Threw) => Acc::set(roots.exception.get(x.heap()).erase()),
-            Ok(Coercion::Value(v)) => Acc::set(v),
+            Ok(Flow::Threw) => Acc::set(roots.exception.get(x.heap()).erase()),
+            Ok(Flow::Value(v)) => Acc::set(v),
             Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
         }
     });

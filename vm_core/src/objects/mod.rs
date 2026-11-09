@@ -10,6 +10,7 @@ pub mod dictionary;
 pub mod feedback;
 pub mod float;
 mod helpers;
+pub mod js_array;
 pub mod map;
 pub mod object;
 pub mod prototype_info;
@@ -30,6 +31,7 @@ pub use context::{
     info_mode,
 };
 pub use data_handler::{DataHandler, DataHandlerInit};
+pub use descriptor::descriptor_object;
 pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     EntryClass, NumberDictionary, NumberDictionaryInit,

@@ -1,13 +1,12 @@
 use crate::errors::Errors;
 use crate::lookup::{Hit, Lookup};
 use crate::proxy::{Flow, Proxy};
-use crate::transition::{Transition, can_add_element};
+use crate::transition::Transition;
 use crate::{
-    AccessorInfo, AccessorPair, Change, Coercion, Compare, Convert, DETAILS_CONFIGURABLE,
-    DETAILS_ENUMERABLE, DenseString, FixedArray, Handle, HandleScope, Heap, HostCtx, Key,
-    LanguageMode, NativeIndex, Object, PartialDescriptor, PropertyDescriptor, Prototype,
-    SetApplied, SlotFlags, SlotName, Smi, StringOwn, Tagged, ThreadState, VM, Value, VmError,
-    raise_runtime,
+    AccessorInfo, Change, Coercion, Convert, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString,
+    FixedArray, Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object,
+    PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotFlags, SlotName, Smi,
+    StringOwn, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
 };
 
 /// Store semantics:
@@ -17,6 +16,45 @@ use crate::{
 pub enum StoreSemantics {
     WriteThrough,
     Shadow,
+}
+
+/// A rejected define returns false or throws TypeError.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ShouldThrow {
+    DontThrow,
+    Throw,
+}
+
+/// Storage location of an own property, for apply without a second lookup.
+pub enum OwnPropertyLocation<'s> {
+    MapSlot(usize),
+    Element(usize),
+    NativeAccessor {
+        index: usize,
+        info: Handle<'s, AccessorInfo>,
+        flags: SlotFlags,
+    },
+    Parent(usize),
+}
+
+pub struct OwnProperty<'s> {
+    pub desc: PropertyDescriptor<'s>,
+    pub location: Option<OwnPropertyLocation<'s>>,
+}
+
+pub enum MaybeOwnProperty<'s> {
+    Threw,
+    Missing,
+    Found(OwnProperty<'s>),
+}
+
+impl ShouldThrow {
+    pub fn reject(self) -> Result<Flow<bool>, VmError> {
+        match self {
+            Self::Throw => Err(VmError::Type),
+            Self::DontThrow => Ok(Flow::Value(false)),
+        }
+    }
 }
 
 impl Object {
@@ -59,7 +97,10 @@ impl Object {
                 }
                 Hit::Proxy(proxy) => {
                     let proxy = scope.handle(proxy);
-                    Proxy::get(vm, heap, state, proxy, receiver, name)
+                    match Proxy::get(vm, heap, state, proxy, receiver, name)? {
+                        Flow::Threw => Ok(Coercion::Threw),
+                        Flow::Value(v) => Ok(Coercion::Value(v)),
+                    }
                 }
                 Hit::Data { value, .. }
                 | Hit::Element { value, .. }
@@ -158,121 +199,121 @@ impl Object {
             if receiver.as_tagged(heap).is_nullish(heap) {
                 return Err(VmError::Type);
             }
-            let outcome = if !Proxy::is_js_receiver(heap, receiver.as_tagged(heap)) {
-                // Primitive receivers are not property-store targets
-                Ok(Flow::Value(SetApplied::Rejected))
-            } else {
-                let hit = {
-                    let start = scope.handle(start.as_tagged(heap).erase());
-                    let mut it = Lookup::new(heap, &scope, start, key, false);
-                    it.next(heap, &scope)
-                };
-                match hit {
-                    Hit::Proxy(proxy) => {
-                        let proxy = scope.handle(proxy);
-                        match Proxy::set(vm, heap, state, proxy, key, value, receiver)? {
-                            Coercion::Threw => Ok(Flow::Threw),
-                            Coercion::Value(v) => {
-                                let v = scope.handle(v);
-                                if v.as_tagged(heap).is_truthy(heap) {
-                                    Ok(Flow::Value(SetApplied::Done))
-                                } else {
-                                    Ok(Flow::Value(SetApplied::Rejected))
-                                }
-                            }
-                        }
+            let receiver_is_object = Proxy::is_js_receiver(heap, receiver.as_tagged(heap));
+            let hit = {
+                let start = scope.handle(start.as_tagged(heap).erase());
+                let mut it = Lookup::new(heap, &scope, start, key, false);
+                it.next(heap, &scope)
+            };
+            let outcome = match hit {
+                Hit::Proxy(proxy) => {
+                    let proxy = scope.handle(proxy);
+                    match Proxy::set(vm, heap, state, proxy, key, value, receiver)? {
+                        Flow::Threw => Ok(Flow::Threw),
+                        Flow::Value(true) => Ok(Flow::Value(SetApplied::Done)),
+                        Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
                     }
-                    Hit::StringOwn { .. } => Ok(Flow::Value(SetApplied::Rejected)),
-                    Hit::Accessor { pair, .. } => {
-                        let undefined = heap.known().undefined.get(heap).erase();
-                        let setter = scope.handle(pair.set.get(heap));
-                        if setter.as_tagged(heap) == undefined {
+                }
+                Hit::StringOwn { .. } => Ok(Flow::Value(SetApplied::Rejected)),
+                Hit::Accessor { pair, .. } => {
+                    let undefined = heap.known().undefined.get(heap).erase();
+                    let setter = scope.handle(pair.set.get(heap));
+                    if setter.as_tagged(heap) == undefined {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else {
+                        call_setter(vm, heap, state, &scope, receiver, value, setter)
+                    }
+                }
+                Hit::NativeAccessor {
+                    holder,
+                    info,
+                    flags,
+                    ..
+                } => {
+                    if !holder.erase().ptr_eq(receiver.as_tagged(heap)) {
+                        if !receiver_is_object {
                             Ok(Flow::Value(SetApplied::Rejected))
                         } else {
-                            call_setter(vm, heap, state, &scope, receiver, value, setter)
-                        }
-                    }
-                    Hit::NativeAccessor {
-                        holder,
-                        info,
-                        flags,
-                        ..
-                    } => {
-                        if !holder.erase().ptr_eq(receiver.as_tagged(heap)) {
-                            // Native accessors present as data properties:
-                            // an inherited write defines on the receiver.
                             define_on_receiver(vm, heap, state, &scope, receiver, key, value)
-                        } else if !flags.is_writable() {
-                            Ok(Flow::Value(SetApplied::Rejected))
-                        } else {
-                            let setter = info.setter();
-                            native_accessor_set(vm, heap, state, &scope, setter, receiver, value)
                         }
+                    } else if !flags.is_writable() {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else {
+                        let setter = info.setter();
+                        native_accessor_set(vm, heap, state, &scope, setter, receiver, value)
                     }
-                    Hit::Data {
-                        holder,
-                        offset,
-                        flags,
-                        ..
-                    } => {
-                        if !flags.is_writable() {
-                            Ok(Flow::Value(SetApplied::Rejected))
+                }
+                Hit::Data {
+                    holder,
+                    offset,
+                    flags,
+                    ..
+                } => {
+                    if !flags.is_writable() {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else if !receiver_is_object {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else {
+                        let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
+                        if inherited && semantics == StoreSemantics::Shadow {
+                            define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                         } else {
-                            let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
-                            if inherited && semantics == StoreSemantics::Shadow {
-                                define_on_receiver(vm, heap, state, &scope, receiver, key, value)
-                            } else {
-                                let holder = scope.handle(holder);
-                                let host = holder.as_tagged(heap).erase();
-                                holder.as_tagged(heap).slot(heap, offset).set(
-                                    heap,
-                                    host,
-                                    value.as_tagged(heap),
-                                );
-                                Ok(Flow::Value(SetApplied::Done))
-                            }
-                        }
-                    }
-                    Hit::Element {
-                        holder,
-                        index,
-                        flags,
-                        ..
-                    } => {
-                        if !flags.is_writable() {
-                            Ok(Flow::Value(SetApplied::Rejected))
-                        } else {
-                            let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
-                            if inherited && semantics == StoreSemantics::Shadow {
-                                define_on_receiver(vm, heap, state, &scope, receiver, key, value)
-                            } else {
-                                let holder = scope.handle(holder);
-                                Object::store_array_element(heap, &scope, &holder, index, &value)?;
-                                Ok(Flow::Value(SetApplied::Done))
-                            }
-                        }
-                    }
-                    Hit::Parent { holder, slot, .. } => {
-                        if holder.erase().ptr_eq(receiver.as_tagged(heap)) {
                             let holder = scope.handle(holder);
-                            let pairs = holder
-                                .as_tagged(heap)
-                                .map(heap)
-                                .prototype
-                                .get(heap)
-                                .get_as::<FixedArray>(heap)
-                                .expect("parent state implies a parent list");
-                            pairs.element_slot(slot).set(
+                            let host = holder.as_tagged(heap).erase();
+                            holder.as_tagged(heap).slot(heap, offset).set(
                                 heap,
-                                pairs.erase(),
+                                host,
                                 value.as_tagged(heap),
                             );
                             Ok(Flow::Value(SetApplied::Done))
-                        } else {
-                            define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                         }
                     }
-                    Hit::Miss => {
+                }
+                Hit::Element {
+                    holder,
+                    index,
+                    flags,
+                    ..
+                } => {
+                    if !flags.is_writable() {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else if !receiver_is_object {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else {
+                        let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
+                        if inherited && semantics == StoreSemantics::Shadow {
+                            define_on_receiver(vm, heap, state, &scope, receiver, key, value)
+                        } else {
+                            let holder = scope.handle(holder);
+                            Object::store_array_element(heap, &scope, &holder, index, &value)?;
+                            Ok(Flow::Value(SetApplied::Done))
+                        }
+                    }
+                }
+                Hit::Parent { holder, slot, .. } => {
+                    if holder.erase().ptr_eq(receiver.as_tagged(heap)) {
+                        let holder = scope.handle(holder);
+                        let pairs = holder
+                            .as_tagged(heap)
+                            .map(heap)
+                            .prototype
+                            .get(heap)
+                            .get_as::<FixedArray>(heap)
+                            .expect("parent state implies a parent list");
+                        pairs
+                            .element_slot(slot)
+                            .set(heap, pairs.erase(), value.as_tagged(heap));
+                        Ok(Flow::Value(SetApplied::Done))
+                    } else if receiver_is_object {
+                        define_on_receiver(vm, heap, state, &scope, receiver, key, value)
+                    } else {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    }
+                }
+                Hit::Miss => {
+                    if !receiver_is_object {
+                        Ok(Flow::Value(SetApplied::Rejected))
+                    } else {
                         if contextual
                             && mode.is_strict()
                             && receiver
@@ -315,7 +356,10 @@ impl Object {
             match hit {
                 Hit::Proxy(proxy) => {
                     let proxy = scope.handle(proxy);
-                    Proxy::has(vm, heap, state, proxy, key)
+                    match Proxy::has(vm, heap, state, proxy, key)? {
+                        Flow::Threw => Ok(Coercion::Threw),
+                        Flow::Value(has) => Ok(Coercion::Value(Convert::boolean(heap, has))),
+                    }
                 }
                 Hit::Miss => Ok(Coercion::Value(Convert::boolean(heap, false))),
                 _ => Ok(Coercion::Value(Convert::boolean(heap, true))),
@@ -339,17 +383,12 @@ impl Object {
                 return Err(VmError::Type);
             }
             if Proxy::is_proxy(heap, target.as_tagged(heap)) {
-                return match Proxy::delete(vm, heap, state, target, key)? {
-                    Coercion::Threw => Ok(Flow::Threw),
-                    Coercion::Value(v) => {
-                        let v = scope.handle(v);
-                        Ok(Flow::Value(v.as_tagged(heap).is_truthy(heap)))
-                    }
-                };
+                return Proxy::delete(vm, heap, state, target, key);
             }
             // String exotic own properties ("length"/indices) are
             // non-configurable, for primitives and String wrappers alike
-            // (ES 10.4.3.4); every other primitive property deletes as absent.
+            // (ES 10.4.3.1, 10.4.3.5); every other primitive property
+            // deletes as absent.
             if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
                 && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
             {
@@ -367,105 +406,480 @@ impl Object {
         })
     }
 
-    /// `[[GetOwnProperty]]` as a raw descriptor: side-effect free.
-    pub fn ordinary_own_descriptor<'s>(
-        heap: &Heap,
+    /// `[[GetOwnProperty]] ( propertyKey )`
+    /// [ES 10.1.5](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-getownproperty-p)
+    /// [ES 10.4.3.1](https://tc39.es/ecma262/#sec-string-exotic-objects-getownproperty-p)
+    /// [ES 10.5.5](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-getownproperty-p)
+    /// Dispatches ordinary objects, String exotic keys, and proxies.
+    pub fn get_own_property<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
         scope: &'s HandleScope<'_>,
-        receiver: Tagged<'_, Value>,
-        key: Tagged<'_, Value>,
-    ) -> Option<PropertyDescriptor<'s>> {
-        let hit = Lookup::new(heap, scope, scope.handle(receiver), scope.handle(key), true)
-            .next(heap, scope);
+        obj: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+    ) -> Result<MaybeOwnProperty<'s>, VmError> {
+        if obj.as_tagged(heap).is_nullish(heap) {
+            return Err(VmError::Type);
+        }
+        if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
+            return Proxy::get_own_property(vm, heap, state, scope, obj, key);
+        }
+        // TODO: dispatch typed-array, module-namespace, and arguments
+        // exotic [[GetOwnProperty]] once those object kinds exist
+        // (ES 10.4.4, 10.4.5, 10.4.6).
+        // Other primitives have no own properties; String primitives have
+        // the virtual code-unit/length properties.
+        if obj.as_tagged(heap).is_primitive(heap)
+            && DenseString::from_receiver(heap, obj.as_tagged(heap)).is_none()
+        {
+            return Ok(MaybeOwnProperty::Missing);
+        }
+        Ok(match Self::own_property_ordinary(heap, scope, obj, key) {
+            Some(own) => MaybeOwnProperty::Found(own),
+            None => MaybeOwnProperty::Missing,
+        })
+    }
+
+    /// Non-proxy `[[GetOwnProperty]]`: descriptor plus storage location.
+    pub fn own_property_ordinary<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        receiver: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+    ) -> Option<OwnProperty<'s>> {
+        // TODO: ES 10.4.3.1 checks ordinary own properties before
+        // StringGetOwnProperty; Lookup reports StringOwn first.
+        let hit = Lookup::new(heap, scope, receiver, key, true).next(heap, scope);
         match hit {
-            Hit::Data { value, flags, .. } => Some(PropertyDescriptor::Data {
-                value: scope.handle(value),
-                writable: flags.is_writable(),
-                enumerable: flags.is_enumerable(),
-                configurable: flags.is_configurable(),
-            }),
-            Hit::Accessor { pair, flags, .. } => Some(PropertyDescriptor::Accessor {
-                get: scope.handle(pair.get.get(heap)),
-                set: scope.handle(pair.set.get(heap)),
-                enumerable: flags.is_enumerable(),
-                configurable: flags.is_configurable(),
-            }),
-            // Native accessors over an internal slot present as data.
-            // Only the array-length field accessor exists today.
-            Hit::NativeAccessor { holder, flags, .. } => holder
-                .array_length(heap, key.as_name())
-                .map(|value| PropertyDescriptor::Data {
+            Hit::Data {
+                index,
+                value,
+                flags,
+                ..
+            } => Some(OwnProperty {
+                desc: PropertyDescriptor::Data {
                     value: scope.handle(value),
                     writable: flags.is_writable(),
                     enumerable: flags.is_enumerable(),
                     configurable: flags.is_configurable(),
+                },
+                location: Some(OwnPropertyLocation::MapSlot(index)),
+            }),
+            Hit::Accessor {
+                index, pair, flags, ..
+            } => Some(OwnProperty {
+                desc: PropertyDescriptor::Accessor {
+                    get: scope.handle(pair.get.get(heap)),
+                    set: scope.handle(pair.set.get(heap)),
+                    enumerable: flags.is_enumerable(),
+                    configurable: flags.is_configurable(),
+                },
+                location: Some(
+                    if matches!(key.as_tagged(heap).classify_key(heap), Ok(Key::Element(_))) {
+                        OwnPropertyLocation::Element(index)
+                    } else {
+                        OwnPropertyLocation::MapSlot(index)
+                    },
+                ),
+            }),
+            // Native accessors present as data; only array length exists.
+            Hit::NativeAccessor {
+                index,
+                holder,
+                info,
+                flags,
+                ..
+            } => holder
+                .array_length(heap, key.as_tagged(heap).as_name())
+                .map(|value| OwnProperty {
+                    desc: PropertyDescriptor::Data {
+                        value: scope.handle(value),
+                        writable: flags.is_writable(),
+                        enumerable: flags.is_enumerable(),
+                        configurable: flags.is_configurable(),
+                    },
+                    location: Some(OwnPropertyLocation::NativeAccessor {
+                        index,
+                        info: scope.handle(info),
+                        flags,
+                    }),
                 }),
-            Hit::Element { value, flags, .. } => Some(PropertyDescriptor::Data {
-                value: scope.handle(value),
-                writable: flags.is_writable(),
-                enumerable: flags.is_enumerable(),
-                configurable: flags.is_configurable(),
+            Hit::Element {
+                index,
+                value,
+                flags,
+                ..
+            } => Some(OwnProperty {
+                desc: PropertyDescriptor::Data {
+                    value: scope.handle(value),
+                    writable: flags.is_writable(),
+                    enumerable: flags.is_enumerable(),
+                    configurable: flags.is_configurable(),
+                },
+                location: Some(OwnPropertyLocation::Element(index)),
             }),
-            Hit::Parent { value, .. } => Some(PropertyDescriptor::Data {
-                value: scope.handle(value),
-                writable: false,
-                enumerable: false,
-                configurable: false,
+            Hit::Parent { slot, value, .. } => Some(OwnProperty {
+                desc: PropertyDescriptor::Data {
+                    value: scope.handle(value),
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+                location: Some(OwnPropertyLocation::Parent(slot)),
             }),
-            Hit::StringOwn { .. } | Hit::Proxy(_) | Hit::Miss => None,
+            Hit::StringOwn { .. } => {
+                DenseString::own_descriptor(heap, scope, receiver, key).map(|desc| OwnProperty {
+                    desc,
+                    location: None,
+                })
+            }
+            Hit::Proxy(_) | Hit::Miss => None,
         }
     }
 
-    pub fn define_own_property(
+    /// `[[DefineOwnProperty]] ( propertyKey, propertyDesc )`
+    /// [ES 10.1.6](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-defineownproperty-p-desc)
+    /// [ES 10.4.2.1](https://tc39.es/ecma262/#sec-array-exotic-objects-defineownproperty-p-desc)
+    /// [ES 10.4.3.2](https://tc39.es/ecma262/#sec-string-exotic-objects-defineownproperty-p-desc)
+    /// [ES 10.5.6](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-defineownproperty-p-desc)
+    /// Dispatches ordinary, array length, String, and proxy defines.
+    pub fn define_own_property<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        obj: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+        partial: PartialDescriptor<'s>,
+        should_throw: ShouldThrow,
+    ) -> Result<Flow<bool>, VmError> {
+        if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
+            return Proxy::define_own_property(
+                vm,
+                heap,
+                state,
+                scope,
+                obj,
+                name,
+                partial,
+                should_throw,
+            );
+        }
+        if obj.as_tagged(heap).is_primitive(heap) {
+            return Err(VmError::Type);
+        }
+        if obj
+            .as_tagged(heap)
+            .as_heap_object()
+            .is_some_and(|o| o.is_array(heap))
+            && name
+                .as_tagged(heap)
+                .as_name()
+                .erase()
+                .ptr_eq(heap.known().strings.length.get(heap))
+        {
+            let array = scope
+                .cast::<Object>(heap, obj.as_tagged(heap))
+                .expect("array checked above");
+            return Self::array_set_length(vm, heap, state, scope, array, partial, should_throw);
+        }
+        if let Some(current) = DenseString::own_descriptor(heap, scope, obj, name) {
+            let current = PartialDescriptor::from(&current);
+            let receiver = scope
+                .cast::<Object>(heap, obj.as_tagged(heap))
+                .expect("string wrappers are objects");
+            let extensible = receiver.as_tagged(heap).is_extendable(heap);
+            if Transition::is_compatible_property_descriptor(
+                heap,
+                extensible,
+                &partial,
+                Some(&current),
+            ) {
+                return Ok(Flow::Value(true));
+            }
+            return should_throw.reject();
+        }
+        // TODO: dispatch typed-array, module-namespace, and arguments
+        // exotic [[DefineOwnProperty]] once those object kinds exist
+        // (ES 10.4.4, 10.4.5, 10.4.6).
+        let receiver = scope
+            .cast::<Object>(heap, obj.as_tagged(heap))
+            .expect("non-proxy target is an object");
+        let current = Self::own_property_ordinary(heap, scope, obj, name);
+        let name = scope.handle(name.as_tagged(heap).as_name());
+        Self::define_own_property_apply(
+            Some(vm),
+            Some(state),
+            heap,
+            scope,
+            receiver,
+            name,
+            current,
+            &partial,
+            should_throw,
+        )
+    }
+
+    /// `[[DefineOwnProperty]] ( propertyKey, propertyDesc )`
+    /// [ES 10.1.6](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-defineownproperty-p-desc)
+    /// [ES 10.1.6.3](https://tc39.es/ecma262/#sec-validateandapplypropertydescriptor)
+    /// Ordinary-object define; use [`Self::define_own_property`] for exotics.
+    pub fn define_own_property_ordinary(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         name: Handle<SlotName>,
         desc: PropertyDescriptor<'_>,
     ) -> Result<bool, VmError> {
-        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
-            let current = Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i);
-            match current {
-                Some(current) => {
-                    if !element_define_valid(heap, &current, &desc) {
-                        return Ok(false);
-                    }
-                }
-                None => {
-                    if !can_add_element(heap, receiver.as_tagged(heap), i) {
-                        return Ok(false);
-                    }
-                }
-            }
-            return Self::define_element(heap, scope, receiver, i, desc);
+        let receiver_value = scope.handle(receiver.as_tagged(heap).erase());
+        let name_value = scope.handle(name.as_tagged(heap).erase());
+        let current = Self::own_property_ordinary(heap, scope, receiver_value, name_value);
+        let partial = PartialDescriptor::from(&desc);
+        match Self::define_own_property_apply(
+            None,
+            None,
+            heap,
+            scope,
+            receiver,
+            name,
+            current,
+            &partial,
+            ShouldThrow::DontThrow,
+        )? {
+            Flow::Value(defined) => Ok(defined),
+            Flow::Threw => Err(VmError::Type),
         }
-        let current = receiver
-            .as_tagged(heap)
-            .map(heap)
-            .descriptors()
-            .iter()
-            .enumerate()
-            .find(|(_, d)| d.name(heap).ptr_eq(name.as_tagged(heap)))
-            .map(|(index, d)| (index, d.flags(), scope.handle(d.value.get(heap))));
-        let Some((index, cur_flags, cur_desc_value)) = current else {
-            return Self::add_own_property(heap, scope, receiver, name, desc);
-        };
-
-        let Some(action) = ({
-            validate_define(
-                heap,
-                receiver.as_tagged(heap),
-                name.as_tagged(heap),
-                cur_flags,
-                cur_desc_value,
-                desc,
-            )
-        }) else {
-            return Ok(false);
-        };
-        Self::apply_define(heap, scope, receiver, name, index, action);
-        Ok(true)
     }
 
+    /// Ordinary define after `[[GetOwnProperty]]`: validates against `current`,
+    /// then adds, writes, redefines, or applies native accessor-backed data
+    /// through its setter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn define_own_property_apply<'s>(
+        vm: Option<&VM>,
+        state: Option<&ThreadState>,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        receiver: Handle<'_, Object>,
+        name: Handle<'_, SlotName>,
+        current: Option<OwnProperty<'s>>,
+        partial: &PartialDescriptor<'s>,
+        should_throw: ShouldThrow,
+    ) -> Result<Flow<bool>, VmError> {
+        let undefined = heap.known().undefined.get_handle(heap, scope).erase();
+        let extensible = receiver.as_tagged(heap).is_extendable(heap);
+        let current_partial = current
+            .as_ref()
+            .map(|current| PartialDescriptor::from(&current.desc));
+        if !Transition::is_compatible_property_descriptor(
+            heap,
+            extensible,
+            partial,
+            current_partial.as_ref(),
+        ) {
+            return should_throw.reject();
+        }
+        let Some(current) = current else {
+            let full = partial.complete_against(undefined, None);
+            if Self::add_own_property(heap, scope, receiver, name, full)? {
+                return Ok(Flow::Value(true));
+            }
+            return should_throw.reject();
+        };
+        let full = partial.complete_against(undefined, Some(&current.desc));
+        match current.location {
+            None => Ok(Flow::Value(true)),
+            Some(OwnPropertyLocation::Parent(_)) => {
+                if Self::add_own_property(heap, scope, receiver, name, full)? {
+                    Ok(Flow::Value(true))
+                } else {
+                    should_throw.reject()
+                }
+            }
+            Some(OwnPropertyLocation::Element(index)) => {
+                if Self::define_element(heap, scope, receiver, index, full)? {
+                    Ok(Flow::Value(true))
+                } else {
+                    should_throw.reject()
+                }
+            }
+            Some(OwnPropertyLocation::MapSlot(index)) => {
+                let same = match (&current.desc, &full) {
+                    (
+                        PropertyDescriptor::Accessor {
+                            get: cg, set: cs, ..
+                        },
+                        PropertyDescriptor::Accessor {
+                            get: fg, set: fs, ..
+                        },
+                    ) => {
+                        full.flags() == current.desc.flags()
+                            && cg.as_tagged(heap).ptr_eq(fg.as_tagged(heap))
+                            && cs.as_tagged(heap).ptr_eq(fs.as_tagged(heap))
+                    }
+                    (PropertyDescriptor::Data { .. }, PropertyDescriptor::Data { .. }) => {
+                        full.flags() == current.desc.flags()
+                    }
+                    _ => false,
+                };
+                if same {
+                    if partial.value.is_some()
+                        && let PropertyDescriptor::Data { value, .. } = full
+                    {
+                        Transition::write_slot(heap, receiver, index, value);
+                    }
+                } else {
+                    Transition::define(
+                        heap,
+                        scope,
+                        receiver,
+                        name,
+                        full,
+                        Change::Replace { index },
+                    );
+                }
+                Ok(Flow::Value(true))
+            }
+            Some(OwnPropertyLocation::NativeAccessor { index, info, flags }) => {
+                let PropertyDescriptor::Data {
+                    value,
+                    writable,
+                    enumerable,
+                    configurable,
+                } = full
+                else {
+                    unreachable!("native accessors validate as data")
+                };
+                if partial.value.is_some() {
+                    let (Some(vm), Some(state)) = (vm, state) else {
+                        return should_throw.reject();
+                    };
+                    let holder = scope.handle(receiver.as_tagged(heap).erase());
+                    match native_accessor_set(
+                        vm,
+                        heap,
+                        state,
+                        scope,
+                        info.as_tagged(heap).setter(),
+                        holder,
+                        value,
+                    )? {
+                        Flow::Threw => return Ok(Flow::Threw),
+                        Flow::Value(SetApplied::Rejected) => {
+                            return should_throw.reject();
+                        }
+                        Flow::Value(_) => {}
+                    }
+                }
+                let mut new_flags = SlotFlags::ACCESSOR;
+                if writable {
+                    new_flags = new_flags.union(SlotFlags::WRITABLE);
+                }
+                if enumerable {
+                    new_flags = new_flags.union(SlotFlags::ENUMERABLE);
+                }
+                if configurable {
+                    new_flags = new_flags.union(SlotFlags::CONFIGURABLE);
+                }
+                if new_flags != flags {
+                    Transition::replace_native_accessor_flags(
+                        heap, scope, receiver, name, index, new_flags,
+                    );
+                }
+                Ok(Flow::Value(true))
+            }
+        }
+    }
+
+    /// DefineProperty ( obj, key, attrs )
+    /// [ES 20.1.2.4](https://tc39.es/ecma262/#sec-object.defineproperty)
+    /// Shared `Object.defineProperty` tail: object check, ToPropertyKey,
+    /// ToPropertyDescriptor, then [[DefineOwnProperty]].
+    pub fn define_property<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        obj: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+        attrs: Handle<'_, Value>,
+        should_throw: ShouldThrow,
+    ) -> Result<Flow<bool>, VmError> {
+        if obj.as_tagged(heap).is_primitive(heap) {
+            return Err(VmError::Type);
+        }
+        let Some(key) = Self::to_property_key(vm, heap, state, key)? else {
+            return Ok(Flow::Threw);
+        };
+        let key = scope.handle(key);
+        let Some(partial) = Self::to_property_descriptor(vm, heap, state, scope, attrs)? else {
+            return Ok(Flow::Threw);
+        };
+        Self::define_own_property(
+            vm,
+            heap,
+            state,
+            scope,
+            obj,
+            key.erase(),
+            partial,
+            should_throw,
+        )
+    }
+
+    /// DefinePropertyOrThrow ( obj, propertyKey, propertyDesc )
+    /// [ES 7.3.8](https://tc39.es/ecma262/#sec-definepropertyorthrow)
+    /// [[DefineOwnProperty]] with a TypeError when the define is rejected.
+    pub fn define_property_or_throw<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        obj: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+        partial: PartialDescriptor<'s>,
+    ) -> Result<Flow<bool>, VmError> {
+        match Self::define_own_property(
+            vm,
+            heap,
+            state,
+            scope,
+            obj,
+            name,
+            partial,
+            ShouldThrow::Throw,
+        )? {
+            Flow::Threw => Ok(Flow::Threw),
+            Flow::Value(true) => Ok(Flow::Value(true)),
+            Flow::Value(false) => Err(VmError::Type),
+        }
+    }
+
+    /// CreateDataPropertyOrThrow ( obj, propertyKey, value )
+    /// [ES 7.3.6](https://tc39.es/ecma262/#sec-createdatapropertyorthrow)
+    /// Defines `{ value, writable: true, enumerable: true, configurable: true }`.
+    pub fn create_data_property_or_throw<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        obj: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+        value: Handle<'s, Value>,
+    ) -> Result<Flow<bool>, VmError> {
+        let partial = PartialDescriptor::from(&PropertyDescriptor::data(value));
+        Self::define_property_or_throw(vm, heap, state, scope, obj, name, partial)
+    }
+
+    /// `[[Delete]] ( propertyKey )`
+    /// [ES 10.1.10](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-delete-p)
+    /// [ES 10.1.10.1](https://tc39.es/ecma262/#sec-ordinarydelete)
+    /// Removes a configurable own property and returns true; a
+    /// non-configurable key stays and returns false, while an absent key
+    /// returns true. Canonical indices are removed from the elements store
+    /// (dense hole or dictionary entry). Proxy and String-exotic dispatch
+    /// happen in `delete_property`.
     pub fn delete_own_property(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -478,14 +892,13 @@ impl Object {
                 Key::Element(i) => {
                     let obj = receiver.as_tagged(heap);
                     if let Some(dict) = obj.element_dictionary(heap) {
-                        // non-configurable entries reject the delete (ES 10.5.2.10)
-                        if let Some(entry) = dict.find(heap, i)
-                            && dict.details_at(heap, entry) & DETAILS_CONFIGURABLE == 0
-                        {
-                            return Ok(false);
+                        if let Some(entry) = dict.find(heap, i) {
+                            if dict.details_at(heap, entry) & DETAILS_CONFIGURABLE == 0 {
+                                return Ok(false);
+                            }
+                            dict.delete(heap, i);
+                            Prototype::element_mutated(heap, obj);
                         }
-                        dict.delete(heap, i);
-                        Prototype::element_mutated(heap, obj);
                         break 'name None;
                     }
                     // indices beyond the visible range were never own
@@ -495,9 +908,12 @@ impl Object {
                         && let Some(elements) = obj.elements_array(heap)
                         && i < elements.len()
                     {
-                        elements.set(heap, i, heap.known().the_hole.get(heap).erase());
-                        Object::promote_holey(heap, scope, &receiver);
-                        Prototype::element_mutated(heap, receiver.as_tagged(heap));
+                        let hole = heap.known().the_hole.get(heap).erase();
+                        if elements.at(heap, i) != hole {
+                            elements.set(heap, i, hole);
+                            Object::promote_holey(heap, scope, &receiver);
+                            Prototype::element_mutated(heap, receiver.as_tagged(heap));
+                        }
                     }
                     break 'name None;
                 }
@@ -528,63 +944,6 @@ impl Object {
         }
         Transition::remove_property(heap, scope, receiver, name);
         Ok(true)
-    }
-
-    fn apply_define(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: Handle<Object>,
-        name: Handle<SlotName>,
-        index: usize,
-        action: DefineAction,
-    ) {
-        match action {
-            DefineAction::Nothing => {}
-            DefineAction::WriteDataSlot { value } => {
-                // the in-place data write needs no map change
-                Transition::write_slot(heap, receiver, index, value);
-            }
-            DefineAction::Redefine { desc } => {
-                Transition::define(heap, scope, receiver, name, desc, Change::Replace { index })
-            }
-            DefineAction::NativeAccessor { flags } => {
-                Transition::replace_native_accessor_flags(
-                    heap, scope, receiver, name, index, flags,
-                );
-            }
-        }
-    }
-
-    /// LengthOfArrayLike (ES 7.3.18) with fast paths for arrays and strings.
-    pub fn length_of_array_like<'a>(
-        vm: &'a VM,
-        heap: &'a mut Heap,
-        state: &'a ThreadState,
-        scope: &HandleScope<'_>,
-        obj: Handle<'_, Value>,
-    ) -> Result<Option<u64>, VmError> {
-        if let Some(o) = obj.as_tagged(heap).as_heap_object()
-            && o.as_ref().is_array(heap)
-        {
-            return Ok(Some(o.as_ref().length() as u64));
-        }
-        if let Some(s) = DenseString::from_receiver(heap, obj.as_tagged(heap)) {
-            return Ok(Some(s.len() as u64));
-        }
-        // TODO: typed-array fast path once [[TypedArrayName]] exists.
-        let length_key = heap.known().strings.length.get_handle(heap, scope).erase();
-        let length_value = match Self::get_property(vm, heap, state, obj, obj, length_key, false) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let length = match Self::to_numeric(vm, heap, state, length_value) {
-            // TODO: handle the 2^53 max length/key.
-            Ok(Some(n)) => n as u64,
-            Ok(None) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        Ok(Some(length))
     }
 }
 
@@ -681,19 +1040,25 @@ fn define_on_receiver(
     key: Handle<'_, Value>,
     value: Handle<'_, Value>,
 ) -> Result<Flow<SetApplied>, VmError> {
-    let current = Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?;
+    let current = Object::get_own_property(vm, heap, state, scope, receiver, key)?;
     let partial = match current {
-        Flow::Threw => return Ok(Flow::Threw),
-        Flow::Value(Some(d))
-            if d.is_accessor_descriptor()
-                || (d.is_data_descriptor() && d.writable == Some(false)) =>
-        {
+        MaybeOwnProperty::Threw => return Ok(Flow::Threw),
+        MaybeOwnProperty::Found(d) if !d.desc.is_data_descriptor() || !d.desc.is_writable() => {
             return Ok(Flow::Value(SetApplied::Rejected));
         }
-        Flow::Value(Some(_)) => PartialDescriptor::value(value),
-        Flow::Value(None) => PartialDescriptor::new_data(value),
+        MaybeOwnProperty::Found(_) => PartialDescriptor::value(value),
+        MaybeOwnProperty::Missing => PartialDescriptor::new_data(value),
     };
-    match Proxy::define_own_property(vm, heap, state, scope, receiver, key, partial)? {
+    match Object::define_own_property(
+        vm,
+        heap,
+        state,
+        scope,
+        receiver,
+        key,
+        partial,
+        ShouldThrow::DontThrow,
+    )? {
         Flow::Threw => Ok(Flow::Threw),
         Flow::Value(true) => Ok(Flow::Value(SetApplied::Transition)),
         Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
@@ -709,19 +1074,27 @@ pub fn own_property_enumerable(
     key: Tagged<'_, Value>,
 ) -> Option<bool> {
     let key = key.classify_key(heap).ok()?;
-    // string exotic: indices are enumerable own properties, "length" is not
+    // String virtual keys win when present; wrappers may also have
+    // ordinary own properties.
     if let Some(s) = DenseString::from_receiver(heap, receiver) {
-        return match key {
-            Key::Element(i) => Some((i as u64) < s.len() as u64),
+        let virtual_key = match key {
+            Key::Element(i) if (i as u64) < s.len() as u64 => Some(true),
             Key::Name(name) => s
                 .own_key(heap, name)
                 .map(|own| matches!(own, StringOwn::Index(_))),
+            _ => None,
         };
+        if virtual_key.is_some() {
+            return virtual_key;
+        }
+        if receiver.is_primitive(heap) {
+            return None;
+        }
     }
     let object = receiver.as_heap_object()?;
     match key {
         Key::Element(i) => {
-            if i >= object.max_element_index(heap) {
+            if object.is_array(heap) && i >= object.length() {
                 return None;
             }
             // dense entries are created writable, enumerable, configurable
@@ -739,189 +1112,4 @@ pub fn own_property_enumerable(
             .find(|d| d.name(heap).ptr_eq(name))
             .map(|d| d.flags().is_enumerable()),
     }
-}
-
-enum DefineAction<'s> {
-    /// Valid, nothing to change.
-    Nothing,
-    /// data→data with unchanged attributes: write the existing slot.
-    WriteDataSlot { value: Handle<'s, Value> },
-    /// Replace the descriptor with the new one (data or accessor).
-    Redefine { desc: PropertyDescriptor<'s> },
-    /// Change flags on a native accessor while keeping its accessor info.
-    NativeAccessor { flags: SlotFlags },
-}
-
-/// ES 3.c of ValidateAndApplyPropertyDescriptor, element edition: a
-/// non-configurable existing element only accepts a compatible
-/// redefinition (same kind and attributes; same value when
-/// non-writable; identical pair halves).
-fn element_define_valid(
-    heap: &Heap,
-    current: &PropertyDescriptor<'_>,
-    desc: &PropertyDescriptor<'_>,
-) -> bool {
-    use PropertyDescriptor as D;
-    let configurable = |d: &D| match d {
-        D::Data { configurable, .. } | D::Accessor { configurable, .. } => *configurable,
-    };
-    if configurable(current) {
-        return true;
-    }
-    if configurable(desc) {
-        return false;
-    }
-    match (current, desc) {
-        (
-            D::Data {
-                value: cv,
-                writable: cw,
-                enumerable: ce,
-                ..
-            },
-            D::Data {
-                value: nv,
-                writable: nw,
-                enumerable: ne,
-                ..
-            },
-        ) => {
-            ce == ne
-                && (*cw
-                    || (!*nw && Compare::same_value(heap, cv.as_tagged(heap), nv.as_tagged(heap))))
-        }
-        (
-            D::Accessor {
-                get: cg,
-                set: cs,
-                enumerable: ce,
-                ..
-            },
-            D::Accessor {
-                get: ng,
-                set: ns,
-                enumerable: ne,
-                ..
-            },
-        ) => {
-            ce == ne
-                && cg.as_tagged(heap).ptr_eq(ng.as_tagged(heap))
-                && cs.as_tagged(heap).ptr_eq(ns.as_tagged(heap))
-        }
-        _ => false,
-    }
-}
-
-fn validate_define<'a, 's>(
-    heap: &'a Heap,
-    receiver: Tagged<'a, Object>,
-    name: Tagged<'a, SlotName>,
-    cur_flags: SlotFlags,
-    cur_desc_value: Handle<'s, Value>,
-    desc: PropertyDescriptor<'s>,
-) -> Option<DefineAction<'s>> {
-    let cur_configurable = cur_flags.is_configurable();
-
-    if cur_flags.is_accessor() {
-        if cur_configurable {
-            return Some(DefineAction::Redefine { desc });
-        }
-        if cur_desc_value
-            .as_tagged(heap)
-            .get_as::<AccessorInfo>(heap)
-            .is_some()
-        {
-            let PropertyDescriptor::Data {
-                value,
-                writable,
-                enumerable,
-                configurable,
-            } = desc
-            else {
-                return None;
-            };
-            if configurable || enumerable != cur_flags.is_enumerable() {
-                return None;
-            }
-            let current = receiver.array_length(heap, name)?;
-            if !Compare::same_value(heap, value.as_tagged(heap), current) {
-                return None;
-            }
-            if writable == cur_flags.is_writable() {
-                return Some(DefineAction::Nothing);
-            }
-            if !writable && cur_flags.is_writable() {
-                return Some(DefineAction::NativeAccessor {
-                    flags: cur_flags.without_writable(),
-                });
-            }
-            return None;
-        }
-        let PropertyDescriptor::Accessor {
-            get,
-            set,
-            enumerable,
-            configurable,
-        } = desc
-        else {
-            return None;
-        };
-        if configurable || enumerable != cur_flags.is_enumerable() {
-            return None;
-        }
-        // Native accessors are handled above; this is a user accessor pair.
-        let cur_pair = cur_desc_value
-            .as_tagged(heap)
-            .get_as::<AccessorPair>(heap)?;
-        if !Compare::same_value(heap, get.as_tagged(heap), cur_pair.get.get(heap))
-            || !Compare::same_value(heap, set.as_tagged(heap), cur_pair.set.get(heap))
-        {
-            return None;
-        }
-        return Some(DefineAction::Nothing);
-    }
-
-    if let PropertyDescriptor::Accessor { .. } = desc {
-        if !cur_configurable {
-            return None;
-        }
-        return Some(DefineAction::Redefine { desc });
-    }
-
-    let PropertyDescriptor::Data {
-        value,
-        writable,
-        enumerable,
-        configurable,
-    } = desc
-    else {
-        unreachable!("descriptor kind checked above")
-    };
-    if !cur_configurable {
-        if configurable || enumerable != cur_flags.is_enumerable() {
-            return None;
-        }
-        if !cur_flags.is_writable() {
-            if writable {
-                return None;
-            }
-
-            let offset = cur_desc_value
-                .as_tagged(heap)
-                .to_i64()
-                .expect("data row offset") as usize;
-            if !Compare::same_value(
-                heap,
-                value.as_tagged(heap),
-                receiver.slot(heap, offset).get(heap),
-            ) {
-                return None;
-            }
-            return Some(DefineAction::Nothing);
-        }
-    }
-    if desc.flags() == cur_flags {
-        return Some(DefineAction::WriteDataSlot { value });
-    }
-    Some(DefineAction::Redefine { desc })
 }

@@ -33,7 +33,7 @@ pub use objects::proxy;
 pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
 
-pub use access::StoreSemantics;
+pub use access::{MaybeOwnProperty, OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
@@ -69,8 +69,8 @@ pub use objects::{
     PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
     ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotDescriptor,
     SlotFlags, SlotName, StringData, StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit,
-    WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode, object_kind,
-    object_layout, string_content_hash, visit_object,
+    WrapperKind, decode_wtf8, descriptor_object, info_is_immutable, info_is_lexical, info_mode,
+    object_kind, object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};

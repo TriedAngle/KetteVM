@@ -134,7 +134,7 @@ fn redefine_records_pred() {
         let map_a = map_handle(thread, &scope, obj);
 
         let v = scope.handle(Smi::new(1));
-        Object::define_own_property(
+        Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             obj,

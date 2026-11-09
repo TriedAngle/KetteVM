@@ -50,7 +50,7 @@ impl Runtime for KetteRuntime {
             };
             // a bare global `print(x)`, same native as `Console.print`
             Object::install_method(thread, &scope, global, "print", print)?;
-            Object::define_own_property(
+            Object::define_own_property_ordinary(
                 thread.heap(),
                 &scope,
                 global,
