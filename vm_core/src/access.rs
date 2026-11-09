@@ -1,12 +1,13 @@
-use crate::errors::Errors;
+use crate::VmError;
+use crate::bail;
 use crate::lookup::{Hit, Lookup};
-use crate::proxy::{Flow, Proxy};
+use crate::proxy::Proxy;
 use crate::transition::Transition;
 use crate::{
-    AccessorInfo, Change, Coercion, Convert, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString,
-    FixedArray, Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object,
-    PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotFlags, SlotName, Smi,
-    StringOwn, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
+    AccessorInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString, FixedArray,
+    Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object, PartialDescriptor,
+    PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi, StringOwn, Tagged,
+    ThreadState, Thrown, VM, Value,
 };
 
 /// Store semantics:
@@ -42,17 +43,29 @@ pub struct OwnProperty<'s> {
     pub location: Option<OwnPropertyLocation<'s>>,
 }
 
-pub enum MaybeOwnProperty<'s> {
-    Threw,
-    Missing,
-    Found(OwnProperty<'s>),
+impl ShouldThrow {
+    /// Map a rejected define/store to the policy's outcome.
+    pub fn reject(self, vm: &VM, heap: &mut Heap, state: &ThreadState) -> Result<bool> {
+        match self {
+            ShouldThrow::Throw => bail!(vm, heap, state, VmError::CannotRedefineProperty),
+            ShouldThrow::DontThrow => Ok(false),
+        }
+    }
 }
 
-impl ShouldThrow {
-    pub fn reject(self) -> Result<Flow<bool>, VmError> {
-        match self {
-            Self::Throw => Err(VmError::Type),
-            Self::DontThrow => Ok(Flow::Value(false)),
+/// The ordinary-define variant used when no VM/thread is available; a
+/// `Throw` policy cannot occur on that path.
+fn reject_ordinary(
+    vm: Option<&VM>,
+    state: Option<&ThreadState>,
+    heap: &mut Heap,
+    should_throw: ShouldThrow,
+) -> Result<bool> {
+    match (vm, state) {
+        (Some(vm), Some(state)) => should_throw.reject(vm, heap, state),
+        _ => {
+            debug_assert_eq!(should_throw, ShouldThrow::DontThrow);
+            Ok(false)
         }
     }
 }
@@ -71,10 +84,10 @@ impl Object {
         receiver: Handle<'_, Value>,
         name: Handle<'_, Value>,
         throws_on_miss: bool,
-    ) -> Result<Coercion<'h>, VmError> {
+    ) -> Result<Tagged<'h, Value>> {
         state.handle_scope(|scope| {
             if holder.as_tagged(heap).is_nullish(heap) {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::CannotReadPropertyOfNullish);
             }
             let start = scope.handle(holder.as_tagged(heap).erase());
             let mut it = Lookup::new(heap, &scope, start, name, false);
@@ -88,25 +101,19 @@ impl Object {
                             .get_as::<DenseString>(heap)
                             .map(|s| s.to_rust_string(heap))
                             .unwrap_or_default();
-                        let ex = Errors::not_defined(vm, heap, state, &text)
-                            .expect("error materialization must not fail");
-                        state.set_pending_exception(ex);
-                        return Ok(Coercion::Threw);
+                        bail!(vm, heap, state, VmError::NotDefined, &text);
                     }
-                    Ok(Coercion::Value(heap.known().undefined.get(heap).erase()))
+                    Ok(heap.known().undefined.get(heap).erase())
                 }
                 Hit::Proxy(proxy) => {
                     let proxy = scope.handle(proxy);
-                    match Proxy::get(vm, heap, state, proxy, receiver, name)? {
-                        Flow::Threw => Ok(Coercion::Threw),
-                        Flow::Value(v) => Ok(Coercion::Value(v)),
-                    }
+                    Proxy::get(vm, heap, state, proxy, receiver, name)
                 }
                 Hit::Data { value, .. }
                 | Hit::Element { value, .. }
                 | Hit::Parent { value, .. } => {
                     let value = scope.handle(value);
-                    Ok(Coercion::Value(value.as_tagged(heap)))
+                    Ok(value.as_tagged(heap))
                 }
                 Hit::StringOwn { holder, own } => {
                     let value = match own {
@@ -119,13 +126,13 @@ impl Object {
                             scope.handle(unit.as_tagged(heap).erase())
                         }
                     };
-                    Ok(Coercion::Value(value.as_tagged(heap)))
+                    Ok(value.as_tagged(heap))
                 }
                 Hit::Accessor { pair, .. } => {
                     let undefined = heap.known().undefined.get_handle(heap, &scope).erase();
                     let getter = scope.handle(pair.get.get(heap));
                     if getter.as_tagged(heap) == undefined.as_tagged(heap) {
-                        return Ok(Coercion::Value(undefined.as_tagged(heap)));
+                        return Ok(undefined.as_tagged(heap));
                     }
                     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
                     let result = scope.handle(HostCtx::enter(
@@ -137,11 +144,7 @@ impl Object {
                         args,
                         None,
                     )?);
-                    if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                        Ok(Coercion::Threw)
-                    } else {
-                        Ok(Coercion::Value(result.as_tagged(heap)))
-                    }
+                    Ok(result.as_tagged(heap))
                 }
                 Hit::NativeAccessor { holder, info, .. } => {
                     let getter = info.getter();
@@ -194,10 +197,10 @@ impl Object {
         semantics: StoreSemantics,
         contextual: bool,
         mode: LanguageMode,
-    ) -> Result<Flow<SetApplied>, VmError> {
+    ) -> Result<SetApplied> {
         state.handle_scope(|scope| {
             if receiver.as_tagged(heap).is_nullish(heap) {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::CannotSetPropertyOfNullish);
             }
             let receiver_is_object = Proxy::is_js_receiver(heap, receiver.as_tagged(heap));
             let hit = {
@@ -209,17 +212,16 @@ impl Object {
                 Hit::Proxy(proxy) => {
                     let proxy = scope.handle(proxy);
                     match Proxy::set(vm, heap, state, proxy, key, value, receiver)? {
-                        Flow::Threw => Ok(Flow::Threw),
-                        Flow::Value(true) => Ok(Flow::Value(SetApplied::Done)),
-                        Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
+                        true => Ok(SetApplied::Done),
+                        false => Ok(SetApplied::Rejected),
                     }
                 }
-                Hit::StringOwn { .. } => Ok(Flow::Value(SetApplied::Rejected)),
+                Hit::StringOwn { .. } => Ok(SetApplied::Rejected),
                 Hit::Accessor { pair, .. } => {
                     let undefined = heap.known().undefined.get(heap).erase();
                     let setter = scope.handle(pair.set.get(heap));
                     if setter.as_tagged(heap) == undefined {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else {
                         call_setter(vm, heap, state, &scope, receiver, value, setter)
                     }
@@ -232,12 +234,12 @@ impl Object {
                 } => {
                     if !holder.erase().ptr_eq(receiver.as_tagged(heap)) {
                         if !receiver_is_object {
-                            Ok(Flow::Value(SetApplied::Rejected))
+                            Ok(SetApplied::Rejected)
                         } else {
                             define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                         }
                     } else if !flags.is_writable() {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else {
                         let setter = info.setter();
                         native_accessor_set(vm, heap, state, &scope, setter, receiver, value)
@@ -250,9 +252,9 @@ impl Object {
                     ..
                 } => {
                     if !flags.is_writable() {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else if !receiver_is_object {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else {
                         let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
                         if inherited && semantics == StoreSemantics::Shadow {
@@ -265,7 +267,7 @@ impl Object {
                                 host,
                                 value.as_tagged(heap),
                             );
-                            Ok(Flow::Value(SetApplied::Done))
+                            Ok(SetApplied::Done)
                         }
                     }
                 }
@@ -276,17 +278,17 @@ impl Object {
                     ..
                 } => {
                     if !flags.is_writable() {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else if !receiver_is_object {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else {
                         let inherited = !holder.erase().ptr_eq(receiver.as_tagged(heap));
                         if inherited && semantics == StoreSemantics::Shadow {
                             define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                         } else {
                             let holder = scope.handle(holder);
-                            Object::store_array_element(heap, &scope, &holder, index, &value)?;
-                            Ok(Flow::Value(SetApplied::Done))
+                            Object::store_array_element(heap, &scope, &holder, index, &value);
+                            Ok(SetApplied::Done)
                         }
                     }
                 }
@@ -303,16 +305,16 @@ impl Object {
                         pairs
                             .element_slot(slot)
                             .set(heap, pairs.erase(), value.as_tagged(heap));
-                        Ok(Flow::Value(SetApplied::Done))
+                        Ok(SetApplied::Done)
                     } else if receiver_is_object {
                         define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                     } else {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     }
                 }
                 Hit::Miss => {
                     if !receiver_is_object {
-                        Ok(Flow::Value(SetApplied::Rejected))
+                        Ok(SetApplied::Rejected)
                     } else {
                         if contextual
                             && mode.is_strict()
@@ -320,17 +322,15 @@ impl Object {
                                 .as_tagged(heap)
                                 .ptr_eq(vm.known().global_object.get(heap).erase())
                         {
-                            raise_runtime(vm, heap, state, VmError::Reference);
-                            return Ok(Flow::Threw);
+                            bail!(vm, heap, state, VmError::UninitializedVariable);
                         }
                         define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                     }
                 }
             };
             match outcome {
-                Ok(Flow::Value(SetApplied::Rejected)) if mode.is_strict() => {
-                    raise_runtime(vm, heap, state, VmError::Type);
-                    Ok(Flow::Threw)
+                Ok(SetApplied::Rejected) if mode.is_strict() => {
+                    bail!(vm, heap, state, VmError::CannotSetProperty)
                 }
                 other => other,
             }
@@ -347,22 +347,19 @@ impl Object {
         state: &ThreadState,
         start: Handle<'_, Value>,
         key: Handle<'_, Value>,
-    ) -> Result<Coercion<'h>, VmError> {
+    ) -> Result<bool> {
         state.handle_scope(|scope| {
             if start.as_tagged(heap).is_nullish(heap) {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::CannotCheckPropertyOfNullish);
             }
             let hit = Lookup::new(heap, &scope, start, key, false).next(heap, &scope);
             match hit {
                 Hit::Proxy(proxy) => {
                     let proxy = scope.handle(proxy);
-                    match Proxy::has(vm, heap, state, proxy, key)? {
-                        Flow::Threw => Ok(Coercion::Threw),
-                        Flow::Value(has) => Ok(Coercion::Value(Convert::boolean(heap, has))),
-                    }
+                    Proxy::has(vm, heap, state, proxy, key)
                 }
-                Hit::Miss => Ok(Coercion::Value(Convert::boolean(heap, false))),
-                _ => Ok(Coercion::Value(Convert::boolean(heap, true))),
+                Hit::Miss => Ok(false),
+                _ => Ok(true),
             }
         })
     }
@@ -377,10 +374,10 @@ impl Object {
         state: &ThreadState,
         target: Handle<'_, Value>,
         key: Handle<'_, Value>,
-    ) -> Result<Flow<bool>, VmError> {
+    ) -> Result<bool> {
         state.handle_scope(|scope| {
             if target.as_tagged(heap).is_nullish(heap) {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::CannotDeletePropertyOfNullish);
             }
             if Proxy::is_proxy(heap, target.as_tagged(heap)) {
                 return Proxy::delete(vm, heap, state, target, key);
@@ -392,17 +389,15 @@ impl Object {
             if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
                 && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
             {
-                return Ok(Flow::Value(false));
+                return Ok(false);
             }
             if target.as_tagged(heap).is_primitive(heap) {
-                return Ok(Flow::Value(true));
+                return Ok(true);
             }
             let receiver = scope
                 .cast::<Object>(heap, target.as_tagged(heap))
                 .expect("non-primitive receivers are objects");
-            Ok(Flow::Value(Self::delete_own_property(
-                heap, &scope, receiver, key,
-            )?))
+            Self::delete_own_property(vm, heap, state, &scope, receiver, key)
         })
     }
 
@@ -418,9 +413,9 @@ impl Object {
         scope: &'s HandleScope<'_>,
         obj: Handle<'_, Value>,
         key: Handle<'_, Value>,
-    ) -> Result<MaybeOwnProperty<'s>, VmError> {
+    ) -> Result<Option<OwnProperty<'s>>> {
         if obj.as_tagged(heap).is_nullish(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
         }
         if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
             return Proxy::get_own_property(vm, heap, state, scope, obj, key);
@@ -433,12 +428,9 @@ impl Object {
         if obj.as_tagged(heap).is_primitive(heap)
             && DenseString::from_receiver(heap, obj.as_tagged(heap)).is_none()
         {
-            return Ok(MaybeOwnProperty::Missing);
+            return Ok(None);
         }
-        Ok(match Self::own_property_ordinary(heap, scope, obj, key) {
-            Some(own) => MaybeOwnProperty::Found(own),
-            None => MaybeOwnProperty::Missing,
-        })
+        Ok(Self::own_property_ordinary(heap, scope, obj, key))
     }
 
     /// Non-proxy `[[GetOwnProperty]]`: descriptor plus storage location.
@@ -476,7 +468,10 @@ impl Object {
                     configurable: flags.is_configurable(),
                 },
                 location: Some(
-                    if matches!(key.as_tagged(heap).classify_key(heap), Ok(Key::Element(_))) {
+                    if matches!(
+                        key.as_tagged(heap).classify_key(heap),
+                        Some(Key::Element(_))
+                    ) {
                         OwnPropertyLocation::Element(index)
                     } else {
                         OwnPropertyLocation::MapSlot(index)
@@ -553,7 +548,7 @@ impl Object {
         name: Handle<'_, Value>,
         partial: PartialDescriptor<'s>,
         should_throw: ShouldThrow,
-    ) -> Result<Flow<bool>, VmError> {
+    ) -> Result<bool> {
         if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
             return Proxy::define_own_property(
                 vm,
@@ -567,7 +562,7 @@ impl Object {
             );
         }
         if obj.as_tagged(heap).is_primitive(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::CannotDefineOnPrimitive);
         }
         if obj
             .as_tagged(heap)
@@ -596,9 +591,9 @@ impl Object {
                 &partial,
                 Some(&current),
             ) {
-                return Ok(Flow::Value(true));
+                return Ok(true);
             }
-            return should_throw.reject();
+            return should_throw.reject(vm, heap, state);
         }
         // TODO: dispatch typed-array, module-namespace, and arguments
         // exotic [[DefineOwnProperty]] once those object kinds exist
@@ -631,12 +626,12 @@ impl Object {
         receiver: Handle<Object>,
         name: Handle<SlotName>,
         desc: PropertyDescriptor<'_>,
-    ) -> Result<bool, VmError> {
+    ) -> Result<bool> {
         let receiver_value = scope.handle(receiver.as_tagged(heap).erase());
         let name_value = scope.handle(name.as_tagged(heap).erase());
         let current = Self::own_property_ordinary(heap, scope, receiver_value, name_value);
         let partial = PartialDescriptor::from(&desc);
-        match Self::define_own_property_apply(
+        Self::define_own_property_apply(
             None,
             None,
             heap,
@@ -646,10 +641,7 @@ impl Object {
             current,
             &partial,
             ShouldThrow::DontThrow,
-        )? {
-            Flow::Value(defined) => Ok(defined),
-            Flow::Threw => Err(VmError::Type),
-        }
+        )
     }
 
     /// Ordinary define after `[[GetOwnProperty]]`: validates against `current`,
@@ -666,7 +658,7 @@ impl Object {
         current: Option<OwnProperty<'s>>,
         partial: &PartialDescriptor<'s>,
         should_throw: ShouldThrow,
-    ) -> Result<Flow<bool>, VmError> {
+    ) -> Result<bool> {
         let undefined = heap.known().undefined.get_handle(heap, scope).erase();
         let extensible = receiver.as_tagged(heap).is_extendable(heap);
         let current_partial = current
@@ -678,30 +670,30 @@ impl Object {
             partial,
             current_partial.as_ref(),
         ) {
-            return should_throw.reject();
+            return reject_ordinary(vm, state, heap, should_throw);
         }
         let Some(current) = current else {
             let full = partial.complete_against(undefined, None);
-            if Self::add_own_property(heap, scope, receiver, name, full)? {
-                return Ok(Flow::Value(true));
+            if Self::add_own_property(heap, scope, receiver, name, full) {
+                return Ok(true);
             }
-            return should_throw.reject();
+            return reject_ordinary(vm, state, heap, should_throw);
         };
         let full = partial.complete_against(undefined, Some(&current.desc));
         match current.location {
-            None => Ok(Flow::Value(true)),
+            None => Ok(true),
             Some(OwnPropertyLocation::Parent(_)) => {
-                if Self::add_own_property(heap, scope, receiver, name, full)? {
-                    Ok(Flow::Value(true))
+                if Self::add_own_property(heap, scope, receiver, name, full) {
+                    Ok(true)
                 } else {
-                    should_throw.reject()
+                    reject_ordinary(vm, state, heap, should_throw)
                 }
             }
             Some(OwnPropertyLocation::Element(index)) => {
-                if Self::define_element(heap, scope, receiver, index, full)? {
-                    Ok(Flow::Value(true))
+                if Self::define_element(heap, scope, receiver, index, full) {
+                    Ok(true)
                 } else {
-                    should_throw.reject()
+                    reject_ordinary(vm, state, heap, should_throw)
                 }
             }
             Some(OwnPropertyLocation::MapSlot(index)) => {
@@ -739,7 +731,7 @@ impl Object {
                         Change::Replace { index },
                     );
                 }
-                Ok(Flow::Value(true))
+                Ok(true)
             }
             Some(OwnPropertyLocation::NativeAccessor { index, info, flags }) => {
                 let PropertyDescriptor::Data {
@@ -753,7 +745,7 @@ impl Object {
                 };
                 if partial.value.is_some() {
                     let (Some(vm), Some(state)) = (vm, state) else {
-                        return should_throw.reject();
+                        return reject_ordinary(vm, state, heap, should_throw);
                     };
                     let holder = scope.handle(receiver.as_tagged(heap).erase());
                     match native_accessor_set(
@@ -765,11 +757,10 @@ impl Object {
                         holder,
                         value,
                     )? {
-                        Flow::Threw => return Ok(Flow::Threw),
-                        Flow::Value(SetApplied::Rejected) => {
-                            return should_throw.reject();
+                        SetApplied::Rejected => {
+                            return should_throw.reject(vm, heap, state);
                         }
-                        Flow::Value(_) => {}
+                        _ => {}
                     }
                 }
                 let mut new_flags = SlotFlags::ACCESSOR;
@@ -787,7 +778,7 @@ impl Object {
                         heap, scope, receiver, name, index, new_flags,
                     );
                 }
-                Ok(Flow::Value(true))
+                Ok(true)
             }
         }
     }
@@ -805,17 +796,13 @@ impl Object {
         key: Handle<'_, Value>,
         attrs: Handle<'_, Value>,
         should_throw: ShouldThrow,
-    ) -> Result<Flow<bool>, VmError> {
+    ) -> Result<bool> {
         if obj.as_tagged(heap).is_primitive(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::CannotDefineOnPrimitive);
         }
-        let Some(key) = Self::to_property_key(vm, heap, state, key)? else {
-            return Ok(Flow::Threw);
-        };
+        let key = Self::to_property_key(vm, heap, state, key)?;
         let key = scope.handle(key);
-        let Some(partial) = Self::to_property_descriptor(vm, heap, state, scope, attrs)? else {
-            return Ok(Flow::Threw);
-        };
+        let partial = Self::to_property_descriptor(vm, heap, state, scope, attrs)?;
         Self::define_own_property(
             vm,
             heap,
@@ -839,8 +826,8 @@ impl Object {
         obj: Handle<'_, Value>,
         name: Handle<'_, Value>,
         partial: PartialDescriptor<'s>,
-    ) -> Result<Flow<bool>, VmError> {
-        match Self::define_own_property(
+    ) -> Result<bool> {
+        let defined = Self::define_own_property(
             vm,
             heap,
             state,
@@ -849,10 +836,11 @@ impl Object {
             name,
             partial,
             ShouldThrow::Throw,
-        )? {
-            Flow::Threw => Ok(Flow::Threw),
-            Flow::Value(true) => Ok(Flow::Value(true)),
-            Flow::Value(false) => Err(VmError::Type),
+        )?;
+        if defined {
+            Ok(true)
+        } else {
+            bail!(vm, heap, state, VmError::CannotDefineProperty)
         }
     }
 
@@ -867,7 +855,7 @@ impl Object {
         obj: Handle<'_, Value>,
         name: Handle<'_, Value>,
         value: Handle<'s, Value>,
-    ) -> Result<Flow<bool>, VmError> {
+    ) -> Result<bool> {
         let partial = PartialDescriptor::from(&PropertyDescriptor::data(value));
         Self::define_property_or_throw(vm, heap, state, scope, obj, name, partial)
     }
@@ -881,13 +869,17 @@ impl Object {
     /// (dense hole or dictionary entry). Proxy and String-exotic dispatch
     /// happen in `delete_property`.
     pub fn delete_own_property(
+        vm: &VM,
         heap: &mut Heap,
+        state: &ThreadState,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         key: Handle<'_, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> Result<bool> {
         let name = 'name: {
-            let key = key.as_tagged(heap).classify_key(heap)?;
+            let Some(key) = key.as_tagged(heap).classify_key(heap) else {
+                bail!(vm, heap, state, VmError::InvalidPropertyKey);
+            };
             match key {
                 Key::Element(i) => {
                     let obj = receiver.as_tagged(heap);
@@ -923,7 +915,7 @@ impl Object {
         let Some(name) = name else {
             return Ok(true);
         };
-        Self::delete_named_property(heap, scope, receiver, name)
+        Ok(Self::delete_named_property(heap, scope, receiver, name))
     }
 
     fn delete_named_property(
@@ -931,7 +923,7 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         name: Handle<SlotName>,
-    ) -> Result<bool, VmError> {
+    ) -> bool {
         let configurable = receiver
             .as_tagged(heap)
             .map(heap)
@@ -940,10 +932,10 @@ impl Object {
             .find(|d| d.name(heap).ptr_eq(name.as_tagged(heap)))
             .map(|d| d.flags().is_configurable());
         if configurable != Some(true) {
-            return Ok(configurable.is_none());
+            return configurable.is_none();
         }
         Transition::remove_property(heap, scope, receiver, name);
-        Ok(true)
+        true
     }
 }
 
@@ -955,22 +947,10 @@ fn call_setter(
     receiver: Handle<'_, Value>,
     value: Handle<'_, Value>,
     setter: Handle<'_, Value>,
-) -> Result<Flow<SetApplied>, VmError> {
+) -> Result<SetApplied> {
     let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
-    let result = scope.handle(HostCtx::enter(
-        vm,
-        state.runtime(vm, heap),
-        heap,
-        state,
-        setter,
-        args,
-        None,
-    )?);
-    if result.as_tagged(heap) == heap.known().exception.get(heap) {
-        Ok(Flow::Threw)
-    } else {
-        Ok(Flow::Value(SetApplied::CallSetter))
-    }
+    HostCtx::enter(vm, state.runtime(vm, heap), heap, state, setter, args, None)?;
+    Ok(SetApplied::CallSetter)
 }
 
 fn native_accessor_get<'h>(
@@ -980,9 +960,9 @@ fn native_accessor_get<'h>(
     scope: &HandleScope<'_>,
     getter: Option<NativeIndex>,
     holder: Handle<'_, Value>,
-) -> Result<Coercion<'h>, VmError> {
+) -> Result<Tagged<'h, Value>> {
     let Some(index) = getter else {
-        return Ok(Coercion::Value(heap.known().undefined.get(heap).erase()));
+        return Ok(heap.known().undefined.get(heap).erase());
     };
     let args = scope.stage(&[holder.as_tagged(heap).erase()]).as_args();
     let result = scope.handle(vm.native(index)(
@@ -991,9 +971,9 @@ fn native_accessor_get<'h>(
         args,
     ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
-        Ok(Coercion::Threw)
+        Err(Thrown)
     } else {
-        Ok(Coercion::Value(result.as_tagged(heap)))
+        Ok(result.as_tagged(heap))
     }
 }
 
@@ -1005,9 +985,9 @@ fn native_accessor_set<'h>(
     setter: Option<NativeIndex>,
     holder: Handle<'_, Value>,
     value: Handle<'_, Value>,
-) -> Result<Flow<SetApplied>, VmError> {
+) -> Result<SetApplied> {
     let Some(index) = setter else {
-        return Ok(Flow::Value(SetApplied::Rejected));
+        return Ok(SetApplied::Rejected);
     };
     let args = scope
         .stage(&[holder.as_tagged(heap).erase(), value.as_tagged(heap)])
@@ -1018,14 +998,14 @@ fn native_accessor_set<'h>(
         args,
     ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
-        Ok(Flow::Threw)
+        Err(Thrown)
     } else if result.as_tagged(heap) == heap.known().false_object.get(heap).erase() {
         // a native setter rejects the store by returning false (ArraySetLength
         // when a remaining element cannot be deleted); strict code turns this
         // into a TypeError, sloppy code ignores it
-        Ok(Flow::Value(SetApplied::Rejected))
+        Ok(SetApplied::Rejected)
     } else {
-        Ok(Flow::Value(SetApplied::CallSetter))
+        Ok(SetApplied::CallSetter)
     }
 }
 
@@ -1039,15 +1019,14 @@ fn define_on_receiver(
     receiver: Handle<'_, Value>,
     key: Handle<'_, Value>,
     value: Handle<'_, Value>,
-) -> Result<Flow<SetApplied>, VmError> {
+) -> Result<SetApplied> {
     let current = Object::get_own_property(vm, heap, state, scope, receiver, key)?;
     let partial = match current {
-        MaybeOwnProperty::Threw => return Ok(Flow::Threw),
-        MaybeOwnProperty::Found(d) if !d.desc.is_data_descriptor() || !d.desc.is_writable() => {
-            return Ok(Flow::Value(SetApplied::Rejected));
+        Some(d) if !d.desc.is_data_descriptor() || !d.desc.is_writable() => {
+            return Ok(SetApplied::Rejected);
         }
-        MaybeOwnProperty::Found(_) => PartialDescriptor::value(value),
-        MaybeOwnProperty::Missing => PartialDescriptor::new_data(value),
+        Some(_) => PartialDescriptor::value(value),
+        None => PartialDescriptor::new_data(value),
     };
     match Object::define_own_property(
         vm,
@@ -1059,9 +1038,8 @@ fn define_on_receiver(
         partial,
         ShouldThrow::DontThrow,
     )? {
-        Flow::Threw => Ok(Flow::Threw),
-        Flow::Value(true) => Ok(Flow::Value(SetApplied::Transition)),
-        Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
+        true => Ok(SetApplied::Transition),
+        false => Ok(SetApplied::Rejected),
     }
 }
 
@@ -1073,7 +1051,7 @@ pub fn own_property_enumerable(
     receiver: Tagged<'_, Value>,
     key: Tagged<'_, Value>,
 ) -> Option<bool> {
-    let key = key.classify_key(heap).ok()?;
+    let key = key.classify_key(heap)?;
     // String virtual keys win when present; wrappers may also have
     // ordinary own properties.
     if let Some(s) = DenseString::from_receiver(heap, receiver) {

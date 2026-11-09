@@ -2,15 +2,18 @@
 use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
+use vm_core::VmError;
+use vm_core::raise;
 
 use bytecode::Opcode;
+
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
-use vm_core::proxy::{Flow, Proxy};
+use vm_core::proxy::Proxy;
 use vm_core::{
-    AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
-    Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
+    AccessorPair, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass, Errors,
+    FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
     PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError, raise_runtime,
+    VM, Value, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -35,37 +38,39 @@ pub fn add_body<'a>(
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(v) => scope.handle(v),
+            Err(e) => return raise_runtime(heap, e),
         };
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(v) => scope.handle(v),
+            Err(e) => return raise_runtime(heap, e),
         };
         if lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
             || rhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
         {
-            let a = match Convert::to_string(heap, &scope, lhs) {
-                Ok(v) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, heap, state, e),
-            };
-            let b = match Convert::to_string(heap, &scope, rhs) {
-                Ok(v) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, heap, state, e),
-            };
+            let a = scope.handle(rt_try!(
+                heap,
+                Convert::to_string(vm, heap, state, &scope, lhs)
+            ));
+            let b = scope.handle(rt_try!(
+                heap,
+                Convert::to_string(vm, heap, state, &scope, rhs)
+            ));
             DenseString::concat(heap, &scope, a, b)
                 .as_tagged(heap)
                 .erase()
         } else {
             let a = match lhs.as_tagged(heap).to_number(heap) {
-                Ok(v) => v,
-                Err(e) => return raise_runtime(vm, heap, state, e),
+                Some(v) => v,
+                None => {
+                    raise!(vm, heap, state, VmError::CannotConvertToNumber);
+                }
             };
             let b = match rhs.as_tagged(heap).to_number(heap) {
-                Ok(v) => v,
-                Err(e) => return raise_runtime(vm, heap, state, e),
+                Some(v) => v,
+                None => {
+                    raise!(vm, heap, state, VmError::CannotConvertToNumber);
+                }
             };
             // IEEE `-0 + -0` yields +0; the spec demands -0
             let r = a + b;
@@ -88,16 +93,8 @@ pub fn bitwise_body<'a>(
     lhs: Handle<'_, Value>,
     rhs: Handle<'_, Value>,
 ) -> Tagged<'a, Value> {
-    let a = match Object::to_numeric(vm, heap, state, lhs) {
-        Ok(Some(n)) => n,
-        Ok(None) => return roots.exception.get(heap).erase(),
-        Err(e) => return raise_runtime(vm, heap, state, e),
-    };
-    let b = match Object::to_numeric(vm, heap, state, rhs) {
-        Ok(Some(n)) => n,
-        Ok(None) => return roots.exception.get(heap).erase(),
-        Err(e) => return raise_runtime(vm, heap, state, e),
-    };
+    let a = rt_try!(heap, Object::to_numeric(vm, heap, state, lhs));
+    let b = rt_try!(heap, Object::to_numeric(vm, heap, state, rhs));
     let (ai, bi) = (Convert::number_to_int32(a), Convert::number_to_uint32(b));
     // kind: 0 = `|`, 1 = `^`, 2 = `&`, 3 = `<<`, 4 = `>>`, 5 = `>>>`
     let r: i64 = match kind {
@@ -141,25 +138,28 @@ pub fn compare_body<'a>(
         let hint = if loose { Hint::Default } else { Hint::Number };
         let x = if x_obj {
             match Object::to_primitive(vm, heap, state, x, hint) {
-                Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, heap, state, e),
+                Ok(v) => scope.handle(v),
+                Err(e) => return raise_runtime(heap, e),
             }
         } else {
             x
         };
         let y = if y_obj {
             match Object::to_primitive(vm, heap, state, y, hint) {
-                Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Err(e) => return raise_runtime(vm, heap, state, e),
+                Ok(v) => scope.handle(v),
+                Err(e) => return raise_runtime(heap, e),
             }
         } else {
             y
         };
         let b = match cmp {
-            0 => Compare::equal(heap, &roots, x.as_tagged(heap), y.as_tagged(heap)),
-            1 => Ok(Compare::strict_equal(
+            0 => Some(Compare::equal(
+                heap,
+                &roots,
+                x.as_tagged(heap),
+                y.as_tagged(heap),
+            )),
+            1 => Some(Compare::strict_equal(
                 heap,
                 x.as_tagged(heap),
                 y.as_tagged(heap),
@@ -170,8 +170,8 @@ pub fn compare_body<'a>(
             _ => Compare::greater_than_or_equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
         };
         match b {
-            Ok(v) => Convert::boolean(heap, v),
-            Err(e) => raise_runtime(vm, heap, state, e),
+            Some(v) => Convert::boolean(heap, v),
+            None => Errors::raise(vm, heap, state, VmError::CannotConvertToPrimitive),
         }
     })
 }
@@ -197,11 +197,7 @@ pub fn incdec_body<'a>(
         return old.as_tagged(heap);
     }
     state.handle_scope(|scope| {
-        let n = match Object::to_numeric(vm, heap, state, old) {
-            Ok(Some(n)) => n,
-            Ok(None) => return roots.exception.get(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
+        let n = rt_try!(heap, Object::to_numeric(vm, heap, state, old));
         let old_num: Handle<'_, Value> =
             if n.fract() == 0.0 && Smi::in_range(n as i64) && !(n == 0.0 && n.is_sign_negative()) {
                 scope.handle(Smi::new(n as i64).into_tagged())
@@ -215,15 +211,12 @@ pub fn incdec_body<'a>(
 }
 
 /// Map a `[[Set]]` outcome to the IC outcome kind. Strict-mode
-/// rejections raise inside `Object::set_property`, so `Flow::Threw`
-/// means a pending exception.
-fn set_outcome_kind(applied: Flow<SetApplied>) -> Result<StoreOutcomeKind, ()> {
+/// rejections raise inside `Object::set_property`.
+fn set_outcome_kind(applied: SetApplied) -> StoreOutcomeKind {
     match applied {
-        Flow::Threw => Err(()),
-        Flow::Value(SetApplied::Rejected) => Ok(StoreOutcomeKind::Done),
-        Flow::Value(SetApplied::Done) => Ok(StoreOutcomeKind::Done),
-        Flow::Value(SetApplied::Transition) => Ok(StoreOutcomeKind::Transition),
-        Flow::Value(SetApplied::CallSetter) => Ok(StoreOutcomeKind::CallSetter),
+        SetApplied::Rejected | SetApplied::Done => StoreOutcomeKind::Done,
+        SetApplied::Transition => StoreOutcomeKind::Transition,
+        SetApplied::CallSetter => StoreOutcomeKind::CallSetter,
     }
 }
 
@@ -287,12 +280,9 @@ pub fn store_named_tail<'a>(
             mode,
         ) {
             Ok(applied) => applied,
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return raise_runtime(heap, e),
         };
-        let kind = match set_outcome_kind(applied) {
-            Ok(kind) => kind,
-            Err(()) => return roots.exception.get(heap).erase(),
-        };
+        let kind = set_outcome_kind(applied);
         if let (Some(fb), Some(prev)) = (fb_slot, prev) {
             InlineCache::update_store(
                 heap,
@@ -355,11 +345,14 @@ macro_rules! numeric_slow {
                 let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
                 let rhs = scope.handle(frame.acc());
                 let heap = frame.ctx().heap_mut();
-                match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
-                    Ok(Some(val)) => frame.set_acc(val),
-                    Ok(None) => frame.set_acc(roots.exception.get(heap).erase()),
-                    Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
-                }
+                let val = match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        frame.set_acc(raise_runtime(heap, e));
+                        return;
+                    }
+                };
+                frame.set_acc(val);
             });
             reenter!(pc)
         }
@@ -375,11 +368,14 @@ macro_rules! numeric_slow {
                 let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
                 let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
                 let heap = frame.ctx().heap_mut();
-                match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
-                    Ok(Some(val)) => frame.set_acc(val),
-                    Ok(None) => frame.set_acc(roots.exception.get(heap).erase()),
-                    Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
-                }
+                let val = match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        frame.set_acc(raise_runtime(heap, e));
+                        return;
+                    }
+                };
+                frame.set_acc(val);
             });
             reenter!(pc)
         }
@@ -408,11 +404,8 @@ pub fn slow_negate(frame: Frame) {
     let val = state.handle_scope(|scope| {
         let arg = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
-        match Object::to_numeric(vm, heap, state, arg) {
-            Ok(Some(n)) => heap.new_number(-n),
-            Ok(None) => roots.exception.get(heap).erase(),
-            Err(e) => raise_runtime(vm, heap, state, e),
-        }
+        let n = rt_try!(heap, Object::to_numeric(vm, heap, state, arg));
+        heap.new_number(-n)
     });
     frame.set_acc(val);
     reenter!(pc)
@@ -491,9 +484,11 @@ macro_rules! loc_slow {
                 let known = &*roots;
                 let val = if $sub {
                     match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
-                        Ok(Some(val)) => val,
-                        Ok(None) => roots.exception.get(heap).erase(),
-                        Err(e) => raise_runtime(vm, heap, state, e),
+                        Ok(val) => val,
+                        Err(e) => {
+                            frame.set_acc(raise_runtime(heap, e));
+                            return;
+                        }
                     }
                 } else {
                     add_body(vm, heap, state, roots, lhs, rhs)
@@ -632,11 +627,8 @@ pub fn slow_instance_of(frame: Frame) {
         let object = scope.handle(frame.acc());
         let callable = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
-        match Object::instance_of(vm, heap, state, object, callable) {
-            Ok(Some(r)) => Convert::boolean(heap, r),
-            Ok(None) => roots.exception.get(heap).erase(),
-            Err(e) => raise_runtime(vm, heap, state, e),
-        }
+        let result = rt_try!(heap, Object::instance_of(vm, heap, state, object, callable));
+        Convert::boolean(heap, result)
     });
     frame.set_acc(val);
     reenter!(pc)
@@ -804,7 +796,7 @@ fn load_keyed_body<'a>(
     {
         let recv = scope.handle(recv.as_tagged(heap).erase());
         let key = scope.handle(key.as_tagged(heap).erase());
-        if let Ok(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) {
+        if let Some(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) {
             InlineCache::update_load_element(
                 heap,
                 scope,
@@ -823,9 +815,8 @@ fn load_keyed_body<'a>(
             }
         }
         let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => roots.exception.get_handle(heap, scope).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(v) => scope.handle(v),
+            Err(e) => return raise_runtime(heap, e),
         };
         out.as_tagged(heap).erase()
     }
@@ -843,11 +834,10 @@ pub fn slow_keyed_load(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
-        let key = match Object::to_property_key(vm, heap, state, raw_key) {
-            Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.exception.get(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
         load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
     });
     frame.set_acc(v);
@@ -866,11 +856,10 @@ pub fn slow_keyed_load_reg(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
-        let key = match Object::to_property_key(vm, heap, state, raw_key) {
-            Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.exception.get(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
         load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
     });
     frame.set_acc(v);
@@ -946,11 +935,8 @@ pub fn slow_named_load(frame: Frame) {
                 .constant_slot_name(heap, name_idx),
         );
         let out = match Object::get_property(vm, heap, state, recv, recv, name.erase(), false) {
-            Ok(result) => match result {
-                Coercion::Value(v) => scope.handle(v),
-                Coercion::Threw => roots.exception.get_handle(heap, &scope).erase(),
-            },
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Ok(v) => scope.handle(v),
+            Err(e) => return Acc::set(raise_runtime(heap, e)),
         };
         {
             InlineCache::update_load(
@@ -1003,7 +989,7 @@ pub fn global_load_body<'a>(
         let lexical = match vm_core::global_lexical_get(heap, name_value) {
             Ok(Some((value, binding))) => Some((scope.handle(value), binding)),
             Ok(None) => None,
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => raise!(vm, heap, state, err),
         };
         if let Some((value, binding)) = lexical {
             InlineCache::update_global_lexical(
@@ -1025,11 +1011,8 @@ pub fn global_load_body<'a>(
             name.erase(),
             throws,
         ) {
-            Ok(result) => match result {
-                Coercion::Value(v) => scope.handle(v),
-                Coercion::Threw => roots.exception.get_handle(heap, &scope).erase(),
-            },
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(v) => scope.handle(v),
+            Err(e) => return raise_runtime(heap, e),
         };
         {
             InlineCache::update_load(
@@ -1113,11 +1096,10 @@ pub fn keyed_store_body<'a>(
     mode: LanguageMode,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
-        let key = match Object::to_property_key(vm, heap, state, raw_key) {
-            Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.exception.get(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
         // Fresh array/list construction is the hot no-shadow case: a dense
         // array element can be stored directly without walking the chain.
         if semantics == StoreSemantics::WriteThrough
@@ -1128,9 +1110,7 @@ pub fn keyed_store_body<'a>(
         {
             let grew = i >= obj.length();
             let obj = scope.handle(obj);
-            if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
-                return raise_runtime(vm, heap, state, e);
-            }
+            Object::store_array_element(heap, &scope, &obj, i, &value);
             InlineCache::update_store_element(
                 heap,
                 &scope,
@@ -1164,34 +1144,30 @@ pub fn keyed_store_body<'a>(
             mode,
         ) {
             Ok(applied) => applied,
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return raise_runtime(heap, e),
         };
-        match set_outcome_kind(applied) {
-            Ok(kind) => {
-                if kind != StoreOutcomeKind::CallSetter
-                    && element.is_some()
-                    && recv
-                        .as_tagged(heap)
-                        .as_heap_object()
-                        .is_some_and(|obj| obj.is_array(heap))
-                {
-                    InlineCache::update_store_element(
-                        heap,
-                        &scope,
-                        state
-                            .stack()
-                            .frame_header(base)
-                            .feedback(heap)
-                            .map(|v| scope.handle(v)),
-                        fb,
-                        Some(recv),
-                        grew,
-                    );
-                }
-                value.as_tagged(heap).erase()
-            }
-            Err(()) => roots.exception.get(heap).erase(),
+        let kind = set_outcome_kind(applied);
+        if kind != StoreOutcomeKind::CallSetter
+            && element.is_some()
+            && recv
+                .as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|obj| obj.is_array(heap))
+        {
+            InlineCache::update_store_element(
+                heap,
+                &scope,
+                state
+                    .stack()
+                    .frame_header(base)
+                    .feedback(heap)
+                    .map(|v| scope.handle(v)),
+                fb,
+                Some(recv),
+                grew,
+            );
         }
+        value.as_tagged(heap).erase()
     })
 }
 
@@ -1266,7 +1242,7 @@ pub fn call_getter<'a>(
     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
     match HostCtx::enter(vm, state.runtime(vm, heap), heap, state, getter, args, None) {
         Ok(v) => scope.handle(v).as_tagged(heap).erase(),
-        Err(e) => raise_runtime(vm, heap, state, e),
+        Err(e) => raise_runtime(heap, e),
     }
 }
 
@@ -1290,7 +1266,7 @@ macro_rules! apply_store_hit {
                     None,
                 ) {
                     Ok(v) => $scope.handle(v).as_tagged($heap).erase(),
-                    Err(e) => raise_runtime($vm, $heap, $state, e),
+                    Err(e) => raise_runtime($heap, e),
                 }
             }
             StoreHit::NativeSetter(index) => {
@@ -1311,7 +1287,7 @@ macro_rules! apply_store_hit {
                     // rejected by the native setter (ArraySetLength): a
                     // strict store throws, a sloppy one is a no-op
                     if $mode.is_strict() {
-                        raise_runtime($vm, $heap, $state, VmError::Type)
+                        Errors::raise($vm, $heap, $state, VmError::CannotSetProperty)
                     } else {
                         $value.as_tagged($heap).erase()
                     }
@@ -1426,7 +1402,7 @@ pub fn slow_store_global(frame: Frame) {
                 return value.as_tagged(heap).erase();
             }
             Ok(None) => {}
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => raise!(vm, heap, state, err),
         }
         cached_store!(
             vm, heap, state, roots, &scope, base, fb_slot, global, name, value, mode
@@ -1514,10 +1490,10 @@ pub fn slow_add_parent(frame: Frame) {
                 .as_name(),
         );
         let Some(receiver) = scope.cast::<Object>(heap, receiver.as_tagged(heap)) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        if let Err(e) = Object::add_parent(heap, &scope, receiver, name, value) {
-            return raise_runtime(vm, heap, state, e);
+        if let Err(e) = Object::add_parent(vm, heap, state, &scope, receiver, name, value) {
+            return raise_runtime(heap, e);
         }
         value.as_tagged(heap).erase()
     });
@@ -1540,17 +1516,16 @@ pub fn slow_construct(frame: Frame) {
         let callee = scope.handle(frame.regs().get(callee_reg, frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let Some(obj) = callee.as_tagged(heap).as_heap_object() else {
-            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
+            return Acc::set(Errors::raise(vm, heap, state, VmError::InvalidOperandType));
         };
         if !obj.map(heap).kind().is_constructor() {
-            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
+            return Acc::set(Errors::raise(vm, heap, state, VmError::InvalidOperandType));
         }
         let args = state.stack().args(base, args_base, count);
         if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
             return match Proxy::construct(vm, heap, state, callee, args, callee) {
-                Ok(Flow::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Flow::Value(v)) => Acc::set(v),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
+                Ok(v) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(heap, e)),
             };
         }
         if obj.map(heap).kind().is_bound() {
@@ -1567,7 +1542,7 @@ pub fn slow_construct(frame: Frame) {
                 Some(callee),
             ) {
                 Ok(value) => Acc::set(value),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
+                Err(e) => Acc::set(raise_runtime(heap, e)),
             };
         }
         // a derived constructor's `this` is the hole until `super()` binds
@@ -1582,11 +1557,16 @@ pub fn slow_construct(frame: Frame) {
         let receiver = if derived {
             roots.the_hole.get_handle(heap, &scope).erase()
         } else {
-            match Object::create_construct_receiver_value(vm, heap, state, callee_obj.erase()) {
-                Ok(Some(r)) => scope.handle(r),
-                Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-            }
+            let r = match Object::create_construct_receiver_value(
+                vm,
+                heap,
+                state,
+                callee_obj.erase(),
+            ) {
+                Ok(r) => r,
+                Err(e) => return Acc::set(raise_runtime(heap, e)),
+            };
+            scope.handle(r)
         };
         let mut staged: Vec<Tagged<'_, Value>> = Vec::with_capacity(count + 1);
         staged.push(receiver.as_tagged(heap).erase());
@@ -1602,14 +1582,14 @@ pub fn slow_construct(frame: Frame) {
             Some(callee_obj.erase()),
         ) {
             Ok(v) => scope.handle(v),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Err(e) => return Acc::set(raise_runtime(heap, e)),
         };
         if result.as_tagged(heap) == roots.exception.get(heap).erase() {
             return Acc::set(roots.exception.get(heap).erase());
         }
         if result.as_tagged(heap).is_primitive(heap) {
             if derived {
-                return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
+                return Acc::set(Errors::raise(vm, heap, state, VmError::InvalidOperandType));
             }
             Acc::set(receiver.as_tagged(heap).erase())
         } else {

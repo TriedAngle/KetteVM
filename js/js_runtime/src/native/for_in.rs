@@ -1,12 +1,14 @@
 //! for-in enumeration (ES 14.7.5): a hidden enumerator object that walks
 //! the prototype chain lazily, one own-key snapshot per level.
+use vm_core::VmError;
+use vm_core::raise;
 
 use crate::JSRuntime;
 use crate::known::JsKnown;
 use vm_core::access::own_property_enumerable;
 use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
-    Tagged, VM, Value, VmError, WellKnown, raise_runtime, rt_try,
+    Tagged, VM, Value, WellKnown,
 };
 
 /// Enumerator slot layout (a hidden object of `for_in_enumerator_map`):
@@ -53,7 +55,7 @@ pub fn for_in_enumerate<'a>(
         // the level must survive the key collection and FixedArray
         // allocation below (both allocate)
         let level = scope.handle(level);
-        let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, level));
+        let keys = for_in_level_keys(vm, heap, &scope, level);
         let staged = scope.stage_handles(&keys);
         let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
         let empty = vm.known().empty_fixed_array.get(heap);
@@ -134,7 +136,7 @@ fn for_in_level_keys<'s>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     level: Handle<'_, Value>,
-) -> Result<Vec<Handle<'s, Value>>, VmError> {
+) -> Vec<Handle<'s, Value>> {
     // raw pass: Smi index keys (to be interned) and ready name keys
     let (mut indices, names) = 'keys: {
         let level = level.as_tagged(heap);
@@ -174,7 +176,7 @@ fn for_in_level_keys<'s>(
         keys.push(s.erase());
     }
     keys.extend(names);
-    Ok(keys)
+    keys
 }
 
 /// for-in iteration step (ES 14.7.5.9 EnumerateObjectProperties):
@@ -206,25 +208,16 @@ pub fn for_in_next<'a>(
             // key is examined, so skipped keys are never revisited
             let candidate = 'candidate: {
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 };
                 let slots = obj.slots(heap);
-                let keys = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    slots
-                        .at(heap, FOR_IN_KEYS)
-                        .get_as::<FixedArray>(heap)
-                        .ok_or(VmError::Type)
-                );
-                let index = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    Smi::decode(slots.at(heap, FOR_IN_INDEX).raw()).ok_or(VmError::Type)
-                )
-                .value() as usize;
+                let keys = slots
+                    .at(heap, FOR_IN_KEYS)
+                    .get_as::<FixedArray>(heap)
+                    .expect("for-in enumerator slot");
+                let index = Smi::decode(slots.at(heap, FOR_IN_INDEX).raw())
+                    .expect("for-in enumerator slot")
+                    .value() as usize;
                 let Some(key) = (index < keys.len()).then(|| keys.at(heap, index)) else {
                     break 'candidate None;
                 };
@@ -234,22 +227,17 @@ pub fn for_in_next<'a>(
             let Some(key) = candidate else {
                 // snapshot exhausted: advance to the live prototype
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 };
                 let level = scope.handle(obj.slots(heap).at(heap, FOR_IN_LEVEL));
-                let Some(proto) = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    for_in_next_level(heap, vm.known(), &scope, level)
-                ) else {
+                let Some(proto) = for_in_next_level(heap, vm.known(), &scope, level) else {
                     return vm.known().undefined.get(heap).erase();
                 };
-                let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, proto));
+                let keys = for_in_level_keys(vm, heap, &scope, proto);
                 let staged = scope.stage_handles(&keys);
                 let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 };
                 let slots = obj.slots(heap);
                 slots.set(heap, FOR_IN_LEVEL, proto.as_tagged(heap).erase());
@@ -260,7 +248,7 @@ pub fn for_in_next<'a>(
             // lazy [[GetOwnProperty]] on the key's own level: a key
             // deleted since the snapshot is skipped without registering
             let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             };
             let level = obj.slots(heap).at(heap, FOR_IN_LEVEL);
             let own = own_property_enumerable(heap, level, key.as_tagged(heap));
@@ -270,18 +258,14 @@ pub fn for_in_next<'a>(
             // already registered (yielded earlier, or shadowing
             // non-enumerable on a closer level): skip
             let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             };
-            let visited = rt_try!(
-                vm,
-                heap,
-                state,
-                obj.slots
-                    .get(heap)
-                    .at(heap, FOR_IN_VISITED)
-                    .get_as::<FixedArray>(heap)
-                    .ok_or(VmError::Type)
-            );
+            let visited = obj
+                .slots
+                .get(heap)
+                .at(heap, FOR_IN_VISITED)
+                .get_as::<FixedArray>(heap)
+                .expect("for-in enumerator slot");
             let key_word = key.as_tagged(heap);
             let seen = visited
                 .as_slice()
@@ -293,25 +277,21 @@ pub fn for_in_next<'a>(
             // register the key — yielded or shadowing, both at most once
             {
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 };
-                let visited = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    obj.slots
-                        .get(heap)
-                        .at(heap, FOR_IN_VISITED)
-                        .get_as::<FixedArray>(heap)
-                        .ok_or(VmError::Type)
-                );
+                let visited = obj
+                    .slots
+                    .get(heap)
+                    .at(heap, FOR_IN_VISITED)
+                    .get_as::<FixedArray>(heap)
+                    .expect("for-in enumerator slot");
                 let mut visited: Vec<Tagged<'_, Value>> =
                     visited.as_slice().iter().map(|s| s.get(heap)).collect();
                 visited.push(key.as_tagged(heap));
                 let staged = scope.stage(&visited);
                 let visited = heap.allocate_handle::<FixedArray>(staged, &scope);
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 };
                 obj.slots(heap)
                     .set(heap, FOR_IN_VISITED, visited.as_tagged(heap).erase());
@@ -333,7 +313,7 @@ fn for_in_next_level<'s>(
     roots: &WellKnown,
     scope: &'s HandleScope<'_>,
     level: Handle<'_, Value>,
-) -> Result<Option<Handle<'s, Value>>, VmError> {
+) -> Option<Handle<'s, Value>> {
     let level = level.as_tagged(heap);
     if level.get_as::<DenseString>(heap).is_some() {
         // String.prototype via the global object (both plain data
@@ -342,28 +322,28 @@ fn for_in_next_level<'s>(
         let ctor_key = roots.strings.string.get_handle(heap, scope).erase();
         let string_ctor = Object::get_data_property(heap, scope, global, ctor_key);
         if !string_ctor.is_strong_ptr() {
-            return Ok(None);
+            return None;
         }
         let string_ctor = scope.handle(string_ctor);
         let proto_key = roots.strings.prototype.get_handle(heap, scope).erase();
         let proto = Object::get_data_property(heap, scope, string_ctor, proto_key);
-        return Ok(proto
+        return proto
             .is_strong_ptr()
             .then(|| scope.handle(proto))
-            .filter(|p| p.as_tagged(heap).is_strong_ptr()));
+            .filter(|p| p.as_tagged(heap).is_strong_ptr());
     }
     let Some(obj) = level.as_heap_object() else {
-        return Ok(None);
+        return None;
     };
     let proto = obj.prototype(heap);
     let hole = roots.the_hole.get(heap);
     if proto.ptr_eq(hole) || proto.ptr_eq(roots.null.get(heap)) {
-        return Ok(None);
+        return None;
     }
     // a FixedArray prototype is the Self-style multi-parent form;
     // the chain walk does not model it (ends the enumeration)
-    Ok(proto
+    proto
         .get_as::<FixedArray>(heap)
         .map_or(Some(proto), |_| None)
-        .map(|p| scope.handle(p)))
+        .map(|p| scope.handle(p))
 }

@@ -44,8 +44,7 @@ fn add_prop(
         obj,
         name,
         PropertyDescriptor::data(value),
-    )
-    .unwrap();
+    );
 }
 
 fn transition_target<'a>(
@@ -181,8 +180,9 @@ fn delete_records_pred() {
             let heap = thread.heap();
             scope.handle(name_a.as_tagged(heap).erase())
         };
+        let (vm, heap, state) = thread.split();
         assert!(
-            Object::delete_own_property(thread.heap(), &scope, obj, key).unwrap(),
+            Object::delete_own_property(vm, heap, state, &scope, obj, key).unwrap(),
             "the property is configurable and must delete"
         );
         let map_b = map_handle(thread, &scope, obj);

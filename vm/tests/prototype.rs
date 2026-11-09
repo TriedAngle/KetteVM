@@ -35,7 +35,8 @@ fn object_with<'s>(
         .heap()
         .new_object(scope, map, HandleSlice::EMPTY)
         .as_handle(scope);
-    Object::set_prototype(thread.heap(), scope, obj, proto).unwrap();
+    let (vm, heap, state) = thread.split();
+    Object::set_prototype(vm, heap, state, scope, obj, proto).unwrap();
     for (name, value) in props {
         let name = slot_name(thread, scope, name);
         let value = scope.handle(Smi::new(*value));
@@ -45,8 +46,7 @@ fn object_with<'s>(
             obj,
             name,
             PropertyDescriptor::data(value),
-        )
-        .unwrap();
+        );
     }
     obj
 }
@@ -141,8 +141,7 @@ fn multi_parent_cached_miss_invalidates_when_parent_gains_property() {
             p2,
             y,
             PropertyDescriptor::data(value),
-        )
-        .unwrap();
+        );
 
         let heap = thread.heap();
         let hit = InlineCache::try_load(
@@ -199,8 +198,7 @@ fn multi_parent_ic_invalidates_on_parent_shape_change() {
             p1,
             x,
             PropertyDescriptor::data(value),
-        )
-        .unwrap();
+        );
 
         {
             let heap = thread.heap();

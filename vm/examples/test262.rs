@@ -346,14 +346,7 @@ fn run_test_inner(
     vm.arm_gc_stress();
     let mut thread = vm.attach();
     match thread.eval::<vm::JavascriptCompiler>(&code) {
-        Ok(v)
-            if {
-                {
-                    let heap = thread.heap();
-                    v == heap.known().exception.get(heap).raw()
-                }
-            } =>
-        {
+        Err(ScriptError::Vm(_)) => {
             let name = exception_name(&mut thread);
             stats
                 .fail

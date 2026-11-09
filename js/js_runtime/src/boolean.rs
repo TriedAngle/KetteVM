@@ -1,6 +1,8 @@
 use vm_core::HostCtx;
 use vm_core::Object;
-use vm_core::raise_runtime;
+use vm_core::VmError;
+use vm_core::raise;
+use vm_core::rt_try;
 use vm_core::{Args, Convert, Handle, Tagged, Value, WrapperKind};
 
 /// `Boolean ( value )`
@@ -21,18 +23,17 @@ pub fn boolean_constructor<'a>(
     state.handle_scope(|scope| {
         let arg = args.get(heap, 1);
         let value = scope.handle(Convert::boolean(heap, arg.is_truthy(heap)));
-        let obj = match Object::create_wrapper_from_constructor(
-            vm,
+        let obj = scope.handle(rt_try!(
             heap,
-            state,
-            new_target,
-            WrapperKind::Boolean,
-            value,
-        ) {
-            Ok(Some(obj)) => scope.handle(obj),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+            Object::create_wrapper_from_constructor(
+                vm,
+                heap,
+                state,
+                new_target,
+                WrapperKind::Boolean,
+                value,
+            )
+        ));
         obj.as_tagged(heap).erase()
     })
 }
@@ -46,14 +47,13 @@ pub fn boolean_value_of<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let v = match args
+        let Some(v) = args
             .get(heap, 0)
             .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
-        {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        else {
+            raise!(vm, heap, state, VmError::IncompatibleBooleanReceiver);
         };
-        v.as_tagged(heap).erase()
+        scope.handle(v).as_tagged(heap).erase()
     })
 }
 
@@ -68,13 +68,13 @@ pub fn boolean_to_string<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let value = match args
+    let Some(v) = args
         .get(heap, 0)
         .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
-    {
-        Ok(v) => v == vm.known().true_object.get(heap),
-        Err(err) => return raise_runtime(vm, heap, state, err),
+    else {
+        raise!(vm, heap, state, VmError::IncompatibleBooleanReceiver);
     };
+    let value = v == vm.known().true_object.get(heap);
     let known = vm.known();
     if value {
         known.strings.true_.get(heap).erase()

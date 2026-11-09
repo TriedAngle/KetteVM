@@ -1,10 +1,10 @@
 //! Iterator protocol natives (ES 8.5): GetIterator, IteratorNext,
 //! IteratorComplete and IteratorValue.
+use vm_core::VmError;
+use vm_core::raise;
 
 use crate::JSRuntime;
-use vm_core::{
-    Args, Coercion, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise_runtime, rt_try,
-};
+use vm_core::{Args, Convert, Handle, HostCtx, Object, Tagged, Value, raise_runtime, rt_try};
 
 /// GetIterator (ES 8.5.4): (obj) -> iterator.
 pub fn get_iterator<'a>(
@@ -19,24 +19,16 @@ pub fn get_iterator<'a>(
     state.handle_scope(|scope| {
         let obj = scope.handle(args.get(heap, 0));
         let symbol = known.iterator_symbol.get_handle(heap, &scope).erase();
-        let method = rt_try!(
-            vm,
+        let method = scope.handle(rt_try!(
             heap,
-            state,
             Object::get_property(vm, heap, state, obj, obj, symbol, false)
-        );
-        let method = match method {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            Coercion::Value(v) => scope.handle(v),
-        };
+        ));
         let method_tagged = method.as_tagged(heap);
         if method_tagged.ptr_eq(vm.known().undefined.get(heap))
             || method_tagged.ptr_eq(vm.known().null.get(heap))
             || !method_tagged.is_callable(heap)
         {
-            return raise_runtime(vm, heap, state, VmError::Type); // "obj is not iterable"
+            raise!(vm, heap, state, VmError::InvalidOperandType); // "obj is not iterable"
         }
         let call_args = scope.stage_handles(&[obj]);
         match HostCtx::enter(
@@ -49,7 +41,7 @@ pub fn get_iterator<'a>(
             None,
         ) {
             Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         }
         .as_tagged(heap)
     })
@@ -67,18 +59,10 @@ pub fn iterator_next<'a>(
     state.handle_scope(|scope| {
         let iter = scope.handle(args.get(heap, 0));
         let next_name = vm.known().strings.next.get_handle(heap, &scope).erase();
-        let next = rt_try!(
-            vm,
+        let next = scope.handle(rt_try!(
             heap,
-            state,
             Object::get_property(vm, heap, state, iter, iter, next_name, false)
-        );
-        let next = match next {
-            Coercion::Threw => {
-                return vm.known().exception.get(heap).erase();
-            }
-            Coercion::Value(v) => scope.handle(v),
-        };
+        ));
         let call_args = scope.stage_handles(&[iter]);
         let result = match HostCtx::enter(
             vm,
@@ -90,7 +74,7 @@ pub fn iterator_next<'a>(
             None,
         ) {
             Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         if result
             .as_tagged(heap)
@@ -99,7 +83,7 @@ pub fn iterator_next<'a>(
             return result.as_tagged(heap);
         }
         if result.as_tagged(heap).is_primitive(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type); // IteratorNext result must be an Object
+            raise!(vm, heap, state, VmError::InvalidOperandType); // IteratorNext result must be an Object
         }
         result.as_tagged(heap)
     })
@@ -118,15 +102,10 @@ pub fn iterator_done<'a>(
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
         let done_name = known.strings.done.get_handle(heap, &scope).erase();
-        let v = match rt_try!(
-            vm,
+        let v = scope.handle(rt_try!(
             heap,
-            state,
             Object::get_property(vm, heap, state, result, result, done_name, false)
-        ) {
-            Coercion::Threw => return vm.known().exception.get(heap).erase(),
-            Coercion::Value(v) => scope.handle(v),
-        };
+        ));
         let truthy = v.as_tagged(heap).is_truthy(heap);
         Convert::boolean(heap, truthy)
     })
@@ -144,15 +123,10 @@ pub fn iterator_value<'a>(
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
         let value_name = vm.known().strings.value.get_handle(heap, &scope).erase();
-        let v = match rt_try!(
-            vm,
+        let v = scope.handle(rt_try!(
             heap,
-            state,
             Object::get_property(vm, heap, state, result, result, value_name, false)
-        ) {
-            Coercion::Threw => return vm.known().exception.get(heap).erase(),
-            Coercion::Value(v) => scope.handle(v),
-        };
+        ));
         v.as_tagged(heap)
     })
 }

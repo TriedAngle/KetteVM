@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, Thread, VM, VmCore};
+use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, ScriptError, Thread, VM, VmCore};
 use vm::{
     DenseString, Float, Heap, JavascriptCompiler, KetteCompiler, SlotName, Smi, Tagged, Value,
 };
@@ -124,6 +124,11 @@ fn run_with<C: Compiler>(thread: &mut Thread, src: &str, path: &str) {
                 std::process::exit(1);
             }
         }
+        Err(ScriptError::Vm(_)) => {
+            report_uncaught(thread);
+            eprintln!("{path}: uncaught exception");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
@@ -166,6 +171,9 @@ fn repl(thread: &mut Thread, language: Language) {
                     continue;
                 }
                 println!("{}", show_value(thread, v));
+            }
+            Err(ScriptError::Vm(_)) => {
+                report_uncaught(thread);
             }
             Err(e) => eprintln!("{e}"),
         }

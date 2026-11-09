@@ -9,7 +9,6 @@ pub mod api;
 pub mod bootstrap;
 pub mod compare;
 pub mod convert;
-pub mod error;
 pub mod errors;
 pub mod handle;
 pub mod heap;
@@ -33,17 +32,35 @@ pub use objects::proxy;
 pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
 
-pub use access::{MaybeOwnProperty, OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
+pub use access::{OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
     smi_slot,
 };
 pub use compare::Compare;
-pub use convert::{Coercion, Convert, Hint};
-pub use error::{Message, VmError};
-pub use errors::Errors;
+pub use convert::{Convert, Hint};
+pub use errors::{ErrorKind, Errors, VmError};
 pub use handle::{EscapableHandleScope, Handle, HandleData, HandleScope, HandleSlice};
+
+/// Marker error for VM operations that throw guest code exceptions.
+///
+/// `Err(Thrown)` always means `ThreadState::has_pending_exception()` is
+/// true. The exception value itself lives in the thread's rooted
+/// pending-exception register, not in this marker.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Thrown;
+
+/// A host-side runtime installation failure.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SetupError;
+
+/// VM operation result.
+///
+/// `Err(Thrown)` means an exception is pending on the executing thread.
+/// `Ok(None)` means a normal absence and never an error. Functions that
+/// cannot throw should return their value directly.
+pub type Result<T, E = Thrown> = core::result::Result<T, E>;
 pub use heap::{
     AllocToken, AtomicGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot, GlobalHeap, Heap,
     MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
@@ -73,12 +90,11 @@ pub use objects::{
     object_kind, object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
-pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};
+pub use stack::{Args, Callee, FrameMeta, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
-    MaybeWeak, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value, WEAK_BIT, WEAK_PTR,
-    Word, encode_smi,
+    MaybeWeak, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value, WEAK_BIT, WEAK_PTR, Word,
 };
 
 pub use heap_api::{
@@ -162,9 +178,6 @@ pub struct ThreadState {
     acc: Register,
     pending_exception: Register,
     has_pending_exception: StdCell<bool>,
-    /// The error code behind the current sentinel-channel raise, for
-    /// edges that surface `Result` again (`HostCtx::enter`).
-    last_error: StdCell<VmError>,
     /// Why this thread's execution terminated, if it did. Set exactly once,
     /// right before the uncatchable unwind; guest code can never observe or
     /// intercept it.
@@ -313,14 +326,6 @@ impl ThreadState {
             i = (i + 1) & mask;
         }
         // full: drop inserts (rare — 64 constructor kinds)
-    }
-
-    pub fn set_last_error(&self, err: VmError) {
-        self.last_error.set(err);
-    }
-
-    pub fn last_error(&self) -> VmError {
-        self.last_error.get()
     }
 
     pub fn set_pending_exception<'x, T: 'x>(&self, value: Tagged<'x, T>) {
@@ -473,12 +478,6 @@ impl Thread {
         self.vm.interner().intern_str(&mut self.heap, scope, s)
     }
 
-    pub fn set_pending_exception(&mut self, err: VmError) {
-        let ex = Errors::from_vm_error(&self.vm, &mut self.heap, &self.state, err)
-            .expect("error materialization must not fail");
-        self.state.set_pending_exception(ex);
-    }
-
     pub fn take_pending_exception(&self) -> Option<Value> {
         self.state.take_pending_exception()
     }
@@ -502,7 +501,7 @@ impl Thread {
         callable: Handle<'_, Object>,
         args: &[Value],
         runtime: RuntimeId,
-    ) -> Result<Value, VmError> {
+    ) -> Result<Value, Thrown> {
         debug_assert_eq!(self.state.stack.top(), 0);
         debug_assert!(!self.state.is_frame_active());
 
@@ -527,7 +526,7 @@ impl Thread {
                 args,
                 None,
             )
-            .map(|v| v.raw())
+            .map(|value| value.raw())
         });
         if self.state.termination().is_some() {
             let _ = self.state.take_pending_exception();
@@ -537,18 +536,13 @@ impl Thread {
         result
     }
 
-    pub fn error_object(&mut self, err: VmError) -> Result<Value, VmError> {
-        Errors::from_vm_error(&self.vm, &mut self.heap, &self.state, err).map(|v| v.raw())
-    }
-
     pub fn run_program(
         &mut self,
         program: bytecode::Program,
         runtime: RuntimeId,
     ) -> Result<Value, ScriptError> {
         self.handle_scope(|thread, scope| {
-            let closure = materialize::Materialize::script(thread, &scope, &program, runtime)
-                .map_err(ScriptError::Vm)?;
+            let closure = materialize::Materialize::script(thread, &scope, &program, runtime);
             thread
                 .execute(closure, &[], runtime)
                 .map_err(ScriptError::Vm)
@@ -573,7 +567,7 @@ impl Thread {
 pub enum ScriptError {
     Parse(bytecode::FrontendError),
     Compile(bytecode::FrontendError),
-    Vm(VmError),
+    Vm(Thrown),
 }
 
 impl ScriptError {
@@ -590,7 +584,7 @@ impl core::fmt::Display for ScriptError {
         match self {
             Self::Parse(e) => write!(f, "parse error: {e}"),
             Self::Compile(e) => write!(f, "compile error: {e}"),
-            Self::Vm(e) => write!(f, "runtime error: {e:?}"),
+            Self::Vm(_) => write!(f, "uncaught exception"),
         }
     }
 }
@@ -708,7 +702,6 @@ impl VM {
             acc: unsafe { Register::from_value(undefined) },
             pending_exception: unsafe { Register::from_value(the_hole) },
             has_pending_exception: StdCell::new(false),
-            last_error: StdCell::new(VmError::Type),
             termination: StdCell::new(None),
             construct_cache: unsafe { Register::from_value(the_hole) },
         });
@@ -726,7 +719,7 @@ impl VM {
     /// Run `R`'s setup (native-fn registration + global installation) and
     /// store its rooted state. Must run before the VM is shared:
     /// `R::setup` registers native functions, which needs exclusive access.
-    fn install<R: Runtime>(&mut self) -> Result<(), VmError> {
+    fn install<R: Runtime>(&mut self) -> Result<(), SetupError> {
         assert!(
             !self.has_runtime::<R>(),
             "a runtime is installed once per VM"
@@ -739,7 +732,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn add<R: Runtime>(mut self) -> Result<Self, VmError> {
+    pub fn add<R: Runtime>(mut self) -> Result<Self, SetupError> {
         self.install::<R>()?;
         Ok(self)
     }

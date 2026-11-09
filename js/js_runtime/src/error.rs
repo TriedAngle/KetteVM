@@ -1,11 +1,11 @@
-use vm_core::Coercion;
 use vm_core::Errors;
 use vm_core::HostCtx;
+use vm_core::VmError;
+use vm_core::raise;
 use vm_core::{
     Args, Convert, DenseString, Handle, HandleScope, Heap, Map, Object, Tagged, ThreadState, Value,
-    VmError,
 };
-use vm_core::{VM, raise_runtime};
+use vm_core::{VM, rt_try};
 
 /// `Error ( message [ , options ] )`
 /// [ES 20.5.1.1](https://tc39.es/ecma262/#sec-error-constructor)
@@ -132,11 +132,10 @@ fn make_error<'a>(
 ) -> Tagged<'a, Value> {
     let message = args.get_handle(heap, 1);
     let options = args.get_handle(heap, 2);
-    let error = match Errors::create(vm, heap, state, new_target, map, message, options) {
-        Ok(Some(error)) => scope.handle(error),
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
+    let error = scope.handle(rt_try!(
+        heap,
+        Errors::create(vm, heap, state, new_target, map, message, options)
+    ));
     error.as_tagged(heap).erase()
 }
 
@@ -170,31 +169,28 @@ pub fn error_to_string<'a>(
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         if receiver.as_tagged(heap).is_primitive(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let name_key = vm.known().strings.name.get_handle(heap, &scope).erase();
         let name_default = vm.interner().intern_str(heap, &scope, "Error").erase();
-        let name = match string_property(vm, heap, state, &scope, receiver, name_key, name_default)
-        {
-            Ok(Some(name)) => name,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let name = rt_try!(
+            heap,
+            string_property(vm, heap, state, &scope, receiver, name_key, name_default)
+        );
         let message_key = vm.known().strings.message.get_handle(heap, &scope).erase();
         let message_default = vm.known().strings.empty.get_handle(heap, &scope).erase();
-        let message = match string_property(
-            vm,
+        let message = rt_try!(
             heap,
-            state,
-            &scope,
-            receiver,
-            message_key,
-            message_default,
-        ) {
-            Ok(Some(message)) => message,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+            string_property(
+                vm,
+                heap,
+                state,
+                &scope,
+                receiver,
+                message_key,
+                message_default,
+            )
+        );
         if name.as_tagged(heap).is_empty_string(heap) {
             return message.as_tagged(heap).erase();
         }
@@ -210,7 +206,6 @@ pub fn error_to_string<'a>(
 }
 
 /// `Get ( receiver, key )`, `undefined` replaced by `default`, then `ToString`.
-/// `Ok(None)` means the lookup threw and the exception is pending.
 fn string_property<'s>(
     vm: &VM,
     heap: &mut Heap,
@@ -219,13 +214,12 @@ fn string_property<'s>(
     receiver: Handle<'_, Value>,
     key: Handle<'_, Value>,
     default: Handle<'s, Value>,
-) -> Result<Option<Handle<'s, Value>>, VmError> {
-    let value = match Object::get_property(vm, heap, state, receiver, receiver, key, false)? {
-        Coercion::Threw => return Ok(None),
-        Coercion::Value(value) => scope.handle(value),
-    };
+) -> vm_core::Result<Handle<'s, Value>> {
+    let value = scope.handle(Object::get_property(
+        vm, heap, state, receiver, receiver, key, false,
+    )?);
     if value.as_tagged(heap) == vm.known().undefined.get(heap) {
-        return Ok(Some(default));
+        return Ok(default);
     }
-    Ok(Object::to_string(vm, heap, state, value)?.map(|string| scope.handle(string)))
+    Ok(scope.handle(Object::to_string(vm, heap, state, value)?))
 }

@@ -3,14 +3,18 @@
 //! Flow-free: hot state stays in locals; only `Ctx` owns interpreter state.
 
 use bytecode::Opcode;
+use vm_core::VmError;
+use vm_core::bail;
+use vm_core::raise;
 
 use vm_core::interpreter::{base, unwind};
 
 use crate::RootsArg;
 use crate::slow::match_slow_construct;
 use crate::utils::{
-    ConstructStart, StagedCall, bound_apply_staged, call_scatter_start, call_window_start,
-    construct_native, construct_start, proxy_apply_staged, resolve_target,
+    CallFault, ConstructStart, StagedCall, bound_apply_staged, call_scatter_start,
+    call_window_start, construct_native, construct_start, proxy_apply_staged, raise_fault,
+    resolve_target,
 };
 use crate::{
     match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
@@ -40,9 +44,9 @@ use crate::{
     match_op_throw, match_op_throw_reference_error_if_hole,
 };
 use vm_core::{
-    Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, FrameMeta, Handle, HandleSlice,
-    Heap, HostCtx, Interpreter, Object, Ops, Regs, Tagged, Termination, ThreadState, Unwind, VM,
-    Value, VmError,
+    Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
+    HandleSlice, Heap, HostCtx, Interpreter, Object, Ops, Regs, Result, Tagged, Termination,
+    ThreadState, Thrown, Unwind, VM, Value,
 };
 
 pub struct MatchInterpreter;
@@ -144,11 +148,11 @@ macro_rules! reenter {
     }};
 }
 
-/// Raise a `VmError`, re-deriving the code pointer (materializing the
+/// Raise a fault, re-deriving the code pointer (materializing the
 /// exception may collect), and re-enter at the faulting instruction.
 macro_rules! raise {
     ($ctx:expr, $acc:expr, $pc:expr, $err:expr) => {{
-        *$acc = Acc::set($ctx.raise_tag($err));
+        *$acc = Acc::set(raise_fault($ctx, $err));
         $ctx.reload_code();
         $ctx.set_throw_pc($pc);
         throw_ptr()
@@ -163,7 +167,7 @@ pub fn execute<'a>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'_, Value>>,
-) -> Result<Tagged<'a, Value>, VmError> {
+) -> Result<Tagged<'a, Value>> {
     let stack = state.stack();
 
     let saved_top = stack.top();
@@ -173,6 +177,7 @@ pub fn execute<'a>(
     state.handle_scope(|scope| {
         let result = start(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(result);
+        let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
 
         stack.set_top(saved_top);
         if let Some(outer) = outer {
@@ -180,7 +185,11 @@ pub fn execute<'a>(
         } else {
             state.set_frame_active(false);
         }
-        Ok(rooted.as_tagged(heap))
+        if threw {
+            Err(Thrown)
+        } else {
+            Ok(rooted.as_tagged(heap))
+        }
     })
 }
 
@@ -192,15 +201,16 @@ fn start<'b, 't>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'b, Value>>,
-) -> Result<Tagged<'b, Value>, VmError> {
+) -> Result<Tagged<'b, Value>> {
     match callable.as_tagged(heap).erase().call_target(heap) {
-        None => Err(VmError::Type),
+        None => bail!(vm, heap, state, VmError::NotCallable),
         // proxy and bound-function calls are intercepted before `execute`
-        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
+        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => {
+            bail!(vm, heap, state, VmError::NotCallable)
+        }
         Some(CallTarget::Native(rt)) => {
             let f = vm.native(rt);
-            // Safety: the runtime state is owned by the VM, which outlives
-            // this call.
+            // Safety: this is safe
             let runtime: &'b dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
             let nctx = HostCtx::new(vm, runtime, heap, state);
             Ok(f(nctx, new_target, args.as_args()))
@@ -213,14 +223,14 @@ fn start<'b, 't>(
             ..
         }) => {
             if new_target.is_none() && kind.is_class_constructor() {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::ClassConstructorCalled);
             }
             let stack = state.stack();
             let new_target_value = match &new_target {
                 Some(nt) => nt.as_tagged(heap).erase(),
                 None => vm.known().undefined.get(heap).erase(),
             };
-            let frame = stack.push_frame_values(
+            let frame = match stack.push_frame_values(
                 heap,
                 FrameMeta::ROOT,
                 Callee {
@@ -230,7 +240,12 @@ fn start<'b, 't>(
                 },
                 new_target_value,
                 args.as_tagged(),
-            )?;
+            ) {
+                Some(frame) => frame,
+                None => {
+                    bail!(vm, heap, state, VmError::StackOverflow);
+                }
+            };
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
 
@@ -241,7 +256,7 @@ fn start<'b, 't>(
     }
 }
 
-fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc, VmError> {
+fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
@@ -766,7 +781,7 @@ fn op_return<'h>(
                 // A derived constructor escaped without initializing `this`.
                 let caller = ctx.stack().pop_frame(ctx.frame_base());
                 ctx.switch_frame(caller.base);
-                let _ = ctx.raise_tag(VmError::Reference);
+                let _ = ctx.raise(VmError::UninitializedVariable);
                 ctx.set_throw_pc(caller.pc);
                 return throw_ptr();
             }
@@ -803,10 +818,6 @@ fn op_construct<'h, const STRIDE: usize>(
         Ok(ConstructStart::Native(rt)) => {
             let v = construct_native(ctx, rt, callee_reg, args_base, count);
             reenter!(ctx, acc, pc, next_pc, v)
-        }
-        Ok(ConstructStart::Threw) => {
-            ctx.set_throw_pc(pc);
-            throw_ptr()
         }
         Ok(ConstructStart::Slow) => {
             // The receiver synthesis may have collected; re-derive the

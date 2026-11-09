@@ -1,14 +1,17 @@
 //! ES 19: function properties of the global object (eval, isNaN).
+use vm_core::VmError;
+use vm_core::raise;
 
 use crate::JSRuntime;
 use vm_core::HostCtx;
 use vm_core::Object;
+use vm_core::Result;
 use vm_core::Runtime;
 use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap,
     SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, Smi, Tagged, ThreadState, VM, Value,
-    VmError, WellKnown,
+    WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -33,15 +36,13 @@ pub fn eval_runtime<'a>(
             .expect("checked string source");
         let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal, ids) {
             Ok(program) => program,
-            Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
+            Err(_) => {
+                raise!(vm, heap, state, VmError::InvalidDeclaration);
+            }
         };
         let context = eval_global_context(vm, heap, &scope);
-        let closure = rt_try!(
-            vm,
-            heap,
-            state,
-            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context)
-        );
+        let closure =
+            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context);
         match HostCtx::enter(
             vm,
             state.runtime(vm, heap),
@@ -52,7 +53,7 @@ pub fn eval_runtime<'a>(
             None,
         ) {
             Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         }
         .as_tagged(heap)
     })
@@ -93,18 +94,12 @@ pub fn is_nan<'a>(
         vm, heap, state, ..
     } = ctx;
     let n = rt_try!(
-        vm,
         heap,
-        state,
         state.handle_scope(|scope| {
             let arg = scope.handle(args.get(heap, 1));
             Object::to_numeric(vm, heap, state, arg)
         })
     );
-    let Some(n) = n else {
-        return vm.known().exception.get(heap).erase();
-    };
-
     Convert::boolean(heap, n.is_nan())
 }
 
@@ -124,17 +119,12 @@ pub fn print<'a>(
     }
     let arg = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
-        let text = match Object::to_string(vm, heap, state, arg) {
-            Ok(Some(s)) => {
-                let s = scope.handle(s);
-                s.as_tagged(heap)
-                    .get_as::<DenseString>(heap)
-                    .map(|s| s.to_rust_string(heap))
-                    .unwrap_or_default()
-            }
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, arg)));
+        let text = s
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .map(|s| s.to_rust_string(heap))
+            .unwrap_or_default();
         println!("{text}");
         vm.known().undefined.get(heap).erase()
     })
@@ -165,7 +155,6 @@ fn primitive_to_string(heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> 
 }
 
 /// The cold half: full ToString for boxed numbers, objects, and symbols.
-/// `Ok(None)` means user code threw (the pending exception holds the cause).
 #[cold]
 #[inline(never)]
 fn console_arg_cold(
@@ -173,18 +162,15 @@ fn console_arg_cold(
     heap: &mut Heap,
     state: &ThreadState,
     arg: Handle<'_, Value>,
-) -> Result<Option<String>, VmError> {
+) -> Result<String> {
     state.handle_scope(|scope| {
-        let Some(s) = Object::to_string(vm, heap, state, arg)? else {
-            return Ok(None);
-        };
-        let s = scope.handle(s);
+        let s = scope.handle(Object::to_string(vm, heap, state, arg)?);
         let text = s
             .as_tagged(heap)
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap))
             .unwrap_or_default();
-        Ok(Some(text))
+        Ok(text)
     })
 }
 
@@ -208,9 +194,8 @@ pub fn console_log<'a>(
             continue;
         }
         match console_arg_cold(vm, heap, state, arg) {
-            Ok(Some(text)) => parts.push(text),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(text) => parts.push(text),
+            Err(err) => return raise_runtime(heap, err),
         }
     }
     println!("{}", parts.join(" "));

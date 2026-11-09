@@ -1,6 +1,8 @@
+use crate::VmError;
+use crate::bail;
 use crate::{
-    DenseString, Float, Handle, HandleScope, Heap, Object, StringData, Symbol, Tagged, VM, Value,
-    VmError, WrapperKind,
+    DenseString, Float, Handle, HandleScope, Heap, Object, Result, StringData, Symbol, Tagged,
+    ThreadState, VM, Value, WrapperKind,
 };
 
 /// ToPrimitive hint (ES 7.1.1).
@@ -9,14 +11,6 @@ pub enum Hint {
     Default,
     Number,
     String,
-}
-
-/// A coerced value anchored at the heap borrow that produced it (so it can
-/// be consumed, stored, or rooted before the next allocation), or a pending
-/// exception.
-pub enum Coercion<'a> {
-    Value(Tagged<'a, Value>),
-    Threw,
 }
 
 pub struct Convert;
@@ -61,30 +55,30 @@ impl<'a> Tagged<'a, Value> {
         !self.is_empty_string(heap)
     }
 
-    pub fn to_number(self, heap: &Heap) -> Result<f64, VmError> {
+    pub fn to_number(self, heap: &Heap) -> Option<f64> {
         let known = heap.known();
         if let Some(i) = self.to_i64() {
-            return Ok(i as f64);
+            return Some(i as f64);
         }
         if self == known.undefined.get(heap) || self == known.the_hole.get(heap) {
-            return Ok(f64::NAN);
+            return Some(f64::NAN);
         }
         if self == known.null.get(heap) {
-            return Ok(0.0);
+            return Some(0.0);
         }
         if self == known.false_object.get(heap) {
-            return Ok(0.0);
+            return Some(0.0);
         }
         if self == known.true_object.get(heap) {
-            return Ok(1.0);
+            return Some(1.0);
         }
         if let Some(f) = self.get_as::<Float>(heap) {
-            return Ok(f.value.get());
+            return Some(f.value.get());
         }
         if let Some(s) = self.get_as::<DenseString>(heap) {
-            return Ok(Convert::string_to_number(s.data(heap)).unwrap_or(f64::NAN));
+            return Some(Convert::string_to_number(s.data(heap)).unwrap_or(f64::NAN));
         }
-        Err(VmError::Type)
+        None
     }
 
     /// ES Type check: numbers, strings, symbols, booleans, null, undefined
@@ -134,11 +128,12 @@ impl Convert {
     pub fn to_object<'s>(
         vm: &VM,
         heap: &mut Heap,
+        state: &ThreadState,
         scope: &'s HandleScope<'_>,
         value: Handle<'_, Value>,
-    ) -> Result<Handle<'s, Object>, VmError> {
+    ) -> Result<Handle<'s, Object>> {
         if value.as_tagged(heap).is_nullish(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::CannotConvertNullishToObject);
         }
         if !value.as_tagged(heap).is_primitive(heap) {
             let obj = value
@@ -154,7 +149,7 @@ impl Convert {
             known.symbol_wrapper_map.get(heap)
         } else {
             // TODO: BigInt and any future primitive wrapper kinds.
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::CannotConvertToObject);
         };
         let map = scope.handle(map);
         let value = scope.handle(value.as_tagged(heap));
@@ -276,10 +271,12 @@ impl Convert {
     /// The input is rooted first; the result is anchored at the `&mut Heap`
     /// borrow.
     pub fn to_string<'a>(
+        vm: &VM,
         heap: &'a mut Heap,
+        state: &ThreadState,
         scope: &HandleScope<'_>,
         v: Handle<'_, Value>,
-    ) -> Result<Tagged<'a, Value>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         // Smis allocate a fresh string.
         if let Some(i) = v.as_tagged(heap).to_i64() {
             let s = DenseString::from_utf8(heap, scope, &i.to_string());
@@ -313,7 +310,7 @@ impl Convert {
             return Ok(s.as_tagged(heap).erase());
         }
         // Symbols (and anything else reaching this point) are a TypeError.
-        Err(VmError::Type)
+        bail!(vm, heap, state, VmError::CannotConvertSymbolToString)
     }
 
     /// ES 6.1.6.1.20 `Number::toString`. Rust's `Display` for `f64` stays

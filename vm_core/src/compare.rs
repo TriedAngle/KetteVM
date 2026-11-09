@@ -1,4 +1,4 @@
-use crate::{DenseString, Float, Heap, Smi, Tagged, Value, VmError, WellKnown};
+use crate::{DenseString, Float, Heap, Smi, Tagged, Value, WellKnown};
 
 pub struct Compare;
 
@@ -47,15 +47,15 @@ impl Compare {
         roots: &WellKnown,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> bool {
         let known = roots;
         if Self::strict_equal(heap, x, y) {
-            return Ok(true);
+            return true;
         }
         let nullish =
             |v: Tagged<'_, Value>| v == known.null.get(heap) || v == known.undefined.get(heap);
         if nullish(x) && nullish(y) {
-            return Ok(true);
+            return true;
         }
         let is_bool = |v: Tagged<'_, Value>| {
             v == known.true_object.get(heap) || v == known.false_object.get(heap)
@@ -64,10 +64,10 @@ impl Compare {
         let is_number = |v: Tagged<'_, Value>| v.is_smi() || v.get_as::<Float>(heap).is_some();
         // number ↔ string: the string parses as a number
         if is_number(x) && is_string(y) {
-            return Ok(x.to_number(heap)? == y.to_number(heap)?);
+            return x.to_number(heap).unwrap() == y.to_number(heap).unwrap();
         }
         if is_string(x) && is_number(y) {
-            return Ok(x.to_number(heap)? == y.to_number(heap)?);
+            return x.to_number(heap).unwrap() == y.to_number(heap).unwrap();
         }
         // booleans become numbers (exactly representable as smis, no allocation)
         if is_bool(x) {
@@ -79,6 +79,7 @@ impl Compare {
             .into_tagged();
             return Self::equal(heap, roots, n, y);
         }
+
         if is_bool(y) {
             let n = Smi::new(if y == known.true_object.get(heap) {
                 1
@@ -88,15 +89,16 @@ impl Compare {
             .into_tagged();
             return Self::equal(heap, roots, x, n);
         }
+
         let is_object = |v: Tagged<'_, Value>| {
             !v.is_smi() && !is_bool(v) && !nullish(v) && !is_string(v) && !is_number(v)
         };
         if is_object(x) || is_object(y) {
             // callers pre-coerce object operands (compare_bool); any that
             // remain — symbols — are simply never equal to a primitive
-            return Ok(false);
+            return false;
         }
-        Ok(false)
+        false
     }
 
     /// ES SameValue (7.2.11): NaN equals NaN, +0 and -0 are distinct, and
@@ -147,51 +149,51 @@ impl Compare {
         heap: &'a Heap,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> Option<bool> {
         if let Some(ord) = Self::string_cmp(heap, x, y) {
-            return Ok(ord == core::cmp::Ordering::Less);
+            return Some(ord == core::cmp::Ordering::Less);
         }
         let a = x.to_number(heap)?;
         let b = y.to_number(heap)?;
-        Ok(a < b)
+        Some(a < b)
     }
 
     pub fn less_than_or_equal<'a>(
         heap: &'a Heap,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> Option<bool> {
         if let Some(ord) = Self::string_cmp(heap, x, y) {
-            return Ok(ord != core::cmp::Ordering::Greater);
+            return Some(ord != core::cmp::Ordering::Greater);
         }
         let a = x.to_number(heap)?;
         let b = y.to_number(heap)?;
-        Ok(a <= b)
+        Some(a <= b)
     }
 
     pub fn greater_than<'a>(
         heap: &'a Heap,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> Option<bool> {
         if let Some(ord) = Self::string_cmp(heap, x, y) {
-            return Ok(ord == core::cmp::Ordering::Greater);
+            return Some(ord == core::cmp::Ordering::Greater);
         }
         let a = x.to_number(heap)?;
         let b = y.to_number(heap)?;
-        Ok(a > b)
+        Some(a > b)
     }
 
     pub fn greater_than_or_equal<'a>(
         heap: &'a Heap,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
-    ) -> Result<bool, VmError> {
+    ) -> Option<bool> {
         if let Some(ord) = Self::string_cmp(heap, x, y) {
-            return Ok(ord != core::cmp::Ordering::Less);
+            return Some(ord != core::cmp::Ordering::Less);
         }
         let a = x.to_number(heap)?;
         let b = y.to_number(heap)?;
-        Ok(a >= b)
+        Some(a >= b)
     }
 }

@@ -1,11 +1,14 @@
 //! ES 20.4: Symbol objects.
+use vm_core::Errors;
+use vm_core::VmError;
+use vm_core::raise;
 
 use vm_core::HostCtx;
-use vm_core::raise_runtime;
+use vm_core::rt_try;
 
 use vm_core::{
     Args, DenseString, FixedArray, Handle, HandleScope, Heap, MapKind, Object, Symbol, Tagged,
-    Value, VmError,
+    Value,
 };
 
 /// `Symbol ( [ description ] )`
@@ -21,18 +24,17 @@ pub fn symbol_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     if new_target.is_some() {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     state.handle_scope(|scope| {
         let description = scope.handle(args.get(heap, 1));
         if description.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
             return Symbol::new(heap, &scope, None).as_tagged(heap).erase();
         }
-        let description = match Object::to_string(vm, heap, state, description) {
-            Ok(Some(text)) => scope.handle(text),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let description = scope.handle(rt_try!(
+            heap,
+            Object::to_string(vm, heap, state, description)
+        ));
         let description = scope
             .cast::<DenseString>(heap, description.as_tagged(heap))
             .expect("ToString returns a String");
@@ -55,8 +57,10 @@ pub fn symbol_prototype_description<'a>(
     } = ctx;
     state.handle_scope(
         |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
-            Ok(symbol) => symbol.as_tagged(heap).as_ref().description(heap),
-            Err(err) => raise_runtime(vm, heap, state, err),
+            Some(symbol) => symbol.as_tagged(heap).as_ref().description(heap),
+            None => {
+                raise!(vm, heap, state, VmError::IncompatibleSymbolReceiver);
+            }
         },
     )
 }
@@ -74,9 +78,8 @@ pub fn symbol_prototype_to_string<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
-        let symbol = match this_symbol_value(heap, &scope, receiver.as_tagged(heap)) {
-            Ok(symbol) => symbol,
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        let Some(symbol) = this_symbol_value(heap, &scope, receiver.as_tagged(heap)) else {
+            raise!(vm, heap, state, VmError::IncompatibleSymbolReceiver);
         };
         descriptive_string(heap, &scope, symbol)
             .as_tagged(heap)
@@ -97,8 +100,8 @@ pub fn symbol_prototype_value_of<'a>(
     } = ctx;
     state.handle_scope(
         |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
-            Ok(symbol) => symbol.as_tagged(heap).erase(),
-            Err(err) => raise_runtime(vm, heap, state, err),
+            Some(symbol) => symbol.as_tagged(heap).erase(),
+            None => Errors::raise(vm, heap, state, VmError::IncompatibleSymbolReceiver),
         },
     )
 }
@@ -127,11 +130,7 @@ pub fn symbol_for<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let key = scope.handle(args.get(heap, 1));
-        let key = match Object::to_string(vm, heap, state, key) {
-            Ok(Some(text)) => scope.handle(text),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let key = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, key)));
         let key = scope
             .cast::<DenseString>(heap, key.as_tagged(heap))
             .expect("ToString returns a String");
@@ -166,7 +165,7 @@ pub fn symbol_key_for<'a>(
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 1));
         let Some(symbol) = receiver.as_tagged(heap).get_as::<Symbol>(heap) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let table = vm.known().global_symbol_registry.get(heap);
         for index in (0..table.as_ref().len()).step_by(2) {
@@ -209,22 +208,16 @@ fn this_symbol_value<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
     value: Tagged<'_, Value>,
-) -> Result<Handle<'s, Symbol>, VmError> {
+) -> Option<Handle<'s, Symbol>> {
     if let Some(symbol) = value.get_as::<Symbol>(heap) {
-        return Ok(scope.handle(symbol));
+        return Some(scope.handle(symbol));
     }
-    let Some(object) = value.as_heap_object() else {
-        return Err(VmError::Type);
-    };
+    let object = value.as_heap_object()?;
     if !object.map(heap).kind().contains(MapKind::PRIMITIVE_WRAPPER) {
-        return Err(VmError::Type);
+        return None;
     }
-    let symbol = object
-        .slots(heap)
-        .at(heap, 0)
-        .get_as::<Symbol>(heap)
-        .ok_or(VmError::Type)?;
-    Ok(scope.handle(symbol))
+    let symbol = object.slots(heap).at(heap, 0).get_as::<Symbol>(heap)?;
+    Some(scope.handle(symbol))
 }
 
 /// Appends `[key, symbol]` to the `[[GlobalSymbolRegistry]]`.

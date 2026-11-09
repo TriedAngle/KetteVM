@@ -2,14 +2,15 @@
 //! instantiation (ES 9.1.1.4.16, shared by the JS front end and Kette) and
 //! the array exotic object's `length` accessor.
 
+use crate::VmError;
 use crate::lookup::{Hit, Lookup};
+use crate::raise;
 use crate::tools::KetteTools;
 use crate::{
     AccessorInfo, Args, CallableInfoObject, ContextObject, Convert, EdgeVisitable, FixedArray,
     Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind,
-    Object, PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SlotFlags, Smi, Tagged, VM,
-    Value, Visitor, VmError, frame_context_value, info_is_lexical, info_mode, raise_runtime,
-    rt_try,
+    Object, PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SetupError, SlotFlags, Smi,
+    Tagged, VM, Value, Visitor, frame_context_value, info_is_lexical, info_mode, rt_try,
 };
 
 // ---- array `length` ----
@@ -25,10 +26,10 @@ pub fn array_length_get<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(object) = args.get(heap, 0).as_heap_object() else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     if !object.as_ref().is_array(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     Smi::new(object.as_ref().length() as i64).into_tagged()
 }
@@ -48,20 +49,19 @@ pub fn array_length_set<'a>(
         let holder = args.get_handle(heap, 0);
         let value = args.get(heap, 1);
         let Some(obj) = holder.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         if !obj.as_ref().is_array(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let obj = scope.handle(obj);
         let value = scope.handle(value);
         // ToUint32 and ToNumber each coerce the value (an object runs
         // valueOf twice); unequal results are an invalid length
-        let new_len = match Object::anything_to_array_length(vm, heap, state, value) {
-            Ok(Some(n)) => n,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let new_len = rt_try!(
+            heap,
+            Object::anything_to_array_length(vm, heap, state, value)
+        );
         // the descriptor is read after the coercions (re-entrant code may
         // have redefined it); a non-writable length refuses a different value
         let length_name = vm.known().strings.length.get(heap);
@@ -76,10 +76,8 @@ pub fn array_length_set<'a>(
             return Convert::boolean(heap, false);
         }
         // apply, then report whether every dropped element could be deleted
-        match Object::set_array_length(heap, &scope, &obj, new_len as usize) {
-            Ok(applied) => Convert::boolean(heap, applied),
-            Err(err) => raise_runtime(vm, heap, state, err),
-        }
+        let shrunk = Object::set_array_length(heap, &scope, &obj, new_len as usize);
+        Convert::boolean(heap, shrunk)
     })
 }
 
@@ -107,7 +105,7 @@ fn function_prototype_call<'a>(
 impl Runtime for VmCore {
     const ID: RuntimeId = RuntimeId(0);
 
-    fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), VmError> {
+    fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), SetupError> {
         let call_index = vm.register_native(function_prototype_call);
         let getter = vm.register_native(array_length_get);
         let setter = vm.register_native(array_length_set);
@@ -175,7 +173,8 @@ impl Runtime for VmCore {
                 info.as_ref().set_natives(heap, Some(getter), Some(setter));
             }
             KetteTools::install(thread.heap(), vm.known(), vm.interner(), &scope, tools)
-        })
+        });
+        Ok(())
     }
 }
 
@@ -190,7 +189,7 @@ pub fn read_global_declarations<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
     meta: Tagged<'_, FixedArray>,
-) -> Result<GlobalDeclarations<'s>, VmError> {
+) -> Option<GlobalDeclarations<'s>> {
     let var_count = meta.at(heap, 0).to_i64().unwrap_or(0).max(0) as usize;
     let mut pos = 1;
     let mut vars = Vec::with_capacity(var_count);
@@ -207,13 +206,11 @@ pub fn read_global_declarations<'s>(
     }
     let mut infos = Vec::with_capacity(func_count);
     for _ in 0..func_count {
-        let Some(info) = scope.cast::<CallableInfoObject>(heap, meta.at(heap, pos)) else {
-            return Err(VmError::Type);
-        };
+        let info = scope.cast::<CallableInfoObject>(heap, meta.at(heap, pos))?;
         infos.push(info);
         pos += 1;
     }
-    Ok((vars, funcs, infos))
+    Some((vars, funcs, infos))
 }
 
 pub fn global_property_flags(
@@ -268,19 +265,20 @@ pub fn create_global_var_binding(
     scope: &HandleScope<'_>,
     name: Handle<'_, Value>,
     deletable: bool,
-) -> Result<(), VmError> {
+) -> bool {
     if global_property_flags(heap, scope, name).is_some() {
-        return Ok(());
+        return true;
     }
-    let global = scope
-        .cast::<Object>(heap, heap.known().global_object.get(heap).erase())
-        .ok_or(VmError::Type)?;
+    let Some(global) = scope.cast::<Object>(heap, heap.known().global_object.get(heap).erase())
+    else {
+        return false;
+    };
     if !global.as_tagged(heap).is_extendable(heap) {
-        return Err(VmError::Type);
+        return false;
     }
     let key = scope.handle(name.as_tagged(heap).as_name());
     let value = heap.known().undefined.get_handle(heap, scope).erase();
-    if Object::define_own_property_ordinary(
+    Object::define_own_property_ordinary(
         heap,
         scope,
         global,
@@ -291,11 +289,8 @@ pub fn create_global_var_binding(
             enumerable: true,
             configurable: deletable,
         },
-    )? {
-        Ok(())
-    } else {
-        Err(VmError::Type)
-    }
+    )
+    .expect("global binding define cannot throw")
 }
 
 pub fn create_global_function_binding(
@@ -304,10 +299,11 @@ pub fn create_global_function_binding(
     name: Handle<'_, Value>,
     value: Handle<'_, Value>,
     deletable: bool,
-) -> Result<(), VmError> {
-    let global = scope
-        .cast::<Object>(heap, heap.known().global_object.get(heap).erase())
-        .ok_or(VmError::Type)?;
+) -> bool {
+    let Some(global) = scope.cast::<Object>(heap, heap.known().global_object.get(heap).erase())
+    else {
+        return false;
+    };
     let flags = global_property_flags(heap, scope, name);
     let desc = match flags {
         Some(flags) if !flags.is_configurable() => PropertyDescriptor::Data {
@@ -324,11 +320,8 @@ pub fn create_global_function_binding(
         },
     };
     let key = scope.handle(name.as_tagged(heap).as_name());
-    if Object::define_own_property_ordinary(heap, scope, global, key, desc)? {
-        Ok(())
-    } else {
-        Err(VmError::Type)
-    }
+    Object::define_own_property_ordinary(heap, scope, global, key, desc)
+        .expect("global function binding define cannot throw")
 }
 
 pub fn declare_globals<'a>(
@@ -342,24 +335,20 @@ pub fn declare_globals<'a>(
     let declarations = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        let (vars, func_names, func_infos) = rt_try!(
-            vm,
-            heap,
-            state,
+        let Some((vars, func_names, func_infos)) =
             read_global_declarations(heap, &scope, meta.as_tagged(heap))
-        );
+        else {
+            raise!(vm, heap, state, VmError::InvalidGlobalDeclarations);
+        };
 
-        let context_value = rt_try!(vm, heap, state, frame_context_value(state, heap));
-        let context = rt_try!(
-            vm,
-            heap,
-            state,
-            scope
-                .cast::<ContextObject>(heap, context_value)
-                .ok_or(VmError::Type)
-        );
+        let Some(context_value) = frame_context_value(state, heap) else {
+            unreachable!("no active frame");
+        };
+        let Some(context) = scope.cast::<ContextObject>(heap, context_value) else {
+            unreachable!("frame context is not a context");
+        };
         let lexical: Vec<(Handle<'_, Value>, i64)> = {
             let scope_info = context.as_tagged(heap).scope_info.get(heap);
             (0..scope_info.local_count())
@@ -397,13 +386,13 @@ pub fn declare_globals<'a>(
                 let same_repl_mode =
                     repl_entry && existing.is_repl_context() && same_mode && info_is_lexical(*mode);
                 if !same_repl_mode {
-                    return raise_runtime(vm, heap, state, VmError::Syntax);
+                    raise!(vm, heap, state, VmError::InvalidDeclaration);
                 }
             }
             if global_property_flags(heap, &scope, *name)
                 .is_some_and(|flags| !flags.is_configurable())
             {
-                return raise_runtime(vm, heap, state, VmError::Syntax);
+                raise!(vm, heap, state, VmError::InvalidDeclaration);
             }
         }
         for name in vars.iter().chain(func_names.iter()) {
@@ -412,52 +401,36 @@ pub fn declare_globals<'a>(
                 .lookup(heap, name.as_tagged(heap))
                 .is_some()
             {
-                return raise_runtime(vm, heap, state, VmError::Syntax);
+                raise!(vm, heap, state, VmError::InvalidDeclaration);
             }
         }
         for name in &func_names {
             if !can_declare_global_function(heap, &scope, *name) {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
         }
         for name in &vars {
             if !can_declare_global_var(heap, &scope, *name) {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
         }
 
         if !lexical.is_empty() {
-            let table = rt_try!(
-                vm,
-                heap,
-                state,
-                ScriptContextTable::add(heap, &scope, table, context)
-            );
+            let table = ScriptContextTable::add(heap, &scope, table, context);
             vm.known().script_context_table.init(table.as_tagged(heap));
         }
 
         for (name, info) in func_names.iter().zip(func_infos.iter()) {
-            let value = rt_try!(
-                vm,
-                heap,
-                state,
-                Object::create_closure(heap, &scope, *info, context)
-            );
+            let value = Object::create_closure(heap, &scope, *info, context);
             let value = scope.handle(value.erase());
-            rt_try!(
-                vm,
-                heap,
-                state,
-                create_global_function_binding(heap, &scope, *name, value, false)
-            );
+            if !create_global_function_binding(heap, &scope, *name, value, false) {
+                raise!(vm, heap, state, VmError::InvalidGlobalDeclaration);
+            }
         }
         for name in &vars {
-            rt_try!(
-                vm,
-                heap,
-                state,
-                create_global_var_binding(heap, &scope, *name, false)
-            );
+            if !create_global_var_binding(heap, &scope, *name, false) {
+                raise!(vm, heap, state, VmError::InvalidGlobalDeclaration);
+            }
         }
         vm.known().undefined.get(heap).erase()
     })

@@ -92,7 +92,7 @@ impl<'s> Lookup<'s> {
         let key = scope.handle(key.as_tagged(heap).erase());
         // unclassifiable keys are treated as name-keyed
         let index = match key.as_tagged(heap).classify_key(heap) {
-            Ok(Key::Element(i)) => Some(i),
+            Some(Key::Element(i)) => Some(i),
             _ => None,
         };
         let start = scope.handle(start.as_tagged(heap).erase());

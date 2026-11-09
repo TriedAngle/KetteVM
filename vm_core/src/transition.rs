@@ -1,9 +1,11 @@
+use crate::VmError;
+use crate::bail;
 use core::alloc::Layout;
 
 use crate::{
     AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
-    Map, MapInit, MapKind, MaybeWeak, Message, Object, Prototype, SlotFlags, SlotName, Smi, Symbol,
-    Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    Map, MapInit, MapKind, MaybeWeak, Object, Prototype, Result, SlotFlags, SlotName, Smi, Symbol,
+    Tagged, ThreadState, VM, Value, WeakFixedArray, WeakFixedArrayInit,
 };
 
 pub enum SiblingChange<'s> {
@@ -798,13 +800,13 @@ impl Object {
         receiver: Handle<Object>,
         name: Handle<SlotName>,
         desc: PropertyDescriptor<'_>,
-    ) -> Result<bool, VmError> {
+    ) -> bool {
         // elements are the only home of canonical indices
-        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+        if let Some(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
             if Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i).is_none()
                 && !can_add_element(heap, receiver.as_tagged(heap), i)
             {
-                return Ok(false);
+                return false;
             }
             return Self::define_element(heap, scope, receiver, i, desc);
         }
@@ -819,27 +821,29 @@ impl Object {
         );
         let cond_7 = receiver.as_tagged(heap).is_extendable(heap);
         if !cond_7 {
-            return Ok(false);
+            return false;
         }
         Transition::define(heap, scope, receiver, name, desc, Change::Append);
-        Ok(true)
+        true
     }
 
     /// Parent pairs are name-only: canonical indices have exactly one
     /// home, the elements store.
     pub fn add_parent(
+        vm: &VM,
         heap: &mut Heap,
+        state: &ThreadState,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         name: Handle<SlotName>,
         value: Handle<'_, Value>,
-    ) -> Result<(), VmError> {
+    ) -> Result<()> {
         if !receiver.as_tagged(heap).is_extendable(heap) {
-            return Err(VmError::NotExtensible);
+            bail!(vm, heap, state, VmError::NotExtensible);
         }
-        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
-            return Self::define_element(heap, scope, receiver, i, PropertyDescriptor::data(value))
-                .map(|_| ());
+        if let Some(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+            Self::define_element(heap, scope, receiver, i, PropertyDescriptor::data(value));
+            return Ok(());
         }
         let mut pairs: Vec<Handle<'_, Value>> = Vec::new();
         {
@@ -853,7 +857,7 @@ impl Object {
         pairs.push(name.erase());
         pairs.push(value);
         let pairs = heap.allocate_handle::<FixedArray>(scope.stage_handles(&pairs), scope);
-        Self::set_prototype(heap, scope, receiver, pairs.erase())
+        Self::set_prototype(vm, heap, state, scope, receiver, pairs.erase())
     }
 }
 
@@ -877,11 +881,13 @@ impl Object {
     ///   silently ignored (sloppy `__proto__` semantics)
     /// - cycles and non-extensible receivers throw (TODO: make this optional for Self semantics)
     pub fn set_prototype(
+        vm: &VM,
         heap: &mut Heap,
+        state: &ThreadState,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         proto: Handle<Value>,
-    ) -> Result<(), VmError> {
+    ) -> Result<()> {
         let proto_word = proto.as_tagged(heap);
         let known = heap.known();
         let is_null = proto_word.ptr_eq(known.null.get(heap).erase());
@@ -911,13 +917,13 @@ impl Object {
                 .kind()
                 .is_immutable_prototype();
             if immutable {
-                return Err(VmError::Message(Message::ImmutablePrototype));
+                bail!(vm, heap, state, VmError::ImmutablePrototype);
             }
         }
         {
             let cond_10 = receiver.as_tagged(heap).map(heap).kind().is_extendable();
             if !cond_10 {
-                return Err(VmError::NotExtensible);
+                bail!(vm, heap, state, VmError::NotExtensible);
             }
         }
 
@@ -930,29 +936,30 @@ impl Object {
                 null: Tagged<'b, Value>,
                 this: Tagged<'b, Value>,
                 mut p: Tagged<'b, Value>,
-            ) -> Result<(), VmError> {
+            ) -> bool {
                 while p.is_strong_ptr() && !p.ptr_eq(null) {
                     if p.ptr_eq(this) {
-                        return Err(VmError::Type);
+                        return false;
                     }
                     let Some(o) = p.as_heap_object() else {
                         break;
                     };
                     p = o.prototype(heap);
                 }
-                Ok(())
+                true
             }
             if let Some(pairs) = start.get_as::<FixedArray>(heap) {
                 let mut i = 1;
                 while i < pairs.len() {
-                    walk(heap, null, this, pairs.at(heap, i))?;
+                    if !walk(heap, null, this, pairs.at(heap, i)) {
+                        bail!(vm, heap, state, VmError::CyclicPrototype);
+                    }
                     i += 2;
                 }
-            } else {
-                walk(heap, null, this, start)?;
+            } else if !walk(heap, null, this, start) {
+                bail!(vm, heap, state, VmError::CyclicPrototype);
             }
-            Ok(())
-        }?;
+        }
 
         let target = Transition::sibling_target(
             heap,

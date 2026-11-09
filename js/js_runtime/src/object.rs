@@ -1,16 +1,17 @@
 //! ES 20.1: the Object constructor, statics, and prototype methods.
-use vm_core::Coercion;
+use vm_core::Errors;
 use vm_core::HostCtx;
+use vm_core::Result;
+use vm_core::VmError;
+use vm_core::raise;
 
 use crate::JSRuntime;
-use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind,
-    MaybeOwnProperty, Object, PartialDescriptor, PropertyDescriptor, Prototype, ProxyObject,
-    ShouldThrow, SlotName, Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown, WrapperKind,
-    descriptor_object,
+    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind, Object,
+    PartialDescriptor, PropertyDescriptor, Prototype, ProxyObject, ShouldThrow, SlotName, Smi,
+    Tagged, ThreadState, VM, Value, WellKnown, WrapperKind, descriptor_object,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -22,51 +23,51 @@ fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tag
 }
 
 /// ES 7.2.2 IsArray, including proxy targets (revoked proxies throw).
-pub fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Result<bool, VmError> {
+pub fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Option<bool> {
     loop {
         let Some(object) = value.as_heap_object() else {
-            return Ok(false);
+            return Some(false);
         };
         let kind = object.map(heap).kind();
         if kind.is_array() {
-            return Ok(true);
+            return Some(true);
         }
         if !kind.is_proxy() {
-            return Ok(false);
+            return Some(false);
         }
         let Some(proxy) = value.get_as::<ProxyObject>(heap) else {
-            return Ok(false);
+            return Some(false);
         };
         let (target, handler) = proxy.parts(heap);
         if handler == heap.known().null.get(heap) {
-            return Err(VmError::Type);
+            return None;
         }
         value = target;
     }
 }
 
 /// Builtin tag for the ToObject'd receiver (ES 20.1.3.6 steps 5-14).
-fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Result<&'static str, VmError> {
+fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<&'static str> {
     if is_array(heap, receiver)? {
-        return Ok("Array");
+        return Some("Array");
     }
     let Some(object) = receiver.as_heap_object() else {
-        return Ok("Object");
+        return Some("Object");
     };
     let kind = object.map(heap).kind();
     // [[Call]]: includes callable proxies (a proxy around a function).
     if kind.is_callable() {
-        return Ok("Function");
+        return Some("Function");
     }
     if kind.is_error() {
-        return Ok("Error");
+        return Some("Error");
     }
     if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
         // Wrappers carry the primitive in slots[0]; wrapper prototypes are
         // wrappers too (ES 20.3.3, 20.4.3, 20.5.3). Symbols/BigInts have no
         // builtin-tag step; their prototypes supply @@toStringTag.
         let value = object.slots(heap).at(heap, 0);
-        return Ok(match WrapperKind::classify(heap, heap.known(), value) {
+        return Some(match WrapperKind::classify(heap, heap.known(), value) {
             Some(WrapperKind::Number) => "Number",
             Some(WrapperKind::String) => "String",
             Some(WrapperKind::Boolean) => "Boolean",
@@ -74,9 +75,9 @@ fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Result<&'static str,
         });
     }
     if kind.contains(MapKind::DATE) {
-        return Ok("Date");
+        return Some("Date");
     }
-    Ok("Object")
+    Some("Object")
 }
 
 /// `Object.prototype.toString` (ES 20.1.3.6).
@@ -101,7 +102,7 @@ pub fn object_to_string<'a>(
         // ToObject(this): box primitives so the @@toStringTag lookup (and
         // any getter's receiver) sees the wrapper, as the spec requires.
         let object = if value.is_primitive(heap) {
-            match Convert::to_object(vm, heap, &scope, receiver) {
+            match Convert::to_object(vm, heap, state, &scope, receiver) {
                 Ok(object) => scope.handle(object.as_tagged(heap).erase()),
                 // TODO: BigInt wrappers are unimplemented.
                 Err(_) => return tag_string(heap, &scope, "Object"),
@@ -109,21 +110,15 @@ pub fn object_to_string<'a>(
         } else {
             receiver
         };
-        let default_tag = match builtin_tag(heap, object.as_tagged(heap)) {
-            Ok(tag) => tag,
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        let Some(default_tag) = builtin_tag(heap, object.as_tagged(heap)) else {
+            raise!(vm, heap, state, VmError::RevokedProxy);
         };
         // Let tag be ? Get(O, @@toStringTag).
         let symbol = known.to_string_tag_symbol.get_handle(heap, &scope).erase();
-        let tag = match rt_try!(
-            vm,
+        let tag = scope.handle(rt_try!(
             heap,
-            state,
             Object::get_property(vm, heap, state, object, object, symbol, false)
-        ) {
-            Coercion::Threw => return vm.known().exception.get(heap).erase(),
-            Coercion::Value(tag) => scope.handle(tag),
-        };
+        ));
         let tag = tag
             .as_tagged(heap)
             .get_as::<DenseString>(heap)
@@ -153,11 +148,11 @@ pub fn object_constructor<'a>(
         // String/Number/Boolean/Symbol primitives become their wrapper
         // objects (ES 20.1.1.1 step 3).
         // TODO: BigInt wrappers are unimplemented, so they fall through.
-        if !nullish && let Ok(boxed) = Convert::to_object(vm, heap, &scope, arg) {
+        if !nullish && let Ok(boxed) = Convert::to_object(vm, heap, state, &scope, arg) {
             return boxed.as_tagged(heap).erase();
         }
         if !is_construct && !nullish {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         // Object() / Object(undefined) / Object(null) / new Object(): a
         // fresh ordinary object.
@@ -189,14 +184,12 @@ pub fn object_get_prototype_of<'a>(
             if value.is_primitive(heap) {
                 // null / undefined (and symbols, which have no exposed
                 // prototype in this VM): ToObject throws
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
         }
-        let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(Flow::Value(v)) => scope.handle(v),
-            Ok(Flow::Threw) => exception,
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(heap, err),
         };
         result.as_tagged(heap)
     })
@@ -221,14 +214,12 @@ pub fn object_proto_get<'a>(
             if value.is_primitive(heap) {
                 // null / undefined (and symbols, which have no exposed
                 // prototype in this VM): ToObject throws
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
         }
-        let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(Flow::Value(v)) => scope.handle(v),
-            Ok(Flow::Threw) => exception,
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(heap, err),
         };
         result.as_tagged(heap)
     })
@@ -252,7 +243,7 @@ pub fn object_proto_set<'a>(
             .ptr_eq(vm.known().null.get(heap).erase())
             || !proto.as_tagged(heap).is_primitive(heap);
         if nullish {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         if !proto_ok {
             return vm.known().undefined.get(heap).erase();
@@ -261,25 +252,21 @@ pub fn object_proto_set<'a>(
             return vm.known().undefined.get(heap).erase();
         }
         if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
-            return match rt_try!(
-                vm,
+            return if rt_try!(
                 heap,
-                state,
                 Proxy::set_prototype_of(vm, heap, state, receiver, proto)
             ) {
-                Flow::Threw => vm.known().exception.get(heap).erase(),
-                Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
-                Flow::Value(true) => vm.known().undefined.get(heap).erase(),
+                vm.known().undefined.get(heap).erase()
+            } else {
+                Errors::raise(vm, heap, state, VmError::InvalidOperandType)
             };
         }
         let target = scope
             .cast::<Object>(heap, receiver.as_tagged(heap))
             .expect("receiver checked to be an object");
         rt_try!(
-            vm,
             heap,
-            state,
-            Object::set_prototype(heap, &scope, target, proto)
+            Object::set_prototype(vm, heap, state, &scope, target, proto)
         );
         vm.known().undefined.get(heap).erase()
     })
@@ -306,13 +293,13 @@ pub fn object_create<'a>(
             .ptr_eq(vm.known().null.get(heap).erase())
             || !proto.as_tagged(heap).is_primitive(heap);
         if !proto_ok {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         if args.len() > 2 {
             let props = args.get(heap, 2);
             let undefined = vm.known().undefined.get(heap).raw();
             if props.raw() != undefined {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
         }
         let map = vm.known().object_initial_map.get_handle(heap, &scope);
@@ -322,10 +309,8 @@ pub fn object_create<'a>(
             .cast::<Object>(heap, obj.as_tagged(heap).erase())
             .expect("fresh object");
         rt_try!(
-            vm,
             heap,
-            state,
-            Object::set_prototype(heap, &scope, obj, proto)
+            Object::set_prototype(vm, heap, state, &scope, obj, proto)
         );
         obj.as_tagged(heap).erase()
     })
@@ -372,7 +357,6 @@ pub fn own_property_keys<'a>(
 enum OwnProperty {
     Found { enumerable: bool },
     Missing,
-    Threw,
 }
 
 fn own_property(
@@ -382,17 +366,16 @@ fn own_property(
     scope: &HandleScope<'_>,
     receiver: Handle<'_, Value>,
     key: Handle<'_, Value>,
-) -> Result<OwnProperty, VmError> {
+) -> Result<OwnProperty> {
     Ok(
         match Object::get_own_property(vm, heap, state, scope, receiver, key)? {
-            MaybeOwnProperty::Threw => OwnProperty::Threw,
-            MaybeOwnProperty::Found(own) => OwnProperty::Found {
+            Some(own) => OwnProperty::Found {
                 enumerable: match own.desc {
                     PropertyDescriptor::Data { enumerable, .. }
                     | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
                 },
             },
-            MaybeOwnProperty::Missing => OwnProperty::Missing,
+            None => OwnProperty::Missing,
         },
     )
 }
@@ -411,27 +394,21 @@ pub fn object_has_own_property<'a>(
         let receiver = scope.handle(args.get(heap, 0));
         // ToObject(this): null/undefined throw (ES 20.4.3.2 step 1)
         if receiver.as_tagged(heap).is_nullish(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let raw_key = scope.handle(args.get(heap, 1));
         // the key coercion allocates (float/wrapper keys intern or run
         // user code): the receiver must stay rooted across it
-        let Some(key) = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::to_property_key(vm, heap, state, raw_key)
-        ) else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         let key_value = scope.handle(key.as_tagged(heap).erase());
-        match own_property(vm, heap, state, &scope, receiver, key_value) {
-            Ok(OwnProperty::Found { .. }) => Convert::boolean(heap, true),
-            Ok(OwnProperty::Missing) => Convert::boolean(heap, false),
-            Ok(OwnProperty::Threw) => vm.known().exception.get(heap).erase(),
-            Err(err) => raise_runtime(vm, heap, state, err),
+        match rt_try!(
+            heap,
+            own_property(vm, heap, state, &scope, receiver, key_value)
+        ) {
+            OwnProperty::Found { .. } => Convert::boolean(heap, true),
+            OwnProperty::Missing => Convert::boolean(heap, false),
         }
     })
 }
@@ -449,27 +426,21 @@ pub fn object_property_is_enumerable<'a>(
         let receiver = scope.handle(args.get(heap, 0));
         // ToObject(this): null/undefined throw (ES 20.4.3.5 step 1)
         if receiver.as_tagged(heap).is_nullish(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let raw_key = scope.handle(args.get(heap, 1));
         // the key coercion allocates (float/wrapper keys intern or run
         // user code): the receiver must stay rooted across it
-        let Some(key) = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::to_property_key(vm, heap, state, raw_key)
-        ) else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         let key_value = scope.handle(key.as_tagged(heap).erase());
-        match own_property(vm, heap, state, &scope, receiver, key_value) {
-            Ok(OwnProperty::Found { enumerable }) => Convert::boolean(heap, enumerable),
-            Ok(OwnProperty::Missing) => Convert::boolean(heap, false),
-            Ok(OwnProperty::Threw) => vm.known().exception.get(heap).erase(),
-            Err(err) => raise_runtime(vm, heap, state, err),
+        match rt_try!(
+            heap,
+            own_property(vm, heap, state, &scope, receiver, key_value)
+        ) {
+            OwnProperty::Found { enumerable } => Convert::boolean(heap, enumerable),
+            OwnProperty::Missing => Convert::boolean(heap, false),
         }
     })
 }
@@ -512,31 +483,18 @@ pub fn object_get_own_property_descriptor<'a>(
         let target = scope.handle(target);
         let raw_key = args.get(heap, 2);
         let raw_key = scope.handle(raw_key);
-        let Some(key) = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::to_property_key(vm, heap, state, raw_key)
-        ) else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         let key_value = scope.handle(key.as_tagged(heap).erase());
-        let own = match Object::get_own_property(vm, heap, state, &scope, target, key_value) {
-            Ok(own) => own,
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let own = match own {
-            MaybeOwnProperty::Threw => return vm.known().exception.get(heap).erase(),
-            MaybeOwnProperty::Missing => return vm.known().undefined.get(heap).erase(),
-            MaybeOwnProperty::Found(own) => own,
+        let Some(own) = rt_try!(
+            heap,
+            Object::get_own_property(vm, heap, state, &scope, target, key_value)
+        ) else {
+            return vm.known().undefined.get(heap).erase();
         };
         let partial = PartialDescriptor::from(&own.desc);
-        match descriptor_object(heap, &scope, &partial) {
-            Ok(v) => v.as_tagged(heap),
-            Err(err) => raise_runtime(vm, heap, state, err),
-        }
+        rt_try!(heap, descriptor_object(heap, &scope, &partial)).as_tagged(heap)
     })
 }
 
@@ -558,10 +516,8 @@ pub fn object_define_property<'a>(
         let target = scope.handle(args.get(heap, 1));
         let key = scope.handle(args.get(heap, 2));
         let attrs = scope.handle(args.get(heap, 3));
-        match rt_try!(
-            vm,
+        if rt_try!(
             heap,
-            state,
             Object::define_property(
                 vm,
                 heap,
@@ -573,9 +529,9 @@ pub fn object_define_property<'a>(
                 ShouldThrow::Throw,
             )
         ) {
-            Flow::Threw => vm.known().exception.get(heap).erase(),
-            Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
-            Flow::Value(true) => target.as_tagged(heap).erase(),
+            target.as_tagged(heap).erase()
+        } else {
+            Errors::raise(vm, heap, state, VmError::InvalidOperandType)
         }
     })
 }
@@ -601,37 +557,33 @@ pub fn object_set_prototype_of<'a>(
             || !proto.as_tagged(heap).is_primitive(heap);
         // RequireObjectCoercible(O) (ES 20.1.2.20 step 1)
         if nullish {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         // proto must be Object or Null *before* a primitive O is returned
         // (step 2 precedes step 3)
         if !proto_ok {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         // primitives are returned unchanged (step 3)
         if !target_is_object {
             return target.as_tagged(heap).erase();
         }
         if Proxy::is_proxy(heap, target.as_tagged(heap)) {
-            return match rt_try!(
-                vm,
+            return if rt_try!(
                 heap,
-                state,
                 Proxy::set_prototype_of(vm, heap, state, target, proto)
             ) {
-                Flow::Threw => vm.known().exception.get(heap).erase(),
-                Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
-                Flow::Value(true) => target.as_tagged(heap).erase(),
+                target.as_tagged(heap).erase()
+            } else {
+                Errors::raise(vm, heap, state, VmError::InvalidOperandType)
             };
         }
         let target_obj = scope
             .cast::<Object>(heap, target.as_tagged(heap))
             .expect("target checked to be an object");
         rt_try!(
-            vm,
             heap,
-            state,
-            Object::set_prototype(heap, &scope, target_obj, proto)
+            Object::set_prototype(vm, heap, state, &scope, target_obj, proto)
         );
         target.as_tagged(heap).erase()
     })
@@ -651,27 +603,16 @@ pub fn object_prevent_extensions<'a>(
         let target = args.get(heap, 1);
         let target = scope.handle(target);
         if target.as_tagged(heap).is_nullish(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         // the (possibly proxy) receiver is returned after traps ran user
         // code: keep it rooted across the call
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
             return target.as_tagged(heap).erase(); // primitives returned unchanged
         }
-        let v = match rt_try!(
-            vm,
-            heap,
-            state,
-            Proxy::prevent_extensions(vm, heap, state, target)
-        ) {
-            Flow::Threw => None,
-            Flow::Value(v) => Some(v),
-        };
-        let Some(v) = v else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let v = rt_try!(heap, Proxy::prevent_extensions(vm, heap, state, target));
         if !v {
-            raise_runtime(vm, heap, state, VmError::NotExtensible)
+            Errors::raise(vm, heap, state, VmError::NotExtensible)
         } else {
             // re-read through the handle: the trap above ran user
             // code and may have moved the receiver
@@ -716,18 +657,7 @@ pub fn object_is_extensible<'a>(
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
             return Convert::boolean(heap, false);
         }
-        let extensible = match rt_try!(
-            vm,
-            heap,
-            state,
-            Proxy::object_is_extensible(vm, heap, state, target)
-        ) {
-            Flow::Threw => None,
-            Flow::Value(v) => Some(v),
-        };
-        let Some(v) = extensible else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let v = rt_try!(heap, Proxy::object_is_extensible(vm, heap, state, target));
         Convert::boolean(heap, v)
     })
 }
@@ -810,7 +740,7 @@ pub fn object_seal<'a>(
     } = ctx;
     let target = args.get_handle(heap, 1);
     if target.as_tagged(heap).is_nullish(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     // traps run user code before the receiver is returned: keep it rooted
     state.handle_scope(|scope| {
@@ -820,20 +750,12 @@ pub fn object_seal<'a>(
             return target_handle.as_tagged(heap).erase();
         }
         // [[PreventExtensions]] first (traps included)
-        let v = match rt_try!(
-            vm,
+        let v = rt_try!(
             heap,
-            state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
-        ) {
-            Flow::Threw => None,
-            Flow::Value(v) => Some(v),
-        };
-        let Some(v) = v else {
-            return vm.known().exception.get(heap).erase();
-        };
+        );
         if !v {
-            return raise_runtime(vm, heap, state, VmError::NotExtensible);
+            raise!(vm, heap, state, VmError::NotExtensible);
         }
         // TODO: per-key [[DefineOwnProperty]] through the defineProperty
         // trap once ownKeys lands (proxy targets); ordinary targets:
@@ -861,7 +783,7 @@ pub fn object_freeze<'a>(
     } = ctx;
     let target = args.get_handle(heap, 1);
     if target.as_tagged(heap).is_nullish(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     // traps run user code before the receiver is returned: keep it rooted
     state.handle_scope(|scope| {
@@ -870,20 +792,12 @@ pub fn object_freeze<'a>(
         if !Proxy::is_js_receiver(heap, target_handle.as_tagged(heap)) {
             return target_handle.as_tagged(heap).erase();
         }
-        let v = match rt_try!(
-            vm,
+        let v = rt_try!(
             heap,
-            state,
             Proxy::prevent_extensions(vm, heap, state, target_handle)
-        ) {
-            Flow::Threw => None,
-            Flow::Value(v) => Some(v),
-        };
-        let Some(v) = v else {
-            return vm.known().exception.get(heap).erase();
-        };
+        );
         if !v {
-            return raise_runtime(vm, heap, state, VmError::NotExtensible);
+            raise!(vm, heap, state, VmError::NotExtensible);
         }
         // re-read through the handle: the trap may have moved the receiver
         if Proxy::is_proxy(heap, target_handle.as_tagged(heap)) {

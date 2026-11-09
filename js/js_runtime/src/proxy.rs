@@ -3,11 +3,11 @@
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::PropertyDescriptor;
-use vm_core::error::Message;
+use vm_core::VmError;
 use vm_core::proxy::Proxy;
-use vm_core::raise_runtime;
+use vm_core::raise;
 use vm_core::rt_try;
-use vm_core::{Args, Handle, HandleSlice, Smi, Tagged, Value, VmError};
+use vm_core::{Args, Handle, HandleSlice, Smi, Tagged, Value};
 
 use crate::JSRuntime;
 
@@ -24,19 +24,14 @@ pub fn proxy_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     if !construct {
-        return raise_runtime(vm, heap, state, VmError::Message(Message::ProxyRequiresNew));
+        raise!(vm, heap, state, VmError::ProxyRequiresNew);
     }
     let target = args.get_handle(heap, 1);
     let handler = args.get_handle(heap, 2);
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
         && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
     if !ok {
-        return raise_runtime(
-            vm,
-            heap,
-            state,
-            VmError::Message(Message::ProxyBadTargetOrHandler),
-        );
+        raise!(vm, heap, state, VmError::ProxyBadTargetOrHandler);
     }
     state.handle_scope(|scope| Proxy::allocate(heap, &scope, target, handler))
 }
@@ -60,12 +55,7 @@ pub fn proxy_revocable<'a>(
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
         && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
     if !ok {
-        return raise_runtime(
-            vm,
-            heap,
-            state,
-            VmError::Message(Message::ProxyBadTargetOrHandler),
-        );
+        raise!(vm, heap, state, VmError::ProxyBadTargetOrHandler);
     }
     state.handle_scope(|scope| {
         let proxy = scope.handle(Proxy::allocate(heap, &scope, target, handler));
@@ -73,12 +63,7 @@ pub fn proxy_revocable<'a>(
         // built-in function with [[RevocableProxy]]; the revocation itself
         // is idempotent, so no done-flag is needed). A bound function has
         // no `prototype` own property, like a built-in.
-        let target = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::native_function(heap, &scope, idx.proxy_revoke)
-        );
+        let target = Object::native_function(heap, &scope, idx.proxy_revoke);
         let bound_args =
             scope.handle(heap.new_array(&scope, scope.stage(&[proxy.as_tagged(heap)])));
         let map = vm.known().bound_function_map.get_handle(heap, &scope);
@@ -94,10 +79,8 @@ pub fn proxy_revocable<'a>(
             .get_handle(heap, &scope)
             .erase();
         rt_try!(
-            vm,
             heap,
-            state,
-            Object::set_prototype(heap, &scope, bound, prototype)
+            Object::set_prototype(vm, heap, state, &scope, bound, prototype)
         );
         // name "revoke", length 0 (the bound argument), neither enumerable
         let name_key = vm.known().strings.name.get_handle(heap, &scope);

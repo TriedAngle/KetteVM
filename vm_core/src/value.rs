@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, ptr::NonNull};
 
-use crate::{Heap, HeapObject, MapKind, Object, VmError};
+use crate::{Heap, HeapObject, MapKind, Object};
 
 // imports flattened
 use crate::Handle;
@@ -137,15 +137,6 @@ impl Smi {
             None
         }
     }
-}
-
-/// Range-check a computed i64 and encode it as a Smi.
-#[inline]
-pub fn encode_smi(r: i64) -> Result<Value, VmError> {
-    if !Smi::in_range(r) {
-        return Err(VmError::Overflow);
-    }
-    Ok(Smi::new(r).encode())
 }
 
 pub struct MaybeWeak<T>(PhantomData<fn() -> T>);

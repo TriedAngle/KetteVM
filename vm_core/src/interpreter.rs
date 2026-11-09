@@ -12,8 +12,8 @@ use crate::heap::{Heap, Register};
 use crate::stack::{FrameMeta, Stack};
 use crate::value::{Tagged, Value};
 use crate::{
-    Args, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, RuntimeId, ThreadState,
-    VM, VmError, Word, raise_runtime,
+    Args, Errors, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, RuntimeId,
+    ThreadState, VM, VmError, Word,
 };
 
 /// Loop back-edge ticks between safepoint polls.
@@ -380,9 +380,9 @@ impl<'s, 'h> Ctx<'s, 'h> {
     }
 
     #[inline(always)]
-    pub fn raise_tag(&mut self, err: VmError) -> Tagged<'_, Value> {
+    pub fn raise(&mut self, err: VmError) -> Tagged<'_, Value> {
         let (vm, state) = (self.vm, self.state);
-        raise_runtime(vm, self.heap_mut(), state, err)
+        Errors::raise(vm, self.heap_mut(), state, err)
     }
 }
 

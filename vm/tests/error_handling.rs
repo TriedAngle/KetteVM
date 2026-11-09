@@ -153,12 +153,8 @@ fn throw_any_value_escapes_as_sentinel() {
     f.throw();
     let f = f.finish(Default::default()).unwrap();
 
-    let result = run(&mut thread, vec![f]).unwrap();
-    let exception_word = {
-        let heap = thread.heap();
-        heap.known().exception.get(heap).raw()
-    };
-    assert_eq!(result, exception_word);
+    let error = run(&mut thread, vec![f]).unwrap_err();
+    assert!(matches!(error, ScriptError::Vm(_)));
     assert_eq!(
         thread.take_pending_exception(),
         Some(Smi::new(42).encode()),
@@ -236,11 +232,7 @@ fn throw_from_finally_escapes_past_its_own_handler() {
     f.throw();
     let f = f.finish(Default::default()).unwrap();
 
-    let result = run(&mut thread, vec![f]).unwrap();
-    let exception_word = {
-        let heap = thread.heap();
-        heap.known().exception.get(heap).raw()
-    };
-    assert_eq!(result, exception_word);
+    let error = run(&mut thread, vec![f]).unwrap_err();
+    assert!(matches!(error, ScriptError::Vm(_)));
     assert_eq!(thread.take_pending_exception(), Some(Smi::new(3).encode()));
 }

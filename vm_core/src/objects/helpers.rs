@@ -1,6 +1,6 @@
 use crate::{
     DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, Smi, Tagged, Thread, ThreadState, VM, Value, VmError, WellKnown,
+    Object, PropertyDescriptor, Result, Smi, Tagged, Thread, ThreadState, VM, Value, WellKnown,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -41,7 +41,7 @@ impl Object {
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
-    ) -> Result<Handle<'s, Object>, VmError> {
+    ) -> Handle<'s, Object> {
         Self::make_native_object(heap, scope, index, true)
     }
 
@@ -50,7 +50,7 @@ impl Object {
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
-    ) -> Result<Handle<'s, Object>, VmError> {
+    ) -> Handle<'s, Object> {
         Self::make_native_object(heap, scope, index, false)
     }
 
@@ -59,7 +59,7 @@ impl Object {
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
         constructor: bool,
-    ) -> Result<Handle<'s, Object>, VmError> {
+    ) -> Handle<'s, Object> {
         let mut kind = MapKind::OBJECT
             .union(MapKind::CALLABLE)
             .union(MapKind::NATIVE)
@@ -89,7 +89,7 @@ impl Object {
                 empty_context.as_tagged(heap).erase(),
             ]),
         );
-        Ok(scope.handle(obj))
+        scope.handle(obj)
     }
 
     pub fn install_constructor<'s>(
@@ -98,7 +98,7 @@ impl Object {
         index: NativeIndex,
         name: &str,
         proto_parent: Handle<'_, Object>,
-    ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
+    ) -> (Handle<'s, Object>, Handle<'s, Object>) {
         Self::install_constructor_with(thread, scope, index, name, proto_parent, None)
     }
 
@@ -111,7 +111,7 @@ impl Object {
         name: &str,
         proto_parent: Handle<'_, Object>,
         value: Handle<'_, Value>,
-    ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
+    ) -> (Handle<'s, Object>, Handle<'s, Object>) {
         Self::install_constructor_with(thread, scope, index, name, proto_parent, Some(value))
     }
 
@@ -122,10 +122,10 @@ impl Object {
         name: &str,
         proto_parent: Handle<'_, Object>,
         wrapper: Option<Handle<'_, Value>>,
-    ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
+    ) -> (Handle<'s, Object>, Handle<'s, Object>) {
         let name_str = thread.intern(scope, name);
-        let fn_obj = Self::native_constructor(thread.heap(), scope, index)?;
-        Self::set_builtin_name(thread, scope, fn_obj, name)?;
+        let fn_obj = Self::native_constructor(thread.heap(), scope, index);
+        Self::set_builtin_name(thread, scope, fn_obj, name);
 
         // prototype object: fresh extendable object chained to proto_parent
         // (wrapper prototypes also carry their primitive in slot 0)
@@ -159,7 +159,8 @@ impl Object {
             proto,
             constructor_name,
             PropertyDescriptor::method(fn_obj.erase()),
-        )?;
+        )
+        .expect("install constructor name");
         let prototype_name = heap.known().strings.prototype.get_handle(heap, scope);
         Object::define_own_property_ordinary(
             thread.heap(),
@@ -172,7 +173,8 @@ impl Object {
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("install constructor prototype");
 
         // global.Name = fn
         let global = {
@@ -187,8 +189,9 @@ impl Object {
             global,
             name,
             PropertyDescriptor::method(fn_obj.erase()),
-        )?;
-        Ok((fn_obj, proto))
+        )
+        .expect("install global constructor");
+        (fn_obj, proto)
     }
 
     /// `name` of a builtin function: { writable: false, enumerable: false, configurable: true }
@@ -197,7 +200,7 @@ impl Object {
         scope: &HandleScope<'_>,
         function: Handle<'_, Object>,
         name: &str,
-    ) -> Result<(), VmError> {
+    ) {
         let name_str = thread.intern(scope, name);
         // Safety: fresh interned word, rooted below before any allocation.
         let name_str: Handle<'_, DenseString> = scope.handle(name_str.as_tagged(thread.heap()));
@@ -213,8 +216,8 @@ impl Object {
             function,
             name_key,
             PropertyDescriptor::non_enumerable(name_str.erase()),
-        )?;
-        Ok(())
+        )
+        .expect("install builtin name");
     }
 
     pub fn install_method(
@@ -223,19 +226,19 @@ impl Object {
         receiver: Handle<'_, Object>,
         name: &str,
         index: NativeIndex,
-    ) -> Result<(), VmError> {
-        let method = Self::native_function(thread.heap(), scope, index)?;
+    ) {
+        let method = Self::native_function(thread.heap(), scope, index);
         let name_str = thread.intern(scope, name);
         let method_name = scope.handle(name_str.as_tagged(thread.heap()));
-        Self::set_builtin_name(thread, scope, method, name)?;
+        Self::set_builtin_name(thread, scope, method, name);
         Object::define_own_property_ordinary(
             thread.heap(),
             scope,
             receiver,
             method_name,
             PropertyDescriptor::method(method.erase()),
-        )?;
-        Ok(())
+        )
+        .expect("install builtin method");
     }
 
     /// `OrdinaryCreateFromConstructor ( newTarget, "%X.prototype%", [[PrimitiveValue]] )`
@@ -248,13 +251,13 @@ impl Object {
         new_target: Handle<'_, Value>,
         kind: WrapperKind,
         value: Handle<'_, Value>,
-    ) -> Result<Option<Tagged<'a, Value>>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         state.handle_scope(|scope| {
             let map = scope.handle(kind.wrapper_map(heap, vm.known()));
             let slots = scope.stage(&[value.as_tagged(heap)]);
             let obj =
                 Object::create_from_constructor(vm, heap, state, &scope, new_target, map, slots)?;
-            Ok(obj.map(|obj| obj.as_tagged(heap).erase()))
+            Ok(obj.as_tagged(heap).erase())
         })
     }
 }
@@ -271,22 +274,16 @@ impl<'a> Tagged<'a, Value> {
         heap: &'a Heap,
         roots: &WellKnown,
         kind: WrapperKind,
-    ) -> Result<Tagged<'a, Value>, VmError> {
+    ) -> Option<Tagged<'a, Value>> {
         if WrapperKind::classify(heap, roots, self) == Some(kind) {
-            return Ok(self);
+            return Some(self);
         }
-        let Some(obj) = self.as_heap_object() else {
-            return Err(VmError::Type);
-        };
+        let obj = self.as_heap_object()?;
         let map = obj.map(heap);
         if !map.kind().contains(MapKind::PRIMITIVE_WRAPPER) {
-            return Err(VmError::Type);
+            return None;
         }
         let value = obj.slots(heap).at(heap, 0);
-        if WrapperKind::classify(heap, roots, value) == Some(kind) {
-            Ok(value)
-        } else {
-            Err(VmError::Type)
-        }
+        (WrapperKind::classify(heap, roots, value) == Some(kind)).then_some(value)
     }
 }

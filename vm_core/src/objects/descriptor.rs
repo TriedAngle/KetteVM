@@ -1,8 +1,10 @@
 //! ES `ToPropertyDescriptor`: JS descriptor object -> partial descriptor.
 
+use crate::VmError;
+use crate::bail;
 use crate::{
-    Coercion, Convert, Handle, HandleScope, HandleSlice, Heap, Object, PartialDescriptor,
-    PropertyDescriptor, SlotName, ThreadState, VM, Value, VmError,
+    Convert, Handle, HandleScope, HandleSlice, Heap, Object, PartialDescriptor, PropertyDescriptor,
+    Result, SlotName, ThreadState, VM, Value,
 };
 
 impl Object {
@@ -12,9 +14,9 @@ impl Object {
         state: &ThreadState,
         scope: &'s HandleScope<'_>,
         attrs: Handle<'_, Value>,
-    ) -> Result<Option<PartialDescriptor<'s>>, VmError> {
+    ) -> Result<PartialDescriptor<'s>> {
         if attrs.as_tagged(heap).is_primitive(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::PropertyDescriptorNotObject);
         }
         let attrs = scope.handle(attrs.as_tagged(heap));
         let strings = &heap.known().strings;
@@ -28,24 +30,12 @@ impl Object {
         ];
         let mut read =
             |name: Handle<'_, Value>| descriptor_field(vm, heap, state, scope, attrs, name);
-        let Some(value) = read(names[0])? else {
-            return Ok(None);
-        };
-        let Some(get) = read(names[1])? else {
-            return Ok(None);
-        };
-        let Some(set) = read(names[2])? else {
-            return Ok(None);
-        };
-        let Some(writable) = read(names[3])? else {
-            return Ok(None);
-        };
-        let Some(enumerable) = read(names[4])? else {
-            return Ok(None);
-        };
-        let Some(configurable) = read(names[5])? else {
-            return Ok(None);
-        };
+        let value = read(names[0])?;
+        let get = read(names[1])?;
+        let set = read(names[2])?;
+        let writable = read(names[3])?;
+        let enumerable = read(names[4])?;
+        let configurable = read(names[5])?;
         if get.is_some() || set.is_some() {
             let undefined = heap.known().undefined.get(heap).erase();
             for half in [get, set] {
@@ -53,18 +43,18 @@ impl Object {
                     && !h.as_tagged(heap).ptr_eq(undefined)
                     && !h.as_tagged(heap).is_callable(heap)
                 {
-                    return Err(VmError::Type);
+                    bail!(vm, heap, state, VmError::AccessorNotCallable);
                 }
             }
         }
-        Ok(Some(PartialDescriptor {
+        Ok(PartialDescriptor {
             value,
             get,
             set,
             writable: writable.map(|v| v.as_tagged(heap).is_truthy(heap)),
             enumerable: enumerable.map(|v| v.as_tagged(heap).is_truthy(heap)),
             configurable: configurable.map(|v| v.as_tagged(heap).is_truthy(heap)),
-        }))
+        })
     }
 }
 
@@ -75,24 +65,14 @@ fn descriptor_field<'s>(
     scope: &'s HandleScope<'_>,
     attrs: Handle<'_, Value>,
     name: Handle<'_, Value>,
-) -> Result<Option<Option<Handle<'s, Value>>>, VmError> {
-    let present = match Object::has_property(vm, heap, state, attrs, name)? {
-        Coercion::Threw => return Ok(None),
-        Coercion::Value(v) => {
-            let v = scope.handle(v);
-            v.as_tagged(heap).is_truthy(heap)
-        }
-    };
-    if !present {
-        return Ok(Some(None));
+) -> Result<Option<Handle<'s, Value>>> {
+    if !Object::has_property(vm, heap, state, attrs, name)? {
+        return Ok(None);
     }
-    match Object::get_property(vm, heap, state, attrs, attrs, name, false)? {
-        Coercion::Threw => Ok(None),
-        Coercion::Value(v) => {
-            let v = scope.handle(v);
-            Ok(Some(Some(v)))
-        }
-    }
+    let value = scope.handle(Object::get_property(
+        vm, heap, state, attrs, attrs, name, false,
+    )?);
+    Ok(Some(value))
 }
 
 /// FromPropertyDescriptor (ES 6.2.6.4): descriptor object with present fields.
@@ -100,7 +80,7 @@ pub fn descriptor_object<'s>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     partial: &PartialDescriptor<'_>,
-) -> Result<Handle<'s, Value>, VmError> {
+) -> Result<Handle<'s, Value>> {
     let map = heap.known().object_initial_map.get_handle(heap, scope);
     let obj = heap
         .new_object(scope, map, HandleSlice::EMPTY)
@@ -140,7 +120,8 @@ pub fn descriptor_object<'s>(
             obj,
             name,
             PropertyDescriptor::data(value),
-        )?;
+        )
+        .expect("fresh descriptor object accepts data fields");
     }
     Ok(obj.erase())
 }

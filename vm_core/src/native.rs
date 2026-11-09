@@ -1,9 +1,29 @@
+use crate::Result;
+use crate::VmError;
 use crate::api::Runtime;
-use crate::errors::Errors;
 use crate::{
-    Args, Coercion, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Tagged,
-    ThreadState, VM, Value, VmError,
+    Args, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState,
+    Thrown, VM, Value,
 };
+
+/// Return `Err(Thrown)` after materializing `err`.
+#[macro_export]
+macro_rules! bail {
+    ($vm:expr, $heap:expr, $state:expr, $err:expr) => {
+        return Err($crate::Errors::throw($vm, $heap, $state, $err))
+    };
+    ($vm:expr, $heap:expr, $state:expr, $err:expr, $arg:expr) => {
+        return Err($crate::Errors::throw_with($vm, $heap, $state, $err, $arg))
+    };
+}
+
+/// Return the exception sentinel after materializing `err`.
+#[macro_export]
+macro_rules! raise {
+    ($vm:expr, $heap:expr, $state:expr, $err:expr) => {
+        return $crate::Errors::raise($vm, $heap, $state, $err)
+    };
+}
 
 // -- native calling convention --
 
@@ -68,10 +88,10 @@ impl<'a> HostCtx<'a> {
         callable: Handle<'_, Value>,
         args: HandleSlice<'r>,
         new_target: Option<Handle<'_, Value>>,
-    ) -> Result<Tagged<'h, Value>, VmError> {
+    ) -> Result<Tagged<'h, Value>> {
         let scope = state.scope();
         let Some(callable) = scope.cast::<Object>(heap, callable.as_tagged(heap)) else {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::NotCallable);
         };
         let new_target = match new_target {
             None => None,
@@ -79,7 +99,7 @@ impl<'a> HostCtx<'a> {
                 // new.target may be exotic (a constructor proxy)
                 let nt = nt.as_tagged(heap);
                 if !nt.is_strong_ptr() {
-                    return Err(VmError::Type);
+                    bail!(vm, heap, state, VmError::NewTargetNotObject);
                 }
                 Some(scope.handle(nt))
             }
@@ -115,10 +135,10 @@ impl<'a> HostCtx<'a> {
         bound: Handle<'_, Value>,
         args: &[Handle<'_, Value>],
         new_target: Option<Handle<'_, Value>>,
-    ) -> Result<Tagged<'h, Value>, VmError> {
+    ) -> Result<Tagged<'h, Value>> {
         state.handle_scope(|scope| {
             let Some(function) = bound.as_tagged(heap).as_heap_object() else {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::NotCallable);
             };
             let slots = function.slots(heap);
             let target = scope.handle(slots.at(heap, 0));
@@ -153,13 +173,7 @@ impl<'a> HostCtx<'a> {
                         } else {
                             new_target.as_tagged(heap)
                         });
-                    let result = match Object::construct_forward(
-                        vm, heap, state, target, &combined, new_target,
-                    )? {
-                        Coercion::Threw => heap.known().exception.get_handle(heap, &scope).erase(),
-                        Coercion::Value(value) => scope.handle(value),
-                    };
-                    Ok(result.as_tagged(heap).erase())
+                    Object::construct_forward(vm, heap, state, target, &combined, new_target)
                 }
             }
         })
@@ -170,28 +184,18 @@ impl<'a> HostCtx<'a> {
 pub type NativeFn =
     for<'a, 'nt> fn(HostCtx<'a>, Option<Handle<'nt, Value>>, Args) -> Tagged<'a, Value>;
 
-/// Materialize `err` as the pending exception and return the sentinel
-pub fn raise_runtime<'a>(
-    vm: &VM,
-    heap: &'a mut Heap,
-    state: &ThreadState,
-    err: VmError,
-) -> Tagged<'a, Value> {
-    let ex =
-        Errors::from_vm_error(vm, heap, state, err).expect("error materialization must not fail");
-    state.set_pending_exception(ex);
-    state.set_last_error(err);
-    vm.known().exception.get(heap).erase()
+/// Return the exception sentinel for an already-pending exception.
+pub fn raise_runtime<'a>(heap: &'a Heap, _thrown: Thrown) -> Tagged<'a, Value> {
+    heap.known().exception.get(heap).erase()
 }
 
-/// `?` for runtime bodies: fold an internal `Result` into the sentinel
-/// channel via [`raise_runtime`].
+/// `?` for runtime bodies: fold a `Thrown` into the sentinel channel.
 #[macro_export]
 macro_rules! rt_try {
-    ($vm:expr, $heap:expr, $state:expr, $e:expr) => {
+    ($heap:expr, $e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(err) => return $crate::raise_runtime($vm, $heap, $state, err),
+            Err($crate::Thrown) => return $crate::raise_runtime($heap, $crate::Thrown),
         }
     };
 }
@@ -245,12 +249,8 @@ impl Default for NativeRegistry {
 /// interpreter's cache still holds the frame executing the call).
 /// The current (calling) frame's context: `CallNative` runs in place, so
 /// the interpreter's cache still holds the frame executing the call.
-pub fn frame_context_value<'a>(
-    state: &ThreadState,
-    heap: &'a Heap,
-) -> Result<Tagged<'a, Value>, VmError> {
-    if !state.is_frame_active() {
-        return Err(VmError::Type);
-    }
-    Ok(state.stack.context(heap, state.frame_base()))
+pub fn frame_context_value<'a>(state: &ThreadState, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
+    state
+        .is_frame_active()
+        .then(|| state.stack.context(heap, state.frame_base()))
 }

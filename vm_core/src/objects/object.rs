@@ -1,13 +1,15 @@
+use crate::VmError;
+use crate::bail;
 use core::alloc::Layout;
 
+use crate::errors::Errors;
 use crate::{
-    AccessorPair, CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_ACCESSOR,
+    AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle,
     HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, NativeIndex,
-    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
+    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
     SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
-    VmError,
 };
 
 /// What a set action did, for callers that only need to update caches.
@@ -352,24 +354,26 @@ impl<'a> Tagged<'a, Value> {
         heap: &Heap,
         i: usize,
         value: Tagged<'_, Value>,
-    ) -> Result<(), VmError> {
+    ) -> bool {
         let Some(obj) = self.as_heap_object() else {
-            return Err(VmError::Type);
+            return false;
         };
         let kind = obj.map(heap).kind();
         if !kind.is_array() || !kind.is_dense_elements() || i >= obj.length() {
-            return Err(VmError::OutOfBounds);
+            return false;
         }
-        let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
+        let Some(elements) = obj.elements_array(heap) else {
+            return false;
+        };
         if i >= elements.len() {
-            return Err(VmError::OutOfBounds);
+            return false;
         }
         if kind.is_holey() && elements.at(heap, i) == heap.known().the_hole.get(heap) {
-            return Err(VmError::OutOfBounds);
+            return false;
         }
         elements.set(heap, i, value);
         Prototype::element_mutated_kind(heap, obj, kind);
-        Ok(())
+        true
     }
 
     #[inline(always)]
@@ -439,8 +443,8 @@ impl Object {
         receiver: &Handle<'_, Object>,
         i: usize,
         value: &Handle<'_, Value>,
-    ) -> Result<(), VmError> {
-        let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
+    ) {
+        let new_len = i.checked_add(1).expect("element index fits usize");
 
         let (grows, logical_len, capacity, dictionary, is_array) = {
             let obj = receiver.as_tagged(heap);
@@ -454,7 +458,8 @@ impl Object {
         };
 
         if dictionary {
-            return Self::store_dictionary_element(heap, scope, receiver, i, value);
+            Self::store_dictionary_element(heap, scope, receiver, i, value);
+            return;
         }
 
         if i > logical_len {
@@ -471,7 +476,7 @@ impl Object {
                 new_len,
                 logical_len,
                 is_array,
-            )?;
+            );
             // the grown capacity is holes past the written index; arrays
             // hide them behind `length`, other receivers are bounded by
             // capacity
@@ -484,7 +489,9 @@ impl Object {
                 Self::promote_holey(heap, scope, receiver);
             }
             let obj = receiver.as_tagged(heap);
-            let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
+            let elements = obj
+                .elements_array(heap)
+                .expect("dense elements have a backing array");
             elements.set(heap, i, value.as_tagged(heap));
             // a store inside the physical capacity but past an array's
             // logical length still extends the array
@@ -493,7 +500,6 @@ impl Object {
             }
             Prototype::element_mutated(heap, obj);
         }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -506,9 +512,11 @@ impl Object {
         new_len: usize,
         logical_len: usize,
         is_array: bool,
-    ) -> Result<(), VmError> {
+    ) {
         let obj = receiver.as_tagged(heap);
-        let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
+        let elements = obj
+            .elements_array(heap)
+            .expect("dense elements have a backing array");
         let (normalize, capacity) = {
             let new_capacity = (new_len + (new_len >> 1) + 16).max(elements.len());
             if i - elements.len() >= 1024 {
@@ -529,7 +537,8 @@ impl Object {
         };
         if normalize {
             Self::normalize_elements(heap, scope, receiver);
-            return Self::store_dictionary_element(heap, scope, receiver, i, value);
+            Self::store_dictionary_element(heap, scope, receiver, i, value);
+            return;
         }
         let keep = logical_len.min(
             receiver
@@ -541,7 +550,9 @@ impl Object {
         let elements = heap.allocate_hole_array(capacity).as_handle(scope);
         {
             let obj = receiver.as_tagged(heap);
-            let old = obj.elements_array(heap).ok_or(VmError::Type)?;
+            let old = obj
+                .elements_array(heap)
+                .expect("dense elements have a backing array");
             let new = elements.as_tagged(heap);
             for k in 0..keep {
                 new.set(heap, k, old.at(heap, k));
@@ -555,7 +566,6 @@ impl Object {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
         }
         Prototype::element_mutated(heap, obj);
-        Ok(())
     }
 
     /// Plain element store into a dictionary-mode array. Accessor and
@@ -567,16 +577,18 @@ impl Object {
         receiver: &Handle<'_, Object>,
         i: usize,
         value: &Handle<'_, Value>,
-    ) -> Result<(), VmError> {
-        let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
+    ) {
+        let new_len = i.checked_add(1).expect("element index fits usize");
         let (dict, length, is_array) = {
             let obj = receiver.as_tagged(heap);
-            let dict = obj.element_dictionary(heap).ok_or(VmError::Type)?;
+            let dict = obj
+                .element_dictionary(heap)
+                .expect("dictionary elements have a dictionary");
             let is_array = obj.is_array(heap);
             (scope.handle(dict), obj.length(), is_array)
         };
         match dict.as_tagged(heap).classify(heap, i) {
-            EntryClass::ReadOnly | EntryClass::Accessor => return Ok(()),
+            EntryClass::ReadOnly | EntryClass::Accessor => return,
             EntryClass::Data | EntryClass::Absent => {}
         }
         if matches!(dict.as_tagged(heap).classify(heap, i), EntryClass::Absent) {
@@ -592,7 +604,8 @@ impl Object {
                 && needed < (1 << 26)
             {
                 Self::densify_elements(heap, scope, receiver, needed);
-                return Self::store_array_element(heap, scope, receiver, i, value);
+                Self::store_array_element(heap, scope, receiver, i, value);
+                return;
             }
         }
         let table = NumberDictionary::insert(heap, scope, &dict, i, *value, DETAILS_DATA);
@@ -605,7 +618,6 @@ impl Object {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
         }
         Prototype::element_mutated(heap, obj);
-        Ok(())
     }
 
     /// The current own descriptor of an element, if present (dense hits
@@ -659,7 +671,7 @@ impl Object {
         receiver: Handle<Object>,
         i: usize,
         desc: PropertyDescriptor<'_>,
-    ) -> Result<bool, VmError> {
+    ) -> bool {
         let is_array = receiver.as_tagged(heap).is_array(heap);
         if let PropertyDescriptor::Data {
             value,
@@ -668,8 +680,8 @@ impl Object {
             configurable: true,
         } = desc
         {
-            Self::store_array_element(heap, scope, &receiver, i, &value)?;
-            return Ok(true);
+            Self::store_array_element(heap, scope, &receiver, i, &value);
+            return true;
         }
         if receiver
             .as_tagged(heap)
@@ -683,7 +695,7 @@ impl Object {
             receiver
                 .as_tagged(heap)
                 .element_dictionary(heap)
-                .ok_or(VmError::Type)?,
+                .expect("dictionary elements have a dictionary"),
         );
         let (value, details, accessor) = match desc {
             PropertyDescriptor::Data {
@@ -725,7 +737,7 @@ impl Object {
             obj.length.set(heap, host, Smi::new((i + 1) as i64));
         }
         Prototype::element_mutated(heap, obj);
-        Ok(true)
+        true
     }
 
     /// ES 10.4.2.3 ArraySetLength after the caller has performed
@@ -737,9 +749,9 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: &Handle<'_, Object>,
         new_len: usize,
-    ) -> Result<bool, VmError> {
+    ) -> bool {
         if !receiver.as_tagged(heap).is_array(heap) {
-            return Err(VmError::Type);
+            return false;
         }
         if new_len > 32 * 1024 * 1024
             && receiver
@@ -775,13 +787,13 @@ impl Object {
                 obj.as_ref()
                     .length
                     .set(heap, obj.erase(), Smi::new(effective as i64));
-                return Ok(!blocked);
+                return !blocked;
             }
             let obj = receiver.as_tagged(heap);
             obj.as_ref()
                 .length
                 .set(heap, obj.erase(), Smi::new(new_len as i64));
-            return Ok(true);
+            return true;
         }
 
         let old_len = receiver.as_tagged(heap).length();
@@ -804,7 +816,7 @@ impl Object {
         obj.as_ref()
             .length
             .set(heap, obj.erase(), Smi::new(new_len as i64));
-        Ok(true)
+        true
     }
 
     /// Clear [[Writable]] on the array `length` native accessor, keeping its
@@ -1000,7 +1012,7 @@ impl Object {
         scope: &HandleScope<'_>,
         info: Handle<'_, CallableInfoObject>,
         context: Handle<'_, ContextObject>,
-    ) -> Result<Tagged<'a, Object>, VmError> {
+    ) -> Tagged<'a, Object> {
         let info_ref = info.as_tagged(heap);
         let kind = info_ref.function_kind();
         let formal_length = info_ref.formal_length();
@@ -1033,34 +1045,38 @@ impl Object {
 
         let length_key = heap.known().strings.length.get_handle(heap, scope);
         let name_key = heap.known().strings.name.get_handle(heap, scope);
-        if !Object::define_own_property_ordinary(
-            heap,
-            scope,
-            function,
-            length_key,
-            PropertyDescriptor::Data {
-                value: scope.handle(Smi::new(formal_length as i64)),
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
-        )? {
-            return Err(VmError::Type);
-        }
-        if !Object::define_own_property_ordinary(
-            heap,
-            scope,
-            function,
-            name_key,
-            PropertyDescriptor::Data {
-                value: function_name.erase(),
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
-        )? {
-            return Err(VmError::Type);
-        }
+        assert!(
+            Object::define_own_property_ordinary(
+                heap,
+                scope,
+                function,
+                length_key,
+                PropertyDescriptor::Data {
+                    value: scope.handle(Smi::new(formal_length as i64)),
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )
+            .expect("fresh closure length define"),
+            "fresh closure accepts length"
+        );
+        assert!(
+            Object::define_own_property_ordinary(
+                heap,
+                scope,
+                function,
+                name_key,
+                PropertyDescriptor::Data {
+                    value: function_name.erase(),
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )
+            .expect("fresh closure name define"),
+            "fresh closure accepts name"
+        );
 
         if kind.needs_prototype() {
             let proto_map = heap.known().object_initial_map.get_handle(heap, scope);
@@ -1069,37 +1085,41 @@ impl Object {
                 .as_handle(scope);
             let constructor = heap.known().strings.constructor.get_handle(heap, scope);
             let prototype = heap.known().strings.prototype.get_handle(heap, scope);
-            if !Object::define_own_property_ordinary(
-                heap,
-                scope,
-                proto,
-                constructor,
-                PropertyDescriptor::Data {
-                    value: function.erase(),
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            )? {
-                return Err(VmError::Type);
-            }
-            if !Object::define_own_property_ordinary(
-                heap,
-                scope,
-                function,
-                prototype,
-                PropertyDescriptor::Data {
-                    value: proto.erase(),
-                    writable: true,
-                    enumerable: false,
-                    configurable: false,
-                },
-            )? {
-                return Err(VmError::Type);
-            }
+            assert!(
+                Object::define_own_property_ordinary(
+                    heap,
+                    scope,
+                    proto,
+                    constructor,
+                    PropertyDescriptor::Data {
+                        value: function.erase(),
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                )
+                .expect("fresh prototype constructor define"),
+                "fresh prototype accepts constructor"
+            );
+            assert!(
+                Object::define_own_property_ordinary(
+                    heap,
+                    scope,
+                    function,
+                    prototype,
+                    PropertyDescriptor::Data {
+                        value: proto.erase(),
+                        writable: true,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                )
+                .expect("fresh closure prototype define"),
+                "fresh closure accepts prototype"
+            );
         }
 
-        Ok(function.as_tagged(heap))
+        function.as_tagged(heap)
     }
 
     pub fn to_primitive<'a>(
@@ -1108,14 +1128,14 @@ impl Object {
         state: &'a ThreadState,
         value: Handle<'_, Value>,
         hint: Hint,
-    ) -> Result<Coercion<'a>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         if value.as_tagged(heap).is_primitive(heap) {
-            return Ok(Coercion::Value(value.as_tagged(heap)));
+            return Ok(value.as_tagged(heap));
         }
         let runtime = state.runtime(vm, heap);
         HostCtx::new(vm, runtime, heap, state).handle_scope(|vm, heap, state, scope| {
             // 1. exotic @@toPrimitive (GetMethod)
-            let exotic = match Object::get_property(
+            let exotic = scope.handle(Object::get_property(
                 vm,
                 heap,
                 state,
@@ -1126,16 +1146,13 @@ impl Object {
                     .get_handle(heap, &scope)
                     .erase(),
                 false,
-            )? {
-                Coercion::Threw => return Ok(Coercion::Threw),
-                Coercion::Value(v) => scope.handle(v),
-            };
+            )?);
             if exotic.as_tagged(heap) != heap.known().undefined.get(heap)
                 && exotic.as_tagged(heap) != heap.known().null.get(heap)
             {
                 if !exotic.as_tagged(heap).is_callable(heap) {
                     // GetMethod: a non-callable, non-nullish method is a TypeError
-                    return Err(VmError::Type);
+                    bail!(vm, heap, state, VmError::SymbolToPrimitiveNotCallable);
                 }
                 let s = &heap.known().strings;
                 let hint_string = scope.handle(match hint {
@@ -1147,13 +1164,10 @@ impl Object {
                 let result = scope.handle(HostCtx::enter(
                     vm, runtime, &mut *heap, state, exotic, args, None,
                 )?);
-                if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                    return Ok(Coercion::Threw);
-                }
                 return if result.as_tagged(heap).is_primitive(heap) {
-                    Ok(Coercion::Value(result.as_tagged(heap)))
+                    Ok(result.as_tagged(heap))
                 } else {
-                    Err(VmError::Type)
+                    bail!(vm, heap, state, VmError::SymbolToPrimitiveNotPrimitive)
                 };
             }
 
@@ -1173,11 +1187,9 @@ impl Object {
                 }
             };
             for name in method_names {
-                let method = match Object::get_property(vm, heap, state, value, value, name, false)?
-                {
-                    Coercion::Threw => return Ok(Coercion::Threw),
-                    Coercion::Value(v) => scope.handle(v),
-                };
+                let method = scope.handle(Object::get_property(
+                    vm, heap, state, value, value, name, false,
+                )?);
                 if !method.as_tagged(heap).is_callable(heap) {
                     continue;
                 }
@@ -1185,15 +1197,12 @@ impl Object {
                 let result = scope.handle(HostCtx::enter(
                     vm, runtime, &mut *heap, state, method, args, None,
                 )?);
-                if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                    return Ok(Coercion::Threw);
-                }
                 if result.as_tagged(heap).is_primitive(heap) {
-                    return Ok(Coercion::Value(result.as_tagged(heap)));
+                    return Ok(result.as_tagged(heap));
                 }
                 // object result: try the next method name
             }
-            Err(VmError::Type)
+            bail!(vm, heap, state, VmError::CannotConvertObjectToPrimitive)
         })
     }
 
@@ -1202,16 +1211,13 @@ impl Object {
         heap: &mut Heap,
         state: &ThreadState,
         value: Handle<'_, Value>,
-    ) -> Result<Option<f64>, VmError> {
+    ) -> Result<f64> {
         state.handle_scope(|scope| {
-            match Self::to_primitive(vm, heap, state, value, Hint::Number)? {
-                Coercion::Threw => Ok(None),
-                // root the anchored result to release the heap borrow
-                Coercion::Value(v) => {
-                    let v = scope.handle(v);
-                    Ok(Some(v.as_tagged(heap).to_number(heap)?))
-                }
-            }
+            // root the anchored result to release the heap borrow
+            let v = scope.handle(Self::to_primitive(vm, heap, state, value, Hint::Number)?);
+            v.as_tagged(heap)
+                .to_number(heap)
+                .ok_or_else(|| Errors::throw(vm, heap, state, VmError::CannotConvertToNumber))
         })
     }
 
@@ -1220,18 +1226,15 @@ impl Object {
         heap: &'a mut Heap,
         state: &ThreadState,
         value: Handle<'_, Value>,
-    ) -> Result<Option<Tagged<'a, Value>>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         state.handle_scope(|scope| {
-            let primitive = if value.as_tagged(heap).is_primitive(heap) {
+            let primitive: Handle<'_, Value> = if value.as_tagged(heap).is_primitive(heap) {
                 value
             } else {
-                match Self::to_primitive(vm, heap, state, value, Hint::String)? {
-                    Coercion::Threw => return Ok(None),
-                    Coercion::Value(v) => scope.handle(v),
-                }
+                scope.handle(Self::to_primitive(vm, heap, state, value, Hint::String)?)
             };
-            let s = scope.handle(Convert::to_string(heap, &scope, primitive)?);
-            Ok(Some(s.as_tagged(heap)))
+            let stringified = Convert::to_string(vm, heap, state, &scope, primitive)?;
+            Ok(scope.handle(stringified).as_tagged(heap))
         })
     }
 
@@ -1242,16 +1245,12 @@ impl Object {
         a: Handle<'_, Value>,
         b: Handle<'_, Value>,
         op: fn(f64, f64) -> f64,
-    ) -> Result<Option<Tagged<'a, Value>>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         // to_numeric runs user code (valueOf): both operands are rooted by
         // the caller's handles, so the sibling survives the first coercion.
-        let Some(a) = Self::to_numeric(vm, heap, state, a)? else {
-            return Ok(None);
-        };
-        let Some(b) = Self::to_numeric(vm, heap, state, b)? else {
-            return Ok(None);
-        };
-        Ok(Some(heap.new_number(op(a, b))))
+        let a = Self::to_numeric(vm, heap, state, a)?;
+        let b = Self::to_numeric(vm, heap, state, b)?;
+        Ok(heap.new_number(op(a, b)))
     }
 
     pub fn to_property_key<'a>(
@@ -1259,45 +1258,44 @@ impl Object {
         heap: &'a mut Heap,
         state: &ThreadState,
         v: Handle<'_, Value>,
-    ) -> Result<Option<Tagged<'a, SlotName>>, VmError> {
-        if let Ok(Key::Element(i)) = v.as_tagged(heap).classify_key(heap) {
-            return Ok(Some(Tagged::from(Smi::new(i as i64))));
+    ) -> Result<Tagged<'a, SlotName>> {
+        if let Some(Key::Element(i)) = v.as_tagged(heap).classify_key(heap) {
+            return Ok(Tagged::from(Smi::new(i as i64)));
         }
         state.handle_scope(|scope| {
             let cond_5 = v.as_tagged(heap).get_as::<Symbol>(heap).is_some();
             if cond_5 {
-                return Ok(Some(v.as_tagged(heap).as_name()));
+                return Ok(v.as_tagged(heap).as_name());
             }
             let is_string = v.as_tagged(heap).get_as::<DenseString>(heap).is_some();
             let primitive: Handle<'_, Value> = if is_string {
                 v
             } else {
-                match Self::to_primitive(vm, heap, state, v, Hint::String)? {
-                    Coercion::Threw => return Ok(None),
-                    Coercion::Value(p) => scope.handle(p),
-                }
+                scope.handle(Self::to_primitive(vm, heap, state, v, Hint::String)?)
             };
             // Named lookup compares interned strings by pointer:
             // canonicalize exactly once here, then every downstream
             // bits-compare is sound.
-            let stringified = Convert::to_string(heap, &scope, primitive)?;
+            let stringified = Convert::to_string(vm, heap, state, &scope, primitive)?;
             // Root the word: the `Tagged<'a>` keeps the `&mut Heap` borrow
             // alive, which would conflict with the cast's shared map read.
             let stringified = scope.handle(stringified);
             let interned = match scope.cast::<DenseString>(heap, stringified.as_tagged(heap)) {
                 Some(s) => vm.interner().intern_value(heap, &scope, &s),
                 // ToString of a symbol primitive throws (ES 6.1.7.1)
-                None => return Err(VmError::Type),
+                None => {
+                    bail!(vm, heap, state, VmError::CannotConvertSymbolToString);
+                }
             };
             let word = interned.as_tagged(heap);
             // canonical index strings name the same property as their
             // numeric form: canonicalize to the Smi spelling exactly
             // once, so every downstream bits-compare is sound
-            if let Ok(Key::Element(i)) = word.erase().classify_key(heap) {
-                return Ok(Some(Tagged::from(Smi::new(i as i64))));
+            if let Some(Key::Element(i)) = word.erase().classify_key(heap) {
+                return Ok(Tagged::from(Smi::new(i as i64)));
             }
             // fresh anchored re-read of the rooted interned word
-            Ok(Some(word.into()))
+            Ok(word.into())
         })
     }
 
@@ -1330,14 +1328,14 @@ impl Object {
         state: &ThreadState,
         object: Handle<'_, Value>,
         callable: Handle<'_, Value>,
-    ) -> Result<Option<bool>, VmError> {
+    ) -> Result<bool> {
         if !callable.as_tagged(heap).is_callable(heap) {
-            return Err(VmError::Type);
+            bail!(vm, heap, state, VmError::InstanceofRightNotCallable);
         }
         // 4. P = Get(C, "prototype") — full [[Get]]; a getter may run user
         // code and move the heap, so only its result has to be rooted here
         state.handle_scope(|scope| {
-            let proto = match Object::get_property(
+            let proto = scope.handle(Object::get_property(
                 vm,
                 heap,
                 state,
@@ -1349,19 +1347,16 @@ impl Object {
                     .get_handle(heap, &scope)
                     .erase(),
                 false,
-            )? {
-                Coercion::Threw => return Ok(None),
-                Coercion::Value(v) => scope.handle(v),
-            };
+            )?);
             // 5. P must be an object
             if proto.as_tagged(heap).is_primitive(heap) {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::FunctionPrototypeNotObject);
             }
-            Ok(Some(Self::has_proto_in_chain(
+            Ok(Self::has_proto_in_chain(
                 heap,
                 object.as_tagged(heap),
                 proto.as_tagged(heap),
-            )))
+            ))
         })
     }
 
@@ -1393,7 +1388,6 @@ impl Object {
 
     /// `OrdinaryCreateFromConstructor ( newTarget, fallbackProto, slots )`
     /// [ES 10.1.14](https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor)
-    /// `Ok(None)` means the `prototype` lookup threw.
     pub fn create_from_constructor<'s>(
         vm: &VM,
         heap: &mut Heap,
@@ -1402,25 +1396,22 @@ impl Object {
         new_target: Handle<'_, Value>,
         map: Handle<'_, Map>,
         slots: HandleSlice<'_>,
-    ) -> Result<Option<Handle<'s, Object>>, VmError> {
+    ) -> Result<Handle<'s, Object>> {
         let proto_name = heap
             .known()
             .strings
             .prototype
             .get_handle(heap, scope)
             .erase();
-        let proto =
-            Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;
-        let proto = match proto {
-            Coercion::Threw => return Ok(None),
-            Coercion::Value(v) => scope.handle(v),
-        };
+        let proto = scope.handle(Object::get_property(
+            vm, heap, state, new_target, new_target, proto_name, false,
+        )?);
         let obj = scope.handle(heap.new_object(scope, map, slots));
         // a non-object `newTarget.prototype` falls back to the map's own one
         if let Some(proto) = scope.cast::<Object>(heap, proto.as_tagged(heap)) {
-            Object::set_prototype(heap, scope, obj, proto.erase())?;
+            Object::set_prototype(vm, heap, state, scope, obj, proto.erase())?;
         }
-        Ok(Some(obj))
+        Ok(obj)
     }
 
     /// The forwarding tail of a `[[Construct]]` (proxy without a `construct`
@@ -1434,7 +1425,7 @@ impl Object {
         target: Handle<'_, Value>,
         args: &[Handle<'_, Value>],
         new_target: Handle<'_, Value>,
-    ) -> Result<Coercion<'a>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         let runtime = state.runtime(vm, heap);
         let is_bound = target
             .as_tagged(heap)
@@ -1451,13 +1442,7 @@ impl Object {
                     args,
                     Some(new_target),
                 )?);
-                Ok(
-                    if value.as_tagged(heap) == heap.known().exception.get(heap) {
-                        Coercion::Threw
-                    } else {
-                        Coercion::Value(value.as_tagged(heap))
-                    },
-                )
+                Ok(value.as_tagged(heap))
             });
         }
         state.handle_scope(|scope| {
@@ -1470,12 +1455,9 @@ impl Object {
             let receiver = if derived {
                 heap.known().the_hole.get_handle(heap, &scope).erase()
             } else {
-                let Some(receiver) =
-                    Self::create_construct_receiver_value(vm, heap, state, new_target)?
-                else {
-                    return Ok(Coercion::Threw);
-                };
-                scope.handle(receiver)
+                scope.handle(Self::create_construct_receiver_value(
+                    vm, heap, state, new_target,
+                )?)
             };
             let mut all: Vec<Tagged<'_, Value>> = Vec::with_capacity(args.len() + 1);
             all.push(receiver.as_tagged(heap));
@@ -1490,17 +1472,19 @@ impl Object {
                 staged,
                 Some(new_target),
             )?);
-            if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                return Ok(Coercion::Threw);
-            }
             if result.as_tagged(heap).is_primitive(heap) {
                 if derived {
                     // a derived constructor may only return objects
-                    return Err(VmError::Type);
+                    bail!(
+                        vm,
+                        heap,
+                        state,
+                        VmError::DerivedConstructorReturnedNonObject
+                    );
                 }
-                return Ok(Coercion::Value(receiver.as_tagged(heap)));
+                return Ok(receiver.as_tagged(heap));
             }
-            Ok(Coercion::Value(result.as_tagged(heap)))
+            Ok(result.as_tagged(heap))
         })
     }
 
@@ -1509,7 +1493,7 @@ impl Object {
         heap: &'a mut Heap,
         state: &ThreadState,
         new_target: Handle<'_, Value>,
-    ) -> Result<Option<Tagged<'a, Value>>, VmError> {
+    ) -> Result<Tagged<'a, Value>> {
         state.handle_scope(|scope| {
             let map = heap.known().object_initial_map.get_handle(heap, &scope);
             let obj = Self::create_from_constructor(
@@ -1521,7 +1505,7 @@ impl Object {
                 map,
                 HandleSlice::EMPTY,
             )?;
-            Ok(obj.map(|obj| obj.as_tagged(heap).erase()))
+            Ok(obj.as_tagged(heap).erase())
         })
     }
 }

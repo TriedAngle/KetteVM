@@ -6,6 +6,10 @@
 #![allow(unused_imports, unused_macros, unused_unsafe, unused_variables)]
 #![allow(dead_code)]
 
+use vm_core::Errors;
+use vm_core::VmError;
+use vm_core::raise;
+
 use core::hint::black_box;
 use std::marker::PhantomData;
 
@@ -20,7 +24,7 @@ use vm_core::ic::{ElementHit, GlobalLexicalHit, InlineCache, LoadHit, MonoProbe}
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
     FeedbackVector, FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs,
-    ScopeInfo, Smi, Tagged, Value, VmError, raise_runtime,
+    ScopeInfo, Smi, Tagged, Value, raise_runtime,
 };
 
 #[cfg(feature = "fast")]
@@ -314,7 +318,7 @@ fn op_load_global(frame: Frame) {
             tail!(slow_global_getter)
         }
         GlobalLoadFast::Uninitialized => {
-            let _ = frame.ctx().raise_tag(VmError::Reference);
+            let _ = frame.ctx().raise(VmError::UninitializedVariable);
             tail!(throw_dispatch)
         }
         GlobalLoadFast::Miss => {
@@ -338,7 +342,7 @@ fn op_load_global_no_throw(frame: Frame) {
             tail!(slow_global_getter)
         }
         GlobalLoadFast::Uninitialized => {
-            let _ = frame.ctx().raise_tag(VmError::Reference);
+            let _ = frame.ctx().raise(VmError::UninitializedVariable);
             tail!(throw_dispatch)
         }
         GlobalLoadFast::Miss => {
@@ -499,10 +503,7 @@ fn op_store_keyed_property(frame: Frame) {
         && idx >= 0
     {
         let idx = idx as usize;
-        if recv
-            .store_array_element_in_place(heap, idx, frame.acc())
-            .is_ok()
-        {
+        if recv.store_array_element_in_place(heap, idx, frame.acc()) {
             next!()
         }
         if let Some(v) = InlineCache::try_store_element(
@@ -530,10 +531,7 @@ fn op_store_keyed_property_no_shadow(frame: Frame) {
         && idx >= 0
     {
         let idx = idx as usize;
-        if recv
-            .store_array_element_in_place(heap, idx, frame.acc())
-            .is_ok()
-        {
+        if recv.store_array_element_in_place(heap, idx, frame.acc()) {
             next!()
         }
         if let Some(v) = InlineCache::try_store_element(
@@ -1294,7 +1292,7 @@ fn op_create_closure(frame: Frame) {
                 .constants(heap)
                 .at(heap, info_idx),
         ) else {
-            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
+            return Acc::set(Errors::raise(vm, heap, state, VmError::InvalidOperandType));
         };
         let context = scope
             .cast::<ContextObject>(
@@ -1302,10 +1300,7 @@ fn op_create_closure(frame: Frame) {
                 state.stack().frame_header(base).context_slot().get(heap),
             )
             .expect("frame context slot holds a ContextObject");
-        match Object::create_closure(heap, &scope, info, context) {
-            Ok(obj) => Acc::set(obj.erase()),
-            Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
-        }
+        Acc::set(Object::create_closure(heap, &scope, info, context).erase())
     });
     frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
@@ -1387,7 +1382,7 @@ fn op_load_context_slot(frame: Frame) {
             .get(heap)
             .get_as::<ContextObject>(heap)
         else {
-            let _ = frame.ctx().raise_tag(VmError::Type);
+            let _ = frame.ctx().raise(VmError::InvalidOperandType);
             tail!(throw_dispatch)
         };
         let v = context
@@ -1408,14 +1403,14 @@ fn op_load_context_slot(frame: Frame) {
         .get(heap)
         .get_as::<ContextObject>(heap)
     else {
-        let _ = frame.ctx().raise_tag(VmError::Type);
+        let _ = frame.ctx().raise(VmError::InvalidOperandType);
         tail!(throw_dispatch)
     };
     for _ in 0..depth {
         context = match context.as_ref().outer.get(heap) {
             Some(context) => context,
             None => {
-                let _ = frame.ctx().raise_tag(VmError::Type);
+                let _ = frame.ctx().raise(VmError::InvalidOperandType);
                 tail!(throw_dispatch)
             }
         };
@@ -1445,14 +1440,14 @@ fn op_store_context_slot(frame: Frame) {
         .get(heap)
         .get_as::<ContextObject>(heap)
     else {
-        let _ = frame.ctx().raise_tag(VmError::Type);
+        let _ = frame.ctx().raise(VmError::InvalidOperandType);
         tail!(throw_dispatch)
     };
     for _ in 0..depth {
         context = match context.as_ref().outer.get(heap) {
             Some(context) => context,
             None => {
-                let _ = frame.ctx().raise_tag(VmError::Type);
+                let _ = frame.ctx().raise(VmError::InvalidOperandType);
                 tail!(throw_dispatch)
             }
         };
@@ -1482,7 +1477,7 @@ fn op_push_context(frame: Frame) {
         .get(heap);
     frame.regs().set(r, old);
     if frame.acc().get_as::<ContextObject>(heap).is_none() {
-        let _ = frame.ctx().raise_tag(VmError::Type);
+        let _ = frame.ctx().raise(VmError::InvalidOperandType);
         tail!(throw_dispatch)
     }
     let value = frame.acc();
@@ -1504,7 +1499,7 @@ fn op_pop_context(frame: Frame) {
         .get_as::<ContextObject>(frame.ctx().heap())
         .is_none()
     {
-        let _ = frame.ctx().raise_tag(VmError::Type);
+        let _ = frame.ctx().raise(VmError::InvalidOperandType);
         tail!(throw_dispatch)
     }
     frame
@@ -1541,7 +1536,7 @@ fn op_create_function_context(frame: Frame) {
             .get_as::<ScopeInfo>(heap)
             .map(|r| r.local_count())
         else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let Some(scope_info) = scope.cast::<ScopeInfo>(
             heap,
@@ -1551,7 +1546,7 @@ fn op_create_function_context(frame: Frame) {
                 .constants(heap)
                 .at(heap, scope_idx),
         ) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let slots = if count == 0 {
             roots.empty_fixed_array.get_handle(heap, &scope)
@@ -1581,7 +1576,7 @@ fn op_throw(frame: Frame) {
 fn op_throw_reference_error_if_hole(frame: Frame) {
     let heap = frame.ctx().heap();
     if frame.acc() == roots.the_hole.get(heap).erase() {
-        let _ = frame.ctx().raise_tag(VmError::Reference);
+        let _ = frame.ctx().raise(VmError::UninitializedVariable);
         tail!(throw_dispatch)
     }
     next!()

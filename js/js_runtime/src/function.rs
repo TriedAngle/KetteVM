@@ -2,13 +2,17 @@
 //! toString/call/apply/bind.
 
 use crate::JSRuntime;
-use vm_core::Coercion;
 use vm_core::HostCtx;
+use vm_core::Result;
 use vm_core::Runtime;
+use vm_core::VmError;
+use vm_core::bail;
+use vm_core::raise;
+
 use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, DenseString, Errors, Handle, HandleScope, HandleSlice, Heap, Object,
-    PropertyDescriptor, Smi, Tagged, ThreadState, VM, Value, VmError,
+    Args, ContextObject, DenseString, Handle, HandleScope, HandleSlice, Heap, Object,
+    PropertyDescriptor, Smi, Tagged, ThreadState, VM, Value,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -38,11 +42,7 @@ pub fn function_constructor<'a>(
                 if i + 1 == args.len() && arg.as_tagged(heap) == vm.known().undefined.get(heap) {
                     String::new()
                 } else {
-                    let text = match Object::to_string(vm, heap, state, arg) {
-                        Ok(Some(text)) => scope.handle(text),
-                        Ok(None) => return vm.known().exception.get(heap).erase(),
-                        Err(err) => return raise_runtime(vm, heap, state, err),
-                    };
+                    let text = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, arg)));
                     text.as_tagged(heap)
                         .get_as::<DenseString>(heap)
                         .map(|s| s.to_rust_string(heap))
@@ -60,25 +60,14 @@ pub fn function_constructor<'a>(
         let program = match js_compiler::compile_js(&source, bytecode::SourceMode::Eval, ids) {
             Ok(program) => program,
             Err(_) => {
-                let ex = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    Errors::from_vm_error(vm, heap, state, VmError::Syntax)
-                );
-                state.set_pending_exception(ex);
-                return vm.known().exception.get(heap).erase();
+                raise!(vm, heap, state, VmError::InvalidDeclaration);
             }
         };
         let Some(context) = scope.cast::<ContextObject>(heap, context.as_tagged(heap)) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        let closure = rt_try!(
-            vm,
-            heap,
-            state,
-            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context)
-        );
+        let closure =
+            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context);
         let result = match HostCtx::enter(
             vm,
             state.runtime(vm, heap),
@@ -89,7 +78,7 @@ pub fn function_constructor<'a>(
             None,
         ) {
             Ok(result) => scope.handle(result),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         result.as_tagged(heap).erase()
     })
@@ -108,7 +97,7 @@ pub fn function_to_string<'a>(
     } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     // TODO: step 2 ([[SourceText]]) is not modelled, so user functions also
     // get the implementation-defined NativeFunction form.
@@ -151,7 +140,7 @@ pub fn function_call<'a>(
     } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     // args[0] is the receiver, so the tail is exactly (thisArg, ...args)
     let forwarded = state.stack().slice(args.slice_from(1));
@@ -166,7 +155,7 @@ pub fn function_call<'a>(
             None,
         ) {
             Ok(result) => scope.handle(result),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         result.as_tagged(heap).erase()
     })
@@ -185,7 +174,7 @@ pub fn function_apply<'a>(
     } = ctx;
     let function = args.get_handle(heap, 0);
     if !function.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     let this_arg = args.get_handle(heap, 1);
     let arg_array = args.get_handle(heap, 2);
@@ -193,11 +182,10 @@ pub fn function_apply<'a>(
         let elements = if arg_array.as_tagged(heap).is_nullish(heap) {
             Vec::new()
         } else {
-            match create_list_from_array_like(vm, heap, state, &scope, arg_array) {
-                Ok(Some(elements)) => elements,
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            }
+            rt_try!(
+                heap,
+                create_list_from_array_like(vm, heap, state, &scope, arg_array)
+            )
         };
         let mut call_args = Vec::with_capacity(elements.len() + 1);
         call_args.push(this_arg.as_tagged(heap));
@@ -213,7 +201,7 @@ pub fn function_apply<'a>(
             None,
         ) {
             Ok(result) => scope.handle(result),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         result.as_tagged(heap).erase()
     })
@@ -221,39 +209,34 @@ pub fn function_apply<'a>(
 
 /// `CreateListFromArrayLike ( obj )`
 /// [ES 7.3.19](https://tc39.es/ecma262/#sec-createlistfromarraylike)
-/// Reads indices `0 .. LengthOfArrayLike(obj)`. `Ok(None)` means user code threw.
+/// Reads indices `0 .. LengthOfArrayLike(obj)`.
 fn create_list_from_array_like<'s>(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
     scope: &'s HandleScope<'_>,
     object: Handle<'_, Value>,
-) -> Result<Option<Vec<Handle<'s, Value>>>, VmError> {
+) -> Result<Vec<Handle<'s, Value>>> {
     if object.as_tagged(heap).is_primitive(heap) {
-        return Err(VmError::Type);
+        bail!(vm, heap, state, VmError::CreateListFromArrayLikeNonObject);
     }
-    let length = match Object::length_of_array_like(vm, heap, state, scope, object) {
-        Ok(Some(length)) => length,
-        Ok(None) => return Ok(None),
-        Err(err) => return Err(err),
-    };
+    let length = Object::length_of_array_like(vm, heap, state, scope, object)?;
     let mut elements = Vec::with_capacity(length as usize);
     for index in 0..length {
         let index = scope.handle(Smi::new(index as i64).into_tagged());
-        let key = match Object::to_property_key(vm, heap, state, index) {
-            Ok(Some(key)) => scope.handle(key),
-            Ok(None) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let element =
-            match Object::get_property(vm, heap, state, object, object, key.erase(), false) {
-                Ok(Coercion::Value(value)) => scope.handle(value),
-                Ok(Coercion::Threw) => return Ok(None),
-                Err(err) => return Err(err),
-            };
+        let key = scope.handle(Object::to_property_key(vm, heap, state, index)?);
+        let element = scope.handle(Object::get_property(
+            vm,
+            heap,
+            state,
+            object,
+            object,
+            key.erase(),
+            false,
+        )?);
         elements.push(element);
     }
-    Ok(Some(elements))
+    Ok(elements)
 }
 
 /// `Function.prototype.bind ( thisArg, ...args )`
@@ -269,7 +252,7 @@ pub fn function_bind<'a>(
     } = ctx;
     let target = args.get_handle(heap, 0);
     if !target.as_tagged(heap).is_callable(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     let this_arg = args.get_handle(heap, 1);
     let prepend: Vec<Handle<'_, Value>> = (2..args.len())
@@ -278,7 +261,7 @@ pub fn function_bind<'a>(
     let bound_count = prepend.len();
     state.handle_scope(|scope| {
         let Some(target_object) = target.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let constructable = target_object.map(heap).kind().is_constructor();
         // BoundFunctionCreate: the [[Prototype]] is the target's
@@ -301,8 +284,8 @@ pub fn function_bind<'a>(
             bound_args.as_tagged(heap).erase(),
         ]);
         let bound = scope.handle(heap.new_object(&scope, map, slots));
-        if let Err(err) = Object::set_prototype(heap, &scope, bound, prototype) {
-            return raise_runtime(vm, heap, state, err);
+        if let Err(err) = Object::set_prototype(vm, heap, state, &scope, bound, prototype) {
+            return raise_runtime(heap, err);
         }
         copy_bound_name_and_length(vm, heap, state, &scope, bound.erase(), target, bound_count)
     })
@@ -323,7 +306,7 @@ fn copy_bound_name_and_length<'a>(
     bound_count: usize,
 ) -> Tagged<'a, Value> {
     let Some(bound_object) = scope.cast::<Object>(heap, bound.as_tagged(heap)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let length_key = vm.known().strings.length.get_handle(heap, scope);
     let mut length = 0.0;
@@ -347,9 +330,8 @@ fn copy_bound_name_and_length<'a>(
             length_key.erase(),
             false,
         ) {
-            Ok(Coercion::Value(value)) => scope.handle(value),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
         };
         if let Some(number) = target_length.as_tagged(heap).as_number(heap) {
             // ToIntegerOrInfinity, then the bound arguments are subtracted
@@ -367,14 +349,13 @@ fn copy_bound_name_and_length<'a>(
         length_key,
         PropertyDescriptor::non_enumerable(length_value.erase()),
     ) {
-        return raise_runtime(vm, heap, state, err);
+        return raise_runtime(heap, err);
     }
     let name_key = vm.known().strings.name.get_handle(heap, scope);
     let target_name =
         match Object::get_property(vm, heap, state, target, target, name_key.erase(), false) {
-            Ok(Coercion::Value(value)) => scope.handle(value),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
         };
     // SetFunctionName(F, targetName, "bound"); a non-string name adds nothing
     let name = match target_name.as_tagged(heap).get_as::<DenseString>(heap) {
@@ -389,7 +370,7 @@ fn copy_bound_name_and_length<'a>(
         name_key,
         PropertyDescriptor::non_enumerable(name.erase()),
     ) {
-        return raise_runtime(vm, heap, state, err);
+        return raise_runtime(heap, err);
     }
     bound.as_tagged(heap).erase()
 }

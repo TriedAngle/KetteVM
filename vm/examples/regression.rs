@@ -167,20 +167,15 @@ fn run_one(harness: &str, path: &Path) -> Result<(), String> {
         vm.arm_gc_stress();
     }
     let mut thread = vm.attach();
-    let value = thread
-        .eval::<JavascriptCompiler>(&program)
-        .map_err(|e| e.to_string())?;
-
-    let threw = {
-        let heap = thread.heap();
-        value == heap.known().exception.get(heap).raw()
-    };
-    if threw {
-        let exception = thread
-            .take_pending_exception()
-            .map(|e| format!("{e:?}"))
-            .unwrap_or_else(|| "uncaught exception".into());
-        return Err(exception);
+    match thread.eval::<JavascriptCompiler>(&program) {
+        Ok(_) => Ok(()),
+        Err(vm::ScriptError::Vm(_)) => {
+            let exception = thread
+                .take_pending_exception()
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| "uncaught exception".into());
+            Err(exception)
+        }
+        Err(e) => Err(e.to_string()),
     }
-    Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::{
     Args, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, StringInterner, Tagged, Value, VmError, WellKnown,
+    Object, PropertyDescriptor, StringInterner, Tagged, Value, WellKnown,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl KetteTools {
         interner: &StringInterner,
         scope: &HandleScope<'_>,
         natives: [NativeIndex; 3],
-    ) -> Result<(), VmError> {
+    ) {
         let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
             MapInit {
@@ -71,7 +71,7 @@ impl KetteTools {
             ("shutdown", natives[2]),
         ];
         for (name, index) in methods {
-            let method = Object::native_function(heap, scope, index)?;
+            let method = Object::native_function(heap, scope, index);
             let name_str = interner.intern_str(heap, scope, name);
             let method_name = scope.handle(name_str.as_tagged(heap));
             Object::define_own_property_ordinary(
@@ -80,7 +80,8 @@ impl KetteTools {
                 tools,
                 method_name,
                 PropertyDescriptor::method(method.erase()),
-            )?;
+            )
+            .expect("install tools method");
         }
 
         let name_str = interner.intern_str(heap, scope, "KetteTools");
@@ -91,7 +92,7 @@ impl KetteTools {
             global,
             name,
             PropertyDescriptor::data(tools.erase()),
-        )?;
-        Ok(())
+        )
+        .expect("install KetteTools global");
     }
 }

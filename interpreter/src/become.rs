@@ -2,11 +2,13 @@
 
 use bytecode::Opcode;
 use handler_derive::{handler, handler_become, handler_table};
+use vm_core::VmError;
+use vm_core::bail;
 
 use vm_core::{
-    Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, ErasedRuntimeState, FrameMeta,
-    Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs, Tagged,
-    ThreadState, VM, Value, VmError,
+    Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors,
+    FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs,
+    Result, Tagged, ThreadState, Thrown, VM, Value,
 };
 
 use crate::slow::*;
@@ -161,7 +163,7 @@ macro_rules! call_enter {
                 bound_apply_staged($ctx, $roots, $regs, callee_reg, staged),
                 true,
             ),
-            Err(err) => (Acc::set($ctx.raise_tag(err)), true),
+            Err(fault) => (Acc::set(raise_fault($ctx, fault)), true),
         };
         if value {
             $ctx.reload_code();
@@ -340,12 +342,14 @@ fn enter<'a, 't>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'a, Value>>,
-) -> Result<Acc, VmError> {
+) -> Result<Acc> {
     match callable.as_tagged(heap).erase().call_target(heap) {
-        None => Err(VmError::Type),
+        None => bail!(vm, heap, state, VmError::NotCallable),
         // the proxy dispatch above already intercepted these
         // proxy and bound-function calls are intercepted before `execute`
-        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => Err(VmError::Type),
+        Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => {
+            bail!(vm, heap, state, VmError::NotCallable)
+        }
         Some(CallTarget::Native(rt)) => {
             let f = vm.native(rt);
             // Safety: the runtime state is owned by the VM, which outlives
@@ -362,14 +366,14 @@ fn enter<'a, 't>(
             ..
         }) => {
             if new_target.is_none() && kind.is_class_constructor() {
-                return Err(VmError::Type);
+                bail!(vm, heap, state, VmError::ClassConstructorCalled);
             }
             let stack = state.stack();
             let new_target_value = match &new_target {
                 Some(nt) => nt.as_tagged(heap).erase(),
                 None => vm.known().undefined.get(heap).erase(),
             };
-            let frame = stack.push_frame_values(
+            let frame = match stack.push_frame_values(
                 heap,
                 FrameMeta::ROOT,
                 Callee {
@@ -379,7 +383,12 @@ fn enter<'a, 't>(
                 },
                 new_target_value,
                 args.as_tagged(),
-            )?;
+            ) {
+                Some(frame) => frame,
+                None => {
+                    bail!(vm, heap, state, VmError::StackOverflow);
+                }
+            };
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
 
@@ -412,7 +421,7 @@ pub fn execute<'a, 't>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'_, Value>>,
-) -> Result<Tagged<'a, Value>, VmError> {
+) -> Result<Tagged<'a, Value>> {
     let stack = state.stack();
 
     let saved_top = stack.top();
@@ -422,13 +431,19 @@ pub fn execute<'a, 't>(
     state.handle_scope(|scope| {
         let acc = enter(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(acc.get(heap));
+        let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
+
         stack.set_top(saved_top);
         if let Some(outer) = outer {
             state.set_frame_base(outer);
         } else {
             state.set_frame_active(false);
         }
-        Ok(rooted.as_tagged(heap))
+        if threw {
+            Err(Thrown)
+        } else {
+            Ok(rooted.as_tagged(heap))
+        }
     })
 }
 
@@ -556,7 +571,7 @@ fn op_return(frame: Frame) {
                 // a derived constructor escaped without initializing `this`
                 let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
                 frame.ctx().switch_frame(caller.base);
-                let _ = frame.ctx().raise_tag(VmError::Reference);
+                let _ = frame.ctx().raise(VmError::UninitializedVariable);
                 let fault_ip = unsafe { frame.ctx().code_ptr().add(caller.pc) };
                 become throw_dispatch::<STRIDE>(
                     fault_ip,
@@ -760,10 +775,9 @@ fn op_construct(frame: Frame) {
             frame.set_acc(val);
             reenter!(pc)
         }
-        Ok(ConstructStart::Threw) => tail!(throw_dispatch),
         Ok(ConstructStart::Slow) => tail!(slow_construct),
-        Err(e) => {
-            let _ = frame.ctx().raise_tag(e);
+        Err(fault) => {
+            frame.set_acc(raise_fault(frame.ctx(), fault));
             tail!(throw_dispatch)
         }
     }

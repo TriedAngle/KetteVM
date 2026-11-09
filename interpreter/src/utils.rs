@@ -1,9 +1,12 @@
 use bytecode::Opcode;
+use vm_core::VmError;
+use vm_core::raise;
+
 use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
-use vm_core::proxy::{Flow, Proxy};
+use vm_core::proxy::Proxy;
 use vm_core::{
-    Acc, Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope,
-    Heap, HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, WellKnown,
+    Acc, Args, CallTarget, Callee, Errors, FeedbackVector, FunctionKind, Handle, HandleScope, Heap,
+    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Thrown, Value, WellKnown,
     raise_runtime,
 };
 
@@ -24,26 +27,44 @@ pub enum StagedCall<'a> {
     /// a bound function over a staged window
     Bound { callee_reg: i32, staged: Args },
 }
+/// Why a call/construct fast path could not produce a staged call.
+#[derive(Copy, Clone, Debug)]
+pub enum CallFault {
+    /// A guest exception is already pending.
+    Threw,
+    /// Materialize this engine error at the call boundary.
+    Raise(VmError),
+}
+
+#[inline(always)]
+pub fn raise_fault<'a>(ctx: &'a mut Ctx<'_, '_>, fault: CallFault) -> Tagged<'a, Value> {
+    match fault {
+        CallFault::Threw => ctx.vm().known().exception.get(ctx.heap()).erase(),
+        CallFault::Raise(err) => ctx.raise(err),
+    }
+}
 
 /// Push a callee frame (facts from a `CallTarget::Bytecode` destructure
 /// or a call-IC hit; the caller is the current frame) and switch to it.
 /// Entry is at pc 0 with the accumulator seeded undefined.
 #[inline(always)]
 pub fn push_callee_frame<'a>(
-    x: &Ctx<'_, '_>,
+    x: &'a Ctx<'_, '_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
     callee: Callee<'_>,
     args: Args,
-) -> Result<StagedCall<'a>, VmError> {
+) -> Result<StagedCall<'a>, CallFault> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
     // the pushed frame's code, straight from the callee's info:
     // `push_frame` does not allocate, so it cannot go stale
     let bytecode = callee.info.as_ref().code.get(heap);
-    let frame = x.stack().push_frame(heap, meta, callee, undefined, args)?;
+    let Some(frame) = x.stack().push_frame(heap, meta, callee, undefined, args) else {
+        return Err(CallFault::Raise(VmError::StackOverflow));
+    };
     x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(StagedCall::Frame)
 }
@@ -52,20 +73,23 @@ pub fn push_callee_frame<'a>(
 /// parameter slots, no intermediate staging window.
 #[inline(always)]
 pub fn push_callee_frame_values<'a>(
-    x: &Ctx<'_, '_>,
+    x: &'a Ctx<'_, '_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
     callee: Callee<'_>,
     values: &[Tagged<'_, Value>],
-) -> Result<StagedCall<'a>, VmError> {
+) -> Result<StagedCall<'a>, CallFault> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
     let bytecode = callee.info.as_ref().code.get(heap);
-    let frame = x
+    let Some(frame) = x
         .stack()
-        .push_frame_values(heap, meta, callee, undefined, values)?;
+        .push_frame_values(heap, meta, callee, undefined, values)
+    else {
+        return Err(CallFault::Raise(VmError::StackOverflow));
+    };
     x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(StagedCall::Frame)
 }
@@ -112,9 +136,9 @@ pub fn resolve_target<'a>(
     callee_reg: i32,
     target: Option<CallTarget<'a>>,
     staged: Args,
-) -> Result<StagedCall<'a>, VmError> {
+) -> Result<StagedCall<'a>, CallFault> {
     match target {
-        None => Err(VmError::Type),
+        None => Err(CallFault::Raise(VmError::NotCallable)),
         Some(CallTarget::Proxy(_)) => Ok(StagedCall::Proxy { callee_reg, staged }),
         Some(CallTarget::Bound { .. }) => Ok(StagedCall::Bound { callee_reg, staged }),
         Some(CallTarget::Native(rt)) => Ok(StagedCall::Native { rt, staged }),
@@ -126,7 +150,7 @@ pub fn resolve_target<'a>(
             ..
         }) => {
             if kind.is_class_constructor() {
-                return Err(VmError::Type);
+                return Err(CallFault::Raise(VmError::ClassConstructorCalled));
             }
             push_callee_frame(
                 x,
@@ -159,7 +183,7 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
     callee: Tagged<'a, Value>,
     recv: Tagged<'a, Value>,
     args: &[Tagged<'a, Value>],
-) -> Result<StagedCall<'a>, VmError> {
+) -> Result<StagedCall<'a>, CallFault> {
     let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * (2 + METHOD as usize + args.len());
     // parameter payload: [receiver, args..]
     let mut window = [recv; 3];
@@ -173,7 +197,7 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
             kind,
         }) => {
             if kind.is_class_constructor() {
-                return Err(VmError::Type);
+                return Err(CallFault::Raise(VmError::ClassConstructorCalled));
             }
             push_callee_frame_values(
                 x,
@@ -188,19 +212,26 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
                 values,
             )
         }
-        CallProbe::Native(rt) => Ok(StagedCall::Native {
-            rt,
-            staged: x.stack().stage_slice(values)?,
-        }),
-        CallProbe::Miss => resolve_target(
-            x,
-            roots,
-            pc,
-            size,
-            callee_reg,
-            call_target_miss(x.heap(), x.feedback_ref(x.heap()), Some(fb), callee),
-            x.stack().stage_slice(values)?,
-        ),
+        CallProbe::Native(rt) => {
+            let Some(staged) = x.stack().stage_slice(values) else {
+                return Err(CallFault::Raise(VmError::StackOverflow));
+            };
+            Ok(StagedCall::Native { rt, staged })
+        }
+        CallProbe::Miss => {
+            let Some(staged) = x.stack().stage_slice(values) else {
+                return Err(CallFault::Raise(VmError::StackOverflow));
+            };
+            resolve_target(
+                x,
+                roots,
+                pc,
+                size,
+                callee_reg,
+                call_target_miss(x.heap(), x.feedback_ref(x.heap()), Some(fb), callee),
+                staged,
+            )
+        }
     }
 }
 
@@ -217,7 +248,7 @@ pub fn call_window_start<'a, const STRIDE: usize>(
     callee: Tagged<'a, Value>,
     base: i32,
     count: usize,
-) -> Result<StagedCall<'a>, VmError> {
+) -> Result<StagedCall<'a>, CallFault> {
     let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Call.operands().len() };
     let staged = x.stack().window(x.frame_base(), base, count);
     match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee) {
@@ -228,7 +259,7 @@ pub fn call_window_start<'a, const STRIDE: usize>(
             kind,
         }) => {
             if kind.is_class_constructor() {
-                return Err(VmError::Type);
+                return Err(CallFault::Raise(VmError::ClassConstructorCalled));
             }
             push_callee_frame(
                 x,
@@ -277,9 +308,8 @@ pub fn proxy_apply_staged(
     let v = state.handle_scope(|scope| {
         let callee = scope.handle(regs.get(callee_reg, x.heap()));
         match Proxy::apply(vm, x.heap_mut(), state, callee, staged) {
-            Ok(Flow::Threw) => Acc::set(roots.exception.get(x.heap()).erase()),
-            Ok(Flow::Value(v)) => Acc::set(v),
-            Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
+            Ok(v) => Acc::set(v),
+            Err(err) => Acc::set(raise_runtime(x.heap_mut(), err)),
         }
     });
     stack.set_top(saved_top);
@@ -315,7 +345,7 @@ pub fn bound_apply_staged(
             None,
         ) {
             Ok(value) => Acc::set(value),
-            Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
+            Err(err) => Acc::set(raise_runtime(x.heap_mut(), err)),
         }
     });
     stack.set_top(saved_top);
@@ -374,8 +404,6 @@ pub enum ConstructStart {
     Frame,
     /// a native constructor: call it directly with `new_target` set
     Native(NativeIndex),
-    /// receiver synthesis threw; the pending exception is set
-    Threw,
     /// not an ordinary function constructor: take the general path
     Slow,
 }
@@ -390,7 +418,7 @@ fn construct_receiver_args(
     derived: bool,
     regs: Regs,
     callee_reg: i32,
-) -> Result<Option<Args>, VmError> {
+) -> Result<Args, CallFault> {
     let vm = x.vm();
     let roots = vm.known();
     let state = x.state();
@@ -401,7 +429,7 @@ fn construct_receiver_args(
         } else {
             let callee_word = regs.get(callee_reg, heap);
             let Some(callee) = scope.cast::<Object>(heap, callee_word) else {
-                return Err(VmError::Type);
+                return Err(CallFault::Raise(VmError::NotCallable));
             };
             if let Some(map) = state.construct_initial_map(heap, callee.as_tagged(heap)) {
                 // identity-keyed initial-map cache hit: allocate directly,
@@ -419,10 +447,14 @@ fn construct_receiver_args(
                 };
                 scope.handle(heap.new_object_prealloc(&scope, map, capacity).erase())
             } else {
-                let Some(obj) =
-                    Object::create_construct_receiver_value(vm, heap, state, callee.erase())?
-                else {
-                    return Ok(None);
+                let obj = match Object::create_construct_receiver_value(
+                    vm,
+                    heap,
+                    state,
+                    callee.erase(),
+                ) {
+                    Ok(obj) => obj,
+                    Err(_) => return Err(CallFault::Threw),
                 };
                 let obj = scope.handle(obj);
                 let obj: Handle<'_, Object> = scope
@@ -432,13 +464,14 @@ fn construct_receiver_args(
                 scope.handle(obj.as_tagged(heap).erase())
             }
         };
-        let staged = state.stack().stage_construct(
-            base,
-            receiver.as_tagged(heap).erase(),
-            args_base,
-            count,
-        )?;
-        Ok(Some(staged))
+        let Some(staged) =
+            state
+                .stack()
+                .stage_construct(base, receiver.as_tagged(heap).erase(), args_base, count)
+        else {
+            return Err(CallFault::Raise(VmError::StackOverflow));
+        };
+        Ok(staged)
     })
 }
 
@@ -454,7 +487,7 @@ pub fn construct_start(
     callee_reg: i32,
     args_base: i32,
     count: usize,
-) -> Result<ConstructStart, VmError> {
+) -> Result<ConstructStart, CallFault> {
     let callee_word = regs.get(callee_reg, x.heap());
     let heap = x.heap();
     if !callee_word
@@ -473,11 +506,7 @@ pub fn construct_start(
         return Ok(ConstructStart::Slow);
     }
     let base = x.frame_base();
-    let Some(staged) =
-        construct_receiver_args(x, base, args_base, count, derived, regs, callee_reg)?
-    else {
-        return Ok(ConstructStart::Threw);
-    };
+    let staged = construct_receiver_args(x, base, args_base, count, derived, regs, callee_reg)?;
     // The receiver synthesis may have collected: re-read the callee from
     // the rooted register window and walk its target again.
     let callee_word = regs.get(callee_reg, x.heap());
@@ -496,7 +525,7 @@ pub fn construct_start(
         return Ok(ConstructStart::Slow);
     }
     let bytecode = info.as_ref().code.get(x.heap());
-    let frame = x.stack().push_frame(
+    let Some(frame) = x.stack().push_frame(
         x.heap(),
         x.caller_meta(pc + size, pc),
         Callee {
@@ -506,7 +535,9 @@ pub fn construct_start(
         },
         callee_word,
         staged,
-    )?;
+    ) else {
+        return Err(CallFault::Raise(VmError::StackOverflow));
+    };
     x.switch_frame_code(frame.base, bytecode.as_ptr(), bytecode.as_ref().runtime());
     Ok(ConstructStart::Frame)
 }
@@ -520,17 +551,17 @@ pub fn construct_native<'a>(
     args_base: i32,
     count: usize,
 ) -> Tagged<'a, Value> {
-    let f = x.vm().native(rt);
+    let vm = x.vm();
+    let f = vm.native(rt);
     let state = x.state();
     let base = x.frame_base();
     let stack = state.stack();
-    let undefined = stack.undefined_word(x.heap());
-    let args = match stack.stage_construct(base, undefined, args_base, count) {
-        Ok(a) => a,
-        Err(err) => {
-            let _ = x.raise_tag(err);
-            return x.vm().known().exception.get(x.heap()).erase();
-        }
+    let staged = {
+        let heap = x.heap();
+        stack.stage_construct(base, stack.undefined_word(heap), args_base, count)
+    };
+    let Some(args) = staged else {
+        raise!(vm, x.heap_mut(), state, VmError::StackOverflow);
     };
     let saved = stack.top();
     let bump = stack.rooting_top(args);

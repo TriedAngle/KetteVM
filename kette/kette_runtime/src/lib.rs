@@ -2,8 +2,8 @@ use vm_core::intrinsics::declare_globals;
 use vm_core::raise_runtime;
 use vm_core::{
     Args, DenseString, EdgeVisitable, Handle, HandleSlice, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, Tagged, VM, Value, Visitor,
-    VmError,
+    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, Tagged, VM, Value,
+    Visitor,
 };
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
@@ -20,7 +20,7 @@ impl EdgeVisitable for KetteRuntime {
 impl Runtime for KetteRuntime {
     const ID: RuntimeId = RuntimeId(2);
 
-    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError> {
+    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
         state.declare_globals = vm.register_native(declare_globals);
         let print = vm.register_native(console_print);
         let mut thread = vm.attach();
@@ -41,7 +41,7 @@ impl Runtime for KetteRuntime {
                 &scope,
             );
             let console = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-            Object::install_method(thread, &scope, console, "print", print)?;
+            Object::install_method(thread, &scope, console, "print", print);
             let console_name = thread.intern(&scope, "Console");
             let console_name = scope.handle(console_name.as_tagged(thread.heap()));
             let global = {
@@ -49,14 +49,15 @@ impl Runtime for KetteRuntime {
                 heap.known().global_object.get_handle(thread.heap(), &scope)
             };
             // a bare global `print(x)`, same native as `Console.print`
-            Object::install_method(thread, &scope, global, "print", print)?;
+            Object::install_method(thread, &scope, global, "print", print);
             Object::define_own_property_ordinary(
                 thread.heap(),
                 &scope,
                 global,
                 console_name,
                 PropertyDescriptor::data(console.erase()),
-            )?;
+            )
+            .expect("install console global");
             Ok(())
         })
     }
@@ -77,15 +78,14 @@ fn console_print<'a>(
     let v = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
         let text = match Object::to_string(vm, heap, state, v) {
-            Ok(Some(t)) => {
+            Ok(t) => {
                 let t = scope.handle(t);
                 t.as_tagged(heap)
                     .get_as::<DenseString>(heap)
                     .map(|s| s.to_rust_string(heap))
                     .unwrap_or_default()
             }
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         println!("{text}");
         vm.known().undefined.get(heap).erase()

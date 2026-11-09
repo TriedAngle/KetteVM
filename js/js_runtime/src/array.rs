@@ -1,8 +1,11 @@
 use vm_core::HostCtx;
-use vm_core::proxy::Flow;
+use vm_core::Result;
+use vm_core::VmError;
+use vm_core::raise;
+
 use vm_core::{
-    Args, Coercion, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap,
-    LanguageMode, Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
+    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, LanguageMode,
+    Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -16,7 +19,6 @@ const ARRAY_ITERATOR_KIND_KEY_VALUE: i64 = 2;
 enum IndexedValue<'s> {
     Absent,
     Present(Handle<'s, Value>),
-    Threw,
 }
 
 /// Get `obj[index]`, using a direct own-element read when possible.
@@ -27,36 +29,25 @@ fn get_indexed_value<'s>(
     scope: &'s HandleScope<'_>,
     obj: Handle<'_, Value>,
     index: u64,
-) -> Result<IndexedValue<'s>, VmError> {
+) -> Result<IndexedValue<'s>> {
     if let Some(o) = obj.as_tagged(heap).as_heap_object()
         && let Some(value) = o.element_value(heap, index as usize)
     {
         return Ok(IndexedValue::Present(scope.handle(value)));
     }
     // TODO: handle the 2^53 max length/key.
-    let key = match Object::to_property_key(
+    let key = scope.handle(Object::to_property_key(
         vm,
         heap,
         state,
         scope.handle(Smi::new(index as i64).into_tagged()),
-    ) {
-        Ok(Some(key)) => scope.handle(key),
-        Ok(None) => return Ok(IndexedValue::Threw),
-        Err(err) => return Err(err),
-    };
-    let present = match Object::has_property(vm, heap, state, obj, key.erase()) {
-        Ok(Coercion::Value(v)) => scope.handle(v),
-        Ok(Coercion::Threw) => return Ok(IndexedValue::Threw),
-        Err(err) => return Err(err),
-    };
-    if !present.as_tagged(heap).is_truthy(heap) {
+    )?);
+    let present = Object::has_property(vm, heap, state, obj, key.erase())?;
+    if !present {
         return Ok(IndexedValue::Absent);
     }
-    match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
-        Ok(Coercion::Value(v)) => Ok(IndexedValue::Present(scope.handle(v))),
-        Ok(Coercion::Threw) => Ok(IndexedValue::Threw),
-        Err(err) => Err(err),
-    }
+    let value = Object::get_property(vm, heap, state, obj, obj, key.erase(), false)?;
+    Ok(IndexedValue::Present(scope.handle(value)))
 }
 
 /// `Array ( ...values )`
@@ -80,9 +71,8 @@ pub fn array_constructor<'a>(
                     .get_handle(heap, &scope)
                     .erase();
                 match Object::get_property(vm, heap, state, nt, nt, name, false) {
-                    Ok(Coercion::Value(v)) => scope.handle(v),
-                    Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                    Err(err) => return raise_runtime(vm, heap, state, err),
+                    Ok(v) => scope.handle(v),
+                    Err(err) => return raise_runtime(heap, err),
                 }
             }
             None => heap
@@ -105,7 +95,7 @@ pub fn array_constructor<'a>(
                     Some(n) => {
                         let len = Convert::number_to_uint32(n);
                         if len as f64 != n {
-                            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+                            raise!(vm, heap, state, VmError::IndexOutOfBounds);
                         }
                         Some(len as usize)
                     }
@@ -118,9 +108,7 @@ pub fn array_constructor<'a>(
         let array = match single_len {
             Some(n) => {
                 let array = heap.new_array(&scope, HandleSlice::EMPTY).as_handle(&scope);
-                if let Err(err) = Object::set_array_length(heap, &scope, &array, n) {
-                    return raise_runtime(vm, heap, state, err);
-                }
+                Object::set_array_length(heap, &scope, &array, n);
                 array
             }
             None => {
@@ -130,10 +118,8 @@ pub fn array_constructor<'a>(
         };
         if let Some(proto) = proto {
             rt_try!(
-                vm,
                 heap,
-                state,
-                Object::set_prototype(heap, &scope, array, proto.erase())
+                Object::set_prototype(vm, heap, state, &scope, array, proto.erase())
             );
         }
         array.as_tagged(heap).erase()
@@ -151,27 +137,24 @@ pub fn array_push<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    match array_push_fast(heap, state, args) {
-        Some(Ok(len)) => return Smi::new(len as i64).into_tagged(),
-        Some(Err(err)) => return raise_runtime(vm, heap, state, err),
-        None => {}
+    if let Some(len) = array_push_fast(heap, state, args) {
+        return Smi::new(len as i64).into_tagged();
     }
     state.handle_scope(|scope| {
         let this = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, this) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, this) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
 
         let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
-        let mut length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(length)) => length,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let mut length = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
         let arg_count = args.len().saturating_sub(1) as u64;
         if length.saturating_add(arg_count) > (1u64 << 53) - 1 {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
 
         for i in 1..args.len() {
@@ -190,9 +173,8 @@ pub fn array_push<'a>(
                 false,
                 LanguageMode::Strict,
             ) {
-                Ok(Flow::Value(_)) => {}
-                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
             }
             length += 1;
         }
@@ -210,9 +192,8 @@ pub fn array_push<'a>(
             false,
             LanguageMode::Strict,
         ) {
-            Ok(Flow::Value(_)) => {}
-            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(_) => {}
+            Err(err) => return raise_runtime(heap, err),
         }
         length_value.as_tagged(heap)
     })
@@ -221,11 +202,7 @@ pub fn array_push<'a>(
 /// Allocation Free Array push fast path if space is remaining.
 /// Returns `None` when the generic `[[Set]]` algorithm is required.
 #[inline]
-fn array_push_fast(
-    heap: &mut Heap,
-    state: &ThreadState,
-    args: Args,
-) -> Option<Result<usize, VmError>> {
+fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<usize> {
     if args.len() != 2 {
         return None;
     }
@@ -249,7 +226,7 @@ fn array_push_fast(
                 .length
                 .set(heap, r.erase(), Smi::new((len + 1) as i64));
             Prototype::element_mutated(heap, obj);
-            return Some(Ok(len + 1));
+            return Some(len + 1);
         }
         len
     };
@@ -258,10 +235,8 @@ fn array_push_fast(
         let obj = receiver.as_tagged(heap).as_heap_object()?;
         let receiver_obj = scope.handle(obj);
         let arg = args.get_handle(heap, 1);
-        match Object::store_array_element(heap, &scope, &receiver_obj, len, &arg) {
-            Ok(()) => Some(Ok(len + 1)),
-            Err(err) => Some(Err(err)),
-        }
+        Object::store_array_element(heap, &scope, &receiver_obj, len, &arg);
+        Some(len + 1)
     })
 }
 
@@ -310,18 +285,17 @@ pub fn array_pop<'a>(
         }
 
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
 
         // LengthOfArrayLike (ES 7.3.18): Get(obj, "length") then ToLength.
         let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
-        let length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(length)) => length,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let length = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
 
         if length == 0 {
             let zero = scope.handle(Smi::new(0).into_tagged());
@@ -337,9 +311,8 @@ pub fn array_pop<'a>(
                 false,
                 LanguageMode::Strict,
             ) {
-                Ok(Flow::Value(_)) => {}
-                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
             }
             return vm.known().undefined.get(heap).erase();
         }
@@ -347,21 +320,21 @@ pub fn array_pop<'a>(
         let new_length = length - 1;
         let new_length_value = scope.handle(Smi::new(new_length as i64).into_tagged());
         // ToString(newLen), interned: named keys compare by pointer.
-        let index = match Object::to_property_key(vm, heap, state, new_length_value) {
-            Ok(Some(key)) => scope.handle(key.erase()),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let index = scope.handle(
+            rt_try!(
+                heap,
+                Object::to_property_key(vm, heap, state, new_length_value)
+            )
+            .erase(),
+        );
         let element = match Object::get_property(vm, heap, state, obj, obj, index, false) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(heap, err),
         };
         match Object::delete_property(vm, heap, state, obj, index) {
-            Ok(Flow::Value(true)) => {}
-            Ok(Flow::Value(false)) => return raise_runtime(vm, heap, state, VmError::Type),
-            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(true) => {}
+            Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+            Err(err) => return raise_runtime(heap, err),
         }
         match Object::set_property(
             vm,
@@ -375,9 +348,8 @@ pub fn array_pop<'a>(
             false,
             LanguageMode::Strict,
         ) {
-            Ok(Flow::Value(_)) => {}
-            Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(_) => {}
+            Err(err) => return raise_runtime(heap, err),
         }
         element.as_tagged(heap)
     })
@@ -434,9 +406,9 @@ pub fn array_values<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         let map = known.array_iterator_map.get_handle(heap, &scope);
         heap.new_object(
@@ -467,7 +439,7 @@ pub fn array_iterator_next<'a>(
     let receiver = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let Some(iterator) = receiver.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let iterator = scope.handle(iterator);
         if !iterator
@@ -475,12 +447,12 @@ pub fn array_iterator_next<'a>(
             .map(heap)
             .ptr_eq(known.array_iterator_map.get(heap))
         {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let (array, index, kind) = {
             let slots = iterator.as_tagged(heap).slots(heap);
             if slots.len() < 3 {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             }
             (
                 scope.handle(slots.at(heap, 0)),
@@ -494,17 +466,16 @@ pub fn array_iterator_next<'a>(
             (undefined, true)
         } else {
             let Some(index) = Smi::decode(index) else {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             };
             let Some(kind) = Smi::decode(kind).map(|s| s.value()) else {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             };
             let index = index.value() as u64;
-            let length = match Object::length_of_array_like(vm, heap, state, &scope, array) {
-                Ok(Some(length)) => length,
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+            let length = rt_try!(
+                heap,
+                Object::length_of_array_like(vm, heap, state, &scope, array)
+            );
             if index >= length {
                 iterator
                     .as_tagged(heap)
@@ -521,24 +492,23 @@ pub fn array_iterator_next<'a>(
                 let result = match kind {
                     ARRAY_ITERATOR_KIND_KEY => scope.handle(index_number),
                     ARRAY_ITERATOR_KIND_VALUE | ARRAY_ITERATOR_KIND_KEY_VALUE => {
-                        let index_key = match Object::to_property_key(
-                            vm,
-                            heap,
-                            state,
-                            scope.handle(index_number),
-                        ) {
-                            Ok(Some(key)) => scope.handle(key.erase()),
-                            Ok(None) => return vm.known().exception.get(heap).erase(),
-                            Err(err) => return raise_runtime(vm, heap, state, err),
-                        };
+                        let index_key = scope.handle(
+                            rt_try!(
+                                heap,
+                                Object::to_property_key(
+                                    vm,
+                                    heap,
+                                    state,
+                                    scope.handle(index_number),
+                                )
+                            )
+                            .erase(),
+                        );
                         let value = match Object::get_property(
                             vm, heap, state, array, array, index_key, false,
                         ) {
-                            Ok(Coercion::Value(v)) => scope.handle(v),
-                            Ok(Coercion::Threw) => {
-                                return vm.known().exception.get(heap).erase();
-                            }
-                            Err(err) => return raise_runtime(vm, heap, state, err),
+                            Ok(v) => scope.handle(v),
+                            Err(err) => return raise_runtime(heap, err),
                         };
                         if kind == ARRAY_ITERATOR_KIND_VALUE {
                             value
@@ -552,7 +522,7 @@ pub fn array_iterator_next<'a>(
                             scope.handle(pair.as_tagged(heap).erase())
                         }
                     }
-                    _ => return raise_runtime(vm, heap, state, VmError::Type),
+                    _ => raise!(vm, heap, state, VmError::InvalidOperandType),
                 };
                 (result, false)
             }
@@ -616,22 +586,21 @@ pub fn array_map<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
-        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(len)) => len,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
         let callback = args.get_handle(heap, 1);
         if !callback.as_tagged(heap).is_callable(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         // ArrayCreate(ES 23.1.3.33) rejects lengths above 2^32 - 1.
         if len > u32::MAX as u64 {
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+            raise!(vm, heap, state, VmError::IndexOutOfBounds);
         }
         let this_arg = if args.len() > 2 {
             args.get_handle(heap, 2)
@@ -646,8 +615,7 @@ pub fn array_map<'a>(
             let value = match get_indexed_value(vm, heap, state, &scope, obj, k) {
                 Ok(IndexedValue::Absent) => continue,
                 Ok(IndexedValue::Present(value)) => value,
-                Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Err(err) => return raise_runtime(heap, err),
             };
             let call_args = scope.stage(&[
                 this_arg.as_tagged(heap),
@@ -665,20 +633,14 @@ pub fn array_map<'a>(
                 None,
             ) {
                 Ok(value) => scope.handle(value),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Err(err) => return raise_runtime(heap, err),
             };
             if mapped.as_tagged(heap) == exception.as_tagged(heap) {
                 return exception.as_tagged(heap);
             }
-            if let Err(err) =
-                Object::store_array_element(heap, &scope, &result, k as usize, &mapped)
-            {
-                return raise_runtime(vm, heap, state, err);
-            }
+            Object::store_array_element(heap, &scope, &result, k as usize, &mapped);
         }
-        if let Err(err) = Object::set_array_length(heap, &scope, &result, len as usize) {
-            return raise_runtime(vm, heap, state, err);
-        }
+        Object::set_array_length(heap, &scope, &result, len as usize);
         result.as_tagged(heap).erase()
     })
 }
@@ -696,18 +658,17 @@ pub fn array_reduce<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
-        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(len)) => len,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
         let callback = args.get_handle(heap, 1);
         if !callback.as_tagged(heap).is_callable(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let undefined = vm.known().undefined.get_handle(heap, &scope).erase();
         let exception = vm.known().exception.get_handle(heap, &scope).erase();
@@ -721,13 +682,12 @@ pub fn array_reduce<'a>(
                 match get_indexed_value(vm, heap, state, &scope, obj, k) {
                     Ok(IndexedValue::Absent) => {}
                     Ok(IndexedValue::Present(value)) => first = Some(value),
-                    Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
-                    Err(err) => return raise_runtime(vm, heap, state, err),
+                    Err(err) => return raise_runtime(heap, err),
                 }
                 k += 1;
             }
             let Some(value) = first else {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                raise!(vm, heap, state, VmError::InvalidOperandType);
             };
             value
         };
@@ -739,8 +699,7 @@ pub fn array_reduce<'a>(
                     continue;
                 }
                 Ok(IndexedValue::Present(value)) => value,
-                Ok(IndexedValue::Threw) => return exception.as_tagged(heap),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Err(err) => return raise_runtime(heap, err),
             };
             let call_args = scope.stage(&[
                 undefined.as_tagged(heap),
@@ -759,7 +718,7 @@ pub fn array_reduce<'a>(
                 None,
             ) {
                 Ok(value) => scope.handle(value),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Err(err) => return raise_runtime(heap, err),
             };
             if result.as_tagged(heap) == exception.as_tagged(heap) {
                 return exception.as_tagged(heap);
@@ -785,15 +744,14 @@ pub fn array_to_string<'a>(
     } = ctx;
     let receiver = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
         let join_key = known.strings.join.get_handle(heap, &scope).erase();
         let join = match Object::get_property(vm, heap, state, obj, obj, join_key, false) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(v) => scope.handle(v),
+            Err(err) => return raise_runtime(heap, err),
         };
         let func = if join.as_tagged(heap).is_callable(heap) {
             join
@@ -815,7 +773,7 @@ pub fn array_to_string<'a>(
         };
         match outcome {
             Ok(value) => value.as_tagged(heap).erase(),
-            Err(err) => raise_runtime(vm, heap, state, err),
+            Err(err) => raise_runtime(heap, err),
         }
     })
 }
@@ -828,30 +786,23 @@ fn join_impl<'a>(
     separator: Option<Handle<'_, Value>>,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
 
-        let length = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(length)) => length,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let length = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
 
         let sep = match separator {
             Some(h) if h.as_tagged(heap) != vm.known().undefined.get(heap) => {
-                match Object::to_string(vm, heap, state, h) {
-                    Ok(Some(s)) => {
-                        let s = scope.handle(s);
-                        s.as_tagged(heap)
-                            .get_as::<DenseString>(heap)
-                            .map(|d| d.to_rust_string(heap))
-                            .unwrap_or_default()
-                    }
-                    Ok(None) => return vm.known().exception.get(heap).erase(),
-                    Err(err) => return raise_runtime(vm, heap, state, err),
-                }
+                let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, h)));
+                s.as_tagged(heap)
+                    .get_as::<DenseString>(heap)
+                    .map(|d| d.to_rust_string(heap))
+                    .unwrap_or_default()
             }
             _ => ",".to_string(),
         };
@@ -861,20 +812,21 @@ fn join_impl<'a>(
             if i > 0 {
                 out.push_str(&sep);
             }
-            let index = match Object::to_property_key(
-                vm,
-                heap,
-                state,
-                scope.handle(Smi::new(i as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key.erase()),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+            let index = scope.handle(
+                rt_try!(
+                    heap,
+                    Object::to_property_key(
+                        vm,
+                        heap,
+                        state,
+                        scope.handle(Smi::new(i as i64).into_tagged()),
+                    )
+                )
+                .erase(),
+            );
             let element = match Object::get_property(vm, heap, state, obj, obj, index, false) {
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(v) => scope.handle(v),
+                Err(err) => return raise_runtime(heap, err),
             };
             let element_value = element.as_tagged(heap);
             if element_value == vm.known().undefined.get(heap)
@@ -882,15 +834,9 @@ fn join_impl<'a>(
             {
                 continue;
             }
-            match Object::to_string(vm, heap, state, element) {
-                Ok(Some(s)) => {
-                    let s = scope.handle(s);
-                    if let Some(d) = s.as_tagged(heap).get_as::<DenseString>(heap) {
-                        out.push_str(&d.to_rust_string(heap));
-                    }
-                }
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+            let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, element)));
+            if let Some(d) = s.as_tagged(heap).get_as::<DenseString>(heap) {
+                out.push_str(&d.to_rust_string(heap));
             }
         }
         DenseString::from_utf8(heap, &scope, &out)
@@ -912,37 +858,33 @@ pub fn array_is_array<'a>(
         vm, heap, state, ..
     } = ctx;
     let arg = args.get(heap, 1);
-    let is_array = match is_array(heap, arg) {
-        Ok(is_array) => is_array,
-        Err(err) => return raise_runtime(vm, heap, state, err),
+    let Some(is_array) = is_array(heap, arg) else {
+        raise!(vm, heap, state, VmError::RevokedProxy);
     };
     Convert::boolean(heap, is_array)
 }
 
 /// A `slice` boundary: absent/undefined → `default`, Smi passes straight
-/// through, otherwise ToNumber and truncate (NaN → 0). `Ok(None)` is a
-/// pending exception.
+/// through, otherwise ToNumber and truncate (NaN → 0).
 fn slice_bound(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
     arg: Option<Handle<'_, Value>>,
     default: f64,
-) -> Result<Option<f64>, VmError> {
+) -> Result<f64> {
     let Some(h) = arg else {
-        return Ok(Some(default));
+        return Ok(default);
     };
     let v = h.as_tagged(heap);
     if v == vm.known().undefined.get(heap) {
-        return Ok(Some(default));
+        return Ok(default);
     }
     if let Some(smi) = Smi::decode(v.raw()) {
-        return Ok(Some(smi.value() as f64));
+        return Ok(smi.value() as f64);
     }
-    match Object::to_numeric(vm, heap, state, h)? {
-        Some(n) => Ok(Some(if n.is_nan() { 0.0 } else { n.trunc() })),
-        None => Ok(None),
-    }
+    let n = Object::to_numeric(vm, heap, state, h)?;
+    Ok(if n.is_nan() { 0.0 } else { n.trunc() })
 }
 
 /// `Array.prototype.slice ( start, end )`
@@ -958,39 +900,36 @@ pub fn array_slice<'a>(
     } = ctx;
     state.handle_scope(|scope| {
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
-        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(len)) => len,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
         let len_f = len as f64;
 
-        let start = match slice_bound(
-            vm,
+        let start = rt_try!(
             heap,
-            state,
-            (args.len() > 1).then(|| args.get_handle(heap, 1)),
-            0.0,
-        ) {
-            Ok(Some(v)) => v,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let end = match slice_bound(
-            vm,
+            slice_bound(
+                vm,
+                heap,
+                state,
+                (args.len() > 1).then(|| args.get_handle(heap, 1)),
+                0.0,
+            )
+        );
+        let end = rt_try!(
             heap,
-            state,
-            (args.len() > 2).then(|| args.get_handle(heap, 2)),
-            len_f,
-        ) {
-            Ok(Some(v)) => v,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+            slice_bound(
+                vm,
+                heap,
+                state,
+                (args.len() > 2).then(|| args.get_handle(heap, 2)),
+                len_f,
+            )
+        );
         let start = if start < 0.0 {
             (len_f + start).max(0.0)
         } else {
@@ -1005,7 +944,7 @@ pub fn array_slice<'a>(
         let start = start as u64;
         // ArrayCreate(ES 23.1.3.33) rejects lengths above 2^32 - 1.
         if count > u32::MAX as u64 {
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+            raise!(vm, heap, state, VmError::IndexOutOfBounds);
         }
 
         // TODO: ArraySpeciesCreate (ES 23.1.3.34) once species is supported.
@@ -1013,40 +952,36 @@ pub fn array_slice<'a>(
         for n in 0..count {
             let from = start + n;
             // TODO: handle the 2^53 max length/key.
-            let from_key = match Object::to_property_key(
-                vm,
+            let from_key = scope.handle(rt_try!(
                 heap,
-                state,
-                scope.handle(Smi::new(from as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
-            let present = match Object::has_property(vm, heap, state, obj, from_key.erase()) {
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
-            if !present.as_tagged(heap).is_truthy(heap) {
+                Object::to_property_key(
+                    vm,
+                    heap,
+                    state,
+                    scope.handle(Smi::new(from as i64).into_tagged()),
+                )
+            ));
+            let present = rt_try!(
+                heap,
+                Object::has_property(vm, heap, state, obj, from_key.erase())
+            );
+            if !present {
                 continue;
             }
             let value =
                 match Object::get_property(vm, heap, state, obj, obj, from_key.erase(), false) {
-                    Ok(Coercion::Value(v)) => scope.handle(v),
-                    Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                    Err(err) => return raise_runtime(vm, heap, state, err),
+                    Ok(v) => scope.handle(v),
+                    Err(err) => return raise_runtime(heap, err),
                 };
-            let to_key = match Object::to_property_key(
-                vm,
+            let to_key = scope.handle(rt_try!(
                 heap,
-                state,
-                scope.handle(Smi::new(n as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+                Object::to_property_key(
+                    vm,
+                    heap,
+                    state,
+                    scope.handle(Smi::new(n as i64).into_tagged()),
+                )
+            ));
             let result_value = scope.handle(result.as_tagged(heap).erase());
             let key_value = scope.handle(to_key.as_tagged(heap).erase());
             match Object::create_data_property_or_throw(
@@ -1058,14 +993,11 @@ pub fn array_slice<'a>(
                 key_value,
                 value,
             ) {
-                Ok(Flow::Value(_)) => {}
-                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
             }
         }
-        if let Err(err) = Object::set_array_length(heap, &scope, &result, count as usize) {
-            return raise_runtime(vm, heap, state, err);
-        }
+        Object::set_array_length(heap, &scope, &result, count as usize);
         result.as_tagged(heap).erase()
     })
 }
@@ -1087,7 +1019,7 @@ pub fn array_sort<'a>(
             let c = args.get(heap, 1);
             if c != vm.known().undefined.get(heap) {
                 if !c.is_callable(heap) {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
                 }
                 Some(scope.handle(c))
             } else {
@@ -1098,15 +1030,14 @@ pub fn array_sort<'a>(
         };
 
         let receiver = args.get_handle(heap, 0);
-        let obj = match Convert::to_object(vm, heap, &scope, receiver) {
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => return raise_runtime(heap, err),
         };
-        let len = match Object::length_of_array_like(vm, heap, state, &scope, obj) {
-            Ok(Some(len)) => len,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
         let undefined = vm.known().undefined.get_handle(heap, &scope).erase();
         let exception = vm.known().exception.get_handle(heap, &scope).erase();
 
@@ -1116,28 +1047,25 @@ pub fn array_sort<'a>(
         let mut undefined_count = 0usize;
         for i in 0..len {
             // TODO: handle the 2^53 max length/key.
-            let key = match Object::to_property_key(
-                vm,
+            let key = scope.handle(rt_try!(
                 heap,
-                state,
-                scope.handle(Smi::new(i as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
-            let present = match Object::has_property(vm, heap, state, obj, key.erase()) {
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
-            if !present.as_tagged(heap).is_truthy(heap) {
+                Object::to_property_key(
+                    vm,
+                    heap,
+                    state,
+                    scope.handle(Smi::new(i as i64).into_tagged()),
+                )
+            ));
+            let present = rt_try!(
+                heap,
+                Object::has_property(vm, heap, state, obj, key.erase())
+            );
+            if !present {
                 continue;
             }
             let value = match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(v) => scope.handle(v),
+                Err(err) => return raise_runtime(heap, err),
             };
             if value.as_tagged(heap) == undefined.as_tagged(heap) {
                 undefined_count += 1;
@@ -1161,11 +1089,8 @@ pub fn array_sort<'a>(
                     let mut pairs: Vec<(Handle<'_, Value>, Handle<'_, Value>)> =
                         Vec::with_capacity(elems.len());
                     for h in elems.iter() {
-                        let key = match Object::to_string(vm, heap, state, *h) {
-                            Ok(Some(s)) => scope.handle(s),
-                            Ok(None) => return vm.known().exception.get(heap).erase(),
-                            Err(err) => return raise_runtime(vm, heap, state, err),
-                        };
+                        let key =
+                            scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, *h)));
                         pairs.push((*h, key));
                     }
                     pairs.sort_by(|a, b| {
@@ -1195,7 +1120,7 @@ pub fn array_sort<'a>(
                         ) {
                             Ok(v) => cscope.handle(v),
                             Err(err) => {
-                                raise_runtime(vm, heap, state, err);
+                                raise_runtime(heap, err);
                                 threw.set(true);
                                 return core::cmp::Ordering::Equal;
                             }
@@ -1205,7 +1130,7 @@ pub fn array_sort<'a>(
                             return core::cmp::Ordering::Equal;
                         }
                         match Object::to_numeric(vm, heap, state, result) {
-                            Ok(Some(n)) => {
+                            Ok(n) => {
                                 if n < 0.0 {
                                     core::cmp::Ordering::Less
                                 } else if n > 0.0 {
@@ -1214,12 +1139,8 @@ pub fn array_sort<'a>(
                                     core::cmp::Ordering::Equal
                                 }
                             }
-                            Ok(None) => {
-                                threw.set(true);
-                                core::cmp::Ordering::Equal
-                            }
                             Err(err) => {
-                                raise_runtime(vm, heap, state, err);
+                                raise_runtime(heap, err);
                                 threw.set(true);
                                 core::cmp::Ordering::Equal
                             }
@@ -1241,16 +1162,17 @@ pub fn array_sort<'a>(
         // Set(O, ToString(j), sortedList[j], true).
         for (j, value) in elems.iter().enumerate() {
             // TODO: handle the 2^53 max length/key.
-            let key = match Object::to_property_key(
-                vm,
-                heap,
-                state,
-                scope.handle(Smi::new(j as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key).erase(),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+            let key = scope
+                .handle(rt_try!(
+                    heap,
+                    Object::to_property_key(
+                        vm,
+                        heap,
+                        state,
+                        scope.handle(Smi::new(j as i64).into_tagged()),
+                    )
+                ))
+                .erase();
             match Object::set_property(
                 vm,
                 heap,
@@ -1263,30 +1185,31 @@ pub fn array_sort<'a>(
                 false,
                 LanguageMode::Strict,
             ) {
-                Ok(Flow::Value(_)) => {}
-                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
             }
         }
 
         // Delete the remaining indices so holes are preserved.
         for j in item_count..len {
             // TODO: handle the 2^53 max length/key.
-            let key = match Object::to_property_key(
-                vm,
-                heap,
-                state,
-                scope.handle(Smi::new(j as i64).into_tagged()),
-            ) {
-                Ok(Some(key)) => scope.handle(key).erase(),
-                Ok(None) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+            let key = scope
+                .handle(rt_try!(
+                    heap,
+                    Object::to_property_key(
+                        vm,
+                        heap,
+                        state,
+                        scope.handle(Smi::new(j as i64).into_tagged()),
+                    )
+                ))
+                .erase();
             match Object::delete_property(vm, heap, state, obj, key) {
-                Ok(Flow::Value(true)) => {}
-                Ok(Flow::Value(false)) => return raise_runtime(vm, heap, state, VmError::Type),
-                Ok(Flow::Threw) => return vm.known().exception.get(heap).erase(),
-                Err(err) => return raise_runtime(vm, heap, state, err),
+                Ok(true) => {}
+                Ok(false) => {
+                    raise!(vm, heap, state, VmError::InvalidOperandType);
+                }
+                Err(err) => return raise_runtime(heap, err),
             }
         }
         obj.as_tagged(heap)

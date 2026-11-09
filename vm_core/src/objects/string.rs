@@ -193,7 +193,7 @@ impl DenseString {
             return Some(StringOwn::Length(self.len()));
         }
         match name.erase().classify_key(heap) {
-            Ok(Key::Element(i)) if i < self.len() => Some(StringOwn::Index(i)),
+            Some(Key::Element(i)) if i < self.len() => Some(StringOwn::Index(i)),
             _ => None,
         }
     }
@@ -245,7 +245,7 @@ impl DenseString {
         receiver: Handle<'_, Value>,
         key: Handle<'_, SlotName>,
     ) -> Option<Tagged<'a, Value>> {
-        let Ok(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) else {
+        let Some(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) else {
             return None;
         };
         let s = Self::from_receiver(heap, receiver.as_tagged(heap))?;

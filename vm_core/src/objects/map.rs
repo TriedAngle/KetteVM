@@ -3,7 +3,7 @@ use core::alloc::Layout;
 use crate::{
     AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
     HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
-    Smi, Symbol, Tagged, Value, Visitor, VmError, WeakFixedArray,
+    Smi, Symbol, Tagged, Value, Visitor, WeakFixedArray,
 };
 
 #[repr(C)]
@@ -672,27 +672,25 @@ pub enum Key<'a> {
 impl<'a> Tagged<'a, Value> {
     /// Classify an already-coerced property key; out-of-range Smis are
     /// a caller bug (stringified at `to_property_key`).
-    pub fn classify_key(self, heap: &'a Heap) -> Result<Key<'a>, VmError> {
+    pub fn classify_key(self, heap: &'a Heap) -> Option<Key<'a>> {
         if let Some(v) = self.to_i64() {
             if (0..u32::MAX as i64).contains(&v) {
-                return usize::try_from(v)
-                    .map(Key::Element)
-                    .map_err(|_| VmError::OutOfBounds);
+                return usize::try_from(v).ok().map(Key::Element);
             }
-            return Err(VmError::Type);
+            return None;
         }
         if let Some(s) = self.get_as::<DenseString>(heap) {
             if let Some(i) = s.data(heap).canonical_index()
                 && i < u32::MAX as usize
             {
-                return Ok(Key::Element(i));
+                return Some(Key::Element(i));
             }
-            return Ok(Key::Name(s.into()));
+            return Some(Key::Name(s.into()));
         }
         if let Some(s) = self.get_as::<Symbol>(heap) {
-            return Ok(Key::Name(s.into()));
+            return Some(Key::Name(s.into()));
         }
-        Err(VmError::Type)
+        None
     }
 }
 

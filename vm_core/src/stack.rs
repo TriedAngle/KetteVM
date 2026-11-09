@@ -5,8 +5,6 @@ use crate::{
     Object, Register, Smi, Tagged, Value, Visitor,
 };
 
-use crate::VmError;
-
 /// Number of slots in a thread's interpreter stack.
 pub const STACK_SLOTS: usize = 16 * 1024;
 
@@ -113,15 +111,6 @@ impl Args {
     pub fn iter<'h>(self, heap: &'h Heap) -> impl Iterator<Item = Tagged<'h, Value>> + 'h {
         (0..self.count).map(move |i| self.get(heap, i))
     }
-}
-
-/// What a scattered call site stages at element 0.
-#[derive(Copy, Clone)]
-pub enum Recv {
-    /// the receiver register's word (method call sites)
-    Reg(i32),
-    /// synthesized undefined (function call sites)
-    Undefined,
 }
 
 /// The fixed frame header: `HEADER_SLOTS` contiguous slots directly below
@@ -396,7 +385,7 @@ impl Stack {
         callee: Callee<'_>,
         new_target: Tagged<'_, Value>,
         args: Args,
-    ) -> Result<FrameMeta, VmError> {
+    ) -> Option<FrameMeta> {
         let count = args.count;
         self.push_frame_with(
             heap,
@@ -423,7 +412,7 @@ impl Stack {
         callee: Callee<'_>,
         new_target: Tagged<'_, Value>,
         values: &[Tagged<'_, Value>],
-    ) -> Result<FrameMeta, VmError> {
+    ) -> Option<FrameMeta> {
         let count = values.len();
         self.push_frame_with(
             heap,
@@ -433,53 +422,6 @@ impl Stack {
             count,
             |stack, anchor, _| {
                 stack.write_params(anchor, values);
-            },
-        )
-    }
-
-    /// Push a callee frame from scattered call-site registers: the
-    /// parameters are written straight from the caller's operands.
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn push_scattered_frame(
-        &self,
-        heap: &Heap,
-        caller: FrameMeta,
-        callee: Callee<'_>,
-        new_target: Tagged<'_, Value>,
-        recv: Recv,
-        sargs: [i32; 2],
-        argc: usize,
-    ) -> Result<FrameMeta, VmError> {
-        let count = 1 + argc;
-        self.push_frame_with(
-            heap,
-            caller,
-            callee,
-            new_target,
-            count,
-            |stack, anchor, base| {
-                match recv {
-                    Recv::Reg(recv) => {
-                        let src = Self::slot_of(base, recv);
-                        stack
-                            .slot_unchecked(anchor)
-                            .as_raw()
-                            .store_raw(stack.slot_unchecked(src).raw().to_bits());
-                    }
-                    Recv::Undefined => {
-                        stack
-                            .slot_unchecked(anchor)
-                            .store(stack.undefined.get(heap));
-                    }
-                }
-                for (i, &operand) in sargs.iter().enumerate().take(argc) {
-                    let src = Self::slot_of(base, operand);
-                    stack
-                        .slot_unchecked(anchor + 1 + i)
-                        .as_raw()
-                        .store_raw(stack.slot_unchecked(src).raw().to_bits());
-                }
             },
         )
     }
@@ -496,12 +438,12 @@ impl Stack {
         new_target: Tagged<'_, Value>,
         count: usize,
         write: P,
-    ) -> Result<FrameMeta, VmError> {
+    ) -> Option<FrameMeta> {
         let (register_count, formal_min) = callee.info.frame_facts();
         let padded = count.max(formal_min);
         let low = self.top();
         if low + register_count + HEADER_SLOTS + padded > self.slots.len() {
-            return Err(VmError::StackOverflow);
+            return None;
         }
         let anchor = low + register_count + HEADER_SLOTS;
         write(self, anchor, caller.base);
@@ -514,7 +456,7 @@ impl Stack {
             self.slot_unchecked(low + i).store(fill);
         }
         self.set_top(anchor + padded);
-        Ok(self.init_frame_header(
+        Some(self.init_frame_header(
             heap,
             anchor,
             &callee,
@@ -565,44 +507,6 @@ impl Stack {
         }
     }
 
-    /// Stage scattered call operands into one contiguous
-    /// `[receiver, args...]` window at the incoming top without bumping
-    /// it: the words are outside the GC's scan until the consumer bumps
-    /// `top` over them — nothing may allocate in between.
-    #[inline]
-    pub fn stage_scattered(
-        &self,
-        heap: &Heap,
-        caller_base: usize,
-        recv: Recv,
-        args: [i32; 2],
-        argc: usize,
-    ) -> Result<Args, VmError> {
-        let dst = self.top();
-        let count = 1 + argc;
-        if dst + count > self.slots.len() {
-            return Err(VmError::StackOverflow);
-        }
-        match recv {
-            Recv::Undefined => {
-                self.slot_unchecked(dst).store(self.undefined.get(heap));
-            }
-            Recv::Reg(recv) => {
-                let src = Self::slot_of(caller_base, recv);
-                self.slot_unchecked(dst)
-                    .as_raw()
-                    .store_raw(self.slot_unchecked(src).raw().to_bits());
-            }
-        }
-        for (i, &operand) in args.iter().enumerate().take(argc) {
-            let src = Self::slot_of(caller_base, operand);
-            self.slot_unchecked(dst + 1 + i)
-                .as_raw()
-                .store_raw(self.slot_unchecked(src).raw().to_bits());
-        }
-        Ok(self.args_at(dst, count))
-    }
-
     /// Stage `[receiver, window...]` at the incoming top (construct
     /// pushes and runtime constructors).
     #[inline]
@@ -612,28 +516,28 @@ impl Stack {
         receiver: Tagged<'_, Value>,
         base: i32,
         count: usize,
-    ) -> Result<Args, VmError> {
+    ) -> Option<Args> {
         let dst = self.top();
         if dst + 1 + count > self.slots.len() {
-            return Err(VmError::StackOverflow);
+            return None;
         }
         self.slot_unchecked(dst).store(receiver);
         if count > 0 {
             let src = Self::slot_of(caller_base, base - count as i32 + 1);
             self.copy_params(dst + 1, self.args_at(src, count).ptr, count);
         }
-        Ok(self.args_at(dst, 1 + count))
+        Some(self.args_at(dst, 1 + count))
     }
 
     /// Stage an external slice at the incoming top (execution entry).
     #[inline]
-    pub fn stage_slice(&self, values: &[Tagged<'_, Value>]) -> Result<Args, VmError> {
+    pub fn stage_slice(&self, values: &[Tagged<'_, Value>]) -> Option<Args> {
         let dst = self.top();
         if dst + values.len() > self.slots.len() {
-            return Err(VmError::StackOverflow);
+            return None;
         }
         self.write_params(dst, values);
-        Ok(self.args_at(dst, values.len()))
+        Some(self.args_at(dst, values.len()))
     }
 
     /// A handle over a caller register slot: rooted by the live frame

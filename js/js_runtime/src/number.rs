@@ -2,10 +2,13 @@
 
 use vm_core::HostCtx;
 use vm_core::Object;
+use vm_core::VmError;
+use vm_core::raise;
+
+use vm_core::rt_try;
 use vm_core::{
-    Args, Convert, DenseString, Handle, Heap, Smi, Tagged, Value, VmError, WellKnown, WrapperKind,
+    Args, Convert, DenseString, Handle, Heap, Smi, Tagged, Value, WellKnown, WrapperKind,
 };
-use vm_core::{raise_runtime, rt_try};
 
 /// `Number ( value )`
 /// [ES 21.1.1.1](https://tc39.es/ecma262/#sec-number-constructor-number-value)
@@ -19,9 +22,7 @@ pub fn number_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     let n = rt_try!(
-        vm,
         heap,
-        state,
         state.handle_scope(|scope| {
             let arg = if args.len() > 1 {
                 scope.handle(args.get(heap, 1))
@@ -31,27 +32,22 @@ pub fn number_constructor<'a>(
             Object::to_numeric(vm, heap, state, arg)
         })
     );
-    let Some(n) = n else {
-        return vm.known().exception.get(heap).erase();
-    };
-
     let Some(new_target) = new_target else {
         return heap.new_number(n);
     };
     state.handle_scope(|scope| {
         let value = scope.handle(heap.new_number(n));
-        let obj = match Object::create_wrapper_from_constructor(
-            vm,
+        let obj = scope.handle(rt_try!(
             heap,
-            state,
-            new_target,
-            WrapperKind::Number,
-            value,
-        ) {
-            Ok(Some(obj)) => scope.handle(obj),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+            Object::create_wrapper_from_constructor(
+                vm,
+                heap,
+                state,
+                new_target,
+                WrapperKind::Number,
+                value,
+            )
+        ));
         obj.as_tagged(heap).erase()
     })
 }
@@ -65,14 +61,13 @@ pub fn number_value_of<'a>(
     // borrows the heap immutably, and a handle releases that borrow before
     // the `TypeError` path needs the heap mutably.
     ctx.handle_scope(|vm, heap, state, scope| {
-        let v = match args
+        let Some(v) = args
             .get(heap, 0)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
-        {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        else {
+            raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        v.as_tagged(heap).erase()
+        scope.handle(v).as_tagged(heap).erase()
     })
 }
 
@@ -83,23 +78,23 @@ pub fn number_to_string<'a>(
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
         // root the receiver: `Convert::to_string` allocates a fresh string
-        let v = match args
+        let Some(v) = args
             .get(heap, 0)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
-        {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        else {
+            raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        let s = match Convert::to_string(heap, &scope, v) {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let v = scope.handle(v);
+        let s = scope.handle(rt_try!(
+            heap,
+            Convert::to_string(vm, heap, state, &scope, v)
+        ));
         s.as_tagged(heap).erase()
     })
 }
 
 /// The numeric `this` of a Number.prototype method (receiver or wrapper).
-fn number_receiver(heap: &Heap, roots: &WellKnown, args: Args) -> Result<f64, VmError> {
+fn number_receiver(heap: &Heap, roots: &WellKnown, args: Args) -> Option<f64> {
     let v = args
         .get(heap, 0)
         .wrapper_value(heap, roots, WrapperKind::Number)?;
@@ -114,16 +109,23 @@ pub fn number_to_fixed<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let x = rt_try!(vm, heap, state, number_receiver(heap, vm.known(), args));
+        let Some(x) = number_receiver(heap, vm.known(), args) else {
+            raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
+        };
         let digits = match (args.len() > 1).then(|| args.get(heap, 1)) {
             Some(d) if d != vm.known().undefined.get(heap) => {
                 scope.handle(d);
-                rt_try!(vm, heap, state, d.to_number(heap)) as i64
+                match d.to_number(heap) {
+                    Some(number) => number as i64,
+                    None => {
+                        raise!(vm, heap, state, VmError::CannotConvertToNumber);
+                    }
+                }
             }
             _ => 0,
         };
         if !(0..=100).contains(&digits) {
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+            raise!(vm, heap, state, VmError::IndexOutOfBounds);
         }
         let text = if x.is_nan() {
             "NaN".into()
@@ -147,19 +149,24 @@ pub fn number_to_precision<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let x = rt_try!(vm, heap, state, number_receiver(heap, vm.known(), args));
+        let Some(x) = number_receiver(heap, vm.known(), args) else {
+            raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
+        };
         let arg = args.get(heap, 1);
         if arg == vm.known().undefined.get(heap) {
             let v = scope.handle(heap.new_number(x));
-            let s = match Convert::to_string(heap, &scope, v) {
-                Ok(v) => scope.handle(v),
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            };
+            let s = scope.handle(rt_try!(
+                heap,
+                Convert::to_string(vm, heap, state, &scope, v)
+            ));
             return s.as_tagged(heap).erase();
         }
-        let p = rt_try!(vm, heap, state, arg.to_number(heap)) as i64;
+        let Some(p) = arg.to_number(heap) else {
+            raise!(vm, heap, state, VmError::CannotConvertToNumber);
+        };
+        let p = p as i64;
         if !(1..=100).contains(&p) {
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+            raise!(vm, heap, state, VmError::IndexOutOfBounds);
         }
         let text = if x.is_nan() {
             "NaN".into()

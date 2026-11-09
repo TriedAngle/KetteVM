@@ -4,7 +4,8 @@
 use core::any::Any;
 
 use crate::{
-    EdgeVisitable, Handle, HandleSlice, Heap, Object, Tagged, ThreadState, VM, Value, VmError,
+    EdgeVisitable, Handle, HandleSlice, Heap, Object, Result, SetupError, Tagged, ThreadState, VM,
+    Value,
 };
 
 /// The interpreter entry: [[Call]]/[[Construct]] on a bytecode callable.
@@ -20,7 +21,7 @@ pub type EntryFn = for<'a, 'v, 's, 'c, 'r, 'n, 't> fn(
     callable: Handle<'c, Object>,
     args: HandleSlice<'r>,
     new_target: Option<Handle<'n, Value>>,
-) -> Result<Tagged<'a, Value>, VmError>;
+) -> Result<Tagged<'a, Value>>;
 
 pub trait Interpreter {
     const EXECUTE: EntryFn;
@@ -40,7 +41,7 @@ pub trait Runtime: EdgeVisitable + Default + Send + Sync + Any + 'static {
     /// a direct index into the VM's runtime list.
     const ID: RuntimeId;
 
-    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError>;
+    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError>;
 }
 
 pub trait ErasedRuntimeState: EdgeVisitable + Send + Sync {

@@ -1,11 +1,12 @@
 //! ES 22.1 (Math): function properties of the Math namespace object.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use vm_core::Result;
 
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::rt_try;
-use vm_core::{Args, Handle, Heap, Tagged, ThreadState, VM, Value, VmError};
+use vm_core::{Args, Handle, Heap, Tagged, ThreadState, VM, Value};
 
 /// TODO: better distribution
 /// xorshift64
@@ -28,8 +29,7 @@ fn number_arg(heap: &Heap, args: Args, i: usize) -> Option<f64> {
 }
 
 /// The cold half of an argument read: full ToNumeric for strings, objects,
-/// `undefined`, etc. `None` means user code threw (the pending exception
-/// holds the cause).
+/// `undefined`, etc.
 #[cold]
 #[inline(never)]
 fn numeric_arg_cold(
@@ -38,7 +38,7 @@ fn numeric_arg_cold(
     state: &ThreadState,
     args: Args,
     i: usize,
-) -> Result<Option<f64>, VmError> {
+) -> Result<f64> {
     state.handle_scope(|scope| {
         let arg = scope.handle(args.get(heap, i));
         Object::to_numeric(vm, heap, state, arg)
@@ -46,17 +46,11 @@ fn numeric_arg_cold(
 }
 
 /// An argument as an f64: the inlinable number fast path, falling back to
-/// the cold ToNumeric body. `Ok(None)` is a pending exception.
+/// the cold ToNumeric body.
 #[inline]
-fn arg_as_f64(
-    vm: &VM,
-    heap: &mut Heap,
-    state: &ThreadState,
-    args: Args,
-    i: usize,
-) -> Result<Option<f64>, VmError> {
+fn arg_as_f64(vm: &VM, heap: &mut Heap, state: &ThreadState, args: Args, i: usize) -> Result<f64> {
     if let Some(x) = number_arg(heap, args, i) {
-        return Ok(Some(x));
+        return Ok(x);
     }
     numeric_arg_cold(vm, heap, state, args, i)
 }
@@ -71,9 +65,7 @@ fn math_unary<'a>(
     args: Args,
     f: impl Fn(f64) -> f64,
 ) -> Tagged<'a, Value> {
-    let Some(x) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
-        return vm.known().exception.get(heap).erase();
-    };
+    let x = rt_try!(heap, arg_as_f64(vm, heap, state, args, 1));
     heap.new_number(f(x))
 }
 
@@ -128,12 +120,8 @@ pub fn math_pow<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(base) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
-        return vm.known().exception.get(heap).erase();
-    };
-    let Some(exp) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 2)) else {
-        return vm.known().exception.get(heap).erase();
-    };
+    let base = rt_try!(heap, arg_as_f64(vm, heap, state, args, 1));
+    let exp = rt_try!(heap, arg_as_f64(vm, heap, state, args, 2));
     heap.new_number(base.powf(exp))
 }
 
@@ -223,9 +211,7 @@ fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value>
     };
     let mut i = 1;
     while i < args.len() {
-        let Some(x) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, i)) else {
-            return vm.known().exception.get(heap).erase();
-        };
+        let x = rt_try!(heap, arg_as_f64(vm, heap, state, args, i));
         if x.is_nan() {
             result = f64::NAN;
         } else if min {

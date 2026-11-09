@@ -2,7 +2,7 @@ use core::alloc::Layout;
 
 use crate::{
     ContextObject, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
-    HeapObject, INFO_GLOBAL, Message, ObjectKind, Smi, Tagged, Value, Visitor, VmError,
+    HeapObject, INFO_GLOBAL, ObjectKind, Result, Smi, Tagged, Value, Visitor, VmError,
     info_is_immutable, info_is_lexical,
 };
 
@@ -221,7 +221,7 @@ impl ScriptContextTable {
         scope: &'s HandleScope<'_>,
         old: Handle<'_, ScriptContextTable>,
         context: Handle<'_, ContextObject>,
-    ) -> Result<Handle<'s, ScriptContextTable>, VmError> {
+    ) -> Handle<'s, ScriptContextTable> {
         let (old_len, old_capacity) = {
             let old_ref = old.as_tagged(heap);
             (old_ref.length(), old_ref.capacity())
@@ -237,7 +237,7 @@ impl ScriptContextTable {
                 .collect()
         };
         if lexical.is_empty() {
-            return Ok(scope.handle(old.as_tagged(heap)));
+            return scope.handle(old.as_tagged(heap));
         }
 
         let total = old_name_count + lexical.len();
@@ -304,7 +304,7 @@ impl ScriptContextTable {
         table_ref
             .length
             .set(heap, host, Smi::new((old_len + 1) as i64));
-        Ok(table)
+        table
     }
 }
 
@@ -368,7 +368,7 @@ pub fn global_lexical_get<'a>(
         .element_slot(found.slot_index)
         .get(heap);
     if value == heap.known().the_hole.get(heap).erase() {
-        return Err(VmError::Reference);
+        return Err(VmError::UninitializedVariable);
     }
     Ok(Some((
         value,
@@ -396,10 +396,10 @@ pub fn global_lexical_set<'a>(
         .as_ref()
         .element_slot(found.slot_index);
     if slot.get(heap) == heap.known().the_hole.get(heap).erase() {
-        return Err(VmError::Reference);
+        return Err(VmError::UninitializedVariable);
     }
     if info_is_immutable(found.info) {
-        return Err(VmError::Message(Message::ConstAssign));
+        return Err(VmError::ConstAssign);
     }
     slot.set(heap, context.erase(), value);
     Ok(Some(GlobalLexicalBinding {

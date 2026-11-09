@@ -13,15 +13,19 @@
 //! Time values follow ES 21.4.1.1/21.4.1.31: integral milliseconds in the
 //! inclusive range ±8.64e15; anything else is NaN. Every entry point funnels
 //! through [`time_clip`].
+use vm_core::VmError;
+use vm_core::bail;
+use vm_core::raise;
 
 use vm_core::Handle;
+use vm_core::Hint;
 use vm_core::HostCtx;
 use vm_core::Object;
-use vm_core::raise_runtime;
+use vm_core::Result;
 use vm_core::{Args, HandleScope, Heap};
-use vm_core::{Coercion, Hint};
-use vm_core::{DenseString, MapKind, Tagged, Value, VmError};
+use vm_core::{DenseString, MapKind, Tagged, Value};
 use vm_core::{ThreadState, VM};
+use vm_core::{raise_runtime, rt_try};
 
 use crate::JSRuntime;
 
@@ -428,17 +432,12 @@ pub fn date_parse<'a>(
         return heap.new_number(parse_text(&text));
     }
     state.handle_scope(|scope| {
-        let text = match Object::to_string(vm, heap, state, arg) {
-            Ok(Some(s)) => {
-                let s = scope.handle(s);
-                s.as_tagged(heap)
-                    .get_as::<DenseString>(heap)
-                    .map(|d| d.to_rust_string(heap))
-                    .unwrap_or_default()
-            }
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, arg)));
+        let text = s
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .map(|d| d.to_rust_string(heap))
+            .unwrap_or_default();
         heap.new_number(parse_text(&text))
     })
 }
@@ -451,39 +450,39 @@ fn date_from_value(
     heap: &mut Heap,
     state: &ThreadState,
     value: Handle<'_, Value>,
-) -> Result<Option<f64>, VmError> {
+) -> Result<f64> {
     let tagged = value.as_tagged(heap);
     // Fast paths: numbers, strings, and the other primitives need neither
     // ToPrimitive nor a handle scope.
     if let Some(number) = tagged.as_number(heap) {
-        return Ok(Some(time_clip(number)));
+        return Ok(time_clip(number));
     }
     if let Some(text) = tagged.get_as::<DenseString>(heap) {
-        return Ok(Some(parse_text(&text.to_rust_string(heap))));
+        return Ok(parse_text(&text.to_rust_string(heap)));
     }
     // A Date argument carries its instant in [[DateValue]]; ES reads that
     // slot instead of running ToPrimitive (which could call user code).
     if let Some(millis) = date_value(heap, tagged) {
-        return Ok(Some(time_clip(millis)));
+        return Ok(time_clip(millis));
     }
     if tagged.is_primitive(heap) {
-        return Ok(Some(time_clip(tagged.to_number(heap)?)));
+        return match tagged.to_number(heap) {
+            Some(number) => Ok(time_clip(number)),
+            None => bail!(vm, heap, state, VmError::CannotConvertToNumber),
+        };
     }
-    state.handle_scope(
-        |scope| match Object::to_primitive(vm, heap, state, value, Hint::Default)? {
-            Coercion::Threw => Ok(None),
-            Coercion::Value(value) => {
-                let value = scope.handle(value);
-                if let Some(text) = value.as_tagged(heap).get_as::<DenseString>(heap) {
-                    let text = text.to_rust_string(heap);
-                    Ok(Some(parse_text(&text)))
-                } else {
-                    let number = value.as_tagged(heap).to_number(heap)?;
-                    Ok(Some(time_clip(number)))
-                }
+    state.handle_scope(|scope| {
+        let value = scope.handle(Object::to_primitive(vm, heap, state, value, Hint::Default)?);
+        if let Some(text) = value.as_tagged(heap).get_as::<DenseString>(heap) {
+            let text = text.to_rust_string(heap);
+            Ok(parse_text(&text))
+        } else {
+            match value.as_tagged(heap).to_number(heap) {
+                Some(number) => Ok(time_clip(number)),
+                None => bail!(vm, heap, state, VmError::CannotConvertToNumber),
             }
-        },
-    )
+        }
+    })
 }
 
 /// `MakeDay`/`MakeTime`/`MakeDate` plus `TimeClip` on the seven components
@@ -530,32 +529,27 @@ fn component_number(
     heap: &mut Heap,
     state: &ThreadState,
     value: Handle<'_, Value>,
-) -> Result<Option<f64>, VmError> {
+) -> Result<f64> {
     if value.as_tagged(heap).is_primitive(heap) {
-        return Ok(Some(value.as_tagged(heap).to_number(heap)?));
+        return match value.as_tagged(heap).to_number(heap) {
+            Some(number) => Ok(number),
+            None => bail!(vm, heap, state, VmError::CannotConvertToNumber),
+        };
     }
     Object::to_numeric(vm, heap, state, value)
 }
 
-fn date_from_components(
-    vm: &VM,
-    heap: &mut Heap,
-    state: &ThreadState,
-    args: Args,
-) -> Result<Option<f64>, VmError> {
+fn date_from_components(vm: &VM, heap: &mut Heap, state: &ThreadState, args: Args) -> Result<f64> {
     // year, month, date=1, hours=0, minutes=0, seconds=0, ms=0
     let mut parts = [0.0f64; 7];
     parts[2] = 1.0;
     let count = args.len().saturating_sub(1).min(parts.len());
     for (index, part) in parts.iter_mut().enumerate().take(count) {
         let value = args.get_handle(heap, index + 1);
-        match component_number(vm, heap, state, value)? {
-            Some(value) => *part = value,
-            None => return Ok(None),
-        }
+        *part = component_number(vm, heap, state, value)?;
     }
     parts[0] = make_full_year(parts[0]);
-    Ok(Some(make_time_value(parts)))
+    Ok(make_time_value(parts))
 }
 
 /// `Date ( ...values )`
@@ -585,29 +579,18 @@ pub fn date_constructor<'a>(
         time_clip(now_millis())
     } else if args.len() == 2 {
         let value = args.get_handle(heap, 1);
-        match date_from_value(vm, heap, state, value) {
-            Ok(Some(time)) => time,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
+        rt_try!(heap, date_from_value(vm, heap, state, value))
     } else {
-        match date_from_components(vm, heap, state, args) {
-            Ok(Some(time)) => time,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
+        rt_try!(heap, date_from_components(vm, heap, state, args))
     };
     state.handle_scope(|scope| {
         let map = known.date_instance_map.get_handle(heap, &scope);
         let time = scope.handle(heap.new_number(time));
         let slots = scope.stage(&[time.as_tagged(heap)]);
-        let object = match Object::create_from_constructor(
-            vm, heap, state, &scope, new_target, map, slots,
-        ) {
-            Ok(Some(object)) => object,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let object = rt_try!(
+            heap,
+            Object::create_from_constructor(vm, heap, state, &scope, new_target, map, slots)
+        );
         object.as_tagged(heap).erase()
     })
 }
@@ -642,7 +625,7 @@ pub fn date_get_time<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     heap.new_number(millis)
 }
@@ -693,7 +676,7 @@ fn get_field<'a>(ctx: HostCtx<'a>, args: Args, field: Field) -> Tagged<'a, Value
         vm, heap, state, ..
     } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     match break_down(time) {
         Some(broken) => heap.new_number(field.read(&broken)),
@@ -775,7 +758,7 @@ fn set_fields<'a>(
     } = ctx;
     let receiver = args.get_handle(heap, 0);
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let first = span.first();
     // The setter's first component is mandatory in the signature: a missing
@@ -783,11 +766,10 @@ fn set_fields<'a>(
     let supplied = args.len().saturating_sub(1).max(1).min(span.count());
     let mut parts = [0.0f64; 7];
     for (offset, part) in parts[first..first + supplied].iter_mut().enumerate() {
-        match component_number(vm, heap, state, args.get_handle(heap, offset + 1)) {
-            Ok(Some(value)) => *part = value,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        }
+        *part = rt_try!(
+            heap,
+            component_number(vm, heap, state, args.get_handle(heap, offset + 1))
+        );
     }
     let current = if current.is_nan() {
         if !invalid_fills_zero {
@@ -798,7 +780,7 @@ fn set_fields<'a>(
         current
     };
     let Some(broken) = break_down(current) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let existing = [
         broken.year as f64,
@@ -828,13 +810,12 @@ pub fn date_set_time<'a>(
     } = ctx;
     let receiver = args.get_handle(heap, 0);
     if date_value(heap, receiver.as_tagged(heap)).is_none() {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     }
-    let time = match component_number(vm, heap, state, args.get_handle(heap, 1)) {
-        Ok(Some(time)) => time_clip(time),
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
+    let time = time_clip(rt_try!(
+        heap,
+        component_number(vm, heap, state, args.get_handle(heap, 1))
+    ));
     state.handle_scope(|scope| store_time(heap, &scope, receiver, time))
 }
 
@@ -850,7 +831,7 @@ pub fn date_get_timezone_offset<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     // `(tv - LocalTime(tv)) / msPerMinute` with `LocalTime` the identity.
     heap.new_number(if time.is_nan() { f64::NAN } else { 0.0 })
@@ -868,7 +849,7 @@ pub fn date_get_year<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(time) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     match break_down(time) {
         Some(broken) => heap.new_number(broken.year as f64 - 1900.0),
@@ -1219,16 +1200,15 @@ pub fn date_set_year<'a>(
     } = ctx;
     let receiver = args.get_handle(heap, 0);
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
-    let year = match component_number(vm, heap, state, args.get_handle(heap, 1)) {
-        Ok(Some(year)) => year,
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
+    let year = rt_try!(
+        heap,
+        component_number(vm, heap, state, args.get_handle(heap, 1))
+    );
     let current = if current.is_nan() { 0.0 } else { current };
     let Some(broken) = break_down(current) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let time = make_time_value([
         make_full_year(year),
@@ -1254,7 +1234,7 @@ fn format_with<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let text = match break_down(millis) {
         Some(broken) => format(&broken),
@@ -1278,10 +1258,10 @@ pub fn date_to_iso_string<'a>(
         vm, heap, state, ..
     } = ctx;
     let Some(millis) = date_value(heap, args.get(heap, 0)) else {
-        return raise_runtime(vm, heap, state, VmError::Type);
+        raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let Some(broken) = break_down(millis) else {
-        return raise_runtime(vm, heap, state, VmError::InvalidTime);
+        raise!(vm, heap, state, VmError::InvalidTimeValue);
     };
     state.handle_scope(|scope| {
         let text = format_iso(&broken);
@@ -1324,9 +1304,8 @@ pub fn date_to_json<'a>(
         let this = args.get_handle(heap, 0);
         let object = scope.handle(this.as_tagged(heap));
         let primitive = match Object::to_primitive(vm, heap, state, object, Hint::Number) {
-            Ok(Coercion::Value(value)) => scope.handle(value),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
         };
         if primitive
             .as_tagged(heap)
@@ -1337,12 +1316,11 @@ pub fn date_to_json<'a>(
         }
         let name = known.strings.to_iso_string.get_handle(heap, &scope).erase();
         let method = match Object::get_property(vm, heap, state, object, object, name, false) {
-            Ok(Coercion::Value(value)) => scope.handle(value),
-            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
         };
         if !method.as_tagged(heap).is_callable(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let call_args = scope.stage(&[object.as_tagged(heap).erase()]);
         // Root the call result before dropping the heap borrow it carries:
@@ -1362,7 +1340,7 @@ pub fn date_to_json<'a>(
         };
         match outcome {
             Ok(value) => value.as_tagged(heap).erase(),
-            Err(err) => raise_runtime(vm, heap, state, err),
+            Err(err) => raise_runtime(heap, err),
         }
     })
 }

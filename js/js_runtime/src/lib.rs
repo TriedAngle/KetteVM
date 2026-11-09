@@ -69,8 +69,8 @@ use symbol::{
 
 use vm_core::{
     DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SlotFlags, SlotName, Smi, Symbol,
-    Thread, VM, Value, Visitor, VmError,
+    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, SlotFlags, SlotName,
+    Smi, Symbol, Thread, VM, Value, Visitor,
 };
 
 mod known;
@@ -88,7 +88,7 @@ pub struct JSRuntime {
 impl Runtime for JSRuntime {
     const ID: RuntimeId = RuntimeId(1);
 
-    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), VmError> {
+    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
         state.ids = native::register(vm);
         state.indices = register_builtin_natives(vm);
         {
@@ -101,7 +101,8 @@ impl Runtime for JSRuntime {
                 state.known.init(thread.heap(), &scope);
             });
         }
-        install_builtins(vm, state)
+        install_builtins(vm, state);
+        Ok(())
     }
 }
 
@@ -430,9 +431,8 @@ fn install_error_class<'s>(
     index: NativeIndex,
     class: &str,
     parent: Handle<'_, Object>,
-) -> Result<ErrorClass<'s>, VmError> {
-    let (constructor, prototype) =
-        Object::install_constructor(thread, scope, index, class, parent)?;
+) -> ErrorClass<'s> {
+    let (constructor, prototype) = Object::install_constructor(thread, scope, index, class, parent);
     let name = thread.intern(scope, class);
     // Safety: fresh interned word, rooted below before the define.
     let name: Handle<'_, DenseString> = scope.handle(name.as_tagged(thread.heap()));
@@ -448,7 +448,8 @@ fn install_error_class<'s>(
         prototype,
         name_key,
         PropertyDescriptor::method(name.erase()),
-    )?;
+    )
+    .expect("bootstrap define");
     let message_key = thread
         .heap()
         .known()
@@ -470,7 +471,8 @@ fn install_error_class<'s>(
         prototype,
         message_key,
         PropertyDescriptor::method(empty),
-    )?;
+    )
+    .expect("bootstrap define");
     let map = thread.heap().allocate_handle::<Map>(
         MapInit {
             kind: MapKind::OBJECT
@@ -482,11 +484,11 @@ fn install_error_class<'s>(
         },
         scope,
     );
-    Ok((constructor, prototype, map))
+    (constructor, prototype, map)
 }
 
 /// Build the builtin objects and install them on the global object.
-pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmError> {
+pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
     let idx = &state.indices;
     let known = vm.known();
     let mut thread = vm.attach();
@@ -508,23 +510,23 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             "Number",
             object_prototype,
             number_zero,
-        )?;
-        Object::install_method(thread, &scope, number_proto, "valueOf", idx.number_value_of)?;
+        );
+        Object::install_method(thread, &scope, number_proto, "valueOf", idx.number_value_of);
         Object::install_method(
             thread,
             &scope,
             number_proto,
             "toString",
             idx.number_to_string,
-        )?;
-        Object::install_method(thread, &scope, number_proto, "toFixed", idx.number_to_fixed)?;
+        );
+        Object::install_method(thread, &scope, number_proto, "toFixed", idx.number_to_fixed);
         Object::install_method(
             thread,
             &scope,
             number_proto,
             "toPrecision",
             idx.number_to_precision,
-        )?;
+        );
         // static data properties on the Number constructor
         let pos_inf = thread
             .heap()
@@ -558,7 +560,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: false,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
         {
             let heap = thread.heap();
@@ -586,21 +589,21 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             "Boolean",
             object_prototype,
             boolean_false,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             boolean_proto,
             "valueOf",
             idx.boolean_value_of,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             boolean_proto,
             "toString",
             idx.boolean_to_string,
-        )?;
+        );
         {
             let heap = thread.heap();
 
@@ -624,15 +627,15 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             "String",
             object_prototype,
             wks_empty,
-        )?;
-        Object::install_method(thread, &scope, string_proto, "valueOf", idx.string_value_of)?;
+        );
+        Object::install_method(thread, &scope, string_proto, "valueOf", idx.string_value_of);
         Object::install_method(
             thread,
             &scope,
             string_proto,
             "toString",
             idx.string_to_string,
-        )?;
+        );
         {
             let heap = thread.heap();
 
@@ -650,12 +653,12 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
 
         // ---- Error / TypeError / ReferenceError / RangeError / SyntaxError ------
         let (error_fn, error_proto, error_map) =
-            install_error_class(thread, &scope, idx.error, "Error", object_prototype)?;
+            install_error_class(thread, &scope, idx.error, "Error", object_prototype);
         known.error_map.init(error_map.as_tagged(thread.heap()));
-        Object::install_method(thread, &scope, error_proto, "toString", idx.error_to_string)?;
+        Object::install_method(thread, &scope, error_proto, "toString", idx.error_to_string);
 
         let (_, _, type_error_map) =
-            install_error_class(thread, &scope, idx.type_error, "TypeError", error_proto)?;
+            install_error_class(thread, &scope, idx.type_error, "TypeError", error_proto);
         known
             .type_error_map
             .init(type_error_map.as_tagged(thread.heap()));
@@ -666,49 +669,50 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             idx.reference_error,
             "ReferenceError",
             error_proto,
-        )?;
+        );
         known
             .reference_error_map
             .init(reference_error_map.as_tagged(thread.heap()));
 
         let (_, _, range_error_map) =
-            install_error_class(thread, &scope, idx.range_error, "RangeError", error_proto)?;
+            install_error_class(thread, &scope, idx.range_error, "RangeError", error_proto);
         known
             .range_error_map
             .init(range_error_map.as_tagged(thread.heap()));
 
         let (_, _, syntax_error_map) =
-            install_error_class(thread, &scope, idx.syntax_error, "SyntaxError", error_proto)?;
+            install_error_class(thread, &scope, idx.syntax_error, "SyntaxError", error_proto);
         known
             .syntax_error_map
             .init(syntax_error_map.as_tagged(thread.heap()));
 
         let (_, _, eval_error_map) =
-            install_error_class(thread, &scope, idx.eval_error, "EvalError", error_proto)?;
+            install_error_class(thread, &scope, idx.eval_error, "EvalError", error_proto);
         known
             .eval_error_map
             .init(eval_error_map.as_tagged(thread.heap()));
 
         let (_, _, uri_error_map) =
-            install_error_class(thread, &scope, idx.uri_error, "URIError", error_proto)?;
+            install_error_class(thread, &scope, idx.uri_error, "URIError", error_proto);
         known
             .uri_error_map
             .init(uri_error_map.as_tagged(thread.heap()));
 
-        Object::install_method(thread, &scope, error_fn, "isError", idx.error_is_error)?;
+        Object::install_method(thread, &scope, error_fn, "isError", idx.error_is_error);
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
         let function_prototype = known.function_prototype.get_handle(thread.heap(), &scope);
         let function_fn =
-            Object::native_constructor(thread.heap(), &scope, idx.function_constructor)?;
-        Object::set_builtin_name(thread, &scope, function_fn, "Function")?;
+            Object::native_constructor(thread.heap(), &scope, idx.function_constructor);
+        Object::set_builtin_name(thread, &scope, function_fn, "Function");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             function_prototype,
             wks_constructor,
             PropertyDescriptor::method(function_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
@@ -720,7 +724,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("bootstrap define");
         let function_name = thread.intern(&scope, "Function");
         // Safety: fresh interned word, rooted below before the define.
         let function_name = scope.handle(function_name.as_tagged(thread.heap()));
@@ -731,7 +736,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global_object,
             function_name,
             PropertyDescriptor::method(function_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         {
             let heap = thread.heap();
@@ -763,7 +769,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             function_prototype,
             "toString",
             idx.function_to_string,
-        )?;
+        );
         // call/apply are plain (non-constructor) runtime functions
         Object::install_method(
             thread,
@@ -771,24 +777,24 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             function_prototype,
             "call",
             idx.function_call,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             function_prototype,
             "apply",
             idx.function_apply,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             function_prototype,
             "bind",
             idx.function_bind,
-        )?;
+        );
         // ---- eval -------------------------------------------------------------
-        let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
-        Object::set_builtin_name(thread, &scope, eval_fn, "eval")?;
+        let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval);
+        Object::set_builtin_name(thread, &scope, eval_fn, "eval");
         state
             .known
             .eval_function
@@ -803,7 +809,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             eval_name,
             PropertyDescriptor::method(eval_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- globalThis -------------------------------------------------------
         let global_this_name = thread.intern(&scope, "globalThis");
@@ -819,12 +826,13 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: true,
             },
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- Object.prototype.toString/hasOwnProperty/propertyIsEnumerable ------
         let object_prototype = known.object_prototype.get_handle(thread.heap(), &scope);
         let object_to_string_fn =
-            Object::native_function(thread.heap(), &scope, idx.object_to_string)?;
+            Object::native_function(thread.heap(), &scope, idx.object_to_string);
         state
             .known
             .object_to_string
@@ -836,24 +844,25 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             object_prototype,
             object_to_string_name,
             PropertyDescriptor::method(object_to_string_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::install_method(
             thread,
             &scope,
             object_prototype,
             "hasOwnProperty",
             idx.object_has_own_property,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_prototype,
             "propertyIsEnumerable",
             idx.object_property_is_enumerable,
-        )?;
+        );
         {
-            let get_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_get)?;
-            let set_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_set)?;
+            let get_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_get);
+            let set_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_set);
             let get_fn = scope.handle(get_fn.as_tagged(thread.heap()).erase());
             let set_fn = scope.handle(set_fn.as_tagged(thread.heap()).erase());
             let proto_name = thread.intern(&scope, "__proto__");
@@ -870,22 +879,24 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: true,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
 
         // ---- Object / isNaN -----------------------------------------------------
         // %Object.prototype% already exists from bootstrap; link the
         // constructor to it (like Array below)
         let object_prototype = known.object_prototype.get_handle(thread.heap(), &scope);
-        let object_fn = Object::native_constructor(thread.heap(), &scope, idx.object)?;
-        Object::set_builtin_name(thread, &scope, object_fn, "Object")?;
+        let object_fn = Object::native_constructor(thread.heap(), &scope, idx.object);
+        Object::set_builtin_name(thread, &scope, object_fn, "Object");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             object_prototype,
             wks_constructor,
             PropertyDescriptor::method(object_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
@@ -897,7 +908,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("bootstrap define");
         let object_name = thread.intern(&scope, "Object");
         // Safety: fresh interned word, rooted below before the define.
         let object_name = scope.handle(object_name.as_tagged(thread.heap()));
@@ -907,49 +919,50 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             object_name,
             PropertyDescriptor::method(object_fn.erase()),
-        )?;
-        Object::install_method(thread, &scope, object_fn, "create", idx.object_create)?;
+        )
+        .expect("bootstrap define");
+        Object::install_method(thread, &scope, object_fn, "create", idx.object_create);
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "getPrototypeOf",
             idx.object_get_prototype_of,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "getOwnPropertyNames",
             idx.object_get_own_property_names,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "getOwnPropertyDescriptor",
             idx.object_get_own_property_descriptor,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "defineProperty",
             idx.object_define_property,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "setPrototypeOf",
             idx.object_set_prototype_of,
-        )?;
+        );
 
         // ---- Array ---------------------------------------------------------------
         // %Array.prototype% already exists from bootstrap (an array object
         // whose prototype is %Object.prototype%); just link the constructor
-        let array_fn = Object::native_constructor(thread.heap(), &scope, idx.array)?;
-        Object::set_builtin_name(thread, &scope, array_fn, "Array")?;
+        let array_fn = Object::native_constructor(thread.heap(), &scope, idx.array);
+        Object::set_builtin_name(thread, &scope, array_fn, "Array");
         let array_prototype = known.array_prototype.get_handle(thread.heap(), &scope);
         Object::define_own_property_ordinary(
             thread.heap(),
@@ -957,7 +970,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             array_prototype,
             wks_constructor,
             PropertyDescriptor::method(array_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
@@ -970,7 +984,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("bootstrap define");
         let array_name = thread.intern(&scope, "Array");
         // Safety: fresh interned word, rooted below before the define.
         let array_name = scope.handle(array_name.as_tagged(thread.heap()));
@@ -980,22 +995,23 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             array_name,
             PropertyDescriptor::method(array_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
-        Object::install_method(thread, &scope, array_prototype, "push", idx.array_push)?;
-        Object::install_method(thread, &scope, array_prototype, "pop", idx.array_pop)?;
-        Object::install_method(thread, &scope, array_prototype, "map", idx.array_map)?;
-        Object::install_method(thread, &scope, array_prototype, "reduce", idx.array_reduce)?;
-        Object::install_method(thread, &scope, array_prototype, "join", idx.array_join)?;
-        Object::install_method(thread, &scope, array_prototype, "slice", idx.array_slice)?;
-        Object::install_method(thread, &scope, array_prototype, "sort", idx.array_sort)?;
+        Object::install_method(thread, &scope, array_prototype, "push", idx.array_push);
+        Object::install_method(thread, &scope, array_prototype, "pop", idx.array_pop);
+        Object::install_method(thread, &scope, array_prototype, "map", idx.array_map);
+        Object::install_method(thread, &scope, array_prototype, "reduce", idx.array_reduce);
+        Object::install_method(thread, &scope, array_prototype, "join", idx.array_join);
+        Object::install_method(thread, &scope, array_prototype, "slice", idx.array_slice);
+        Object::install_method(thread, &scope, array_prototype, "sort", idx.array_sort);
         Object::install_method(
             thread,
             &scope,
             array_prototype,
             "toString",
             idx.array_to_string,
-        )?;
+        );
 
         let zero = scope.handle(Smi::new(0));
         Object::define_own_property_ordinary(
@@ -1009,10 +1025,11 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("bootstrap define");
 
-        let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date)?;
-        Object::set_builtin_name(thread, &scope, date_fn, "Date")?;
+        let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date);
+        Object::set_builtin_name(thread, &scope, date_fn, "Date");
         let date_prototype = {
             let heap = thread.heap();
             let prototype = state.known.date_prototype.get(heap).erase();
@@ -1026,7 +1043,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             date_prototype,
             wks_constructor,
             PropertyDescriptor::method(date_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
@@ -1038,242 +1056,243 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
-        Object::install_method(thread, &scope, date_prototype, "valueOf", idx.date_value_of)?;
-        Object::install_method(thread, &scope, date_prototype, "getTime", idx.date_get_time)?;
-        Object::install_method(thread, &scope, date_prototype, "getDate", idx.date_get_date)?;
-        Object::install_method(thread, &scope, date_prototype, "getDay", idx.date_get_day)?;
+        )
+        .expect("bootstrap define");
+        Object::install_method(thread, &scope, date_prototype, "valueOf", idx.date_value_of);
+        Object::install_method(thread, &scope, date_prototype, "getTime", idx.date_get_time);
+        Object::install_method(thread, &scope, date_prototype, "getDate", idx.date_get_date);
+        Object::install_method(thread, &scope, date_prototype, "getDay", idx.date_get_day);
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getFullYear",
             idx.date_get_full_year,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getHours",
             idx.date_get_hours,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getMilliseconds",
             idx.date_get_milliseconds,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getMinutes",
             idx.date_get_minutes,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getMonth",
             idx.date_get_month,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getSeconds",
             idx.date_get_seconds,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getTimezoneOffset",
             idx.date_get_timezone_offset,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCDate",
             idx.date_get_utc_date,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCDay",
             idx.date_get_utc_day,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCFullYear",
             idx.date_get_utc_full_year,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCHours",
             idx.date_get_utc_hours,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCMilliseconds",
             idx.date_get_utc_milliseconds,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCMinutes",
             idx.date_get_utc_minutes,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCMonth",
             idx.date_get_utc_month,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "getUTCSeconds",
             idx.date_get_utc_seconds,
-        )?;
-        Object::install_method(thread, &scope, date_prototype, "getYear", idx.date_get_year)?;
-        Object::install_method(thread, &scope, date_prototype, "setDate", idx.date_set_date)?;
+        );
+        Object::install_method(thread, &scope, date_prototype, "getYear", idx.date_get_year);
+        Object::install_method(thread, &scope, date_prototype, "setDate", idx.date_set_date);
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setFullYear",
             idx.date_set_full_year,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setHours",
             idx.date_set_hours,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setMilliseconds",
             idx.date_set_milliseconds,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setMinutes",
             idx.date_set_minutes,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setMonth",
             idx.date_set_month,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setSeconds",
             idx.date_set_seconds,
-        )?;
-        Object::install_method(thread, &scope, date_prototype, "setTime", idx.date_set_time)?;
+        );
+        Object::install_method(thread, &scope, date_prototype, "setTime", idx.date_set_time);
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCDate",
             idx.date_set_utc_date,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCFullYear",
             idx.date_set_utc_full_year,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCHours",
             idx.date_set_utc_hours,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCMilliseconds",
             idx.date_set_utc_milliseconds,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCMinutes",
             idx.date_set_utc_minutes,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCMonth",
             idx.date_set_utc_month,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "setUTCSeconds",
             idx.date_set_utc_seconds,
-        )?;
-        Object::install_method(thread, &scope, date_prototype, "setYear", idx.date_set_year)?;
+        );
+        Object::install_method(thread, &scope, date_prototype, "setYear", idx.date_set_year);
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "toString",
             idx.date_to_string,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "toISOString",
             idx.date_to_iso_string,
-        )?;
-        Object::install_method(thread, &scope, date_prototype, "toJSON", idx.date_to_json)?;
+        );
+        Object::install_method(thread, &scope, date_prototype, "toJSON", idx.date_to_json);
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "toGMTString",
             idx.date_to_gmt_string,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             date_prototype,
             "toUTCString",
             idx.date_to_gmt_string,
-        )?;
-        let date_parse_fn = Object::native_function(thread.heap(), &scope, idx.date_parse)?;
-        Object::set_builtin_name(thread, &scope, date_parse_fn, "parse")?;
+        );
+        let date_parse_fn = Object::native_function(thread.heap(), &scope, idx.date_parse);
+        Object::set_builtin_name(thread, &scope, date_parse_fn, "parse");
         let date_parse_name = thread.intern(&scope, "parse");
         // Safety: fresh interned word, rooted below before the define.
         let date_parse_name = scope.handle(date_parse_name.as_tagged(thread.heap()));
@@ -1283,9 +1302,10 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             date_fn,
             date_parse_name,
             PropertyDescriptor::method(date_parse_fn.erase()),
-        )?;
-        let date_now_fn = Object::native_function(thread.heap(), &scope, idx.date_now)?;
-        Object::set_builtin_name(thread, &scope, date_now_fn, "now")?;
+        )
+        .expect("bootstrap define");
+        let date_now_fn = Object::native_function(thread.heap(), &scope, idx.date_now);
+        Object::set_builtin_name(thread, &scope, date_now_fn, "now");
         let date_now_name = thread.intern(&scope, "now");
         // Safety: fresh interned word, rooted below before the define.
         let date_now_name = scope.handle(date_now_name.as_tagged(thread.heap()));
@@ -1295,7 +1315,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             date_fn,
             date_now_name,
             PropertyDescriptor::method(date_now_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         let date_name = thread.intern(&scope, "Date");
         // Safety: fresh interned word, rooted below before the define.
         let date_name = scope.handle(date_name.as_tagged(thread.heap()));
@@ -1305,11 +1326,12 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             date_name,
             PropertyDescriptor::method(date_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // Array.isArray
-        let is_array_fn = Object::native_function(thread.heap(), &scope, idx.array_is_array)?;
-        Object::set_builtin_name(thread, &scope, is_array_fn, "isArray")?;
+        let is_array_fn = Object::native_function(thread.heap(), &scope, idx.array_is_array);
+        Object::set_builtin_name(thread, &scope, is_array_fn, "isArray");
         let is_array_name = thread.intern(&scope, "isArray");
         // Safety: fresh interned word, rooted below before the define.
         let is_array_name = scope.handle(is_array_name.as_tagged(thread.heap()));
@@ -1319,7 +1341,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             array_fn,
             is_array_name,
             PropertyDescriptor::method(is_array_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- Array iteration (the iterator protocol minimum) ---------------------
         // %IteratorPrototype%: @@iterator (returns the receiver)
@@ -1338,7 +1361,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             HandleSlice::EMPTY,
         ));
         let sym_iterator_iter =
-            Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator)?;
+            Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator);
         let iterator_name: Handle<'_, SlotName> =
             scope.handle(state.known.iterator_symbol.get(thread.heap()));
         Object::define_own_property_ordinary(
@@ -1347,7 +1370,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             iterator_prototype,
             iterator_name,
             PropertyDescriptor::method(sym_iterator_iter.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // %ArrayIteratorPrototype%: next
         let map = thread.heap().allocate_handle::<Map>(
@@ -1367,11 +1391,11 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             array_iterator_prototype,
             "next",
             idx.array_iterator_next,
-        )?;
+        );
 
         // Array.prototype.values === Array.prototype[Symbol.iterator]: a
         // runtime returning a fresh array-iterator object
-        let values_fn = Object::native_function(thread.heap(), &scope, idx.array_values)?;
+        let values_fn = Object::native_function(thread.heap(), &scope, idx.array_values);
         let values_name = known.strings.values.get_handle(thread.heap(), &scope);
         Object::define_own_property_ordinary(
             thread.heap(),
@@ -1379,14 +1403,16 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             array_prototype,
             values_name,
             PropertyDescriptor::method(values_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             array_prototype,
             iterator_name,
             PropertyDescriptor::method(values_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // array-iterator map: slots [iterated array, next index, kind],
         // prototype %ArrayIteratorPrototype%
@@ -1454,17 +1480,17 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             &scope,
         );
         let math_object = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-        Object::install_method(thread, &scope, math_object, "sqrt", idx.math_sqrt)?;
-        Object::install_method(thread, &scope, math_object, "log", idx.math_log)?;
-        Object::install_method(thread, &scope, math_object, "pow", idx.math_pow)?;
-        Object::install_method(thread, &scope, math_object, "abs", idx.math_abs)?;
-        Object::install_method(thread, &scope, math_object, "floor", idx.math_floor)?;
-        Object::install_method(thread, &scope, math_object, "ceil", idx.math_ceil)?;
-        Object::install_method(thread, &scope, math_object, "trunc", idx.math_trunc)?;
-        Object::install_method(thread, &scope, math_object, "round", idx.math_round)?;
-        Object::install_method(thread, &scope, math_object, "min", idx.math_min)?;
-        Object::install_method(thread, &scope, math_object, "max", idx.math_max)?;
-        Object::install_method(thread, &scope, math_object, "random", idx.math_random)?;
+        Object::install_method(thread, &scope, math_object, "sqrt", idx.math_sqrt);
+        Object::install_method(thread, &scope, math_object, "log", idx.math_log);
+        Object::install_method(thread, &scope, math_object, "pow", idx.math_pow);
+        Object::install_method(thread, &scope, math_object, "abs", idx.math_abs);
+        Object::install_method(thread, &scope, math_object, "floor", idx.math_floor);
+        Object::install_method(thread, &scope, math_object, "ceil", idx.math_ceil);
+        Object::install_method(thread, &scope, math_object, "trunc", idx.math_trunc);
+        Object::install_method(thread, &scope, math_object, "round", idx.math_round);
+        Object::install_method(thread, &scope, math_object, "min", idx.math_min);
+        Object::install_method(thread, &scope, math_object, "max", idx.math_max);
+        Object::install_method(thread, &scope, math_object, "random", idx.math_random);
         for (name, value) in [
             ("E", std::f64::consts::E),
             ("LN10", std::f64::consts::LN_10),
@@ -1490,7 +1516,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: false,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
         let math_name = thread.intern(&scope, "Math");
         // Safety: fresh interned word, rooted below before the define.
@@ -1501,7 +1528,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             math_name,
             PropertyDescriptor::method(math_object.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- console (namespace object; shell convenience, not ES) -----------
         let map = thread.heap().allocate_handle::<Map>(
@@ -1515,7 +1543,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
         );
         let console_object =
             scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-        Object::install_method(thread, &scope, console_object, "log", idx.console_log)?;
+        Object::install_method(thread, &scope, console_object, "log", idx.console_log);
         let console_name = thread.intern(&scope, "console");
         // Safety: fresh interned word, rooted below before the define.
         let console_name = scope.handle(console_name.as_tagged(thread.heap()));
@@ -1525,10 +1553,11 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             console_name,
             PropertyDescriptor::method(console_object.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
-        let is_nan_fn = Object::native_function(thread.heap(), &scope, idx.is_nan)?;
-        Object::set_builtin_name(thread, &scope, is_nan_fn, "isNaN")?;
+        let is_nan_fn = Object::native_function(thread.heap(), &scope, idx.is_nan);
+        Object::set_builtin_name(thread, &scope, is_nan_fn, "isNaN");
         let is_nan_name = thread.intern(&scope, "isNaN");
         // Safety: fresh interned word, rooted below before the define.
         let is_nan_name = scope.handle(is_nan_name.as_tagged(thread.heap()));
@@ -1538,10 +1567,11 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             is_nan_name,
             PropertyDescriptor::method(is_nan_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- print / performance (shell conveniences; not ES) --------------------
-        let print_fn = Object::native_function(thread.heap(), &scope, idx.print)?;
+        let print_fn = Object::native_function(thread.heap(), &scope, idx.print);
         let print_name = thread.intern(&scope, "print");
         // Safety: fresh interned word, rooted below before the define.
         let print_name = scope.handle(print_name.as_tagged(thread.heap()));
@@ -1551,7 +1581,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             print_name,
             PropertyDescriptor::method(print_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         let map = thread.heap().allocate_handle::<Map>(
             MapInit {
@@ -1570,7 +1601,7 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             performance_object,
             "now",
             idx.performance_now,
-        )?;
+        );
         let performance_name = thread.intern(&scope, "performance");
         // Safety: fresh interned word, rooted below before the define.
         let performance_name = scope.handle(performance_name.as_tagged(thread.heap()));
@@ -1580,13 +1611,14 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             performance_name,
             PropertyDescriptor::method(performance_object.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- Symbol -----------------------------------------------------------
         // `new Symbol()` throws from the constructor body (ES 20.4.1.1 step 1),
         // so the function itself carries [[Construct]].
-        let symbol_fn = Object::native_constructor(thread.heap(), &scope, idx.symbol)?;
-        Object::set_builtin_name(thread, &scope, symbol_fn, "Symbol")?;
+        let symbol_fn = Object::native_constructor(thread.heap(), &scope, idx.symbol);
+        Object::set_builtin_name(thread, &scope, symbol_fn, "Symbol");
         let symbol_name = thread.intern(&scope, "Symbol");
         // Safety: fresh interned word, rooted below before the define.
         let symbol_name = scope.handle(symbol_name.as_tagged(thread.heap()));
@@ -1596,7 +1628,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             symbol_name,
             PropertyDescriptor::method(symbol_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // %Symbol.prototype% is ordinary; Symbol instances use the wrapper
         // map below with [[SymbolData]] in slot 0.
@@ -1647,19 +1680,21 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: false,
             },
-        )?;
+        )
+        .expect("bootstrap define");
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             symbol_prototype,
             wks_constructor,
             PropertyDescriptor::method(symbol_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
 
         // Symbol.prototype.description is an accessor; the setter is absent.
         {
-            let getter = Object::native_function(thread.heap(), &scope, idx.symbol_description)?;
-            Object::set_builtin_name(thread, &scope, getter, "get description")?;
+            let getter = Object::native_function(thread.heap(), &scope, idx.symbol_description);
+            Object::set_builtin_name(thread, &scope, getter, "get description");
             let get = scope.handle(getter.as_tagged(thread.heap()).erase());
             let set = known.undefined.get_handle(thread.heap(), &scope).erase();
             let description_name = thread.intern(&scope, "description");
@@ -1676,7 +1711,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: true,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
         Object::install_method(
             thread,
@@ -1684,19 +1720,19 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             symbol_prototype,
             "toString",
             idx.symbol_to_string,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             symbol_prototype,
             "valueOf",
             idx.symbol_value_of,
-        )?;
+        );
         // Symbol.prototype[@@toPrimitive] returns the wrapped symbol.
         {
             let to_primitive =
-                Object::native_function(thread.heap(), &scope, idx.symbol_to_primitive)?;
-            Object::set_builtin_name(thread, &scope, to_primitive, "[Symbol.toPrimitive]")?;
+                Object::native_function(thread.heap(), &scope, idx.symbol_to_primitive);
+            Object::set_builtin_name(thread, &scope, to_primitive, "[Symbol.toPrimitive]");
             let key: Handle<'_, SlotName> =
                 scope.handle(known.to_primitive_symbol.get(thread.heap()));
             Object::define_own_property_ordinary(
@@ -1710,10 +1746,11 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: true,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
-        Object::install_method(thread, &scope, symbol_fn, "for", idx.symbol_for)?;
-        Object::install_method(thread, &scope, symbol_fn, "keyFor", idx.symbol_key_for)?;
+        Object::install_method(thread, &scope, symbol_fn, "for", idx.symbol_for);
+        Object::install_method(thread, &scope, symbol_fn, "keyFor", idx.symbol_key_for);
 
         // The engine's @@iterator/@@toPrimitive/@@toStringTag are the
         // well-known symbols; the other well-known symbols are only ever
@@ -1771,7 +1808,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: false,
                     configurable: false,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
         // Symbol.prototype[@@toStringTag] = "Symbol".
         let to_string_tag_key: Handle<'_, SlotName> =
@@ -1788,13 +1826,14 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                 enumerable: false,
                 configurable: true,
             },
-        )?;
+        )
+        .expect("bootstrap define");
 
         // ---- Proxy ------------------------------------------------------------
         // The Proxy constructor is a runtime function *without* a
         // `.prototype` property (ES 20.2.1: "Proxy.prototype is
         // undefined"); `install_constructor` cannot be used.
-        let proxy_fn = Object::native_constructor(thread.heap(), &scope, idx.proxy)?;
+        let proxy_fn = Object::native_constructor(thread.heap(), &scope, idx.proxy);
         let two = scope.handle(Smi::new(2));
         Object::define_own_property_ordinary(
             thread.heap(),
@@ -1802,8 +1841,9 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             proxy_fn,
             wks_length,
             PropertyDescriptor::non_enumerable(two),
-        )?;
-        Object::set_builtin_name(thread, &scope, proxy_fn, "Proxy")?;
+        )
+        .expect("bootstrap define");
+        Object::set_builtin_name(thread, &scope, proxy_fn, "Proxy");
         let proxy_name = thread.intern(&scope, "Proxy");
         // Safety: fresh interned word, rooted below before the define.
         let proxy_name = scope.handle(proxy_name.as_tagged(thread.heap()));
@@ -1813,19 +1853,21 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             global,
             proxy_name,
             PropertyDescriptor::method(proxy_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         // Proxy.revocable: a non-constructor function returning
         // { proxy, revoke }; the revoke closure is the JS template
         // installed by REVOKE_PRELUDE (natives cannot carry state).
-        let revocable_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revocable)?;
+        let revocable_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revocable);
         Object::define_own_property_ordinary(
             thread.heap(),
             &scope,
             revocable_fn,
             wks_length,
             PropertyDescriptor::non_enumerable(two),
-        )?;
-        Object::set_builtin_name(thread, &scope, revocable_fn, "revocable")?;
+        )
+        .expect("bootstrap define");
+        Object::set_builtin_name(thread, &scope, revocable_fn, "revocable");
         let revocable_name = state
             .known
             .strings
@@ -1837,25 +1879,26 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
             proxy_fn,
             revocable_name,
             PropertyDescriptor::method(revocable_fn.erase()),
-        )?;
+        )
+        .expect("bootstrap define");
         // ---- Object extensibility statics --------------------------------------
-        Object::install_method(thread, &scope, object_fn, "is", idx.object_is)?;
+        Object::install_method(thread, &scope, object_fn, "is", idx.object_is);
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "preventExtensions",
             idx.object_prevent_extensions,
-        )?;
+        );
         Object::install_method(
             thread,
             &scope,
             object_fn,
             "isExtensible",
             idx.object_is_extensible,
-        )?;
-        Object::install_method(thread, &scope, object_fn, "seal", idx.object_seal)?;
-        Object::install_method(thread, &scope, object_fn, "freeze", idx.object_freeze)?;
+        );
+        Object::install_method(thread, &scope, object_fn, "seal", idx.object_seal);
+        Object::install_method(thread, &scope, object_fn, "freeze", idx.object_freeze);
 
         // ---- value properties of the global object -----------------------------
         let infinity = thread
@@ -1888,8 +1931,8 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) -> Result<(), VmErro
                     enumerable: true,
                     configurable: false,
                 },
-            )?;
+            )
+            .expect("bootstrap define");
         }
-        Ok(())
     })
 }

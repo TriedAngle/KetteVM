@@ -1,6 +1,8 @@
 use vm_core::HostCtx;
 use vm_core::Object;
-use vm_core::raise_runtime;
+use vm_core::VmError;
+use vm_core::raise;
+use vm_core::rt_try;
 use vm_core::{Args, Handle, Symbol, Tagged, Value, WrapperKind};
 
 use crate::symbol::descriptive_string;
@@ -26,26 +28,21 @@ pub fn string_constructor<'a>(
                 .as_tagged(heap)
                 .erase();
         }
-        let s = match Object::to_string(vm, heap, state, arg) {
-            Ok(Some(s)) => scope.handle(s),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+        let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, arg)));
         let Some(new_target) = new_target else {
             return s.as_tagged(heap).erase();
         };
-        let obj = match Object::create_wrapper_from_constructor(
-            vm,
+        let obj = scope.handle(rt_try!(
             heap,
-            state,
-            new_target,
-            WrapperKind::String,
-            s.erase(),
-        ) {
-            Ok(Some(obj)) => scope.handle(obj),
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
+            Object::create_wrapper_from_constructor(
+                vm,
+                heap,
+                state,
+                new_target,
+                WrapperKind::String,
+                s.erase(),
+            )
+        ));
         obj.as_tagged(heap).erase()
     })
 }
@@ -59,14 +56,13 @@ pub fn string_value_of<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let v = match args
+        let Some(v) = args
             .get(heap, 0)
             .wrapper_value(heap, vm.known(), WrapperKind::String)
-        {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(vm, heap, state, err),
+        else {
+            raise!(vm, heap, state, VmError::IncompatibleStringReceiver);
         };
-        v.as_tagged(heap).erase()
+        scope.handle(v).as_tagged(heap).erase()
     })
 }
 
