@@ -66,17 +66,15 @@ jobs:
       - name: Parse the Negative Control block
         id: parse
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, sys
+          import json, os, sys
 
-          pr = json.loads(subprocess.run(
-              ["gh", "api", f"repos/{os.environ['GITHUB_REPOSITORY']}/pulls/"
-               f"{os.environ['PR_NUMBER']}"],
-              check=True, capture_output=True, text=True).stdout)
-          body = pr.get("body") or ""
+          # The event payload carries the body (no API call, no gh
+          # dependency - the container image ships no gh CLI; the
+          # `edited` trigger re-fires with the updated body).
+          body = os.environ.get("PR_BODY") or ""
 
           branches = []
           in_block = False
