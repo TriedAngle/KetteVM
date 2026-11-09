@@ -613,11 +613,7 @@ fn throw_handler() {
         let f = callable(thread, &scope, &p, 1, 0);
         thread.execute(f, &[smi(0)], vm_core::intrinsics::VmCore::ID)
     });
-    let exception = {
-        let heap = thread.heap();
-        heap.known().exception.get(heap).raw()
-    };
-    assert_eq!(result, Ok(exception));
+    assert!(matches!(result, Err(vm_core::Thrown)));
     assert!(thread.has_pending_exception(), "the throw must surface");
 }
 
@@ -637,10 +633,6 @@ fn call_non_callable_throws() {
         let outer = callable(thread, &scope, &outer, 1, 2);
         thread.execute(outer, &[smi(1)], vm_core::intrinsics::VmCore::ID)
     });
-    let exception = {
-        let heap = thread.heap();
-        heap.known().exception.get(heap).raw()
-    };
-    assert_eq!(result, Ok(exception));
+    assert!(matches!(result, Err(vm_core::Thrown)));
     assert!(thread.has_pending_exception(), "the raise must surface");
 }
