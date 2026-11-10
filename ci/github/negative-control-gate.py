@@ -124,8 +124,11 @@ def run_test(file, path, check=False):
     if r[0] == "regression":
         return run_file(file, check=check)
     pkg, stem = r[1]
+    # The filter and --exact must be SEPARATE argv elements — a single
+    # "path --exact" string matches no test and passes vacuously (the
+    # C7/C10/C15 matrix rounds failed exactly there).
     return sh("cargo", "test", "--locked", "-p", pkg, "--test", stem, "--",
-              f"{path} --exact", check=check)
+              path, "--exact", check=check)
 
 def build(check=False):
     return sh("cargo", "build", "--locked", "--workspace", "--all-targets", check=check)
