@@ -20,10 +20,9 @@ const UNSUPPORTED_FEATURES: &[&str] = &[
     "BigInt",
     "Temporal",
     "regexp-modifiers",
-    // class extensions beyond fields: static blocks, private methods,
-    // decorators
+    // class extensions beyond fields: static blocks, static private
+    // methods, decorators
     "class-static-block",
-    "class-private-methods",
     "class-static-methods-private",
     "class-decorators",
     // ArrayBuffer/TypedArray machinery is entirely absent; these tests
@@ -48,9 +47,6 @@ const UNSUPPORTED_PATHS: &[&str] = &[
 /// panic the VM or balloon memory (sparse/hole-y dense allocations and
 /// multi-GB generated sources), not merely fail.
 const HARD_SKIP_PATHS: &[&str] = &[
-    // Subclassed built-ins currently segfault the VM.
-    "/subclass-builtins/",
-    "/subclass/builtin-objects/",
     "/dynamic-import/",
     "_FIXTURE",
     "15.4.4.14-5-12",
@@ -79,20 +75,6 @@ const HARD_SKIP_PATHS: &[&str] = &[
     "15.4.4.15-9-1",
     "length-truncate-nonconfigurable-sparse",
     "parse-mega-huge-array",
-    // SIGSEGV today (subclass-builtin / Promise machinery); hard-skip
-    // until the underlying bug is fixed
-    "Object/subclass-object-arg.js",
-    "Promise/prototype/finally/rejected-observable-then-calls-argument.js",
-    "subclass/builtin-objects/Date/regular-subclassing.js",
-    "subclass/builtin-objects/Error/message-property-assignment.js",
-    "subclass/builtin-objects/Function/instance-length.js",
-    "subclass/builtin-objects/Function/instance-name.js",
-    "subclass/builtin-objects/GeneratorFunction/instance-length.js",
-    "subclass/builtin-objects/GeneratorFunction/instance-name.js",
-    "subclass/builtin-objects/GeneratorFunction/instance-prototype.js",
-    "subclass/builtin-objects/NativeError/ReferenceError-message.js",
-    "subclass/builtin-objects/NativeError/TypeError-message.js",
-    "subclass/builtin-objects/String/length.js",
 ];
 
 #[derive(Default)]
@@ -107,83 +89,16 @@ struct Stats {
     skipped_panic: usize,
 }
 
-/// Tests that panic the VM today (subclass-builtins machinery,
-/// poisoned __proto__, proxy-observed fields, ...): skipped instead of
-/// run so the `panic:` counter stays an exception signal — any nonzero
-/// value is a NEW bug. Keep this list in sync when panics are fixed
-/// (remove) or discovered (add, then investigate).
+/// Tests that still panic the VM today: skipped instead of run so the
+/// `panic:` counter stays an exception signal — any nonzero value is a
+/// NEW bug. Keep this list in sync when panics are fixed (remove) or
+/// discovered (add, then investigate).
 const KNOWN_PANICS: &[&str] = &[
-    "DisposableStack/prototype/dispose/throws-suppressederror-if-multiple-errors-during-disposal.js",
-    "built-ins/Object/setPrototypeOf/set-error.js",
-    "expressions/class/subclass-builtins/subclass-Array.js",
-    "expressions/class/subclass-builtins/subclass-Boolean.js",
-    "expressions/class/subclass-builtins/subclass-Date.js",
-    "expressions/class/subclass-builtins/subclass-Error.js",
-    "expressions/class/subclass-builtins/subclass-Function.js",
-    "expressions/class/subclass-builtins/subclass-Number.js",
-    "expressions/class/subclass-builtins/subclass-Object.js",
-    "expressions/class/subclass-builtins/subclass-RangeError.js",
-    "expressions/class/subclass-builtins/subclass-ReferenceError.js",
-    "expressions/class/subclass-builtins/subclass-String.js",
-    "expressions/class/subclass-builtins/subclass-TypeError.js",
-    "language/expressions/class/poisoned-underscore-proto.js",
-    "language/expressions/delete/super-property.js",
-    "language/expressions/super/call-poisoned-underscore-proto.js",
-    "language/statements/class/poisoned-underscore-proto.js",
-    "language/statements/using/throws-suppressederror-if-multiple-errors-during-disposal.js",
-    "staging/sm/PrivateName/proxy-init-set.js",
     "staging/sm/String/string-upper-lower-mapping.js",
     "staging/sm/class/superCallBaseInvoked.js",
     "staging/sm/class/superPropProxies.js",
-    "staging/sm/regress/regress-610026.js",
-    "statements/class/definition/this-access-restriction.js",
-    "statements/class/elements/class-field-is-observable-by-proxy.js",
-    "statements/class/elements/privatefield-on-proxy.js",
-    "statements/class/elements/public-class-field-initialization-is-visible-to-proxy.js",
-    "statements/class/subclass-builtins/subclass-Array.js",
-    "statements/class/subclass-builtins/subclass-Boolean.js",
-    "statements/class/subclass-builtins/subclass-Date.js",
-    "statements/class/subclass-builtins/subclass-Error.js",
-    "statements/class/subclass-builtins/subclass-Function.js",
-    "statements/class/subclass-builtins/subclass-Number.js",
-    "statements/class/subclass-builtins/subclass-Object.js",
-    "statements/class/subclass-builtins/subclass-RangeError.js",
-    "statements/class/subclass-builtins/subclass-ReferenceError.js",
-    "statements/class/subclass-builtins/subclass-String.js",
-    "statements/class/subclass-builtins/subclass-TypeError.js",
-    "subclass/builtin-objects/Array/contructor-calls-super-multiple-arguments.js",
-    "subclass/builtin-objects/Array/contructor-calls-super-single-argument.js",
-    "subclass/builtin-objects/Array/length.js",
-    "subclass/builtin-objects/Array/regular-subclassing.js",
-    "subclass/builtin-objects/Array/super-must-be-called.js",
-    "subclass/builtin-objects/Boolean/regular-subclassing.js",
-    "subclass/builtin-objects/Boolean/super-must-be-called.js",
-    "subclass/builtin-objects/Date/super-must-be-called.js",
-    "subclass/builtin-objects/Error/regular-subclassing.js",
-    "subclass/builtin-objects/Function/regular-subclassing.js",
-    "subclass/builtin-objects/Function/super-must-be-called.js",
-    "subclass/builtin-objects/GeneratorFunction/regular-subclassing.js",
-    "subclass/builtin-objects/GeneratorFunction/super-must-be-called.js",
-    "subclass/builtin-objects/NativeError/ReferenceError-name.js",
-    "subclass/builtin-objects/NativeError/TypeError-name.js",
-    "subclass/builtin-objects/Number/regular-subclassing.js",
-    "subclass/builtin-objects/Number/super-must-be-called.js",
-    "subclass/builtin-objects/Object/regular-subclassing.js",
-    "subclass/builtin-objects/Object/replacing-prototype.js",
-    "subclass/builtin-objects/String/regular-subclassing.js",
-    "subclass/builtin-objects/String/super-must-be-called.js",
-    // panic today (missing Intl / staging TypedArray machinery)
-    "intl402/DurationFormat/prototype/format/duration-out-of-range-3.js",
-    "intl402/NumberFormat/prototype/format/numbering-systems.js",
-    "intl402/RelativeTimeFormat/prototype/formatToParts/unit-plural.js",
-    "intl402/RelativeTimeFormat/prototype/formatToParts/value-tonumber.js",
-    "staging/sm/Array/toSpliced-dense.js",
-    "staging/sm/Array/with-dense.js",
-    "staging/sm/TypedArray/slice-bitwise-same.js",
-    "staging/sm/TypedArray/sort-negative-nan.js",
-    "staging/sm/TypedArray/sort_large_countingsort.js",
-    "staging/sm/TypedArray/sort_modifications.js",
     "staging/sm/regress/regress-563221.js",
+    "staging/sm/regress/regress-610026.js",
 ];
 
 fn frontmatter(src: &str) -> &str {
