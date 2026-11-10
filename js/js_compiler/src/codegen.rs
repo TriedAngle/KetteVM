@@ -146,6 +146,7 @@ enum ContextHost {
 struct Layout {
     register_count: u32,
     this_slot: Option<u32>,
+    arguments_slot: Option<u32>,
     new_target_slot: Option<u32>,
     this_function_slot: Option<u32>,
     slot_names: Vec<ScopeLocal>,
@@ -588,6 +589,7 @@ pub fn generate<'a>(
             .map(|_| Layout {
                 register_count: 0,
                 this_slot: None,
+                arguments_slot: None,
                 new_target_slot: None,
                 this_function_slot: None,
                 slot_names: Vec::new(),
@@ -840,7 +842,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 } else {
                     flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
                 };
-                let forced = calls_eval || self.facts.captured.contains(&sym);
+                let mapped_param = is_param && self.facts.arguments_mapped.contains(&fid);
+                let forced = calls_eval || self.facts.captured.contains(&sym) || mapped_param;
                 let slot = if block_context {
                     let slot = *block_next.entry(sid).or_default();
                     block_next.insert(sid, slot + 1);
@@ -927,6 +930,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
         }
 
+        let arguments_slot = if self.facts.arguments_needed.contains(&fid) {
+            let slot = slot_names.len() as u32;
+            slot_names.push(ScopeLocal {
+                name: b"arguments".as_slice().into(),
+                info: if self.facts.functions[fid.0 as usize].strict {
+                    MODE_CONST as u32
+                } else {
+                    MODE_VAR as u32
+                },
+            });
+            Some(slot)
+        } else {
+            None
+        };
+
         let creates_context = !slot_names.is_empty() || !block_slots.is_empty() || calls_eval;
         debug_assert_eq!(
             creates_context,
@@ -936,6 +954,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         Layout {
             register_count: next_reg,
             this_slot,
+            arguments_slot,
             new_target_slot,
             this_function_slot,
             creates_context,
@@ -1341,6 +1360,15 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
     /// Store the accumulator into an identifier assignment target.
     fn store_name(&mut self, ident: &IdentifierReference<'_>) -> Result<(), CompileError> {
+        if self.c.facts.functions[self.fid.0 as usize].strict
+            && matches!(
+                self.c.facts.mode,
+                Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal
+            )
+            && matches!(ident.name.as_str(), "arguments" | "eval")
+        {
+            return Err(CompileError::new(ident.span, "strict assignment target"));
+        }
         let flags = self.ident_symbol_flags(ident);
         let is_const = flags.is_some_and(|f| f.contains(SymbolFlags::ConstVariable));
         let is_nfe = flags.is_some_and(|f| f.contains(SymbolFlags::FunctionExpression));
@@ -1493,6 +1521,25 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             return Err(CompileError::new(ident.span, "unresolved identifier"));
         };
         let reference = self.c.scoping.get_reference(rid);
+        if ident.name == "arguments"
+            && let Some(&fid) = self.c.facts.arguments_ref.get(&rid)
+            && let Some(slot) = self.c.layouts[fid.0 as usize].arguments_slot
+        {
+            let depth = self
+                .c
+                .facts
+                .arguments_ref_depth
+                .get(&rid)
+                .copied()
+                .unwrap_or(0);
+            return Ok(IdRes::Slot(
+                Slot::Ctx {
+                    slot,
+                    hole_check: false,
+                },
+                depth,
+            ));
+        }
         match reference.symbol_id() {
             None => {
                 let dynamic = matches!(
@@ -4952,6 +4999,37 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let name = self.c.scoping.symbol_name(sym).to_string();
             self.b.load_current_closure();
             self.store_symbol(sym, &name)?;
+        }
+
+        // arguments object (ES 10.2.11): created before parameter
+        // initialization so default initializers can observe it
+        if let Some(arguments_slot) = self.c.layouts[self.fid.0 as usize].arguments_slot {
+            let mapped = self.c.facts.arguments_mapped.contains(&self.fid);
+            let mut call_args = vec![RtArg::Smi(u32::from(mapped))];
+            if mapped {
+                let params = &self.c.facts.functions[self.fid.0 as usize].params;
+                let mut seen: Vec<String> = Vec::new();
+                for (index, param) in params.iter().enumerate().rev() {
+                    let BindingPattern::BindingIdentifier(binding) = param.pattern else {
+                        unreachable!("mapped arguments imply a simple parameter list")
+                    };
+                    let name = binding.name.as_str().to_string();
+                    if seen.contains(&name) {
+                        continue;
+                    }
+                    seen.push(name);
+                    let Some(symbol) = binding.symbol_id.get() else {
+                        continue;
+                    };
+                    if let Some(Slot::Ctx { slot, .. }) = self.c.slots.get(&symbol) {
+                        call_args.push(RtArg::Smi(index as u32));
+                        call_args.push(RtArg::Smi(*slot));
+                    }
+                }
+            }
+            self.b
+                .call_native_staged(self.c.ids.create_arguments, &call_args);
+            self.b.store_context_slot(arguments_slot, 0);
         }
 
         // parameters: non-simple lists (any default / pattern / rest)

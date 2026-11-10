@@ -12,9 +12,9 @@ mod for_in;
 mod iterators;
 
 use vm_core::{
-    AccessorPair, Args, ContextObject, Convert, DenseString, FixedArray, Handle, HandleSlice, Heap,
-    Key, LanguageMode, Object, ObjectSlotsInit, PropertyDescriptor, SlotName, Smi, StoreSemantics,
-    StringData, Symbol, Tagged, Value, info_is_immutable, info_is_lexical,
+    AccessorPair, Args, ArgumentsCreate, ContextObject, Convert, DenseString, FixedArray, Handle,
+    HandleSlice, Heap, Key, LanguageMode, Object, ObjectSlotsInit, PropertyDescriptor, SlotName,
+    Smi, StoreSemantics, StringData, Symbol, Tagged, Value, info_is_immutable, info_is_lexical,
 };
 
 use crate::JSRuntime;
@@ -73,6 +73,7 @@ pub fn register(vm: &mut VM) -> NativeIds {
         declare_globals: vm.register_native(intrinsics::declare_globals),
         throw_const_assign: vm.register_native(throw_const_assign_error),
         create_rest_parameter: vm.register_native(create_rest_parameter),
+        create_arguments: vm.register_native(create_arguments),
         super_get_property: vm.register_native(super_get_property),
         super_set_property: vm.register_native(super_set_property),
     }
@@ -978,7 +979,6 @@ fn construct_super_construct<'a>(
         let derived = callee
             .as_tagged(heap)
             .as_heap_object()
-            .filter(|obj| !obj.map(heap).kind().is_native())
             .and_then(|obj| obj.callable_info(heap))
             .is_some_and(|info| info.function_kind().is_derived_class_constructor());
         let Some(callee) = scope.cast::<Object>(heap, callee.as_tagged(heap)) else {
@@ -1639,6 +1639,80 @@ fn create_rest_parameter<'a>(
                 values: HandleSlice::EMPTY,
                 elements,
                 length: values.len(),
+            },
+        )
+        .erase()
+    })
+}
+
+// ---- arguments objects (ES 10.4.4) -------------------------------------------
+
+/// `CreateUnmappedArgumentsObject ( argList )`
+/// [ES 10.4.4.6](https://tc39.es/ecma262/#sec-createunmappedargumentsobject)
+/// `CreateMappedArgumentsObject ( func, formals, argList, envRecord )`
+/// [ES 10.4.4.7](https://tc39.es/ecma262/#sec-createmappedargumentsobject)
+/// (mapped, index0, slot0, ...) -> arguments object. The pairs map argument
+/// indices to the function-context slots holding the parameter bindings.
+fn create_arguments<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let known = &ctx.runtime::<JSRuntime>().known;
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let mapped = args.get(heap, 0).to_i64().unwrap_or(0) != 0;
+    state.handle_scope(|scope| {
+        if !state.is_frame_active() {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        }
+        let base = state.frame_base();
+        let argc = state.stack().argc(base).saturating_sub(1); // receiver included
+        let values: Vec<Handle<'_, Value>> = (0..argc)
+            .map(|i| scope.handle(state.stack().reg(heap, base, (i + 1) as i32)))
+            .collect();
+        let function = scope.handle(state.stack().callable(heap, base).erase());
+        let parameter_map = if mapped {
+            let Some(context) = state
+                .stack()
+                .context(heap, base)
+                .get_as::<ContextObject>(heap)
+            else {
+                raise!(vm, heap, state, VmError::InvalidOperandType);
+            };
+            let mut entries: Vec<Handle<'_, Value>> =
+                Vec::with_capacity(1 + (args.len().saturating_sub(1) / 2) * 2);
+            entries.push(scope.handle(context.erase()));
+            let mut i = 1;
+            while i + 1 < args.len() {
+                let index = args.get(heap, i).to_i64().unwrap_or(-1);
+                let slot = args.get(heap, i + 1).to_i64().unwrap_or(-1);
+                if index >= 0 && slot >= 0 && (index as usize) < argc {
+                    entries.push(scope.handle(Smi::new(index).into_tagged()));
+                    entries.push(scope.handle(Smi::new(slot).into_tagged()));
+                }
+                i += 2;
+            }
+            Some(heap.allocate_handle::<FixedArray>(scope.stage_handles(&entries), &scope))
+        } else {
+            None
+        };
+        let iterator_symbol = known.iterator_symbol.get_handle(heap, &scope);
+        let iterator_name: Tagged<'_, SlotName> = iterator_symbol.as_tagged(heap).into();
+        let iterator_key = scope.handle(iterator_name);
+        let iterator = known.array_values.get_handle(heap, &scope).erase();
+        let throw_type_error = vm.known().throw_type_error.get_handle(heap, &scope).erase();
+        Object::create_arguments(
+            heap,
+            &scope,
+            ArgumentsCreate {
+                values: scope.stage_handles(&values),
+                function: function.erase(),
+                parameter_map,
+                iterator_key,
+                iterator,
+                throw_type_error,
             },
         )
         .erase()

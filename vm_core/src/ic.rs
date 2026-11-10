@@ -1044,6 +1044,12 @@ impl InlineCache {
         receiver: Tagged<'a, Value>,
         index: usize,
     ) -> Option<ElementHit<'a>> {
+        if receiver
+            .as_heap_object()
+            .is_some_and(|o| o.map(heap).kind().is_arguments())
+        {
+            return None;
+        }
         let (obj, map, kind, payload) = probe_element_smi(heap, vector, slot, receiver)?;
         match kind {
             KIND_ELEMENT => apply_element_load(heap, obj, map, index, payload),
@@ -1061,6 +1067,12 @@ impl InlineCache {
         index: usize,
         value: Tagged<'a, Value>,
     ) -> Option<Tagged<'a, Value>> {
+        if receiver
+            .as_heap_object()
+            .is_some_and(|o| o.map(heap).kind().is_arguments())
+        {
+            return None;
+        }
         let (obj, map, kind, payload) = probe_element_smi(heap, vector, slot, receiver)?;
         if kind != KIND_ELEMENT_STORE {
             return None;

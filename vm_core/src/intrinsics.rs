@@ -7,10 +7,11 @@ use crate::lookup::{Hit, Lookup};
 use crate::raise;
 use crate::tools::KetteTools;
 use crate::{
-    AccessorInfo, Args, CallableInfoObject, ContextObject, Convert, EdgeVisitable, FixedArray,
-    Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind,
-    Object, PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SetupError, SlotFlags, Smi,
-    Tagged, VM, Value, Visitor, frame_context_value, info_is_lexical, info_mode, rt_try,
+    AccessorInfo, Args, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
+    EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
+    MODE_CLASS, MODE_LET, Map, MapInit, MapKind, Object, PropertyDescriptor, Runtime, RuntimeId,
+    ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor,
+    frame_context_value, info_is_lexical, info_mode, mode_from_strict, rt_try,
 };
 
 // ---- array `length` ----
@@ -102,11 +103,24 @@ fn function_prototype_call<'a>(
     ctx.vm.known().undefined.get(ctx.heap).erase()
 }
 
+/// The `%ThrowTypeError%` [[Call]] (ES 10.2.3).
+fn throw_type_error<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    _args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    raise!(vm, heap, state, VmError::InvalidOperandType)
+}
+
 impl Runtime for VmCore {
     const ID: RuntimeId = RuntimeId(0);
 
     fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), SetupError> {
         let call_index = vm.register_native(function_prototype_call);
+        let throw_index = vm.register_native(throw_type_error);
         let getter = vm.register_native(array_length_get);
         let setter = vm.register_native(array_length_set);
         debug_assert_eq!(setter.0, getter.0 + 1);
@@ -126,11 +140,25 @@ impl Runtime for VmCore {
                 .get_handle(heap, &scope)
                 .erase();
             let empty_context = heap.known().empty_context.get_handle(heap, &scope).erase();
+            let empty = heap.known().strings.empty.get_handle(heap, &scope);
+            let info = heap.allocate_handle::<CallableInfoObject>(
+                CallableInfoInit::Native {
+                    index: call_index,
+                    mode: mode_from_strict(true),
+                },
+                &scope,
+            );
+            info.as_tagged(heap).set_metadata_full(
+                heap,
+                Some(empty.as_tagged(heap).erase()),
+                0,
+                0,
+                FunctionKind::Normal,
+            );
             let map = heap.allocate_handle::<Map>(
                 MapInit {
                     kind: MapKind::OBJECT
                         .union(MapKind::CALLABLE)
-                        .union(MapKind::NATIVE)
                         .union(MapKind::EXTENDABLE),
                     value_slot_count: 2,
                     descriptors: &[],
@@ -139,7 +167,7 @@ impl Runtime for VmCore {
                 &scope,
             );
             let slots = scope.stage(&[
-                Smi::new(call_index.0 as i64).into_tagged(),
+                info.as_tagged(heap).erase(),
                 empty_context.as_tagged(heap).erase(),
             ]);
             let function_prototype = scope.handle(heap.new_object(&scope, map, slots));
@@ -158,6 +186,57 @@ impl Runtime for VmCore {
                     function_prototype.as_tagged(heap).erase(),
                 );
             }
+            let length_key = heap.known().strings.length.get_handle(heap, &scope);
+            let name_key = heap.known().strings.name.get_handle(heap, &scope);
+            for (key, value) in [
+                (length_key, scope.handle(Smi::new(0).into_tagged()).erase()),
+                (name_key, empty.erase()),
+            ] {
+                Object::define_own_property_ordinary(
+                    heap,
+                    &scope,
+                    function_prototype,
+                    key,
+                    PropertyDescriptor::Data {
+                        value,
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                )
+                .expect("Function.prototype metadata");
+            }
+
+            // %ThrowTypeError% (ES 10.2.3): frozen, non-constructable,
+            // [[Prototype]] = %Function.prototype%.
+            let throw_type_error = Object::native_function(heap, &scope, throw_index, 0);
+            for (key, value) in [
+                (length_key, scope.handle(Smi::new(0).into_tagged()).erase()),
+                (name_key, empty.erase()),
+            ] {
+                Object::define_own_property_ordinary(
+                    heap,
+                    &scope,
+                    throw_type_error,
+                    key,
+                    PropertyDescriptor::Data {
+                        value,
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                )
+                .expect("ThrowTypeError metadata");
+            }
+            if let Some(info) = throw_type_error.as_tagged(heap).callable_info(heap) {
+                info.as_ref()
+                    .set_name(heap, Some(empty.as_tagged(heap).erase()));
+            }
+            Object::make_non_extensible(heap, &scope, throw_type_error);
+            vm.known()
+                .throw_type_error
+                .init(throw_type_error.as_tagged(heap));
+
             // `bootstrap` installs the `length` accessor on the array map
             // with no natives; point it at the ones registered above
             let map = heap.known().js_array_map.get_handle(heap, &scope);

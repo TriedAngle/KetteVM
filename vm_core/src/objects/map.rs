@@ -376,9 +376,9 @@ impl ElementsKind {
 /// - byte 2 (bits 16..23): the `ElementsKind` storage kind
 /// - bit 24: named-properties mode
 ///
-/// Constructor implies callable. NATIVE is only valid together with
-/// CALLABLE and means slots[0] of the object is a Smi native registry
-/// index instead of a `CallableInfoObject`.
+/// Constructor implies callable. Every callable object's slot 0 is its
+/// `CallableInfoObject`; native functions carry their registry index in
+/// that info's `function_data`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct MapKind(u64);
@@ -389,7 +389,6 @@ impl MapKind {
     pub const EXTENDABLE: MapKind = MapKind(1 << 8);
     pub const CALLABLE: MapKind = MapKind(1 << 9);
     pub const CONSTRUCTOR: MapKind = MapKind(1 << 10);
-    pub const NATIVE: MapKind = MapKind(1 << 11);
     pub const PRIMITIVE_WRAPPER: MapKind = MapKind(1 << 12);
     pub const CLASS_CONSTRUCTOR: MapKind = MapKind(1 << 13);
     /// Date instances carry a [[DateValue]] in their first value slot.
@@ -397,6 +396,8 @@ impl MapKind {
     /// Error instances carry [[ErrorData]] (the `"Error"` builtin tag).
     pub const ERROR: MapKind = MapKind(1 << 27);
     pub const BOUND: MapKind = MapKind(1 << 28);
+    /// Arguments exotic object: slots[0] is `[[ParameterMap]]`.
+    pub const ARGUMENTS: MapKind = MapKind(1 << 29);
 
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
@@ -566,11 +567,6 @@ impl MapKind {
     }
 
     #[inline(always)]
-    pub const fn is_native(self) -> bool {
-        self.0 & Self::NATIVE.0 != 0
-    }
-
-    #[inline(always)]
     pub const fn is_constructor(self) -> bool {
         self.0 & Self::CONSTRUCTOR.0 != 0
     }
@@ -588,6 +584,11 @@ impl MapKind {
     #[inline(always)]
     pub const fn is_bound(self) -> bool {
         self.0 & Self::BOUND.0 != 0
+    }
+
+    #[inline(always)]
+    pub const fn is_arguments(self) -> bool {
+        self.0 & Self::ARGUMENTS.0 != 0
     }
 }
 

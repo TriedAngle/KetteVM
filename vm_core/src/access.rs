@@ -277,6 +277,11 @@ impl Object {
                     flags,
                     ..
                 } => {
+                    // arguments exotic [[Set]]: write the parameter binding
+                    // first when the receiver is the object itself
+                    if holder.erase().ptr_eq(receiver.as_tagged(heap)) {
+                        holder.arguments_mapped_set(heap, index, value.as_tagged(heap));
+                    }
                     if !flags.is_writable() {
                         Ok(SetApplied::Rejected)
                     } else if !receiver_is_object {
@@ -420,9 +425,9 @@ impl Object {
         if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
             return Proxy::get_own_property(vm, heap, state, scope, obj, key);
         }
-        // TODO: dispatch typed-array, module-namespace, and arguments
-        // exotic [[GetOwnProperty]] once those object kinds exist
-        // (ES 10.4.4, 10.4.5, 10.4.6).
+        // TODO: dispatch typed-array and module-namespace exotic
+        // [[GetOwnProperty]] once those object kinds exist (ES 10.4.5,
+        // 10.4.6); arguments values are substituted in `Lookup`.
         // Other primitives have no own properties; String primitives have
         // the virtual code-unit/length properties.
         if obj.as_tagged(heap).is_primitive(heap)
@@ -567,6 +572,22 @@ impl Object {
         if obj
             .as_tagged(heap)
             .as_heap_object()
+            .is_some_and(|o| o.map(heap).kind().is_arguments())
+        {
+            return Self::arguments_define_own_property(
+                vm,
+                heap,
+                state,
+                scope,
+                obj,
+                name,
+                partial,
+                should_throw,
+            );
+        }
+        if obj
+            .as_tagged(heap)
+            .as_heap_object()
             .is_some_and(|o| o.is_array(heap))
             && name
                 .as_tagged(heap)
@@ -595,9 +616,9 @@ impl Object {
             }
             return should_throw.reject(vm, heap, state);
         }
-        // TODO: dispatch typed-array, module-namespace, and arguments
-        // exotic [[DefineOwnProperty]] once those object kinds exist
-        // (ES 10.4.4, 10.4.5, 10.4.6).
+        // TODO: dispatch typed-array and module-namespace exotic
+        // [[DefineOwnProperty]] once those object kinds exist (ES 10.4.5,
+        // 10.4.6).
         let receiver = scope
             .cast::<Object>(heap, obj.as_tagged(heap))
             .expect("non-proxy target is an object");
@@ -614,6 +635,78 @@ impl Object {
             &partial,
             should_throw,
         )
+    }
+
+    /// `[[DefineOwnProperty]] ( propertyKey, propertyDesc )`
+    /// [ES 10.4.4.2](https://tc39.es/ecma262/#sec-arguments-exotic-objects-defineownproperty-p-desc)
+    /// Arguments exotic define: an index still in `[[ParameterMap]]` writes
+    /// through to the parameter binding and loses its mapping when made an
+    /// accessor or non-writable.
+    #[allow(clippy::too_many_arguments)]
+    fn arguments_define_own_property<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        obj: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+        partial: PartialDescriptor<'s>,
+        should_throw: ShouldThrow,
+    ) -> Result<bool> {
+        let index = match name.as_tagged(heap).classify_key(heap) {
+            Some(Key::Element(index)) => Some(index),
+            _ => None,
+        };
+        let mapped = index.is_some_and(|index| {
+            obj.as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|o| o.arguments_mapping(heap, index).is_some())
+        });
+        let mut effective = partial;
+        if mapped
+            && partial.is_data_descriptor()
+            && partial.value.is_none()
+            && partial.writable == Some(false)
+            && let Some(value) = obj
+                .as_tagged(heap)
+                .as_heap_object()
+                .and_then(|o| o.arguments_mapped_value(heap, index.expect("mapped index")))
+        {
+            effective.value = Some(scope.handle(value));
+        }
+        let current = Self::own_property_ordinary(heap, scope, obj, name);
+        let name = scope.handle(name.as_tagged(heap).as_name());
+        let receiver = scope
+            .cast::<Object>(heap, obj.as_tagged(heap))
+            .expect("arguments target is an object");
+        let allowed = Self::define_own_property_apply(
+            Some(vm),
+            Some(state),
+            heap,
+            scope,
+            receiver,
+            name,
+            current,
+            &effective,
+            should_throw,
+        )?;
+        if allowed && let Some(index) = index.filter(|_| mapped) {
+            let object = obj
+                .as_tagged(heap)
+                .as_heap_object()
+                .expect("arguments target is an object");
+            if partial.is_accessor_descriptor() {
+                object.arguments_remove_mapping(heap, index);
+            } else {
+                if let Some(value) = partial.value {
+                    object.arguments_mapped_set(heap, index, value.as_tagged(heap));
+                }
+                if partial.writable == Some(false) {
+                    object.arguments_remove_mapping(heap, index);
+                }
+            }
+        }
+        Ok(allowed)
     }
 
     /// `[[DefineOwnProperty]] ( propertyKey, propertyDesc )`
@@ -869,6 +962,38 @@ impl Object {
     /// (dense hole or dictionary entry). Proxy and String-exotic dispatch
     /// happen in `delete_property`.
     pub fn delete_own_property(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        key: Handle<'_, Value>,
+    ) -> Result<bool> {
+        let arguments_index = match key.as_tagged(heap).classify_key(heap) {
+            Some(Key::Element(index))
+                if receiver.as_tagged(heap).map(heap).kind().is_arguments() =>
+            {
+                Some(index)
+            }
+            _ => None,
+        };
+        let mapped = arguments_index.is_some_and(|index| {
+            receiver
+                .as_tagged(heap)
+                .arguments_mapping(heap, index)
+                .is_some()
+        });
+        let result = Self::delete_own_property_ordinary(vm, heap, state, scope, receiver, key)?;
+        if result && let Some(index) = arguments_index.filter(|_| mapped) {
+            // arguments exotic [[Delete]] also drops the parameter mapping
+            receiver
+                .as_tagged(heap)
+                .arguments_remove_mapping(heap, index);
+        }
+        Ok(result)
+    }
+
+    fn delete_own_property_ordinary(
         vm: &VM,
         heap: &mut Heap,
         state: &ThreadState,

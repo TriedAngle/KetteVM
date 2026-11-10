@@ -9,9 +9,10 @@ use crate::JSRuntime;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, MapKind, Object,
-    PartialDescriptor, PropertyDescriptor, Prototype, ProxyObject, ShouldThrow, SlotName, Smi,
-    Tagged, ThreadState, VM, Value, WellKnown, WrapperKind, descriptor_object,
+    Args, Compare, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_WRITABLE, DenseString,
+    Handle, HandleScope, HandleSlice, Heap, MapKind, NumberDictionary, Object, PartialDescriptor,
+    PropertyDescriptor, Prototype, ProxyObject, ShouldThrow, SlotName, Smi, Symbol, Tagged,
+    ThreadState, VM, Value, WellKnown, WrapperKind, descriptor_object,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -76,6 +77,9 @@ fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<&'static str>
     }
     if kind.contains(MapKind::DATE) {
         return Some("Date");
+    }
+    if kind.is_arguments() {
+        return Some("Arguments");
     }
     Some("Object")
 }
@@ -459,7 +463,8 @@ pub fn object_get_own_property_names<'a>(
     // `own_property_keys` already lists it
     state.handle_scope(|scope| {
         let staged = {
-            let names = own_property_keys(heap, vm.known(), target.as_tagged(heap));
+            let mut names = own_property_keys(heap, vm.known(), target.as_tagged(heap));
+            names.retain(|key| key.get_as::<Symbol>(heap).is_none());
             scope.stage(&names)
         };
         heap.new_array(&scope, staged).erase()
@@ -662,11 +667,9 @@ pub fn object_is_extensible<'a>(
     })
 }
 
-/// SetIntegrityLevel (ES 7.3.15/16) for ordinary objects: clone the map
-/// with `configurable` (and for freeze `writable`) cleared on every
-/// descriptor and EXTENDABLE dropped. Dense array elements keep their
-/// intrinsic attributes (TODO: element sealing with the elements
-/// machinery).
+/// SetIntegrityLevel (ES 7.3.15/16) for ordinary objects: clear
+/// `configurable` (and for freeze `writable`) on every element and named
+/// descriptor, drop EXTENDABLE, and (for arrays) make `length` read-only.
 pub fn set_integrity_flags(
     heap: &mut Heap,
     scope: &HandleScope<'_>,
@@ -674,22 +677,43 @@ pub fn set_integrity_flags(
     freeze: bool,
 ) {
     use vm_core::{Map, MapInit, MapKind, SlotFlags};
-    let (kind, descriptor_count, already) = {
-        let map = obj.as_tagged(heap).map(heap);
-        (
-            map.kind(),
-            map.descriptors().len(),
-            !map.kind().is_extendable()
-                && map.descriptors().iter().all(|d| {
-                    let flags = d.flags();
-                    !flags.is_configurable()
-                        && (!freeze || flags.is_accessor() || !flags.is_writable())
-                }),
-        )
-    };
-    if already {
-        return;
+
+    if freeze && obj.as_tagged(heap).is_array(heap) {
+        Object::make_array_length_readonly(heap, scope, &obj);
     }
+    if !obj.as_tagged(heap).element_keys(heap).is_empty() {
+        // Dense elements cannot carry attributes: normalize once, then
+        // rewrite every entry's details (ES 7.3.15 step 3.a).
+        Object::normalize_elements(heap, scope, &obj);
+        let dict = scope.handle(
+            obj.as_tagged(heap)
+                .element_dictionary(heap)
+                .expect("normalized elements are a dictionary"),
+        );
+        let mut entries: Vec<(usize, Handle<'_, Value>, i64)> = Vec::new();
+        dict.as_tagged(heap)
+            .for_each_entry(heap, |key, value, details| {
+                entries.push((key, scope.handle(value), details));
+            });
+        let mut dict = dict;
+        for (key, value, details) in entries {
+            let mut details = details & !DETAILS_CONFIGURABLE;
+            if freeze && details & DETAILS_ACCESSOR == 0 {
+                details &= !DETAILS_WRITABLE;
+            }
+            dict = NumberDictionary::insert(heap, scope, &dict, key, value, details);
+        }
+        let obj_ref = obj.as_tagged(heap);
+        obj_ref
+            .elements
+            .set(heap, obj_ref.erase(), dict.as_tagged(heap).erase());
+        Prototype::element_mutated(heap, obj_ref);
+    }
+
+    let (kind, descriptor_count) = {
+        let map = obj.as_tagged(heap).map(heap);
+        (map.kind(), map.descriptors().len())
+    };
     // clone the map with `configurable` (and for freeze `writable`)
     // cleared on every descriptor and EXTENDABLE dropped: names are
     // read under the enter-heap anchor so the descriptor rows stay

@@ -120,6 +120,10 @@ pub struct NativeIds {
     /// (first) -> array -- a fresh array of the frame's arguments from
     /// formal index `first` (a Smi)
     pub create_rest_parameter: NativeIndex,
+    /// (mapped, index0, slot0, ...) -> object -- the frame's arguments
+    /// object (ES 10.4.4.6 / 10.4.4.7); `mapped` is a Smi flag and the
+    /// pairs name argument indices bound to function-context slots
+    pub create_arguments: NativeIndex,
     /// (home, recv, key) -> value -- super.x load: GetSuperBase of the home
     /// object, walked with the split receiver/lookup-start (ES 15.4.2)
     pub super_get_property: NativeIndex,

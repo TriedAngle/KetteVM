@@ -239,6 +239,14 @@ pub struct Facts<'a> {
     pub param_symbols: HashMap<SymbolId, u32>,
     /// names bound by parameter patterns (TDZ locals, not param registers)
     pub pattern_params: HashSet<SymbolId>,
+    /// functions with a `[[ParameterMap]]`-bearing (mapped) arguments object
+    pub arguments_mapped: HashSet<Fid>,
+    /// functions whose prologue materializes an arguments object
+    pub arguments_needed: HashSet<Fid>,
+    /// `arguments` references bound to a function's implicit object
+    pub arguments_ref: HashMap<ReferenceId, Fid>,
+    /// context hops from an `arguments` use site to its owning function
+    pub arguments_ref_depth: HashMap<ReferenceId, u32>,
 }
 
 impl Facts<'_> {
@@ -375,6 +383,10 @@ impl<'a, 'p> Collector<'a, 'p> {
             special: HashMap::new(),
             ref_depth: HashMap::new(),
             ref_skip_hole: HashSet::new(),
+            arguments_needed: HashSet::new(),
+            arguments_mapped: HashSet::new(),
+            arguments_ref: HashMap::new(),
+            arguments_ref_depth: HashMap::new(),
             for_init_decl: HashMap::new(),
             for_initialized: HashSet::new(),
             repl_root: matches!(self.mode, Mode::Repl),
@@ -389,6 +401,7 @@ impl<'a, 'p> Collector<'a, 'p> {
         d.scan_special_owners();
         d.scan_captures();
         d.finalize_for_heads();
+        d.mark_arguments();
         d.creates_context = d.compute_creates_context();
         d.block_contexts = d.compute_block_contexts();
         d.scan_special_nodes();
@@ -404,6 +417,10 @@ impl<'a, 'p> Collector<'a, 'p> {
             captures_new_target,
             needs_this_function,
             obj_lit_home,
+            arguments_needed,
+            arguments_mapped,
+            arguments_ref,
+            arguments_ref_depth,
             ..
         } = d;
 
@@ -490,6 +507,10 @@ impl<'a, 'p> Collector<'a, 'p> {
             sloppy_block_functions: self.sloppy_block_functions,
             param_symbols: self.param_symbols,
             pattern_params: self.pattern_params,
+            arguments_mapped,
+            arguments_needed,
+            arguments_ref,
+            arguments_ref_depth,
         }
     }
 
@@ -1012,6 +1033,10 @@ struct Deriver<'a, 'p, 'f> {
     special: HashMap<NodeId, Special>,
     ref_depth: HashMap<ReferenceId, u32>,
     ref_skip_hole: HashSet<ReferenceId>,
+    arguments_needed: HashSet<Fid>,
+    arguments_mapped: HashSet<Fid>,
+    arguments_ref: HashMap<ReferenceId, Fid>,
+    arguments_ref_depth: HashMap<ReferenceId, u32>,
     for_init_decl: HashMap<ScopeId, NodeId>,
     for_initialized: HashSet<SymbolId>,
     /// REPL mode: root-level bindings are global properties, not slots
@@ -1405,6 +1430,171 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         unreachable!("target is an ancestor of the use site")
     }
 
+    /// The nearest non-arrow function scope owning `arguments` for a use
+    /// site. Arrow functions inherit their enclosing function's binding.
+    fn arguments_owner(&self, scope: ScopeId) -> Option<Fid> {
+        let mut cur = Some(scope);
+        while let Some(scope) = cur {
+            if let Some(&fid) = self.fn_scope_to_fid.get(&scope)
+                && !self.functions[fid.0 as usize].kind.is_arrow()
+                && !matches!(
+                    &self.functions[fid.0 as usize].body,
+                    FnBody::Script(_) | FnBody::FieldInit(_) | FnBody::Empty
+                )
+            {
+                return Some(fid);
+            }
+            cur = self.scoping.scope_parent_id(scope);
+        }
+        None
+    }
+
+    /// Whether this function body contains a binding named `arguments`.
+    fn scope_belongs_to_function(&self, scope: ScopeId, fid: Fid) -> bool {
+        let mut cur = Some(scope);
+        while let Some(scope) = cur {
+            if let Some(&owner) = self.fn_scope_to_fid.get(&scope) {
+                return owner == fid;
+            }
+            cur = self.scoping.scope_parent_id(scope);
+        }
+        false
+    }
+
+    /// `argumentsObjNeeded` (ES 10.2.11): false for arrows, functions with a
+    /// parameter named `arguments`, and simple parameter lists that declare
+    /// `arguments` as a function or lexical name.
+    fn arguments_object_needed(&self, fid: Fid) -> bool {
+        let func = &self.functions[fid.0 as usize];
+        if func.kind.is_arrow()
+            || matches!(
+                &func.body,
+                FnBody::Script(_) | FnBody::FieldInit(_) | FnBody::Empty
+            )
+        {
+            return false;
+        }
+        let mut has_param_exprs = false;
+        for param in &func.params {
+            has_param_exprs |= param.rest
+                || param.default.is_some()
+                || !matches!(param.pattern, BindingPattern::BindingIdentifier(_));
+            for sym in collect_binding_symbols(param.pattern) {
+                if self.scoping.symbol_name(sym) == "arguments" {
+                    return false;
+                }
+            }
+        }
+        if !has_param_exprs {
+            // function declarations are VarDeclaredNames; top-level lexical
+            // declarations are LexicallyDeclaredNames (ES 10.2.11)
+            for raw in 0..self.scoping.scopes_len() {
+                let scope = ScopeId::from_usize(raw);
+                if !self.scope_belongs_to_function(scope, fid) {
+                    continue;
+                }
+                if self.scoping.iter_bindings_in(scope).any(|sym| {
+                    self.scoping.symbol_name(sym) == "arguments"
+                        && self
+                            .scoping
+                            .symbol_flags(sym)
+                            .contains(SymbolFlags::Function)
+                }) {
+                    return false;
+                }
+            }
+            if let Some(scope) = self
+                .fn_scope_to_fid
+                .iter()
+                .find_map(|(&scope, &owner)| (owner == fid).then_some(scope))
+                && self.scoping.iter_bindings_in(scope).any(|sym| {
+                    self.scoping.symbol_name(sym) == "arguments"
+                        && self
+                            .scoping
+                            .symbol_flags(sym)
+                            .intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
+                })
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether an oxc-resolved `arguments` reference must instead bind to
+    /// the nearest function's implicit arguments object. Oxc has no implicit
+    /// binding, so it can resolve an inner function's `arguments` to an outer
+    /// function's `var arguments`; lexical declarations inside the function
+    /// still shadow it.
+    fn arguments_shadows(&self, fid: Fid, symbol: SymbolId) -> bool {
+        let flags = self.scoping.symbol_flags(symbol);
+        let mut scope = Some(self.scoping.symbol_scope_id(symbol));
+        while let Some(current) = scope {
+            if let Some(&owner) = self.fn_scope_to_fid.get(&current) {
+                if owner != fid {
+                    return true;
+                }
+                return !flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class);
+            }
+            scope = self.scoping.scope_parent_id(current);
+        }
+        true
+    }
+
+    /// Attribute unresolved `arguments` references to their owning function
+    /// and mark functions whose direct `eval` can observe the binding.
+    fn mark_arguments(&mut self) {
+        for raw in 0..self.scoping.references_len() {
+            let rid = ReferenceId::from_usize(raw);
+            let reference = self.scoping.get_reference(rid);
+            let AstKind::IdentifierReference(ident) =
+                self.nodes.get_node(reference.node_id()).kind()
+            else {
+                continue;
+            };
+            if ident.name != "arguments" {
+                continue;
+            }
+            let Some(fid) = self.arguments_owner(reference.scope_id()) else {
+                continue;
+            };
+            if !self.arguments_object_needed(fid) {
+                continue;
+            }
+            if let Some(symbol) = reference.symbol_id()
+                && !self.arguments_shadows(fid, symbol)
+            {
+                continue;
+            }
+            self.arguments_needed.insert(fid);
+            self.arguments_ref.insert(rid, fid);
+        }
+        for (&scope, &fid) in self.fn_scope_to_fid {
+            if !self
+                .scoping
+                .scope_flags(scope)
+                .contains(ScopeFlags::DirectEval)
+            {
+                continue;
+            }
+            if self.arguments_object_needed(fid) {
+                self.arguments_needed.insert(fid);
+            }
+        }
+        let needed: Vec<Fid> = self.arguments_needed.iter().copied().collect();
+        for fid in needed {
+            let func = &self.functions[fid.0 as usize];
+            let simple = !func.params.iter().any(|param| {
+                param.rest
+                    || param.default.is_some()
+                    || !matches!(param.pattern, BindingPattern::BindingIdentifier(_))
+            });
+            if !func.strict && simple {
+                self.arguments_mapped.insert(fid);
+            }
+        }
+    }
+
     /// Which functions push a context: those whose bindings/specials
     /// occupy slots (`captured`, `this`/`new.target`/`this_function`), or
     /// that run direct `eval`. Must stay in sync with
@@ -1413,6 +1603,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         let mut out: HashSet<Fid> = self.captures_this.iter().copied().collect();
         out.extend(self.captures_new_target.iter().copied());
         out.extend(self.needs_this_function.iter().copied());
+        out.extend(self.arguments_needed.iter().copied());
         // Top-level lexical bindings live in a script context even when no
         // closure captures them: later scripts and direct eval resolve them
         // through the script-context table.
@@ -1754,6 +1945,19 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             };
             let depth = self.ctx_hops_from_ref(reference.node_id(), host);
             self.ref_depth.insert(rid, depth);
+        }
+        let arguments: Vec<(ReferenceId, Fid)> = self
+            .arguments_ref
+            .iter()
+            .map(|(&rid, &fid)| (rid, fid))
+            .collect();
+        for (rid, fid) in arguments {
+            let reference = self.scoping.get_reference(rid);
+            let Some(host) = self.fid_node.get(&fid) else {
+                continue;
+            };
+            let depth = self.ctx_hops_from_ref(reference.node_id(), *host);
+            self.arguments_ref_depth.insert(rid, depth);
         }
     }
 

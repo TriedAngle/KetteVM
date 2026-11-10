@@ -2,15 +2,16 @@ use core::alloc::Layout;
 
 use crate::{
     Code, DenseString, EdgeVisitable, FeedbackVector, FixedArray, GcSlot, Handle, HandlerTable,
-    Header, Heap, HeapObject, LanguageMode, ObjectKind, OptionGcSlot, SlotName, Smi, Tagged, Value,
-    Visitor,
+    Header, Heap, HeapObject, LanguageMode, NativeIndex, ObjectKind, OptionGcSlot, SlotName, Smi,
+    Tagged, Value, Visitor,
 };
 
 #[repr(C)]
 pub struct CallableInfoObject {
     pub header: Header,
-    /// The function's instruction stream.
-    pub code: GcSlot<Code>,
+    /// `function_data`: a `Code` for bytecode functions or a `Smi`
+    /// native-registry index for native functions.
+    pub function_data: GcSlot<Value>,
     /// Language-mode id (`MODE_SLOPPY`, `MODE_STRICT`, ...).
     pub mode: GcSlot<Smi>,
     pub constants: GcSlot<FixedArray>,
@@ -97,13 +98,18 @@ impl FunctionKind {
     }
 }
 
-pub struct CallableInfoInit<'a> {
-    pub code: Handle<'a, Code>,
-    pub constants: Handle<'a, FixedArray>,
-    pub register_count: usize,
-    pub handlers: Option<Handle<'a, HandlerTable>>,
-    pub expected_slots: usize,
-    pub mode: u8,
+pub enum CallableInfoInit<'a> {
+    /// A compiled bytecode function.
+    Bytecode {
+        code: Handle<'a, Code>,
+        constants: Handle<'a, FixedArray>,
+        register_count: usize,
+        handlers: Option<Handle<'a, HandlerTable>>,
+        expected_slots: usize,
+        mode: u8,
+    },
+    /// A native function backed by the VM's NativeRegistry.
+    Native { index: NativeIndex, mode: u8 },
 }
 
 impl HeapObject for CallableInfoObject {
@@ -117,27 +123,46 @@ impl HeapObject for CallableInfoObject {
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().callable_map.get(heap));
-        self.code.set(heap, host, config.code.as_tagged(heap));
-        self.mode.set(heap, host, Smi::new(config.mode as i64));
-        self.constants
-            .set(heap, host, config.constants.as_tagged(heap));
-        self.register_count
-            .set(heap, host, Smi::new(config.register_count as i64));
-        self.descriptor.set(
-            heap,
-            host,
-            Smi::new(config.register_count as i64 | (1 << 16)),
-        );
-        match config.handlers {
-            Some(handlers) => self.handlers.set(heap, host, handlers.as_tagged(heap)),
-            None => self.handlers.clear(heap),
+        let empty = heap.known().empty_fixed_array.get(heap);
+        match config {
+            CallableInfoInit::Bytecode {
+                code,
+                constants,
+                register_count,
+                handlers,
+                expected_slots,
+                mode,
+            } => {
+                self.function_data
+                    .set(heap, host, code.as_tagged(heap).erase());
+                self.constants.set(heap, host, constants.as_tagged(heap));
+                self.register_count
+                    .set(heap, host, Smi::new(*register_count as i64));
+                self.descriptor
+                    .set(heap, host, Smi::new(*register_count as i64 | (1 << 16)));
+                match handlers {
+                    Some(handlers) => self.handlers.set(heap, host, handlers.as_tagged(heap)),
+                    None => self.handlers.clear(heap),
+                }
+                self.expected_slots
+                    .set(heap, host, Smi::new(*expected_slots as i64));
+                self.mode.set(heap, host, Smi::new(*mode as i64));
+            }
+            CallableInfoInit::Native { index, mode } => {
+                self.function_data
+                    .set(heap, host, Smi::new(index.0 as i64).into_tagged());
+                self.constants.set(heap, host, empty);
+                self.register_count.set(heap, host, Smi::new(0));
+                self.descriptor.set(heap, host, Smi::new(1 << 16));
+                self.handlers.clear(heap);
+                self.expected_slots.set(heap, host, Smi::new(0));
+                self.mode.set(heap, host, Smi::new(*mode as i64));
+            }
         }
         self.feedback.clear(heap);
         self.name.init(heap.known().the_hole.get(heap).erase());
         self.formal_parameter_count.set(heap, host, Smi::new(0));
         self.formal_length.set(heap, host, Smi::new(0));
-        self.expected_slots
-            .set(heap, host, Smi::new(config.expected_slots as i64));
         self.kind
             .set(heap, host, Smi::new(FunctionKind::Normal as i64));
     }
@@ -154,7 +179,7 @@ impl HeapObject for CallableInfoObject {
 impl EdgeVisitable for CallableInfoObject {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.code.as_raw());
+        visitor.visit(self.function_data.as_raw());
         visitor.visit(self.constants.as_raw());
         visitor.visit(self.handlers.as_raw());
         visitor.visit(self.feedback.as_raw());
@@ -164,6 +189,28 @@ impl EdgeVisitable for CallableInfoObject {
 }
 
 impl CallableInfoObject {
+    /// The native-registry index when this is a native function.
+    #[inline]
+    pub fn native_index(&self, heap: &Heap) -> Option<NativeIndex> {
+        let smi = Smi::decode(self.function_data.get(heap).raw())?;
+        usize::try_from(smi.value()).ok().map(NativeIndex)
+    }
+
+    /// The instruction stream when this is a bytecode function.
+    #[inline]
+    pub fn code<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Code>> {
+        self.function_data.get(heap).get_as::<Code>(heap)
+    }
+
+    /// Bind a name without changing the function's `length`/`kind`.
+    pub fn set_name(&self, heap: &Heap, name: Option<Tagged<'_, Value>>) {
+        self.name.set(
+            heap,
+            self.tagged(heap),
+            name.unwrap_or_else(|| heap.known().the_hole.get(heap).erase()),
+        );
+    }
+
     /// The packed frame facts off the descriptor Smi
     /// (`register_count | formal_min << 16`, where `formal_min` counts
     /// formal parameters plus the receiver): what a frame push needs.
@@ -176,22 +223,6 @@ impl CallableInfoObject {
     #[inline(always)]
     pub fn mode(&self) -> LanguageMode {
         LanguageMode::from_mode(self.mode.to_smi_unchecked().value() as u8)
-    }
-
-    pub fn set_metadata(
-        &self,
-        heap: &Heap,
-        name: Option<Tagged<'_, Value>>,
-        formal_parameter_count: usize,
-        kind: FunctionKind,
-    ) {
-        self.set_metadata_full(
-            heap,
-            name,
-            formal_parameter_count,
-            formal_parameter_count,
-            kind,
-        )
     }
 
     pub fn set_metadata_full(

@@ -41,7 +41,7 @@ impl Runtime for KetteRuntime {
                 &scope,
             );
             let console = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-            Object::install_method(thread, &scope, console, "print", print);
+            Object::install_method(thread, &scope, console, "print", print, 0);
             let console_name = thread.intern(&scope, "Console");
             let console_name = scope.handle(console_name.as_tagged(thread.heap()));
             let global = {
@@ -49,7 +49,7 @@ impl Runtime for KetteRuntime {
                 heap.known().global_object.get_handle(thread.heap(), &scope)
             };
             // a bare global `print(x)`, same native as `Console.print`
-            Object::install_method(thread, &scope, global, "print", print);
+            Object::install_method(thread, &scope, global, "print", print, 0);
             Object::define_own_property_ordinary(
                 thread.heap(),
                 &scope,

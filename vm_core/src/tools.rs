@@ -71,7 +71,7 @@ impl KetteTools {
             ("shutdown", natives[2]),
         ];
         for (name, index) in methods {
-            let method = Object::native_function(heap, scope, index);
+            let method = Object::native_function(heap, scope, index, 0);
             let name_str = interner.intern_str(heap, scope, name);
             let method_name = scope.handle(name_str.as_tagged(heap));
             Object::define_own_property_ordinary(

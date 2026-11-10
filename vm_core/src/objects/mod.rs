@@ -43,7 +43,7 @@ pub use map::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ElementsKind, Key, Map, MapInit, MapKind,
     SlotDescriptor, SlotFlags, SlotName,
 };
-pub use object::{CallTarget, Object, ObjectInit, ObjectSlotsInit};
+pub use object::{ArgumentsCreate, CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
 pub use proxy::{ProxyInit, ProxyObject};
 pub use script_context::{

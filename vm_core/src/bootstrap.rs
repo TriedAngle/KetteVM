@@ -93,6 +93,9 @@ pub struct WellKnown {
     /// callable, non-constructable function whose `[[Prototype]]` is
     /// `%Object.prototype%`; the `[[Prototype]]` of ordinary function objects.
     pub function_prototype: GcSlot<Object>,
+    /// `%ThrowTypeError%` (ES 10.2.3): the frozen function that throws a
+    /// TypeError when called.
+    pub throw_type_error: GcSlot<Object>,
     /// The realm global object: global variables are properties on it
     /// (top-level `var`/assignments; lexical script-context globals later).
     pub global_object: GcSlot<Object>,
@@ -185,6 +188,7 @@ define_well_known_strings! {
     cause => "cause",
     prototype => "prototype",
     constructor => "constructor",
+    callee => "callee",
     to_string => "toString",
     value_of => "valueOf",
     next => "next",
@@ -302,6 +306,7 @@ impl WellKnown {
             object_prototype: smi_slot::<Object>(),
             array_prototype: smi_slot::<Object>(),
             function_prototype: smi_slot::<Object>(),
+            throw_type_error: smi_slot::<Object>(),
             global_object: smi_slot::<Object>(),
             script_context_table: smi_slot::<ScriptContextTable>(),
             global_symbol_registry: smi_slot::<FixedArray>(),
@@ -386,6 +391,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.object_prototype.as_raw());
         visitor.visit(self.array_prototype.as_raw());
         visitor.visit(self.function_prototype.as_raw());
+        visitor.visit(self.throw_type_error.as_raw());
         visitor.visit(self.global_object.as_raw());
         visitor.visit(self.script_context_table.as_raw());
         visitor.visit(self.global_symbol_registry.as_raw());

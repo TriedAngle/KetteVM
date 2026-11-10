@@ -16,6 +16,8 @@ pub struct JsKnown {
     pub eval_function: GcSlot<vm_core::Object>,
     /// `%Object.prototype.toString%`, kept even if the property is replaced.
     pub object_to_string: GcSlot<vm_core::Object>,
+    /// `%Array.prototype.values%`, the arguments object's `@@iterator`.
+    pub array_values: GcSlot<Object>,
     /// `@@iterator`
     pub iterator_symbol: GcSlot<Symbol>,
     /// `@@toStringTag`
@@ -94,6 +96,7 @@ impl Default for JsKnown {
             strings: JsStrings::default(),
             eval_function: smi_slot(),
             object_to_string: smi_slot(),
+            array_values: smi_slot(),
             iterator_symbol: smi_slot(),
             to_string_tag_symbol: smi_slot(),
             date_prototype: smi_slot(),
@@ -111,6 +114,7 @@ impl EdgeVisitable for JsKnown {
         self.strings.visit_edges(visitor);
         visitor.visit(self.eval_function.as_raw());
         visitor.visit(self.object_to_string.as_raw());
+        visitor.visit(self.array_values.as_raw());
         visitor.visit(self.iterator_symbol.as_raw());
         visitor.visit(self.to_string_tag_symbol.as_raw());
         visitor.visit(self.date_prototype.as_raw());

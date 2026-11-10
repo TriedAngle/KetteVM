@@ -392,6 +392,7 @@ fn op_load_keyed_property(frame: Frame) {
         && idx >= 0
     {
         if let Some(obj) = recv.as_heap_object()
+            && !obj.as_ref().map(heap).kind().is_arguments()
             && let Some(v) = obj.as_ref().element_value_dense(heap, idx as usize)
         {
             frame.set_acc(v);
@@ -421,6 +422,7 @@ fn op_load_keyed_property_reg(frame: Frame) {
         && idx >= 0
     {
         if let Some(obj) = recv.as_heap_object()
+            && !obj.as_ref().map(heap).kind().is_arguments()
             && let Some(v) = obj.as_ref().element_value_dense(heap, idx as usize)
         {
             frame.set_acc(v);
@@ -447,6 +449,7 @@ fn op_load_element_imm(frame: Frame) {
     let idx = frame.unsigned::<1>();
     let fb = frame.unsigned::<2>();
     if let Some(obj) = recv.as_heap_object()
+        && !obj.as_ref().map(heap).kind().is_arguments()
         && let Some(v) = obj.as_ref().element_value_dense(heap, idx)
     {
         frame.set_acc(v);

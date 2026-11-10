@@ -7,9 +7,10 @@ use crate::{
     AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle,
-    HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, NativeIndex,
-    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
-    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind,
+    NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
+    Result, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
+    Visitor,
 };
 
 /// What a set action did, for callers that only need to update caches.
@@ -37,17 +38,18 @@ impl Object {
 
     pub fn callable_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, CallableInfoObject>> {
         let kind = self.map(heap).kind();
-        // TODO: this is not clean, we should separate callability from layout
-        if !kind.is_callable() || kind.is_bound() {
+        if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
             return None;
         }
-        let info = self.slots(heap).at(heap, 0);
-        // the callable map's slot 0 is always its CallableInfoObject
-        Some(unsafe { info.cast() })
+        // every non-exotic callable is laid out as [info, context]
+        self.slots(heap)
+            .at(heap, 0)
+            .get_as::<CallableInfoObject>(heap)
     }
 
     pub fn closure_context<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ContextObject>> {
-        if !self.map(heap).kind().is_callable() {
+        let kind = self.map(heap).kind();
+        if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
             return None;
         }
         self.slots
@@ -61,26 +63,6 @@ impl Object {
         self.callable_info(heap)
             .expect("callable must have callable info")
             .constant_slot_name(heap, idx)
-    }
-
-    #[inline]
-    pub fn runtime_index(&self, heap: &Heap) -> Option<usize> {
-        if !self.map(heap).kind().is_native() {
-            return None;
-        }
-        let idx = Smi::decode(self.slots(heap).at(heap, 0).raw())?.value();
-        usize::try_from(idx).ok()
-    }
-
-    /// The NATIVE-kind slot-0 Smi decoded to a call target half: the
-    /// value is the callee's registry runtime index.
-    #[inline]
-    pub fn runtime_call_target<'a>(&self, heap: &'a Heap) -> Option<CallTarget<'a>> {
-        if !self.map(heap).kind().is_native() {
-            return None;
-        }
-        let idx = Smi::decode(self.slots(heap).at(heap, 0).raw())?.value();
-        Some(CallTarget::Native(NativeIndex(usize::try_from(idx).ok()?)))
     }
 
     #[inline(always)]
@@ -394,13 +376,13 @@ impl<'a> Tagged<'a, Value> {
         if !kind.is_callable() {
             return None;
         }
-        if kind.is_native() {
-            return obj.runtime_call_target(heap);
-        }
         // every non-runtime callable object is laid out with
         // `[callable info, context]` in its first two slots
         let slots = obj.slots(heap);
         let info = unsafe { slots.at(heap, 0).cast::<CallableInfoObject>() };
+        if let Some(index) = info.native_index(heap) {
+            return Some(CallTarget::Native(index));
+        }
         let context = unsafe { slots.at(heap, 1).cast::<ContextObject>() };
         let descriptor = info.descriptor.to_smi_unchecked().value() as u64;
         let register_count = (descriptor & 0xffff) as usize;
@@ -417,21 +399,6 @@ impl<'a> Tagged<'a, Value> {
             info,
             context,
             kind,
-        })
-    }
-
-    #[inline]
-    pub fn bytecode_target(self, heap: &'a Heap) -> Option<CallTarget<'a>> {
-        let obj = self.as_heap_object()?;
-        let slots = obj.slots(heap);
-        let info = unsafe { slots.at(heap, 0).cast::<CallableInfoObject>() };
-        let context = unsafe { slots.at(heap, 1).cast::<ContextObject>() };
-        let descriptor = info.descriptor.to_smi_unchecked().value() as u64;
-        Some(CallTarget::Bytecode {
-            target: obj,
-            info,
-            context,
-            kind: FunctionKind::decode(((descriptor >> 32) & 0xf) as i64),
         })
     }
 }
@@ -587,11 +554,15 @@ impl Object {
             let is_array = obj.is_array(heap);
             (scope.handle(dict), obj.length(), is_array)
         };
-        match dict.as_tagged(heap).classify(heap, i) {
+        let existing = match dict.as_tagged(heap).classify(heap, i) {
             EntryClass::ReadOnly | EntryClass::Accessor => return,
-            EntryClass::Data | EntryClass::Absent => {}
-        }
-        if matches!(dict.as_tagged(heap).classify(heap, i), EntryClass::Absent) {
+            EntryClass::Data => dict
+                .as_tagged(heap)
+                .find(heap, i)
+                .map(|entry| dict.as_tagged(heap).details_at(heap, entry)),
+            EntryClass::Absent => None,
+        };
+        if existing.is_none() {
             let cap_words = dict.as_tagged(heap).capacity() * NumberDictionary::ENTRY_SIZE;
             // only arrays have a logical length to preserve when densifying
             let needed = if is_array {
@@ -608,7 +579,8 @@ impl Object {
                 return;
             }
         }
-        let table = NumberDictionary::insert(heap, scope, &dict, i, *value, DETAILS_DATA);
+        let details = existing.unwrap_or(DETAILS_DATA);
+        let table = NumberDictionary::insert(heap, scope, &dict, i, *value, details);
         let obj = receiver.as_tagged(heap);
         if table.as_tagged(heap) != dict.as_tagged(heap) {
             obj.elements
@@ -926,11 +898,92 @@ impl Object {
     }
 }
 
+impl<'a> Tagged<'a, Object> {
+    /// `[[ParameterMap]]`: `None` for unmapped arguments objects.
+    /// Layout of the internal map: `[context, index0, slot0, ...]`; deleted
+    /// entries are holes (the map itself is never observable).
+    pub fn arguments_parameter_map(self, heap: &'a Heap) -> Option<Tagged<'a, FixedArray>> {
+        if !self.map(heap).kind().is_arguments() {
+            return None;
+        }
+        self.slots(heap).at(heap, 0).get_as::<FixedArray>(heap)
+    }
+
+    /// The environment binding an arguments index maps to.
+    pub fn arguments_mapping(
+        self,
+        heap: &'a Heap,
+        index: usize,
+    ) -> Option<(Tagged<'a, ContextObject>, usize)> {
+        let map = self.arguments_parameter_map(heap)?;
+        if map.len() < 3 {
+            return None;
+        }
+        let context = map.at(heap, 0).get_as::<ContextObject>(heap)?;
+        let mut i = 1;
+        while i + 1 < map.len() {
+            if map.at(heap, i).to_i64() == Some(index as i64) {
+                let slot = map.at(heap, i + 1).to_i64()?;
+                return usize::try_from(slot).ok().map(|slot| (context, slot));
+            }
+            i += 2;
+        }
+        None
+    }
+
+    /// `Get(map, P)`: the current value of the mapped parameter binding.
+    pub fn arguments_mapped_value(self, heap: &'a Heap, index: usize) -> Option<Tagged<'a, Value>> {
+        let (context, slot) = self.arguments_mapping(heap, index)?;
+        let slots = context.slots.get(heap);
+        (slot < slots.len()).then(|| slots.at(heap, slot))
+    }
+
+    /// `Set(map, P, V, false)`: writes the mapped parameter binding.
+    pub fn arguments_mapped_set(self, heap: &Heap, index: usize, value: Tagged<'_, Value>) {
+        let Some((context, slot)) = self.arguments_mapping(heap, index) else {
+            return;
+        };
+        let slots = context.slots.get(heap);
+        if slot < slots.len() {
+            slots.set(heap, slot, value);
+        }
+    }
+
+    /// `Delete(map, P)`: breaks the index-to-parameter correspondence.
+    pub fn arguments_remove_mapping(self, heap: &Heap, index: usize) {
+        let Some(map) = self.arguments_parameter_map(heap) else {
+            return;
+        };
+        let hole = heap.known().the_hole.get(heap).erase();
+        let mut i = 1;
+        while i + 1 < map.len() {
+            if map.at(heap, i).to_i64() == Some(index as i64) {
+                map.set(heap, i, hole);
+                return;
+            }
+            i += 2;
+        }
+    }
+}
+
 pub struct ObjectInit<'a> {
     pub map: Handle<'a, Map>,
     pub slots: Handle<'a, FixedArray>,
     pub elements: Handle<'a, FixedArray>,
     pub length: usize,
+}
+
+/// Fresh arguments object inputs (ES 10.4.4.6 / 10.4.4.7).
+pub struct ArgumentsCreate<'a> {
+    /// The actual argument list (`argList`).
+    pub values: HandleSlice<'a>,
+    /// `callee`: the function being invoked (mapped arguments only).
+    pub function: Handle<'a, Value>,
+    /// Internal `[[ParameterMap]]` metadata; `None` for unmapped objects.
+    pub parameter_map: Option<Handle<'a, FixedArray>>,
+    pub iterator_key: Handle<'a, SlotName>,
+    pub iterator: Handle<'a, Value>,
+    pub throw_type_error: Handle<'a, Value>,
 }
 
 pub struct ObjectSlotsInit<'m, 'v> {
@@ -1120,6 +1173,106 @@ impl Object {
         }
 
         function.as_tagged(heap)
+    }
+
+    /// `CreateUnmappedArgumentsObject ( argList )`
+    /// [ES 10.4.4.6](https://tc39.es/ecma262/#sec-createunmappedargumentsobject)
+    /// `CreateMappedArgumentsObject` shares this shape; `parameter_map`
+    /// carries the internal mapping metadata (never exposed to JS).
+    pub fn create_arguments<'h>(
+        heap: &'h mut Heap,
+        scope: &HandleScope<'_>,
+        init: ArgumentsCreate<'_>,
+    ) -> Tagged<'h, Object> {
+        let kind = MapKind::OBJECT
+            .union(MapKind::EXTENDABLE)
+            .union(MapKind::ARGUMENTS);
+        let map = heap.allocate_handle::<Map>(
+            MapInit {
+                kind,
+                value_slot_count: 1,
+                descriptors: &[],
+                prototype: heap
+                    .known()
+                    .object_prototype
+                    .get_handle(heap, scope)
+                    .erase(),
+            },
+            scope,
+        );
+        let elements = if init.values.is_empty() {
+            scope.handle(heap.known().empty_fixed_array.get(heap))
+        } else {
+            heap.allocate_handle::<FixedArray>(init.values, scope)
+        };
+        let parameter_map = match init.parameter_map {
+            Some(map) => map.as_tagged(heap).erase(),
+            None => heap.known().undefined.get(heap).erase(),
+        };
+        let obj = scope.handle(heap.allocate_object(
+            scope,
+            ObjectSlotsInit {
+                map,
+                values: scope.stage(&[parameter_map]),
+                elements,
+                length: init.values.len(),
+            },
+        ));
+
+        let length_key = heap.known().strings.length.get_handle(heap, scope);
+        assert!(
+            Object::define_own_property_ordinary(
+                heap,
+                scope,
+                obj,
+                length_key,
+                PropertyDescriptor::Data {
+                    value: scope.handle(Smi::new(init.values.len() as i64).into_tagged()),
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )
+            .expect("arguments length define"),
+            "arguments length is configurable"
+        );
+        let callee_key = heap.known().strings.callee.get_handle(heap, scope);
+        let callee = match init.parameter_map {
+            Some(_) => PropertyDescriptor::Data {
+                value: init.function,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+            None => PropertyDescriptor::Accessor {
+                get: init.throw_type_error,
+                set: init.throw_type_error,
+                enumerable: false,
+                configurable: false,
+            },
+        };
+        assert!(
+            Object::define_own_property_ordinary(heap, scope, obj, callee_key, callee)
+                .expect("arguments callee define"),
+            "fresh arguments object accepts callee"
+        );
+        assert!(
+            Object::define_own_property_ordinary(
+                heap,
+                scope,
+                obj,
+                init.iterator_key,
+                PropertyDescriptor::Data {
+                    value: init.iterator,
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )
+            .expect("arguments iterator define"),
+            "arguments iterator is configurable"
+        );
+        obj.as_tagged(heap)
     }
 
     pub fn to_primitive<'a>(

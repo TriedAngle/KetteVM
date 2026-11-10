@@ -61,7 +61,7 @@ pub fn push_callee_frame<'a>(
     let undefined = roots.undefined.get(heap).erase();
     // the pushed frame's code, straight from the callee's info:
     // `push_frame` does not allocate, so it cannot go stale
-    let bytecode = callee.info.as_ref().code.get(heap);
+    let bytecode = callee.info.as_ref().code(heap).expect("bytecode callee");
     let Some(frame) = x.stack().push_frame(heap, meta, callee, undefined, args) else {
         return Err(CallFault::Raise(VmError::StackOverflow));
     };
@@ -83,7 +83,7 @@ pub fn push_callee_frame_values<'a>(
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
-    let bytecode = callee.info.as_ref().code.get(heap);
+    let bytecode = callee.info.as_ref().code(heap).expect("bytecode callee");
     let Some(frame) = x
         .stack()
         .push_frame_values(heap, meta, callee, undefined, values)
@@ -524,7 +524,7 @@ pub fn construct_start(
     if !derived && kind != FunctionKind::Normal && kind != FunctionKind::BaseClassConstructor {
         return Ok(ConstructStart::Slow);
     }
-    let bytecode = info.as_ref().code.get(x.heap());
+    let bytecode = info.as_ref().code(x.heap()).expect("bytecode callee");
     let Some(frame) = x.stack().push_frame(
         x.heap(),
         x.caller_meta(pc + size, pc),

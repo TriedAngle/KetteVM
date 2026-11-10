@@ -190,14 +190,20 @@ impl<'s> Lookup<'s> {
                         flags: flags.union(SlotFlags::ACCESSOR),
                     });
                 }
+                let value = o
+                    .arguments_mapped_value(heap, i)
+                    .unwrap_or_else(|| dict.value_at(heap, entry));
                 return Some(Hit::Element {
                     holder: o,
                     index: i,
-                    value: dict.value_at(heap, entry),
+                    value,
                     flags,
                 });
             }
             if let Some(value) = o.element_value(heap, i) {
+                // arguments exotic [[Get]]: a mapped index reads the
+                // parameter binding, not the stored element copy
+                let value = o.arguments_mapped_value(heap, i).unwrap_or(value);
                 return Some(Hit::Element {
                     holder: o,
                     index: i,

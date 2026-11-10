@@ -48,7 +48,7 @@ fn callable<'s>(
         thread.heap().allocate_handle::<FixedArray>(staged, scope)
     };
     let info = thread.heap().allocate_handle::<CallableInfoObject>(
-        CallableInfoInit {
+        CallableInfoInit::Bytecode {
             expected_slots: 0,
             code,
             constants,

@@ -196,7 +196,7 @@ fn materialize_function<'s>(
     };
 
     let info = heap.allocate_handle::<CallableInfoObject>(
-        CallableInfoInit {
+        CallableInfoInit::Bytecode {
             code,
             constants,
             register_count: function.register_count as usize,

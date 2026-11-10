@@ -613,7 +613,7 @@ impl Stack {
         register_count: usize,
     ) -> FrameMeta {
         let info = callee.info;
-        let code = info.code.get(heap);
+        let code = info.code(heap).expect("bytecode frame requires Code");
         let constants = info.constants.get(heap);
         let feedback = info
             .feedback

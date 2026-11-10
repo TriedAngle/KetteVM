@@ -74,10 +74,10 @@ pub use native::{
     HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject,
-    Cell, CellInit, Code, CodeInit, ContextInit, ContextObject, DETAILS_ACCESSOR,
-    DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler,
-    DataHandlerInit, DenseString, ElementsKind, Encoding, EntryClass, FeedbackVector,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CallTarget, CallableInfoInit,
+    CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject,
+    DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
+    DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, EntryClass, FeedbackVector,
     FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, GlobalLexicalBinding,
     HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
     INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,

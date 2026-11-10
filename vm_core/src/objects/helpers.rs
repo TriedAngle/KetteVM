@@ -1,6 +1,8 @@
 use crate::{
-    DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, Result, Smi, Tagged, Thread, ThreadState, VM, Value, WellKnown,
+    CallableInfoInit, CallableInfoObject, DenseString, Float, FunctionKind, Handle, HandleScope,
+    HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex, Object, PropertyDescriptor, Prototype,
+    Result, SlotFlags, SlotName, Smi, Tagged, Thread, ThreadState, VM, Value, WellKnown,
+    mode_from_strict,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -41,8 +43,9 @@ impl Object {
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
+        length: u32,
     ) -> Handle<'s, Object> {
-        Self::make_native_object(heap, scope, index, true)
+        Self::make_native_object(heap, scope, index, true, length)
     }
 
     /// Callable only: `new f()` throws TypeError ([[Call]] without [[Construct]]).
@@ -50,8 +53,54 @@ impl Object {
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
+        length: u32,
     ) -> Handle<'s, Object> {
-        Self::make_native_object(heap, scope, index, false)
+        Self::make_native_object(heap, scope, index, false, length)
+    }
+
+    /// Drop `EXTENDABLE` without touching any descriptor. Used for
+    /// intrinsics that must be created extensible and then frozen.
+    pub fn make_non_extensible(heap: &mut Heap, scope: &HandleScope<'_>, obj: Handle<'_, Object>) {
+        let (kind, value_slot_count, prototype, descriptors) = {
+            let map = obj.as_tagged(heap).map(heap);
+            let kind = map.kind();
+            if !kind.is_extendable() {
+                return;
+            }
+            let descriptors: Vec<(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>)> = map
+                .descriptors()
+                .iter()
+                .map(|d| {
+                    (
+                        scope.handle(d.name(heap)),
+                        d.flags(),
+                        scope.handle(d.value.get(heap)),
+                    )
+                })
+                .collect();
+            (
+                kind,
+                map.value_slot_count(),
+                scope.handle(map.prototype.get(heap)),
+                descriptors,
+            )
+        };
+        let new_map = heap.allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::new(kind.bits() & !MapKind::EXTENDABLE.bits()),
+                value_slot_count,
+                descriptors: &descriptors,
+                prototype,
+            },
+            scope,
+        );
+        let old_map = obj.as_tagged(heap).map(heap);
+        Prototype::shape_changed(heap, old_map);
+        obj.as_tagged(heap).header.map.set(
+            heap,
+            obj.as_tagged(heap).erase(),
+            new_map.as_tagged(heap),
+        );
     }
 
     fn make_native_object<'s>(
@@ -59,37 +108,54 @@ impl Object {
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
         constructor: bool,
+        length: u32,
     ) -> Handle<'s, Object> {
-        let mut kind = MapKind::OBJECT
-            .union(MapKind::CALLABLE)
-            .union(MapKind::NATIVE)
-            .union(MapKind::EXTENDABLE);
-        if constructor {
-            kind = kind.union(MapKind::CONSTRUCTOR);
-        }
-        let map = heap.allocate_handle::<Map>(
-            MapInit {
-                kind,
-                value_slot_count: 2,
-                descriptors: &[],
-                prototype: heap
-                    .known()
-                    .function_prototype
-                    .get_handle(heap, scope)
-                    .erase(),
+        let info = heap.allocate_handle::<CallableInfoObject>(
+            CallableInfoInit::Native {
+                index,
+                mode: mode_from_strict(true),
             },
             scope,
         );
+        info.as_tagged(heap).set_metadata_full(
+            heap,
+            None,
+            0,
+            length as usize,
+            FunctionKind::Normal,
+        );
+        let map = if constructor {
+            heap.known().function_map.get_handle(heap, scope)
+        } else {
+            heap.known()
+                .non_constructor_function_map
+                .get_handle(heap, scope)
+        };
         let empty_context = heap.known().empty_context.get_handle(heap, scope);
         let obj = heap.new_object(
             scope,
             map,
             scope.stage(&[
-                Smi::new(index.0 as i64).into_tagged(),
+                info.as_tagged(heap).erase(),
                 empty_context.as_tagged(heap).erase(),
             ]),
         );
-        scope.handle(obj)
+        let obj = scope.handle(obj);
+        let length_name = heap.known().strings.length.get_handle(heap, scope);
+        Object::define_own_property_ordinary(
+            heap,
+            scope,
+            obj,
+            length_name,
+            PropertyDescriptor::Data {
+                value: scope.handle(Smi::new(length as i64).into_tagged()),
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        )
+        .expect("install builtin length");
+        obj
     }
 
     pub fn install_constructor<'s>(
@@ -98,8 +164,9 @@ impl Object {
         index: NativeIndex,
         name: &str,
         proto_parent: Handle<'_, Object>,
+        length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
-        Self::install_constructor_with(thread, scope, index, name, proto_parent, None)
+        Self::install_constructor_with(thread, scope, index, name, proto_parent, None, length)
     }
 
     /// Like [`Object::install_constructor`], but the prototype object is
@@ -111,8 +178,17 @@ impl Object {
         name: &str,
         proto_parent: Handle<'_, Object>,
         value: Handle<'_, Value>,
+        length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
-        Self::install_constructor_with(thread, scope, index, name, proto_parent, Some(value))
+        Self::install_constructor_with(
+            thread,
+            scope,
+            index,
+            name,
+            proto_parent,
+            Some(value),
+            length,
+        )
     }
 
     fn install_constructor_with<'s>(
@@ -122,9 +198,10 @@ impl Object {
         name: &str,
         proto_parent: Handle<'_, Object>,
         wrapper: Option<Handle<'_, Value>>,
+        length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
         let name_str = thread.intern(scope, name);
-        let fn_obj = Self::native_constructor(thread.heap(), scope, index);
+        let fn_obj = Self::native_constructor(thread.heap(), scope, index, length);
         Self::set_builtin_name(thread, scope, fn_obj, name);
 
         // prototype object: fresh extendable object chained to proto_parent
@@ -218,6 +295,11 @@ impl Object {
             PropertyDescriptor::non_enumerable(name_str.erase()),
         )
         .expect("install builtin name");
+        let (_vm, heap, _state) = thread.split();
+        if let Some(info) = function.as_tagged(heap).callable_info(heap) {
+            info.as_ref()
+                .set_name(heap, Some(name_str.as_tagged(heap).erase()));
+        }
     }
 
     pub fn install_method(
@@ -226,8 +308,9 @@ impl Object {
         receiver: Handle<'_, Object>,
         name: &str,
         index: NativeIndex,
+        length: u32,
     ) {
-        let method = Self::native_function(thread.heap(), scope, index);
+        let method = Self::native_function(thread.heap(), scope, index, length);
         let name_str = thread.intern(scope, name);
         let method_name = scope.handle(name_str.as_tagged(thread.heap()));
         Self::set_builtin_name(thread, scope, method, name);

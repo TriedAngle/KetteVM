@@ -63,7 +63,7 @@ pub fn proxy_revocable<'a>(
         // built-in function with [[RevocableProxy]]; the revocation itself
         // is idempotent, so no done-flag is needed). A bound function has
         // no `prototype` own property, like a built-in.
-        let target = Object::native_function(heap, &scope, idx.proxy_revoke);
+        let target = Object::native_function(heap, &scope, idx.proxy_revoke, 0);
         let bound_args =
             scope.handle(heap.new_array(&scope, scope.stage(&[proxy.as_tagged(heap)])));
         let map = vm.known().bound_function_map.get_handle(heap, &scope);
