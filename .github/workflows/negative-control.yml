@@ -75,16 +75,18 @@ jobs:
 
       - name: Parse the PR-body blocks
         id: parse
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           python3 - <<'PY'
           import json, os, sys
 
-          # The event payload carries the body (no API call, no gh
-          # dependency - the container image ships no gh CLI; the
-          # `edited` trigger re-fires with the updated body).
-          body = os.environ.get("PR_BODY") or ""
+          # Read the body from the raw event file (byte-faithful, no
+          # API call, no gh dependency - the container image ships no
+          # gh CLI). Interpolating the body through env: ${{ }} YAML-
+          # folds multi-line values: blank lines are eaten and lines
+          # run together, which hides the "Negative Control:" marker.
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              event = json.load(f)
+          body = (event.get("pull_request") or {}).get("body") or ""
 
           branches = []
           cosmetic = []
