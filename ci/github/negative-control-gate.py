@@ -106,6 +106,12 @@ def runner_of(file):
     parts = file.split("/tests/")
     if len(parts) == 2 and parts[0] and parts[1].endswith(".rs"):
         return ("cargo", (parts[0].split("/")[-1], parts[1][:-3]))
+    # Inline #[cfg(test)] tests inside a crate's own sources run via
+    # the lib target; the span path is already module-qualified
+    # (e.g. "tests::inline_add_works") and fits --exact directly.
+    parts = file.split("/src/")
+    if len(parts) == 2 and parts[0] and parts[1] in ("lib.rs", "main.rs"):
+        return ("unit", (parts[0].split("/")[-1],))
     return None
 
 def run_file(file, check=False):
@@ -123,6 +129,10 @@ def run_test(file, path, check=False):
         return None
     if r[0] == "regression":
         return run_file(file, check=check)
+    if r[0] == "unit":
+        (pkg,) = r[1]
+        return sh("cargo", "test", "--locked", "-p", pkg, "--lib", "--",
+                  path, "--exact", check=check)
     pkg, stem = r[1]
     # The filter and --exact must be SEPARATE argv elements — a single
     # "path --exact" string matches no test and passes vacuously (the
