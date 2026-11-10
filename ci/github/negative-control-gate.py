@@ -191,4 +191,3 @@ if missed:
         print(f"   {f} :: {p}")
     sys.exit(1)
 print("gate ok: every changed test fails on at least one branch")
-P

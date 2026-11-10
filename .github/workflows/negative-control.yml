@@ -81,9 +81,9 @@ jobs:
 
           # Read the body from the raw event file (byte-faithful, no
           # API call, no gh dependency - the container image ships no
-          # gh CLI). Interpolating the body through env: ${{ }} YAML-
-          # folds multi-line values: blank lines are eaten and lines
-          # run together, which hides the "Negative Control:" marker.
+          # gh CLI). Interpolating the body through an env mapping
+          # YAML-folds multi-line values: blank lines are eaten and
+          # lines run together, hiding the "Negative Control:" marker.
           with open(os.environ["GITHUB_EVENT_PATH"]) as f:
               event = json.load(f)
           body = (event.get("pull_request") or {}).get("body") or ""
