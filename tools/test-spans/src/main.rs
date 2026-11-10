@@ -8,9 +8,11 @@
 //! identical modulo whitespace.
 //!
 //! Usage: test-spans <file.rs>
-//! Output: `[{"path":"mod::name","start":10,"end":20},...]`
+//! Output: `[{"path":"mod::name","kind":"fn","start":10,"end":20},...]`
 //! (1-based, inclusive; the span starts at the attribute so edits to
-//! `#[...]` count as test edits.)
+//! `#[...]` count as test edits).  `kind` is `"fn"` for a runnable
+//! test function and `"mod"` for a whole `#[cfg(test)]` region: the
+//! gate diffs both, but only `fn` spans map to a test runner.
 
 use ra_ap_syntax::ast::{HasAttrs, HasName};
 use ra_ap_syntax::{AstNode, Edition, SyntaxKind, SyntaxNode, TextSize, ast};
@@ -18,6 +20,9 @@ use ra_ap_syntax::{AstNode, Edition, SyntaxKind, SyntaxNode, TextSize, ast};
 #[derive(serde::Serialize)]
 pub struct Span {
     pub path: String,
+    /// "fn" — a runnable test; "mod" — a cfg(test) region (diffed but
+    /// never run: `cargo test -- mod --exact` matches nothing).
+    pub kind: &'static str,
     pub start: u32,
     pub end: u32,
 }
@@ -126,6 +131,7 @@ fn push_span(item: &ast::Item, node: &SyntaxNode, prefix: &str, text: &str, out:
     };
     out.push(Span {
         path,
+        kind: if is_module { "mod" } else { "fn" },
         start: line_of(text, range.start()),
         end: line_of(text, range.end()),
     });

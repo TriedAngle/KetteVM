@@ -13,8 +13,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import region_diff
 
-import region_diff
-
 branches = json.loads(os.environ["BRANCHES"])
 cosmetic = set(json.loads(os.environ.get("COSMETIC", "[]")))
 base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
@@ -52,6 +50,7 @@ for t in touched:
 # This is the coverage unit now: a test (by span path).
 head_texts, base_texts = {}, {}
 changed_tests = {}   # (file, test_path) -> kind
+span_kind = {}       # (file, test_path) -> "fn" | "mod"
 for f in touched:
     b = sh("git", "show", f"{base}:{f}", check=False).stdout
     h = sh("git", "show", f"{head}:{f}", check=False).stdout
@@ -60,6 +59,10 @@ for f in touched:
     base_texts[f], head_texts[f] = b, h
     sp_a = spans_for(f, b) or []
     sp_h = spans_for(f, h) or []
+    for s in sp_h:
+        span_kind[(f, s["path"])] = s.get("kind", "fn")
+    for s in sp_a:
+        span_kind.setdefault((f, s["path"]), s.get("kind", "fn"))
     for path, kind in region_diff.changed_test_regions(f, sp_a, b, sp_h, h):
         changed_tests[(f, path)] = kind
 if not changed_tests:
@@ -75,6 +78,11 @@ dropped = [(f, p) for (f, p) in changed_tests if p in cosmetic or f"{f}::{p}" in
 for d in dropped:
     print(f"   cosmetic opt-out: {d[0]} :: {d[1]} (human-verified)")
 need = {k: v for k, v in changed_tests.items() if k not in dropped}
+# Coverage is about RUNNABLE tests: a cfg(test) MODULE span ("mod")
+# is diffed by rule 1 but maps to no test (cargo test -- mod
+# --exact matches nothing); a removed test no longer runs anywhere.
+need = {k: v for k, v in need.items()
+        if span_kind.get(k, "fn") != "mod" and v != "removed"}
 if not need:
     print("gate ok: every changed test is cosmetic-opt-out")
     sys.exit(0)
