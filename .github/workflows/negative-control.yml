@@ -126,7 +126,7 @@ jobs:
           set -eu
           python3 - <<'PY'
           import json, os, subprocess, sys
-          sys.path.insert(0, "ci/github")
+          sys.path.insert(0, os.path.join(os.environ.get("GITHUB_WORKSPACE", os.getcwd()), "ci/github"))
           import region_diff
 
           branches = json.loads(os.environ["BRANCHES"])

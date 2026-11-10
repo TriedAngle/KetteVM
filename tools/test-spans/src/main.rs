@@ -12,8 +12,8 @@
 //! (1-based, inclusive; the span starts at the attribute so edits to
 //! `#[...]` count as test edits.)
 
-use ra_ap_syntax::{ast, AstNode, Edition, SyntaxKind, SyntaxNode, TextSize};
 use ra_ap_syntax::ast::{HasAttrs, HasName};
+use ra_ap_syntax::{AstNode, Edition, SyntaxKind, SyntaxNode, TextSize, ast};
 
 #[derive(serde::Serialize)]
 pub struct Span {
@@ -50,7 +50,10 @@ fn walk(node: &SyntaxNode, prefix: &str, text: &str, out: &mut Vec<Span>) {
         // and inspect; recurse into nesting containers through their
         // ITEM_LIST (a MODULE's items are children of the list, not
         // of the module node itself).
-        if matches!(kind, SyntaxKind::MODULE | SyntaxKind::IMPL | SyntaxKind::TRAIT) {
+        if matches!(
+            kind,
+            SyntaxKind::MODULE | SyntaxKind::IMPL | SyntaxKind::TRAIT
+        ) {
             if let Some(item) = ast::Item::cast(child.clone()) {
                 let attrs: Vec<String> = item.attrs().map(|a| a.to_string()).collect();
                 let cfg_test = attrs.iter().any(|a| a.contains("cfg(test)"));
@@ -81,7 +84,9 @@ fn walk(node: &SyntaxNode, prefix: &str, text: &str, out: &mut Vec<Span>) {
         if kind == SyntaxKind::FN {
             if let Some(item) = ast::Item::cast(child.clone()) {
                 let attrs: Vec<String> = item.attrs().map(|a| a.to_string()).collect();
-                if attrs.iter().any(|a| is_test_attr(a)) || attrs.iter().any(|a| a.contains("cfg(test)")) {
+                if attrs.iter().any(|a| is_test_attr(a))
+                    || attrs.iter().any(|a| a.contains("cfg(test)"))
+                {
                     push_span(&item, &child, prefix, text, out);
                 }
             }
@@ -126,11 +131,10 @@ fn push_span(item: &ast::Item, node: &SyntaxNode, prefix: &str, text: &str, out:
     });
 }
 
-
-
-
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: test-spans <file.rs>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: test-spans <file.rs>");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let spans = spans(&text);
     println!("{}", serde_json::to_string(&spans).unwrap());
