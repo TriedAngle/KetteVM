@@ -33,7 +33,7 @@ pub use context::{
 pub use data_handler::{DataHandler, DataHandlerInit};
 pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
-    EntryClass, NumberDictionary, NumberDictionaryInit,
+    NumberDictionary, NumberDictionaryInit,
 };
 pub use feedback::{FeedbackVector, FeedbackVectorInit};
 pub use float::Float;

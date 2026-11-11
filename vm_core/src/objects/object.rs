@@ -1,11 +1,11 @@
 use crate::{
     AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
-    EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle,
-    HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind,
-    NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
-    Result, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
-    Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
+    EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
+    HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
+    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
+    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    VmError, WrapperKind, bail, errors::Errors, raise_runtime,
 };
 use core::alloc::Layout;
 
@@ -550,15 +550,19 @@ impl Object {
             let is_array = obj.is_array_exotic(heap);
             (scope.handle(dict), obj.length(), is_array)
         };
-        let existing = match dict.as_tagged(heap).classify(heap, i) {
-            EntryClass::ReadOnly | EntryClass::Accessor => return,
-            EntryClass::Data => dict
-                .as_tagged(heap)
-                .find(heap, i)
-                .map(|entry| dict.as_tagged(heap).details_at(heap, entry)),
-            EntryClass::Absent => None,
-        };
-        if existing.is_none() {
+        // `[[Set]]` may only overwrite plain writable data. The probe also
+        // yields the entry so a hit writes value and details in place.
+        let existing = dict
+            .as_tagged(heap)
+            .find(heap, i)
+            .map(|entry| (entry, dict.as_tagged(heap).details_at(heap, entry)));
+        if let Some((entry, details)) = existing {
+            if details & (DETAILS_ACCESSOR | DETAILS_WRITABLE) != DETAILS_WRITABLE {
+                return;
+            }
+            dict.as_tagged(heap)
+                .set_entry(heap, entry, value.as_tagged(heap), details);
+        } else {
             let cap_words = dict.as_tagged(heap).capacity() * NumberDictionary::ENTRY_SIZE;
             // only arrays have a logical length to preserve when densifying
             let needed = if is_array {
@@ -574,14 +578,14 @@ impl Object {
                 Self::store_array_element(heap, scope, receiver, i, value);
                 return;
             }
+            let table = NumberDictionary::insert(heap, scope, &dict, i, *value, DETAILS_DATA);
+            let obj = receiver.as_tagged(heap);
+            if table.as_tagged(heap) != dict.as_tagged(heap) {
+                obj.elements
+                    .set(heap, obj.erase(), table.as_tagged(heap).erase());
+            }
         }
-        let details = existing.unwrap_or(DETAILS_DATA);
-        let table = NumberDictionary::insert(heap, scope, &dict, i, *value, details);
         let obj = receiver.as_tagged(heap);
-        if table.as_tagged(heap) != dict.as_tagged(heap) {
-            obj.elements
-                .set(heap, obj.erase(), table.as_tagged(heap).erase());
-        }
         if is_array && i >= length {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
         }
@@ -628,25 +632,42 @@ impl Object {
         })
     }
 
-    /// `[[DefineOwnProperty]]` for a canonical index. Plain
-    /// `w,e,c` data defines use the dense store; accessors and
-    /// non-default attributes become dictionary entries carrying their
-    /// details. `desc` must already be completed against the current
-    /// element descriptor (see [`Self::element_own_descriptor`]).
+    /// `[[DefineOwnProperty]]` for a canonical index. A full default data
+    /// descriptor reuses the dense store only when the element is absent or
+    /// also has default attributes. Every other case writes a dictionary
+    /// entry carrying the descriptor's details, which covers reconfiguration
+    /// and a matching non-default attribute set in one insert. `desc` must
+    /// already be completed against `existing`.
     pub fn define_element(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         i: usize,
         desc: PropertyDescriptor<'_>,
+        existing: Option<&PropertyDescriptor<'_>>,
     ) -> bool {
         let is_array = receiver.as_tagged(heap).is_array_exotic(heap);
-        if let PropertyDescriptor::Data {
-            value,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-        } = desc
+        // The dense store cannot express attributes other than the default
+        // set, so it is only legal when the element is absent or already
+        // default (`[[Set]]` would then be the same write).
+        let default_attrs = existing.is_none_or(|current| {
+            matches!(
+                current,
+                PropertyDescriptor::Data {
+                    writable: true,
+                    enumerable: true,
+                    configurable: true,
+                    ..
+                }
+            )
+        });
+        if default_attrs
+            && let PropertyDescriptor::Data {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            } = desc
         {
             Self::store_array_element(heap, scope, &receiver, i, &value);
             return true;

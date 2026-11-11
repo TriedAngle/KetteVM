@@ -7,6 +7,10 @@ use vm_core::{
 
 crate::register_natives! {
     number -> number_constructor,
+    number_is_finite,
+    number_is_integer,
+    number_is_nan,
+    number_is_safe_integer,
     number_value_of,
     number_to_string,
     number_to_exponential,
@@ -55,6 +59,67 @@ fn number_constructor<'a>(
         ));
         obj.as_tagged(heap).erase()
     })
+}
+
+/// `Number.isFinite ( number )`
+/// [ES 21.1.2.2](https://tc39.es/ecma262/#sec-number.isfinite)
+/// True only for a Number that is finite; never coerces.
+fn number_is_finite<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let finite = args
+        .get(ctx.heap, 1)
+        .as_number(ctx.heap)
+        .is_some_and(f64::is_finite);
+    Convert::boolean(ctx.heap, finite)
+}
+
+/// `Number.isInteger ( number )`
+/// [ES 21.1.2.3](https://tc39.es/ecma262/#sec-number.isinteger)
+/// True only for an integral Number; never coerces.
+fn number_is_integer<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let integer = args
+        .get(ctx.heap, 1)
+        .as_number(ctx.heap)
+        .is_some_and(|n| n.is_finite() && n.trunc() == n);
+    Convert::boolean(ctx.heap, integer)
+}
+
+/// `Number.isNaN ( number )`
+/// [ES 21.1.2.4](https://tc39.es/ecma262/#sec-number.isnan)
+/// True only for the NaN Number value; never coerces.
+fn number_is_nan<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let nan = args
+        .get(ctx.heap, 1)
+        .as_number(ctx.heap)
+        .is_some_and(f64::is_nan);
+    Convert::boolean(ctx.heap, nan)
+}
+
+/// `Number.isSafeInteger ( number )`
+/// [ES 21.1.2.5](https://tc39.es/ecma262/#sec-number.issafeinteger)
+/// True for an integer in the inclusive range ±(2^53 - 1); never coerces.
+fn number_is_safe_integer<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let safe = args
+        .get(ctx.heap, 1)
+        .as_number(ctx.heap)
+        .is_some_and(|n| n.is_finite() && n.trunc() == n && n.abs() <= MAX_SAFE_INTEGER);
+    Convert::boolean(ctx.heap, safe)
 }
 
 /// `Number.prototype.valueOf ( )`

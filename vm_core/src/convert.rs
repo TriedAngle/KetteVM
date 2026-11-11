@@ -155,6 +155,47 @@ impl Convert {
         Ok(scope.handle(object))
     }
 
+    /// ES 7.1.5 ToIntegerOrInfinity: NaN is +0, otherwise truncated.
+    pub fn to_integer_or_infinity(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        value: Handle<'_, Value>,
+    ) -> Result<f64> {
+        let n = Object::to_numeric(vm, heap, state, value)?;
+        Ok(if n.is_nan() { 0.0 } else { n.trunc() })
+    }
+
+    /// ES 7.1.25 ToAbsoluteIndex: negative integers count from `length`.
+    #[inline(always)]
+    pub fn to_absolute_index(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        value: Handle<'_, Value>,
+        length: u64,
+    ) -> Result<f64> {
+        let int = Self::to_integer_or_infinity(vm, heap, state, value)?;
+        Ok(if int.is_finite() && int < 0.0 {
+            length as f64 + int
+        } else {
+            int
+        })
+    }
+
+    /// ES 7.1.26 ToClampedIndex: ToAbsoluteIndex clamped to `[0, length]`.
+    #[inline(always)]
+    pub fn to_clamped_index(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        value: Handle<'_, Value>,
+        length: u64,
+    ) -> Result<f64> {
+        let index = Self::to_absolute_index(vm, heap, state, value, length)?;
+        Ok(index.clamp(0.0, length as f64))
+    }
+
     /// ES 7.1.6 ToInt32 applied to a number: truncate, reduce mod 2^32,
     /// map the upper half to negatives. NaN and ±∞ are +0.
     pub fn number_to_int32(n: f64) -> i32 {
@@ -182,22 +223,13 @@ impl Convert {
     fn string_to_number(data: StringData<'_>) -> Option<f64> {
         // ES trims the same whitespace set as before the re-encoding;
         // the numeric grammar itself is pure ASCII
-        let is_ws = |c: u16| c == 0x20 || (0x09..=0x0d).contains(&c);
         let unit = |i: usize| data.code_unit(i);
-        let mut lo = 0usize;
-        let mut hi = data.len();
-        while lo < hi && is_ws(unit(lo)) {
-            lo += 1;
-        }
-        while hi > lo && is_ws(unit(hi - 1)) {
-            hi -= 1;
-        }
-        let matches = |lit: &[u8]| {
-            hi - lo == lit.len() && (lo..hi).zip(lit).all(|(i, &b)| unit(i) == b as u16)
-        };
-        if hi == lo {
+        let lo = data.trim_start_index();
+        let hi = data.trim_end_index();
+        if lo >= hi {
             return Some(0.0);
         }
+        let matches = |lit: &[u8]| data.starts_with_at(lo, lit) && lo + lit.len() == hi;
         if matches(b"Infinity") || matches(b"+Infinity") {
             return Some(f64::INFINITY);
         }
@@ -226,6 +258,11 @@ impl Convert {
                 // "0x" with no digits is NaN (empty digit run)
                 return (hi - lo > 2).then_some(acc);
             }
+        }
+        // The whole trimmed text must be one StrDecimalLiteral; Rust's f64
+        // parser is more lenient (`inf`, `nan`), so validate the grammar.
+        if data.decimal_prefix_end(lo) != Some(hi) {
+            return None;
         }
         // any unit above 0x7F cannot participate in a numeric literal
         let bytes: Vec<u8> = (lo..hi)

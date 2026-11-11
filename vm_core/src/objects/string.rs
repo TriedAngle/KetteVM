@@ -25,6 +25,33 @@ pub enum StringData<'a> {
     Utf16(&'a [u16]),
 }
 
+/// ES WhiteSpace or LineTerminator (7.2, 7.3).
+fn is_trim_whitespace(unit: u16) -> bool {
+    if (0x2000..=0x200a).contains(&unit) {
+        return true;
+    }
+    matches!(
+        unit,
+        0x09 | 0x0a
+            | 0x0b
+            | 0x0c
+            | 0x0d
+            | 0x20
+            | 0xa0
+            | 0x1680
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    )
+}
+
+fn is_ascii_digit(unit: u16) -> bool {
+    (0x30..=0x39).contains(&unit)
+}
+
 impl StringData<'_> {
     pub fn len(&self) -> usize {
         match *self {
@@ -67,6 +94,76 @@ impl StringData<'_> {
             StringData::Latin1(b) => b == bytes,
             StringData::Utf16(u) => u.iter().zip(bytes).all(|(c, b)| *c == *b as u16),
         }
+    }
+
+    /// First index that is not ES WhiteSpace or LineTerminator.
+    pub fn trim_start_index(&self) -> usize {
+        let mut i = 0;
+        while i < self.len() && is_trim_whitespace(self.code_unit(i)) {
+            i += 1;
+        }
+        i
+    }
+
+    /// End index (exclusive) of the trailing ES WhiteSpace/LineTerminator run.
+    pub fn trim_end_index(&self) -> usize {
+        let mut end = self.len();
+        while end > 0 && is_trim_whitespace(self.code_unit(end - 1)) {
+            end -= 1;
+        }
+        end
+    }
+
+    /// End of the longest `StrDecimalLiteral` prefix starting at `from`, or
+    /// `None` when no prefix matches (ES 7.1.4.1).
+    pub fn decimal_prefix_end(&self, from: usize) -> Option<usize> {
+        let mut i = from;
+        if i < self.len() && matches!(self.code_unit(i), 0x2b | 0x2d) {
+            i += 1;
+        }
+        if self.starts_with_at(i, b"Infinity") {
+            return Some(i + "Infinity".len());
+        }
+        let int_start = i;
+        while i < self.len() && is_ascii_digit(self.code_unit(i)) {
+            i += 1;
+        }
+        let int_digits = i - int_start;
+        let mut frac_digits = 0;
+        if i < self.len() && self.code_unit(i) == 0x2e {
+            i += 1;
+            let frac_start = i;
+            while i < self.len() && is_ascii_digit(self.code_unit(i)) {
+                i += 1;
+            }
+            frac_digits = i - frac_start;
+        }
+        if int_digits == 0 && frac_digits == 0 {
+            return None;
+        }
+        if i < self.len() && matches!(self.code_unit(i), 0x45 | 0x65) {
+            let mut end = i + 1;
+            if end < self.len() && matches!(self.code_unit(end), 0x2b | 0x2d) {
+                end += 1;
+            }
+            let exp_start = end;
+            while end < self.len() && is_ascii_digit(self.code_unit(end)) {
+                end += 1;
+            }
+            // an empty exponent is not part of the literal
+            if end > exp_start {
+                i = end;
+            }
+        }
+        Some(i)
+    }
+
+    pub fn starts_with_at(&self, at: usize, prefix: &[u8]) -> bool {
+        at + prefix.len() <= self.len()
+            && prefix
+                .iter()
+                .enumerate()
+                .all(|(i, &b)| self.code_unit(at + i) == b as u16)
     }
 
     pub fn write_units(&self, out: &mut Vec<u16>) {

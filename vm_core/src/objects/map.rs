@@ -672,6 +672,7 @@ pub enum Key<'a> {
 impl<'a> Tagged<'a, Value> {
     /// Classify an already-coerced property key; out-of-range Smis are
     /// a caller bug (stringified at `to_property_key`).
+    #[inline(always)]
     pub fn classify_key(self, heap: &'a Heap) -> Option<Key<'a>> {
         if let Some(v) = self.to_i64() {
             if (0..u32::MAX as i64).contains(&v) {

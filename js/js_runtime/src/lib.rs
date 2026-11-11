@@ -172,6 +172,10 @@ pub struct BuiltinIndices {
     pub function_to_string: NativeIndex,
     pub object_to_string: NativeIndex,
     pub number: NativeIndex,
+    pub number_is_finite: NativeIndex,
+    pub number_is_integer: NativeIndex,
+    pub number_is_nan: NativeIndex,
+    pub number_is_safe_integer: NativeIndex,
     pub number_value_of: NativeIndex,
     pub number_to_string: NativeIndex,
     pub number_to_exponential: NativeIndex,
@@ -190,6 +194,9 @@ pub struct BuiltinIndices {
     pub object_set_prototype_of: NativeIndex,
     pub array: NativeIndex,
     pub is_nan: NativeIndex,
+    pub is_finite: NativeIndex,
+    pub parse_int: NativeIndex,
+    pub parse_float: NativeIndex,
     pub array_values: NativeIndex,
     pub array_push: NativeIndex,
     pub array_pop: NativeIndex,
@@ -289,6 +296,15 @@ pub struct BuiltinIndices {
     pub array_to_string: NativeIndex,
     pub array_slice: NativeIndex,
     pub array_sort: NativeIndex,
+    pub array_at: NativeIndex,
+    pub array_includes: NativeIndex,
+    pub array_index_of: NativeIndex,
+    pub array_last_index_of: NativeIndex,
+    pub array_fill: NativeIndex,
+    pub array_reverse: NativeIndex,
+    pub array_shift: NativeIndex,
+    pub array_unshift: NativeIndex,
+    pub array_of: NativeIndex,
 }
 
 /// Install one NativeError class: constructor, prototype, and [[ErrorData]] map.
@@ -370,6 +386,13 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
         let wks_constructor: Handle<'_, SlotName> = scope.handle(wks.constructor.get(heap));
         let wks_prototype: Handle<'_, SlotName> = scope.handle(wks.prototype.get(heap));
 
+        // `parseInt`/`parseFloat` are single intrinsic function objects shared
+        // by the global object and `Number` (ES 21.1.2.13).
+        let parse_float_fn = Object::native_function(thread.heap(), &scope, idx.parse_float, 1);
+        Object::set_builtin_name(thread, &scope, parse_float_fn, "parseFloat");
+        let parse_int_fn = Object::native_function(thread.heap(), &scope, idx.parse_int, 2);
+        Object::set_builtin_name(thread, &scope, parse_int_fn, "parseInt");
+
         // ---- Number ----------------------------------------------------------
         let object_prototype = known.object_prototype.get_handle(thread.heap(), &scope);
         let number_zero: Handle<'_, Value> = scope.handle(Smi::new(0).into_tagged());
@@ -430,6 +453,44 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             idx.number_to_precision,
             1,
         );
+        Object::install_method(
+            thread,
+            &scope,
+            number_fn,
+            "isFinite",
+            idx.number_is_finite,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            number_fn,
+            "isInteger",
+            idx.number_is_integer,
+            1,
+        );
+        Object::install_method(thread, &scope, number_fn, "isNaN", idx.number_is_nan, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            number_fn,
+            "isSafeInteger",
+            idx.number_is_safe_integer,
+            1,
+        );
+        for (name, value) in [("parseFloat", parse_float_fn), ("parseInt", parse_int_fn)] {
+            let key = thread.intern(&scope, name);
+            // Safety: fresh interned word, rooted below before the define.
+            let key = scope.handle(key.as_tagged(thread.heap()));
+            Object::define_own_property_ordinary(
+                thread.heap(),
+                &scope,
+                number_fn,
+                key,
+                PropertyDescriptor::method(value.erase()),
+            )
+            .expect("bootstrap define");
+        }
         // static data properties on the Number constructor
         let pos_inf = thread
             .heap()
@@ -438,16 +499,24 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             .heap()
             .allocate_handle::<Float>(f64::NEG_INFINITY, &scope);
         let max_value = thread.heap().allocate_handle::<Float>(f64::MAX, &scope);
-        let min_value = thread
-            .heap()
-            .allocate_handle::<Float>(f64::MIN_POSITIVE, &scope);
+        let min_value = thread.heap().allocate_handle::<Float>(5e-324, &scope);
         let number_nan = thread.heap().allocate_handle::<Float>(f64::NAN, &scope);
+        let epsilon = thread.heap().allocate_handle::<Float>(f64::EPSILON, &scope);
+        let max_safe = thread
+            .heap()
+            .allocate_handle::<Float>(9_007_199_254_740_991.0, &scope);
+        let min_safe = thread
+            .heap()
+            .allocate_handle::<Float>(-9_007_199_254_740_991.0, &scope);
         for (name, value) in [
             ("POSITIVE_INFINITY", pos_inf),
             ("NEGATIVE_INFINITY", neg_inf),
             ("MAX_VALUE", max_value),
             ("MIN_VALUE", min_value),
             ("NaN", number_nan),
+            ("EPSILON", epsilon),
+            ("MAX_SAFE_INTEGER", max_safe),
+            ("MIN_SAFE_INTEGER", min_safe),
         ] {
             let n = thread.intern(&scope, name);
             // Safety: fresh interned word, rooted below before the define.
@@ -954,6 +1023,50 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
         Object::install_method(thread, &scope, array_prototype, "join", idx.array_join, 1);
         Object::install_method(thread, &scope, array_prototype, "slice", idx.array_slice, 2);
         Object::install_method(thread, &scope, array_prototype, "sort", idx.array_sort, 1);
+        Object::install_method(thread, &scope, array_prototype, "at", idx.array_at, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            array_prototype,
+            "includes",
+            idx.array_includes,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            array_prototype,
+            "indexOf",
+            idx.array_index_of,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            array_prototype,
+            "lastIndexOf",
+            idx.array_last_index_of,
+            1,
+        );
+        Object::install_method(thread, &scope, array_prototype, "fill", idx.array_fill, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            array_prototype,
+            "reverse",
+            idx.array_reverse,
+            0,
+        );
+        Object::install_method(thread, &scope, array_prototype, "shift", idx.array_shift, 0);
+        Object::install_method(
+            thread,
+            &scope,
+            array_prototype,
+            "unshift",
+            idx.array_unshift,
+            1,
+        );
+        Object::install_method(thread, &scope, array_fn, "of", idx.array_of, 0);
         Object::install_method(
             thread,
             &scope,
@@ -1619,6 +1732,44 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             global,
             is_nan_name,
             PropertyDescriptor::method(is_nan_fn.erase()),
+        )
+        .expect("bootstrap define");
+
+        let is_finite_fn = Object::native_function(thread.heap(), &scope, idx.is_finite, 1);
+        Object::set_builtin_name(thread, &scope, is_finite_fn, "isFinite");
+        let is_finite_name = thread.intern(&scope, "isFinite");
+        // Safety: fresh interned word, rooted below before the define.
+        let is_finite_name = scope.handle(is_finite_name.as_tagged(thread.heap()));
+        Object::define_own_property_ordinary(
+            thread.heap(),
+            &scope,
+            global,
+            is_finite_name,
+            PropertyDescriptor::method(is_finite_fn.erase()),
+        )
+        .expect("bootstrap define");
+
+        let parse_float_name = thread.intern(&scope, "parseFloat");
+        // Safety: fresh interned word, rooted below before the define.
+        let parse_float_name = scope.handle(parse_float_name.as_tagged(thread.heap()));
+        Object::define_own_property_ordinary(
+            thread.heap(),
+            &scope,
+            global,
+            parse_float_name,
+            PropertyDescriptor::method(parse_float_fn.erase()),
+        )
+        .expect("bootstrap define");
+
+        let parse_int_name = thread.intern(&scope, "parseInt");
+        // Safety: fresh interned word, rooted below before the define.
+        let parse_int_name = scope.handle(parse_int_name.as_tagged(thread.heap()));
+        Object::define_own_property_ordinary(
+            thread.heap(),
+            &scope,
+            global,
+            parse_int_name,
+            PropertyDescriptor::method(parse_int_fn.erase()),
         )
         .expect("bootstrap define");
 

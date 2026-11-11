@@ -133,6 +133,16 @@ impl Compare {
         false
     }
 
+    /// ES SameValueZero (7.2.12): like SameValue, but +0 and -0 are equal.
+    /// Used by `Array.prototype.includes`.
+    pub fn same_value_zero<'a>(heap: &'a Heap, x: Tagged<'a, Value>, y: Tagged<'a, Value>) -> bool {
+        if Self::strict_equal(heap, x, y) {
+            return true;
+        }
+        // the only difference from `===`: NaN equals NaN
+        x.as_number(heap).is_some_and(f64::is_nan) && y.as_number(heap).is_some_and(f64::is_nan)
+    }
+
     /// Relational comparison for two string values: UTF-16 code-unit
     /// order (ES 7.2.13 IsLessThan), encoding-agnostic.
     fn string_cmp<'a>(

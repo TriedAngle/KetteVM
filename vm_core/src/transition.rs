@@ -811,7 +811,7 @@ impl Object {
             {
                 return false;
             }
-            return Self::define_element(heap, scope, receiver, i, desc);
+            return Self::define_element(heap, scope, receiver, i, desc, None);
         }
         debug_assert!(
             !receiver
@@ -845,7 +845,14 @@ impl Object {
             bail!(vm, heap, state, VmError::NotExtensible);
         }
         if let Some(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
-            Self::define_element(heap, scope, receiver, i, PropertyDescriptor::data(value));
+            Self::define_element(
+                heap,
+                scope,
+                receiver,
+                i,
+                PropertyDescriptor::data(value),
+                None,
+            );
             return Ok(());
         }
         let mut pairs: Vec<Handle<'_, Value>> = Vec::new();

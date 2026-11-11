@@ -1,8 +1,8 @@
 use crate::JSRuntime;
 use vm_core::{
-    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
-    LanguageMode, Object, Prototype, Result, Smi, StoreSemantics, Tagged, ThreadState, VM, Value,
-    VmError, extend_lifetime, raise, raise_runtime, rt_try,
+    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
+    LanguageMode, Object, Prototype, Result, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
+    VM, Value, VmError, extend_lifetime, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -19,6 +19,15 @@ crate::register_natives! {
     array_to_string,
     array_slice,
     array_sort,
+    array_at,
+    array_includes,
+    array_index_of,
+    array_last_index_of,
+    array_fill,
+    array_reverse,
+    array_shift,
+    array_unshift,
+    array_of,
 }
 
 const ARRAY_ITERATOR_KIND_KEY: i64 = 0;
@@ -1219,6 +1228,687 @@ fn array_sort<'a>(
         }
         obj.as_tagged(heap)
     })
+}
+
+/// `Array.prototype.at ( index )`
+/// [ES 23.1.3.1](https://tc39.es/ecma262/#sec-array.prototype.at)
+/// Element at `index`, counting from the end when negative.
+fn array_at<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let k = rt_try!(
+            heap,
+            Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 1), len)
+        );
+        if k < 0.0 || k >= len as f64 {
+            return vm.known().undefined.get(heap).erase();
+        }
+        let key = match index_key(vm, heap, state, &scope, k as u64) {
+            Ok(key) => key,
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let value = match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        value.as_tagged(heap).erase()
+    })
+}
+
+/// `Array.prototype.includes ( searchElement [ , fromIndex ] )`
+/// [ES 23.1.3.16](https://tc39.es/ecma262/#sec-array.prototype.includes)
+/// SameValueZero search from `fromIndex`; holes read as `undefined`.
+fn array_includes<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        if len == 0 {
+            return Convert::boolean(heap, false);
+        }
+        let search = args.get_handle(heap, 1);
+        let len_f = len as f64;
+        let mut k = rt_try!(
+            heap,
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+        );
+        while k < len_f {
+            let key = rt_try!(heap, index_key(vm, heap, state, &scope, k as u64));
+            let value = match Object::get_property(vm, heap, state, obj, obj, key.erase(), false) {
+                Ok(value) => scope.handle(value),
+                Err(err) => return raise_runtime(heap, err),
+            };
+            if Compare::same_value_zero(heap, search.as_tagged(heap), value.as_tagged(heap)) {
+                return Convert::boolean(heap, true);
+            }
+            k += 1.0;
+        }
+        Convert::boolean(heap, false)
+    })
+}
+
+/// `Array.prototype.indexOf ( searchElement [ , fromIndex ] )`
+/// [ES 23.1.3.17](https://tc39.es/ecma262/#sec-array.prototype.indexOf)
+/// Smallest strictly-equal index at or after `fromIndex`, else `-1`.
+fn array_index_of<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        if len == 0 {
+            return heap.new_number(-1.0);
+        }
+        let search = args.get_handle(heap, 1);
+        let len_f = len as f64;
+        let mut k = rt_try!(
+            heap,
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+        );
+        while k < len_f {
+            let index = k as u64;
+            match get_indexed_value(vm, heap, state, &scope, obj, index) {
+                Ok(IndexedValue::Absent) => {}
+                Ok(IndexedValue::Present(value)) => {
+                    if Compare::strict_equal(heap, search.as_tagged(heap), value.as_tagged(heap)) {
+                        return heap.new_number(index as f64);
+                    }
+                }
+                Err(err) => return raise_runtime(heap, err),
+            }
+            k += 1.0;
+        }
+        heap.new_number(-1.0)
+    })
+}
+
+/// `Array.prototype.lastIndexOf ( searchElement [ , fromIndex ] )`
+/// [ES 23.1.3.20](https://tc39.es/ecma262/#sec-array.prototype.lastindexof)
+/// Largest strictly-equal index at or before `fromIndex`, else `-1`.
+fn array_last_index_of<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        if len == 0 {
+            return heap.new_number(-1.0);
+        }
+        let search = args.get_handle(heap, 1);
+        let len_f = len as f64;
+        let mut k = if args.len() > 2 {
+            let absolute = rt_try!(
+                heap,
+                Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 2), len)
+            );
+            absolute.min(len_f - 1.0)
+        } else {
+            len_f - 1.0
+        };
+        while k >= 0.0 {
+            let index = k as u64;
+            match get_indexed_value(vm, heap, state, &scope, obj, index) {
+                Ok(IndexedValue::Absent) => {}
+                Ok(IndexedValue::Present(value)) => {
+                    if Compare::strict_equal(heap, search.as_tagged(heap), value.as_tagged(heap)) {
+                        return heap.new_number(index as f64);
+                    }
+                }
+                Err(err) => return raise_runtime(heap, err),
+            }
+            k -= 1.0;
+        }
+        heap.new_number(-1.0)
+    })
+}
+
+/// `Array.prototype.fill ( value [ , start [ , end ] ] )`
+/// [ES 23.1.3.7](https://tc39.es/ecma262/#sec-array.prototype.fill)
+/// Writes `value` over `[start, end)` and returns the receiver.
+fn array_fill<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let len_f = len as f64;
+        let value = args.get_handle(heap, 1);
+        let mut k = rt_try!(
+            heap,
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+        );
+        let end_arg = args.get_handle(heap, 3);
+        let final_index = if end_arg.as_tagged(heap) == vm.known().undefined.get(heap) {
+            len_f
+        } else {
+            rt_try!(
+                heap,
+                Convert::to_clamped_index(vm, heap, state, end_arg, len)
+            )
+        };
+        while k < final_index {
+            let key = rt_try!(heap, index_key(vm, heap, state, &scope, k as u64));
+            match Object::set_property(
+                vm,
+                heap,
+                state,
+                obj,
+                obj,
+                key.erase(),
+                value,
+                StoreSemantics::Shadow,
+                false,
+                LanguageMode::Strict,
+            ) {
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
+            }
+            k += 1.0;
+        }
+        obj.as_tagged(heap)
+    })
+}
+
+/// `Array.prototype.reverse ( )`
+/// [ES 23.1.3.26](https://tc39.es/ecma262/#sec-array.prototype.reverse)
+/// Reverses the elements in place, moving holes with them.
+fn array_reverse<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let middle = len / 2;
+        let mut lower = 0u64;
+        while lower != middle {
+            let upper = len - lower - 1;
+            let lower_key = rt_try!(heap, index_key(vm, heap, state, &scope, lower));
+            let upper_key = rt_try!(heap, index_key(vm, heap, state, &scope, upper));
+            let lower_present = rt_try!(
+                heap,
+                Object::has_property(vm, heap, state, obj, lower_key.erase())
+            );
+            let lower_value = if lower_present {
+                match Object::get_property(vm, heap, state, obj, obj, lower_key.erase(), false) {
+                    Ok(value) => Some(scope.handle(value)),
+                    Err(err) => return raise_runtime(heap, err),
+                }
+            } else {
+                None
+            };
+            let upper_present = rt_try!(
+                heap,
+                Object::has_property(vm, heap, state, obj, upper_key.erase())
+            );
+            let upper_value = if upper_present {
+                match Object::get_property(vm, heap, state, obj, obj, upper_key.erase(), false) {
+                    Ok(value) => Some(scope.handle(value)),
+                    Err(err) => return raise_runtime(heap, err),
+                }
+            } else {
+                None
+            };
+            match (lower_value, upper_value) {
+                (Some(lower_value), Some(upper_value)) => {
+                    if let Err(err) = Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        lower_key.erase(),
+                        upper_value,
+                        StoreSemantics::Shadow,
+                        false,
+                        LanguageMode::Strict,
+                    ) {
+                        return raise_runtime(heap, err);
+                    }
+                    if let Err(err) = Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        upper_key.erase(),
+                        lower_value,
+                        StoreSemantics::Shadow,
+                        false,
+                        LanguageMode::Strict,
+                    ) {
+                        return raise_runtime(heap, err);
+                    }
+                }
+                (None, Some(upper_value)) => {
+                    if let Err(err) = Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        lower_key.erase(),
+                        upper_value,
+                        StoreSemantics::Shadow,
+                        false,
+                        LanguageMode::Strict,
+                    ) {
+                        return raise_runtime(heap, err);
+                    }
+                    match Object::delete_property(vm, heap, state, obj, upper_key.erase()) {
+                        Ok(true) => {}
+                        Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+                        Err(err) => return raise_runtime(heap, err),
+                    }
+                }
+                (Some(lower_value), None) => {
+                    match Object::delete_property(vm, heap, state, obj, lower_key.erase()) {
+                        Ok(true) => {}
+                        Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+                        Err(err) => return raise_runtime(heap, err),
+                    }
+                    if let Err(err) = Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        upper_key.erase(),
+                        lower_value,
+                        StoreSemantics::Shadow,
+                        false,
+                        LanguageMode::Strict,
+                    ) {
+                        return raise_runtime(heap, err);
+                    }
+                }
+                (None, None) => {}
+            }
+            lower += 1;
+        }
+        obj.as_tagged(heap)
+    })
+}
+
+/// `Array.prototype.shift ( )`
+/// [ES 23.1.3.27](https://tc39.es/ecma262/#sec-array.prototype.shift)
+/// Removes the first element and shifts the rest down one index.
+fn array_shift<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
+        if len == 0 {
+            let zero = scope.handle(heap.new_number(0.0));
+            if let Err(err) = Object::set_property(
+                vm,
+                heap,
+                state,
+                obj,
+                obj,
+                length_key,
+                zero,
+                StoreSemantics::Shadow,
+                false,
+                LanguageMode::Strict,
+            ) {
+                return raise_runtime(heap, err);
+            }
+            return vm.known().undefined.get(heap).erase();
+        }
+        let first_key = rt_try!(heap, index_key(vm, heap, state, &scope, 0));
+        let first = match Object::get_property(vm, heap, state, obj, obj, first_key.erase(), false)
+        {
+            Ok(value) => scope.handle(value),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let mut k = 1u64;
+        while k < len {
+            let from_key = rt_try!(heap, index_key(vm, heap, state, &scope, k));
+            let to_key = rt_try!(heap, index_key(vm, heap, state, &scope, k - 1));
+            let present = rt_try!(
+                heap,
+                Object::has_property(vm, heap, state, obj, from_key.erase())
+            );
+            if present {
+                let value = match Object::get_property(
+                    vm,
+                    heap,
+                    state,
+                    obj,
+                    obj,
+                    from_key.erase(),
+                    false,
+                ) {
+                    Ok(value) => scope.handle(value),
+                    Err(err) => return raise_runtime(heap, err),
+                };
+                if let Err(err) = Object::set_property(
+                    vm,
+                    heap,
+                    state,
+                    obj,
+                    obj,
+                    to_key.erase(),
+                    value,
+                    StoreSemantics::Shadow,
+                    false,
+                    LanguageMode::Strict,
+                ) {
+                    return raise_runtime(heap, err);
+                }
+            } else {
+                match Object::delete_property(vm, heap, state, obj, to_key.erase()) {
+                    Ok(true) => {}
+                    Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+                    Err(err) => return raise_runtime(heap, err),
+                }
+            }
+            k += 1;
+        }
+        let last_key = rt_try!(heap, index_key(vm, heap, state, &scope, len - 1));
+        match Object::delete_property(vm, heap, state, obj, last_key.erase()) {
+            Ok(true) => {}
+            Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+            Err(err) => return raise_runtime(heap, err),
+        }
+        let new_len = scope.handle(heap.new_number((len - 1) as f64));
+        if let Err(err) = Object::set_property(
+            vm,
+            heap,
+            state,
+            obj,
+            obj,
+            length_key,
+            new_len,
+            StoreSemantics::Shadow,
+            false,
+            LanguageMode::Strict,
+        ) {
+            return raise_runtime(heap, err);
+        }
+        first.as_tagged(heap).erase()
+    })
+}
+
+/// `Array.prototype.unshift ( ...items )`
+/// [ES 23.1.3.36](https://tc39.es/ecma262/#sec-array.prototype.unshift)
+/// Prepends the arguments and returns the new length.
+fn array_unshift<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = args.get_handle(heap, 0);
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let arg_count = args.len().saturating_sub(1) as u64;
+        if arg_count > 0 {
+            if len.saturating_add(arg_count) > (1u64 << 53) - 1 {
+                raise!(vm, heap, state, VmError::InvalidOperandType);
+            }
+            let mut k = len;
+            while k > 0 {
+                let from_key = rt_try!(heap, index_key(vm, heap, state, &scope, k - 1));
+                let to_key = rt_try!(heap, index_key(vm, heap, state, &scope, k + arg_count - 1));
+                let present = rt_try!(
+                    heap,
+                    Object::has_property(vm, heap, state, obj, from_key.erase())
+                );
+                if present {
+                    let value = match Object::get_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        from_key.erase(),
+                        false,
+                    ) {
+                        Ok(value) => scope.handle(value),
+                        Err(err) => return raise_runtime(heap, err),
+                    };
+                    if let Err(err) = Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        obj,
+                        obj,
+                        to_key.erase(),
+                        value,
+                        StoreSemantics::Shadow,
+                        false,
+                        LanguageMode::Strict,
+                    ) {
+                        return raise_runtime(heap, err);
+                    }
+                } else {
+                    match Object::delete_property(vm, heap, state, obj, to_key.erase()) {
+                        Ok(true) => {}
+                        Ok(false) => raise!(vm, heap, state, VmError::InvalidOperandType),
+                        Err(err) => return raise_runtime(heap, err),
+                    }
+                }
+                k -= 1;
+            }
+            for j in 0..arg_count {
+                let key = rt_try!(heap, index_key(vm, heap, state, &scope, j));
+                let item = args.get_handle(heap, 1 + j as usize);
+                if let Err(err) = Object::set_property(
+                    vm,
+                    heap,
+                    state,
+                    obj,
+                    obj,
+                    key.erase(),
+                    item,
+                    StoreSemantics::Shadow,
+                    false,
+                    LanguageMode::Strict,
+                ) {
+                    return raise_runtime(heap, err);
+                }
+            }
+        }
+        let new_len = len + arg_count;
+        let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
+        let length_value = scope.handle(heap.new_number(new_len as f64));
+        if let Err(err) = Object::set_property(
+            vm,
+            heap,
+            state,
+            obj,
+            obj,
+            length_key,
+            length_value,
+            StoreSemantics::Shadow,
+            false,
+            LanguageMode::Strict,
+        ) {
+            return raise_runtime(heap, err);
+        }
+        length_value.as_tagged(heap)
+    })
+}
+
+/// `Array.of ( ...items )`
+/// [ES 23.1.2.3](https://tc39.es/ecma262/#sec-array.of)
+/// Builds an array (or constructs a subclass instance) from the arguments.
+fn array_of<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let count = args.len().saturating_sub(1) as u64;
+        let this = args.get_handle(heap, 0);
+        let length_value = scope.handle(heap.new_number(count as f64));
+        let is_constructor = this
+            .as_tagged(heap)
+            .as_heap_object()
+            .is_some_and(|obj| obj.map(heap).kind().is_constructor());
+        let array: Handle<'_, Value> = if is_constructor {
+            match Object::construct_forward(vm, heap, state, this, &[length_value], this) {
+                Ok(value) => scope.handle(value),
+                Err(err) => return raise_runtime(heap, err),
+            }
+        } else {
+            // ArrayCreate rejects lengths above 2^32 - 1.
+            if count > u32::MAX as u64 {
+                raise!(vm, heap, state, VmError::IndexOutOfBounds);
+            }
+            heap.new_array(&scope, HandleSlice::EMPTY)
+                .as_handle(&scope)
+                .erase()
+        };
+        for j in 0..count {
+            let key = rt_try!(heap, index_key(vm, heap, state, &scope, j));
+            let item = args.get_handle(heap, 1 + j as usize);
+            match Object::create_data_property_or_throw(
+                vm,
+                heap,
+                state,
+                &scope,
+                array,
+                key.erase(),
+                item,
+            ) {
+                Ok(_) => {}
+                Err(err) => return raise_runtime(heap, err),
+            }
+        }
+        let length_key = vm.known().strings.length.get_handle(heap, &scope).erase();
+        if let Err(err) = Object::set_property(
+            vm,
+            heap,
+            state,
+            array,
+            array,
+            length_key,
+            length_value,
+            StoreSemantics::Shadow,
+            false,
+            LanguageMode::Strict,
+        ) {
+            return raise_runtime(heap, err);
+        }
+        array.as_tagged(heap).erase()
+    })
+}
+
+/// `ToString(𝔽(index))` as a property key.
+fn index_key<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    index: u64,
+) -> Result<Handle<'s, SlotName>> {
+    // TODO: handle the 2^53 max length/key.
+    let number = scope.handle(Smi::new(index as i64).into_tagged());
+    Ok(scope.handle(Object::to_property_key(vm, heap, state, number)?))
 }
 
 /// Lexicographic `DenseString` comparison over UTF-16 code units, in

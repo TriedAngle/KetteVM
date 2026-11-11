@@ -146,23 +146,6 @@ impl NumberDictionary {
         key.to_i64().map(|v| v as usize)
     }
 
-    /// How a stored entry behaves for a plain element access.
-    pub fn classify(&self, heap: &Heap, index: usize) -> EntryClass {
-        match self.find(heap, index) {
-            None => EntryClass::Absent,
-            Some(entry) => {
-                let details = self.details_at(heap, entry);
-                if details & DETAILS_ACCESSOR != 0 {
-                    EntryClass::Accessor
-                } else if details & DETAILS_WRITABLE != 0 {
-                    EntryClass::Data
-                } else {
-                    EntryClass::ReadOnly
-                }
-            }
-        }
-    }
-
     fn hash(index: usize) -> u32 {
         let h = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         (h >> 32) as u32
@@ -232,14 +215,19 @@ impl NumberDictionary {
     ) -> bool {
         match self.find(heap, index) {
             Some(entry) => {
-                let host = self.tagged(heap);
-                self.value_slot(entry).set(heap, host, value);
-                self.details_slot(entry)
-                    .set(heap, host, Smi::new(details).into_tagged());
+                self.set_entry(heap, entry, value, details);
                 true
             }
             None => false,
         }
+    }
+
+    /// Overwrite the value/details of an entry the caller already found.
+    pub fn set_entry(&self, heap: &Heap, entry: usize, value: Tagged<'_, Value>, details: i64) {
+        let host = self.tagged(heap);
+        self.value_slot(entry).set(heap, host, value);
+        self.details_slot(entry)
+            .set(heap, host, Smi::new(details).into_tagged());
     }
 
     /// Rehash every live entry into `new` (capacity already set).
@@ -360,14 +348,6 @@ impl NumberDictionary {
             );
         }
     }
-}
-
-/// What a plain element access faces at some index.
-pub enum EntryClass {
-    Absent,
-    Data,
-    ReadOnly,
-    Accessor,
 }
 
 impl HeapObject for NumberDictionary {

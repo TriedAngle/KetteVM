@@ -81,6 +81,7 @@ pub struct Lookup<'s> {
 }
 
 impl<'s> Lookup<'s> {
+    #[inline(always)]
     pub fn new(
         heap: &Heap,
         scope: &'s HandleScope<'_>,
@@ -119,6 +120,7 @@ impl<'s> Lookup<'s> {
 
     /// Yield the next resolved position, advancing past its holder so
     /// a later call continues the walk; `Miss` when exhausted.
+    #[inline(always)]
     pub fn next<'h>(&mut self, heap: &'h Heap, scope: &'s HandleScope<'_>) -> Hit<'h> {
         let hole = heap.known().the_hole.get(heap).erase();
         loop {

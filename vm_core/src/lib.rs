@@ -74,7 +74,7 @@ pub use objects::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CallTarget, CallableInfoInit,
     CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject,
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
-    DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, EntryClass, FeedbackVector,
+    DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, FeedbackVector,
     FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, GlobalLexicalBinding,
     HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
     INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,
@@ -386,6 +386,7 @@ impl ThreadState {
         unsafe { HandleScope::from_raw(NonNull::from(&self.handles)) }
     }
 
+    #[inline(always)]
     pub fn handle_scope<R>(&self, f: impl for<'s> FnOnce(HandleScope<'s>) -> R) -> R {
         f(self.scope())
     }

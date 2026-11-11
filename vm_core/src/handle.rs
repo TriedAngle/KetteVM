@@ -188,7 +188,7 @@ pub struct HandleScope<'d> {
 }
 
 impl<'d> HandleScope<'d> {
-    #[inline]
+    #[inline(always)]
     pub unsafe fn from_raw(data: NonNull<HandleData>) -> Self {
         let inner = unsafe { &*data.as_ptr() }.inner();
         Self {
@@ -200,6 +200,7 @@ impl<'d> HandleScope<'d> {
         }
     }
 
+    #[inline(always)]
     pub fn handle<'x, T: 'x>(&self, value: impl Into<Tagged<'x, T>>) -> Handle<'_, T> {
         let value = value.into();
         debug_assert!(
@@ -213,6 +214,7 @@ impl<'d> HandleScope<'d> {
 
     /// Root a copy of `values` in contiguous scope slots. The values may be
     /// anchored anywhere: rooting only writes words.
+    #[inline(always)]
     pub fn stage<'x, T>(&self, values: &[Tagged<'x, T>]) -> HandleSlice<'_> {
         // SAFETY: a `Tagged` word is a strong, GC-valid reference.
         unsafe { self.stage_words(values.len(), |i| values[i].raw()) }
@@ -220,6 +222,7 @@ impl<'d> HandleScope<'d> {
 
     /// Root copies of `handles` in contiguous scope slots: their own slots
     /// may be scattered or belong to an enclosing scope.
+    #[inline(always)]
     pub fn stage_handles<T>(&self, handles: &[Handle<'_, T>]) -> HandleSlice<'_> {
         // SAFETY: handle slots only ever hold strong values.
         unsafe { self.stage_words(handles.len(), |i| handles[i].raw()) }
@@ -228,6 +231,7 @@ impl<'d> HandleScope<'d> {
     /// # Safety
     /// Every word `word` yields must be strong (non-weak) and GC-valid: the
     /// slots become roots the collector traces.
+    #[inline(always)]
     unsafe fn stage_words(&self, len: usize, word: impl Fn(usize) -> Value) -> HandleSlice<'_> {
         let inner = unsafe { &*self.data.as_ptr() }.inner();
         let start = inner.allocate_block(len);
@@ -239,6 +243,7 @@ impl<'d> HandleScope<'d> {
         unsafe { HandleSlice::from_slice(core::slice::from_raw_parts(start, len)) }
     }
 
+    #[inline(always)]
     pub fn cast<T: HeapObject>(
         &self,
         heap: &Heap,
@@ -247,6 +252,7 @@ impl<'d> HandleScope<'d> {
         Some(self.handle(value.get_as::<T>(heap)?))
     }
 
+    #[inline(always)]
     pub fn escapable_scope<'a>(&'a mut self) -> EscapableHandleScope<'a, 'd> {
         let data = unsafe { &*self.data.as_ptr() };
         let escape_slot = data.inner().allocate_slot();

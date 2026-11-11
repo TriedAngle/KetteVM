@@ -852,7 +852,7 @@ impl Object {
                 }
             }
             Some(OwnPropertyLocation::Element(index)) => {
-                if Self::define_element(heap, scope, receiver, index, full) {
+                if Self::define_element(heap, scope, receiver, index, full, Some(&current.desc)) {
                     Ok(true)
                 } else {
                     reject_ordinary(vm, state, heap, should_throw)

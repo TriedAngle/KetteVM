@@ -5,11 +5,11 @@ use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
 use vm_core::{
-    AccessorPair, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass, Errors,
-    FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
-    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise,
-    raise_runtime, rt_try,
+    AccessorPair, Compare, ContextInit, ContextObject, Convert, DenseString, Errors, FixedArray,
+    Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object, PropertyDescriptor,
+    Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
+    ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise, raise_runtime,
+    rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
