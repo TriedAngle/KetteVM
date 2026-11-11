@@ -911,13 +911,22 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     );
                     continue;
                 }
-                if calls_eval || self.facts.captured.contains(&sym) {
-                    continue;
-                }
                 let hole_check = self
                     .scoping
                     .symbol_flags(sym)
                     .intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class);
+                // no block context of its own: the function context hosts
+                // the binding (direct eval and closures reach it there)
+                if calls_eval || self.facts.captured.contains(&sym) {
+                    let slot = next_ctx;
+                    next_ctx += 1;
+                    slot_names.push(ScopeLocal {
+                        name: self.scoping.symbol_name(sym).as_bytes().into(),
+                        info: self.scope_local_info(sym),
+                    });
+                    self.slots.insert(sym, Slot::Ctx { slot, hole_check });
+                    continue;
+                }
                 let reg = next_reg;
                 next_reg += 1;
                 if hole_check {
@@ -4840,11 +4849,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
         }
 
-        // no case matched: the default body, or past the switch
-        let end = self.b.new_label();
+        // no case matched: the default body, or out of the switch (via the
+        // break label, which owns the context pop)
         match default_idx {
             Some(i) => self.b.jump(bodies[i]),
-            None => self.b.jump(end),
+            None => self.b.jump(breaks),
         }
 
         // bodies execute in order; fallthrough is just sequential layout
@@ -4858,7 +4867,6 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let (breaks, _) = self.end_breakable();
         self.b.bind(breaks);
         drop(guard);
-        self.b.bind(end);
         Ok(())
     }
 
@@ -4879,13 +4887,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let try_ctx = temps.temp();
             g.b.load_context();
             g.b.store(try_ctx);
-            // try-block lexicals restart in the TDZ on every execution
+            // try-block lexicals restart in the TDZ on every execution; a
+            // captured one needs its own block context, popped before the
+            // handler (which restores `try_ctx` absolutely)
+            let try_guard = g.enter_block_context(s.block.scope_id.get(), temps.temp());
             g.emit_scope_hole_fills(s.block.scope_id.get());
             let t = g.b.begin_try();
             for st in &s.block.body {
                 g.stmt(st)?;
             }
             g.b.end_try(t);
+            drop(try_guard);
 
             let end = g.b.new_label();
             g.b.jump(end);

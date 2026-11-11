@@ -402,8 +402,10 @@ impl<'a, 'p> Collector<'a, 'p> {
         d.scan_captures();
         d.finalize_for_heads();
         d.mark_arguments();
-        d.creates_context = d.compute_creates_context();
+        // block contexts affect the function-context predicate: a block
+        // context hangs off its enclosing function context
         d.block_contexts = d.compute_block_contexts();
+        d.creates_context = d.compute_creates_context();
         d.scan_special_nodes();
         d.compute_reference_depths();
         let Deriver {
@@ -1432,6 +1434,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         // chain (innermost = 0)
         let mut passed_use = false;
         let mut hops = 0u32;
+        let mut prev: Option<NodeId> = Some(node);
         for anc in self.nodes.ancestors(node) {
             if anc.id() == target {
                 if self.node_creates_ctx(anc.id()) && passed_use {
@@ -1439,14 +1442,21 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 }
                 return hops;
             }
-            if !self.node_creates_ctx(anc.id()) {
-                continue;
+            // a switch pushes its case-block context after the discriminant
+            // is evaluated, so references inside it count one hop less
+            let in_discriminant = matches!(
+                anc.kind(),
+                AstKind::SwitchStatement(switch)
+                    if prev == Some(switch.discriminant.node_id())
+            );
+            if !in_discriminant && self.node_creates_ctx(anc.id()) {
+                if !passed_use {
+                    passed_use = true;
+                } else {
+                    hops += 1;
+                }
             }
-            if !passed_use {
-                passed_use = true;
-            } else {
-                hops += 1;
-            }
+            prev = Some(anc.id());
         }
         unreachable!("target is an ancestor of the use site")
     }
@@ -1672,6 +1682,18 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 out.insert(fid);
             }
         }
+        // a block context is pushed onto the enclosing function context:
+        // the owning function must push one too
+        for &scope in &self.block_contexts {
+            let mut cur = Some(scope);
+            while let Some(sid) = cur {
+                if let Some(&fid) = self.fn_scope_to_fid.get(&sid) {
+                    out.insert(fid);
+                    break;
+                }
+                cur = self.scoping.scope_parent_id(sid);
+            }
+        }
         out
     }
 
@@ -1695,16 +1717,30 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             ) {
                 continue;
             }
-            let flags = self.scoping.scope_flags(scope);
-            let mut has_binding = false;
-            let mut needs_context = flags.contains(ScopeFlags::DirectEval);
+            // a direct eval anywhere in the owning function can reach every
+            // block lexical it runs under, so those need a block context too
+            let mut direct_eval = false;
+            let mut cur = Some(scope);
+            while let Some(sid) = cur {
+                if self.fn_scope_to_fid.contains_key(&sid) {
+                    direct_eval = self
+                        .scoping
+                        .scope_flags(sid)
+                        .contains(ScopeFlags::DirectEval);
+                    break;
+                }
+                cur = self.scoping.scope_parent_id(sid);
+            }
+            let mut has_lexical = false;
+            let mut captured_lexical = false;
             for sym in self.scoping.iter_bindings_in(scope) {
-                has_binding = true;
-                if self.captured.contains(&sym) {
-                    needs_context = true;
+                let flags = self.scoping.symbol_flags(sym);
+                if flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class) {
+                    has_lexical = true;
+                    captured_lexical |= self.captured.contains(&sym);
                 }
             }
-            if has_binding && needs_context {
+            if has_lexical && (direct_eval || captured_lexical) {
                 out.insert(scope);
             }
         }
@@ -1989,6 +2025,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         let ref_span = GetSpan::span(self.nodes.get_node(node));
         let mut passed_use = false;
         let mut hops = 0u32;
+        let mut prev: Option<NodeId> = Some(node);
         for anc in self.nodes.ancestors(node) {
             if self.transparent_field_key(anc.kind(), ref_span) {
                 continue;
@@ -1999,14 +2036,21 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 }
                 return hops;
             }
-            if !self.node_creates_ctx(anc.id()) {
-                continue;
+            // a switch pushes its case-block context after the discriminant
+            // is evaluated, so references inside it count one hop less
+            let in_discriminant = matches!(
+                anc.kind(),
+                AstKind::SwitchStatement(switch)
+                    if prev == Some(switch.discriminant.node_id())
+            );
+            if !in_discriminant && self.node_creates_ctx(anc.id()) {
+                if !passed_use {
+                    passed_use = true;
+                } else {
+                    hops += 1;
+                }
             }
-            if !passed_use {
-                passed_use = true;
-            } else {
-                hops += 1;
-            }
+            prev = Some(anc.id());
         }
         // Synthesized catch/eval frames can sit outside the AST host's
         // subtree even though codegen has already pushed its context.
