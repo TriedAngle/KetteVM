@@ -570,10 +570,7 @@ impl Object {
             } else {
                 new_len
             };
-            if !dict.as_tagged(heap).requires_slow_elements()
-                && needed <= cap_words * 2
-                && needed < (1 << 26)
-            {
+            if dict.as_tagged(heap).can_densify() && needed <= cap_words * 2 && needed < (1 << 26) {
                 Self::densify_elements(heap, scope, receiver, needed);
                 Self::store_array_element(heap, scope, receiver, i, value);
                 return;

@@ -177,8 +177,7 @@ fn array_push<'a>(
 
         for i in 1..args.len() {
             let item = args.get_handle(heap, i);
-            let text = Convert::number_to_string(length as f64);
-            let key = DenseString::from_utf8(heap, &scope, &text).erase();
+            let key = rt_try!(heap, index_key(vm, heap, state, &scope, length)).erase();
             match Object::set_property(
                 vm,
                 heap,
@@ -232,6 +231,11 @@ fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<u
             return None;
         }
         let len = obj.as_ref().length();
+        // storing the next element would set `length` past 2^32 - 1, which
+        // the slow path reports (after the element store) as a RangeError
+        if len >= u32::MAX as usize {
+            return None;
+        }
         if !fast_path_exact(heap, obj, len) {
             return None;
         }
@@ -1745,6 +1749,16 @@ fn array_unshift<'a>(
         if arg_count > 0 {
             if len.saturating_add(arg_count) > (1u64 << 53) - 1 {
                 raise!(vm, heap, state, VmError::InvalidOperandType);
+            }
+            // an array's length store would throw at the end; reject first
+            // so a huge sparse receiver is not walked 2^32 times
+            if obj
+                .as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|o| o.as_ref().is_array_exotic(heap))
+                && len.saturating_add(arg_count) > u32::MAX as u64
+            {
+                raise!(vm, heap, state, VmError::InvalidArrayLength);
             }
             let mut k = len;
             while k > 0 {

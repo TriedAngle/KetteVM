@@ -22,7 +22,8 @@ pub struct NumberDictionary {
     pub nof: GcSlot<Smi>,
     pub nod: GcSlot<Smi>,
     /// bit 0: `requires_slow_elements` (sticky; never densify back).
-    /// The remaining bits are reserved.
+    /// bit 1: an entry carries non-default attributes (sticky; densifying
+    ///        would drop them). The remaining bits are reserved.
     pub flags: GcSlot<Smi>,
     pub entries: [GcSlot<Value>; 0],
 }
@@ -36,6 +37,9 @@ pub const DETAILS_ENUMERABLE: i64 = 1 << 2;
 pub const DETAILS_CONFIGURABLE: i64 = 1 << 3;
 /// plain data element: writable, enumerable, configurable
 pub const DETAILS_DATA: i64 = DETAILS_WRITABLE | DETAILS_ENUMERABLE | DETAILS_CONFIGURABLE;
+
+const FLAG_SLOW_ELEMENTS: i64 = 1;
+const FLAG_ATTRIBUTE_ENTRIES: i64 = 1 << 1;
 
 const REQUIRES_SLOW_LIMIT: usize = (1 << 29) - 1;
 
@@ -70,7 +74,21 @@ impl NumberDictionary {
     }
 
     pub fn requires_slow_elements(&self) -> bool {
-        self.flags.to_smi_unchecked().value() & 1 != 0
+        self.flags.to_smi_unchecked().value() & FLAG_SLOW_ELEMENTS != 0
+    }
+
+    /// Whether a dense backing store can represent every entry: no
+    /// accessor/large-index entry, and no entry with non-default attributes.
+    pub fn can_densify(&self) -> bool {
+        self.flags.to_smi_unchecked().value() & (FLAG_SLOW_ELEMENTS | FLAG_ATTRIBUTE_ENTRIES) == 0
+    }
+
+    fn set_flag(&self, heap: &Heap, flag: i64) {
+        let flags = self.flags.to_smi_unchecked().value();
+        if flags & flag == 0 {
+            self.flags
+                .set(heap, self.tagged(heap), Smi::new(flags | flag));
+        }
     }
 
     /// Force the sticky never-densify bit (accessor elements).
@@ -81,9 +99,7 @@ impl NumberDictionary {
     }
 
     fn set_requires_slow_elements(&self, heap: &Heap) {
-        let host = self.tagged(heap);
-        let v = self.flags.to_smi_unchecked().value() | 1;
-        self.flags.set(heap, host, Smi::new(v));
+        self.set_flag(heap, FLAG_SLOW_ELEMENTS);
     }
 
     /// Update the flags after inserting `index`.
@@ -224,6 +240,9 @@ impl NumberDictionary {
 
     /// Overwrite the value/details of an entry the caller already found.
     pub fn set_entry(&self, heap: &Heap, entry: usize, value: Tagged<'_, Value>, details: i64) {
+        if details != DETAILS_DATA {
+            self.set_flag(heap, FLAG_ATTRIBUTE_ENTRIES);
+        }
         let host = self.tagged(heap);
         self.value_slot(entry).set(heap, host, value);
         self.details_slot(entry)
@@ -251,9 +270,12 @@ impl NumberDictionary {
         let host = new.tagged(heap);
         new.nof.set(heap, host, Smi::new(self.nof() as i64));
         new.nod.set(heap, host, Smi::new(0));
-        if self.requires_slow_elements() {
-            new.set_requires_slow_elements(heap);
-        }
+        // data- and attribute-entry flags stay sticky across a rehash
+        new.flags.set(
+            heap,
+            new.tagged(heap),
+            Smi::new(self.flags.to_smi_unchecked().value()),
+        );
     }
 
     /// Grow (or same-size de-tombstone) if needed, returning the table
@@ -306,6 +328,9 @@ impl NumberDictionary {
             t.value_slot(entry).set(heap, host, value.as_tagged(heap));
             t.details_slot(entry)
                 .set(heap, host, Smi::new(details).into_tagged());
+            if details != DETAILS_DATA {
+                t.set_flag(heap, FLAG_ATTRIBUTE_ENTRIES);
+            }
             let nof = t.nof() + 1;
             t.nof.set(heap, host, Smi::new(nof as i64));
             if reused_tombstone {
