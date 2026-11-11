@@ -87,7 +87,7 @@ pub use objects::{
     object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
-pub use stack::{Args, Callee, FrameMeta, STACK_SLOTS, Stack};
+pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
@@ -179,6 +179,9 @@ pub struct ThreadState {
     /// right before the uncatchable unwind; guest code can never observe or
     /// intercept it.
     termination: StdCell<Option<Termination>>,
+    /// Rust stack position of the bottom-most `execute` (0 before the first
+    /// call): the anchor for [`ThreadState::rust_stack_exhausted`].
+    rust_stack_base: StdCell<usize>,
     /// Construct-receiver cache: a `WeakFixedArray` table mapping closures
     /// to their synthesized initial map identity-keyed per closure since `.prototype` is per-closure.
     /// Entries are `[closure(weak), fn_map, proto, proto_slot(Smi),
@@ -352,6 +355,22 @@ impl ThreadState {
 
     pub fn has_pending_exception(&self) -> bool {
         self.has_pending_exception.get()
+    }
+
+    /// Whether re-entering the interpreter would exhaust the Rust stack.
+    /// Bytecode recursion is bounded by the register stack, but a native
+    /// calling back into `execute` (a getter, callback, or coercion) recurses
+    /// on the native stack, which aborts instead of throwing when exhausted.
+    #[inline(always)]
+    pub fn rust_stack_exhausted(&self) -> bool {
+        let probe = 0u8;
+        let here = core::ptr::addr_of!(probe) as usize;
+        let base = self.rust_stack_base.get();
+        if base == 0 {
+            self.rust_stack_base.set(here);
+            return false;
+        }
+        base.saturating_sub(here) > RUST_STACK_BUDGET
     }
 
     /// Why this thread terminated, if it did (uncatchable by guest code).
@@ -701,6 +720,7 @@ impl VM {
             pending_exception: unsafe { Register::from_value(the_hole) },
             has_pending_exception: StdCell::new(false),
             termination: StdCell::new(None),
+            rust_stack_base: StdCell::new(0),
             construct_cache: unsafe { Register::from_value(the_hole) },
         });
         let mut threads = self.shared.threads.lock().unwrap();

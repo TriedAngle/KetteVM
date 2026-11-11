@@ -7,6 +7,12 @@ use core::cell::Cell;
 /// Number of slots in a thread's interpreter stack.
 pub const STACK_SLOTS: usize = 16 * 1024;
 
+/// Rust stack reserved above the bottom-most `execute`: a native that calls
+/// back into the interpreter recurses on the native stack, where exhausting
+/// it aborts the process instead of throwing. Sized for the 2 MiB std thread
+/// stack minimum.
+pub const RUST_STACK_BUDGET: usize = 1 << 20;
+
 /// Fixed header slots between the register file and the parameter region
 pub const HEADER_SLOTS: usize = 11;
 

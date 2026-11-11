@@ -421,6 +421,9 @@ pub fn execute<'a, 't>(
     args: HandleSlice<'_>,
     new_target: Option<Handle<'_, Value>>,
 ) -> Result<Tagged<'a, Value>> {
+    if state.rust_stack_exhausted() {
+        bail!(vm, heap, state, VmError::StackOverflow);
+    }
     let stack = state.stack();
 
     let saved_top = stack.top();
