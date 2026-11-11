@@ -1,9 +1,5 @@
-//! The natives `CallNative` dispatches to: compiled-language semantics (each
-//! cites its ES section), not JS-visible library functions. [`register`]
-//! assigns their ids in the VM's native registry.
+//! Compiler-emitted natives: control flow, class construction, super and eval.
 use crate::JSRuntime;
-use for_in::{for_in_enumerate, for_in_next};
-use iterators::{get_iterator, iterator_done, iterator_next, iterator_value};
 use js_compiler::native::NativeIds;
 use vm_core::{
     AccessorPair, Args, ArgumentsCreate, ContextObject, Convert, DenseString, Errors, FixedArray,
@@ -17,56 +13,54 @@ use vm_core::{
 mod for_in;
 mod iterators;
 
-/// Register every helper and collect the ids the compiler emits.
-pub fn register(vm: &mut VM) -> NativeIds {
-    NativeIds {
-        get_iterator: vm.register_native(get_iterator),
-        iterator_next: vm.register_native(iterator_next),
-        iterator_done: vm.register_native(iterator_done),
-        iterator_value: vm.register_native(iterator_value),
-        has_property: vm.register_native(has_property),
-        copy_data_properties: vm.register_native(copy_data_properties),
-        create_private_name: vm.register_native(create_private_name),
-        private_get: vm.register_native(private_get),
-        private_set: vm.register_native(private_set),
-        private_in: vm.register_native(private_in),
-        set_class_fields: vm.register_native(set_class_fields),
-        init_instance_fields: vm.register_native(init_instance_fields),
-        require_object_coercible: vm.register_native(require_object_coercible),
-        delete_property_operator: vm.register_native(delete_property_operator),
-        delete_identifier_sloppy: vm.register_native(delete_identifier_sloppy),
-        delete_super_property: vm.register_native(delete_super_property),
-        for_in_enumerate: vm.register_native(for_in_enumerate),
-        for_in_next: vm.register_native(for_in_next),
-        set_function_name: vm.register_native(set_function_name),
-        install_accessor: vm.register_native(install_accessor),
-        define_own_property: vm.register_native(define_own_property),
-        set_prototype: vm.register_native(set_prototype),
-        throw_if_not_constructor_or_null: vm.register_native(throw_if_not_constructor_or_null),
-        throw_if_not_object_or_null: vm.register_native(throw_if_not_object_or_null),
-        throw_super_not_called_if_hole: vm.register_native(throw_super_not_called_if_hole),
-        throw_super_already_called_if_not_hole: vm
-            .register_native(throw_super_already_called_if_not_hole),
-        construct_super: vm.register_native(construct_super),
-        construct_super_all_args: vm.register_native(construct_super_all_args),
-        construct_super_via: vm.register_native(construct_super_via),
-        load_dynamic_name: vm.register_native(load_dynamic_name),
-        store_dynamic_name: vm.register_native(store_dynamic_name),
-        declare_eval_var: vm.register_native(declare_eval_var),
-        declare_eval_function: vm.register_native(declare_eval_function),
-        resolve_direct_eval: vm.register_native(resolve_direct_eval),
-        store_repl_global_init: vm.register_native(store_repl_global_init),
-        validate_eval_declarations: vm.register_native(validate_eval_declarations),
-        declare_globals: vm.register_native(intrinsics::declare_globals),
-        throw_const_assign: vm.register_native(throw_const_assign_error),
-        create_rest_parameter: vm.register_native(create_rest_parameter),
-        create_arguments: vm.register_native(create_arguments),
-        super_get_property: vm.register_native(super_get_property),
-        super_set_property: vm.register_native(super_set_property),
-    }
+crate::register_natives! {
+    NativeIds;
+    has_property,
+    copy_data_properties,
+    create_private_name,
+    private_get,
+    private_set,
+    private_in,
+    set_class_fields,
+    init_instance_fields,
+    require_object_coercible,
+    delete_property_operator,
+    delete_identifier_sloppy,
+    delete_super_property,
+    set_function_name,
+    install_accessor,
+    define_own_property,
+    set_prototype,
+    throw_if_not_constructor_or_null,
+    throw_if_not_object_or_null,
+    throw_super_not_called_if_hole,
+    throw_super_already_called_if_not_hole,
+    construct_super,
+    construct_super_all_args,
+    construct_super_via,
+    load_dynamic_name,
+    store_dynamic_name,
+    declare_eval_var,
+    declare_eval_function,
+    resolve_direct_eval,
+    store_repl_global_init,
+    validate_eval_declarations,
+    declare_globals -> intrinsics::declare_globals,
+    throw_const_assign -> throw_const_assign_error,
+    create_rest_parameter,
+    create_arguments,
+    super_get_property,
+    super_set_property,
 }
 
-// ---- runtime helpers ------------------------------------------------------
+/// Fill the compiler's id table from this module and its submodules.
+pub fn native_ids(vm: &mut VM) -> NativeIds {
+    let mut ids = NativeIds::default();
+    for_in::register(vm, &mut ids);
+    iterators::register(vm, &mut ids);
+    register(vm, &mut ids);
+    ids
+}
 
 /// RequireObjectCoercible ( arg )
 /// [ES 7.2.1](https://tc39.es/ecma262/#sec-requireobjectcoercible)
@@ -85,8 +79,6 @@ fn require_object_coercible<'a>(
     }
     args.get(heap, 0)
 }
-
-// ---- delete (ES 13.5.1) ----------------------------------------------------
 
 /// `delete obj.key`
 /// [ES 13.5.1.2](https://tc39.es/ecma262/#sec-delete-operator-runtime-semantics-evaluation)
@@ -468,8 +460,6 @@ fn init_instance_fields<'a>(
     })
 }
 
-// ---- frame access -----------------------------------------------------------
-
 /// Where a dynamically resolved (direct eval) name lives.
 enum DynamicBinding<'s> {
     /// An environment-record slot (possibly the hole): not deletable.
@@ -577,8 +567,6 @@ fn frame_super_parts<'a>(
     ))
 }
 
-// ---- store outcomes ---------------------------------------------------------
-
 /// A full [[Get]] that treats non-callable getters (an absent half of an
 /// accessor pair) as undefined instead of throwing.
 fn get_property_lenient<'a>(
@@ -594,8 +582,6 @@ fn get_property_lenient<'a>(
         Err(err) => raise_runtime(heap, err),
     }
 }
-
-// ---- class definition helpers -----------------------------------------------
 
 /// SetFunctionName (ES 8.4.4): (fn, key, prefix) -> fn. Redefines `name`
 /// on the closure ({w−, e−, c+}); the prefix discriminant (a Smi) is
@@ -905,8 +891,6 @@ fn throw_super_already_called_if_not_hole<'a>(
     v.as_tagged(heap)
 }
 
-// ---- super() construction (ES 15.4.3) ---------------------------------------
-
 /// The shared ConstructSuper tail: construct `callee` with `new_target`,
 /// giving derived parents the hole receiver. The instance lands in the
 /// return value; the exception sentinel escapes when user code threw.
@@ -1101,8 +1085,6 @@ fn construct_super_via<'a>(
         )
     })
 }
-
-// ---- dynamic names (direct eval) ---------------------------------------------
 
 /// Direct-eval name load: (name) -> value. Walks the frame context chain
 /// by name (slots, then extension objects); unresolved names fall back to
@@ -1560,8 +1542,6 @@ fn throw_const_assign_error<'a>(
     Errors::raise(vm, heap, state, VmError::ConstAssign)
 }
 
-// ---- rest parameters ---------------------------------------------------------
-
 /// A fresh array of the frame's arguments from formal index `first`:
 /// (first) -> array.
 fn create_rest_parameter<'a>(
@@ -1597,8 +1577,6 @@ fn create_rest_parameter<'a>(
         .erase()
     })
 }
-
-// ---- arguments objects (ES 10.4.4) -------------------------------------------
 
 /// `CreateUnmappedArgumentsObject ( argList )`
 /// [ES 10.4.4.6](https://tc39.es/ecma262/#sec-createunmappedargumentsobject)
@@ -1671,8 +1649,6 @@ fn create_arguments<'a>(
         .erase()
     })
 }
-
-// ---- super property access (ES 15.4.2 / 15.4.4) -------------------------------
 
 /// super.x load: (home, recv, key) -> value. GetSuperBase of the home
 /// object walked with the split receiver/lookup-start; key coercion runs

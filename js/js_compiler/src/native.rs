@@ -1,7 +1,7 @@
 use vm_core::NativeIndex;
 
 /// Ids of the native functions this front end's bytecode calls directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NativeIds {
     /// (obj) -> iterator -- GetProperty(obj, @@iterator) + Call (ES 8.5.4)
     pub get_iterator: NativeIndex,

@@ -25,11 +25,16 @@ pub mod symbol;
 /// differ.
 #[macro_export]
 macro_rules! register_natives {
-    ($($field:ident $(-> $function:ident)?),* $(,)?) => {
-        pub fn register(
-            vm: &mut ::vm_core::VM,
-            ids: &mut $crate::BuiltinIndices,
-        ) {
+    // Fill the runtime's own builtin table.
+    ($($field:ident $(-> $function:path)?),* $(,)?) => {
+        $crate::register_natives!(@into $crate::BuiltinIndices; $($field $(-> $function)?),*);
+    };
+    // Fill another id table, e.g. the compiler's `NativeIds`.
+    ($ids:ty; $($field:ident $(-> $function:path)?),* $(,)?) => {
+        $crate::register_natives!(@into $ids; $($field $(-> $function)?),*);
+    };
+    (@into $ids:ty; $($field:ident $(-> $function:path)?),* $(,)?) => {
+        pub fn register(vm: &mut ::vm_core::VM, ids: &mut $ids) {
             $(
                 ids.$field = vm.register_native(
                     $crate::register_natives!(@function $field $(-> $function)?)
@@ -38,7 +43,7 @@ macro_rules! register_natives {
         }
     };
     (@function $field:ident) => { $field };
-    (@function $field:ident -> $function:ident) => { $function };
+    (@function $field:ident -> $function:path) => { $function };
 }
 
 use js_compiler::native::NativeIds;
@@ -48,8 +53,8 @@ use vm_core::{
     Smi, Symbol, Thread, VM, Value, Visitor,
 };
 
+mod control_flow;
 mod known;
-mod native;
 
 /// The JS runtime: its state is the runtime itself (one instance per VM).
 pub struct JSRuntime {
@@ -64,7 +69,7 @@ impl Runtime for JSRuntime {
     const ID: RuntimeId = RuntimeId(1);
 
     fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
-        state.ids = native::register(vm);
+        state.ids = control_flow::native_ids(vm);
         state.indices = register_builtin_natives(vm);
         {
             let mut thread = vm.attach();
@@ -86,50 +91,7 @@ impl Default for JSRuntime {
         Self {
             indices: BuiltinIndices::default(),
             known: known::JsKnown::default(),
-            ids: NativeIds {
-                get_iterator: NativeIndex(0),
-                iterator_next: NativeIndex(0),
-                iterator_done: NativeIndex(0),
-                iterator_value: NativeIndex(0),
-                has_property: NativeIndex(0),
-                copy_data_properties: NativeIndex(0),
-                create_private_name: NativeIndex(0),
-                private_get: NativeIndex(0),
-                private_set: NativeIndex(0),
-                private_in: NativeIndex(0),
-                set_class_fields: NativeIndex(0),
-                init_instance_fields: NativeIndex(0),
-                require_object_coercible: NativeIndex(0),
-                delete_property_operator: NativeIndex(0),
-                delete_identifier_sloppy: NativeIndex(0),
-                delete_super_property: NativeIndex(0),
-                for_in_enumerate: NativeIndex(0),
-                for_in_next: NativeIndex(0),
-                set_function_name: NativeIndex(0),
-                install_accessor: NativeIndex(0),
-                define_own_property: NativeIndex(0),
-                set_prototype: NativeIndex(0),
-                throw_if_not_constructor_or_null: NativeIndex(0),
-                throw_if_not_object_or_null: NativeIndex(0),
-                throw_super_not_called_if_hole: NativeIndex(0),
-                throw_super_already_called_if_not_hole: NativeIndex(0),
-                construct_super: NativeIndex(0),
-                construct_super_all_args: NativeIndex(0),
-                construct_super_via: NativeIndex(0),
-                load_dynamic_name: NativeIndex(0),
-                store_dynamic_name: NativeIndex(0),
-                declare_eval_var: NativeIndex(0),
-                declare_eval_function: NativeIndex(0),
-                resolve_direct_eval: NativeIndex(0),
-                store_repl_global_init: NativeIndex(0),
-                validate_eval_declarations: NativeIndex(0),
-                declare_globals: NativeIndex(0),
-                throw_const_assign: NativeIndex(0),
-                create_rest_parameter: NativeIndex(0),
-                create_arguments: NativeIndex(0),
-                super_get_property: NativeIndex(0),
-                super_set_property: NativeIndex(0),
-            },
+            ids: NativeIds::default(),
         }
     }
 }

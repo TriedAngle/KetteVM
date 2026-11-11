@@ -138,7 +138,7 @@ fn symbol_for<'a>(
             .cast::<DenseString>(heap, key.as_tagged(heap))
             .expect("ToString returns a String");
         let table = vm.known().global_symbol_registry.get(heap);
-        for index in (0..table.as_ref().len()).step_by(2) {
+        for index in (0..table.len()).step_by(2) {
             let Some(registered) = table.as_ref().at(heap, index).get_as::<DenseString>(heap)
             else {
                 continue;

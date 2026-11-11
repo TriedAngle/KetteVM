@@ -1,9 +1,18 @@
 //! Iterator protocol natives (ES 8.5): GetIterator, IteratorNext,
 //! IteratorComplete and IteratorValue.
 use crate::JSRuntime;
+use js_compiler::native::NativeIds;
 use vm_core::{
     Args, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise, raise_runtime, rt_try,
 };
+
+crate::register_natives! {
+    NativeIds;
+    get_iterator,
+    iterator_next,
+    iterator_done,
+    iterator_value,
+}
 
 /// GetIterator (ES 8.5.4): (obj) -> iterator.
 pub fn get_iterator<'a>(
