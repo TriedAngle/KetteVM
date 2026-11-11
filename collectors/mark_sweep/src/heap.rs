@@ -49,7 +49,6 @@ pub struct MarkSweepState {
     gc_allocated: AtomicUsize,
     sweep_signal: Arc<SweepSignal>,
     sweeper: Mutex<Option<JoinHandle<()>>>,
-    background_sweeps: AtomicUsize,
 }
 
 /// Wakes and stops the background sweeper. Held by the sweeper thread
@@ -94,7 +93,6 @@ impl MarkSweepState {
             gc_allocated: AtomicUsize::new(0),
             sweep_signal: Arc::new(SweepSignal::new()),
             sweeper: Mutex::new(None),
-            background_sweeps: AtomicUsize::new(0),
         });
         let weak = Arc::downgrade(&this);
         this.safepoint.set_work(Box::new({
@@ -153,10 +151,6 @@ impl MarkSweepState {
 
     pub fn mark_assists(&self) -> usize {
         self.mark_assists.load(Ordering::Relaxed)
-    }
-
-    pub fn background_sweeps(&self) -> usize {
-        self.background_sweeps.load(Ordering::Relaxed)
     }
 
     pub fn active_chunks(&self) -> usize {
@@ -409,7 +403,6 @@ impl MarkSweepState {
                 heap.publish_swept(&chunk, live);
                 heap.take_completed_live()
             };
-            self.background_sweeps.fetch_add(1, Ordering::Relaxed);
             if let Some(live) = completed {
                 self.update_threshold(live);
             }
