@@ -12,9 +12,11 @@ crate::register_natives! {
     proxy_revoke,
 }
 
-/// `new Proxy(target, handler)` (ES 20.2.1.1): both must be JSReceivers;
-/// the map's capability bits mirror the target's so callability is
-/// observable (`typeof`, future `Call`/`Construct` dispatch).
+/// `Proxy ( target, handler )`
+/// [ES 28.2.1.1](https://tc39.es/ecma262/#sec-proxy-target-handler)
+/// Requires `new`; both arguments must be Objects. The proxy map mirrors the
+/// target's callability so `typeof` and `[[Call]]`/`[[Construct]]` dispatch
+/// stay observable.
 fn proxy_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
@@ -37,10 +39,10 @@ fn proxy_constructor<'a>(
     state.handle_scope(|scope| Proxy::allocate(heap, &scope, target, handler))
 }
 
-/// `Proxy.revocable(target, handler)` (ES 20.2.2.1): returns
-/// `{ proxy, revoke }`; the revoke closure is the JS template installed
-/// by REVOKE_PRELUDE (it keeps the idempotence flag and calls the
-/// hidden `__revokeProxy` runtime).
+/// `Proxy.revocable ( target, handler )`
+/// [ES 28.2.2.1](https://tc39.es/ecma262/#sec-proxy.revocable)
+/// Returns `{ proxy, revoke }`; `revoke` is a built-in function with no
+/// arguments that revokes `proxy` and returns `undefined` (idempotently).
 fn proxy_revocable<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -83,21 +85,7 @@ fn proxy_revocable<'a>(
             heap,
             Object::set_prototype(vm, heap, state, &scope, bound, prototype)
         );
-        // name "revoke", length 0 (the bound argument), neither enumerable
-        let name_key = vm.known().strings.name.get_handle(heap, &scope);
-        let name_value = scope.handle(
-            vm.interner()
-                .intern_str(heap, &scope, "revoke")
-                .as_tagged(heap)
-                .erase(),
-        );
-        let builtin_attrs = PropertyDescriptor::Data {
-            value: name_value,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        };
-        let _ = Object::define_own_property_ordinary(heap, &scope, bound, name_key, builtin_attrs);
+        // Built-in function properties: length 0 first, then name "".
         let length_key = vm.known().strings.length.get_handle(heap, &scope);
         let zero: Handle<'_, Value> = scope.handle(Smi::new(0));
         let length_attrs = PropertyDescriptor::Data {
@@ -107,6 +95,15 @@ fn proxy_revocable<'a>(
             configurable: true,
         };
         let _ = Object::define_own_property_ordinary(heap, &scope, bound, length_key, length_attrs);
+        let name_key = vm.known().strings.name.get_handle(heap, &scope);
+        let name_value = heap.known().strings.empty.get_handle(heap, &scope).erase();
+        let builtin_attrs = PropertyDescriptor::Data {
+            value: name_value,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        let _ = Object::define_own_property_ordinary(heap, &scope, bound, name_key, builtin_attrs);
         let revoke = bound.as_tagged(heap).erase();
         let revoke = scope.handle(revoke);
         let map = vm.known().object_initial_map.get_handle(heap, &scope);
