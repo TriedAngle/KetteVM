@@ -1255,6 +1255,34 @@ fn op_jump_if_not_undefined(frame: Frame) {
     }
     next!()
 }
+
+#[handler(JumpIfNullish)]
+fn op_jump_if_nullish(frame: Frame) {
+    let off = frame.signed::<0>();
+    let heap = frame.ctx().heap();
+    let null = roots.null.get(heap).erase();
+    let undefined = roots.undefined.get(heap).erase();
+    let value = frame.acc();
+    if value == null || value == undefined {
+        dispatch!(frame.ip().wrapping_offset(off as isize))
+    }
+    next!()
+}
+
+#[handler(BindThis)]
+fn op_bind_this(frame: Frame) {
+    let heap = frame.ctx().heap();
+    if !frame
+        .regs()
+        .get(0, heap)
+        .as_heap_object()
+        .is_some_and(|obj| obj.map(heap).kind().kind().is_js_receiver())
+    {
+        tail!(slow_bind_this)
+    }
+    next!()
+}
+
 #[handler(CallNative)]
 fn op_call_native(frame: Frame) {
     let pc = frame.pc();

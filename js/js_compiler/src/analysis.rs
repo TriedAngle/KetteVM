@@ -212,6 +212,8 @@ pub struct Facts<'a> {
     pub block_contexts: HashSet<ScopeId>,
     /// functions whose receiver / new.target a nested arrow captures
     pub captures_this: HashSet<Fid>,
+    /// functions that read `this` (directly or through a direct eval)
+    pub uses_this: HashSet<Fid>,
     pub captures_new_target: HashSet<Fid>,
     /// derived constructors with an arrow-delegated super()
     pub needs_this_function: HashSet<Fid>,
@@ -374,6 +376,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             creates_context: HashSet::new(),
             block_contexts: HashSet::new(),
             captures_this: HashSet::new(),
+            uses_this: HashSet::new(),
             captures_new_target: HashSet::new(),
             needs_this_function: HashSet::new(),
             obj_lit_home: HashSet::new(),
@@ -411,6 +414,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             creates_context,
             block_contexts,
             captures_this,
+            uses_this,
             captures_new_target,
             needs_this_function,
             obj_lit_home,
@@ -494,6 +498,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             creates_context,
             block_contexts,
             captures_this,
+            uses_this,
             captures_new_target,
             needs_this_function,
             for_heads: self.for_heads,
@@ -1024,6 +1029,7 @@ struct Deriver<'a, 'p, 'f> {
     creates_context: HashSet<Fid>,
     block_contexts: HashSet<ScopeId>,
     captures_this: HashSet<Fid>,
+    uses_this: HashSet<Fid>,
     captures_new_target: HashSet<Fid>,
     needs_this_function: HashSet<Fid>,
     obj_lit_home: HashSet<NodeId>,
@@ -1154,7 +1160,9 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 AstKind::ThisExpression(_) | AstKind::NewTarget(_) => {
                     self.nearest_function(id, false)
                 }
-                AstKind::CallExpression(c) if matches!(c.callee, Expression::Super(_)) => {
+                AstKind::CallExpression(c)
+                    if matches!(c.callee, Expression::Super(_)) || Self::is_direct_eval(c) =>
+                {
                     self.nearest_function(id, false)
                 }
                 AstKind::StaticMemberExpression(e) if matches!(e.object, Expression::Super(_)) => {
@@ -1205,6 +1213,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                     if owner != self.current_fn_of(id) {
                         self.captures_this.insert(owner);
                     }
+                    self.uses_this.insert(owner);
                     self.special
                         .insert(t.node_id.get(), Special::This { owner, depth });
                 }
@@ -1217,6 +1226,16 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                     }
                     self.special
                         .insert(m.node_id.get(), Special::NewTarget { owner, depth });
+                }
+                AstKind::CallExpression(c) if Self::is_direct_eval(c) => {
+                    let Some((owner, depth)) = self.fn_owner_and_depth(id) else {
+                        continue;
+                    };
+                    if owner != self.current_fn_of(id) {
+                        self.captures_this.insert(owner);
+                    }
+                    self.uses_this.insert(owner);
+                    self.special.insert(id, Special::This { owner, depth });
                 }
                 AstKind::CallExpression(c) if matches!(c.callee, Expression::Super(_)) => {
                     let Some((owner, depth)) = self.fn_owner_and_depth(id) else {
@@ -1268,6 +1287,11 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
 
     /// The nearest enclosing non-arrow function of `node` and the context
     /// hops to its frame context.
+    /// A call the compiler lowers as a direct eval.
+    fn is_direct_eval(c: &CallExpression<'_>) -> bool {
+        !c.optional && matches!(&c.callee, Expression::Identifier(i) if i.name == "eval")
+    }
+
     fn fn_owner_and_depth(&self, node: NodeId) -> Option<(Fid, u32)> {
         let owner = self.nearest_function(node, false)?;
         let fid = *self.fn_of_node.get(&owner)?;

@@ -230,6 +230,7 @@ pub type Handler = for<'h> extern "rust-preserve-none" fn(
 handler_table!(
     op_wide,
     crate::op_load,
+    crate::op_bind_this,
     crate::op_move,
     crate::op_store,
     crate::op_add,
@@ -238,6 +239,7 @@ handler_table!(
     crate::op_jump_if_truthy,
     crate::op_jump_if_falsy,
     crate::op_jump_if_not_undefined,
+    crate::op_jump_if_nullish,
     op_jump_loop,
     op_return,
     op_call_no_feedback,

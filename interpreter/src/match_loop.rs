@@ -4,7 +4,7 @@
 
 use crate::{
     RootsArg, match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
-    match_op_bitwise_and, match_op_bitwise_and_immediate, match_op_bitwise_or,
+    match_op_bind_this, match_op_bitwise_and, match_op_bitwise_and_immediate, match_op_bitwise_or,
     match_op_bitwise_or_immediate, match_op_bitwise_xor, match_op_bitwise_xor_immediate,
     match_op_call_native, match_op_compare_jump, match_op_create_block_context,
     match_op_create_closure, match_op_create_empty_array_literal,
@@ -12,17 +12,17 @@ use crate::{
     match_op_create_sized_array_literal, match_op_dec_loc, match_op_div, match_op_div_immediate,
     match_op_equal, match_op_equal_strict, match_op_exp, match_op_exp_immediate,
     match_op_greater_than, match_op_greater_than_or_equal, match_op_inc_loc, match_op_instance_of,
-    match_op_jump, match_op_jump_if_falsy, match_op_jump_if_not_undefined, match_op_jump_if_truthy,
-    match_op_less_than, match_op_less_than_or_equal, match_op_load, match_op_load_constant,
-    match_op_load_context, match_op_load_context_slot, match_op_load_current_closure,
-    match_op_load_element_imm, match_op_load_false, match_op_load_global,
-    match_op_load_global_no_throw, match_op_load_hole, match_op_load_keyed_property,
-    match_op_load_keyed_property_reg, match_op_load_named_property, match_op_load_new_target,
-    match_op_load_null, match_op_load_smi, match_op_load_true, match_op_load_undefined,
-    match_op_load_zero, match_op_mod, match_op_mod_immediate, match_op_move, match_op_mul,
-    match_op_mul_immediate, match_op_negate, match_op_pop_context, match_op_push_context,
-    match_op_shift_left, match_op_shift_left_immediate, match_op_shift_right,
-    match_op_shift_right_immediate, match_op_shift_right_logical,
+    match_op_jump, match_op_jump_if_falsy, match_op_jump_if_not_undefined,
+    match_op_jump_if_nullish, match_op_jump_if_truthy, match_op_less_than,
+    match_op_less_than_or_equal, match_op_load, match_op_load_constant, match_op_load_context,
+    match_op_load_context_slot, match_op_load_current_closure, match_op_load_element_imm,
+    match_op_load_false, match_op_load_global, match_op_load_global_no_throw, match_op_load_hole,
+    match_op_load_keyed_property, match_op_load_keyed_property_reg, match_op_load_named_property,
+    match_op_load_new_target, match_op_load_null, match_op_load_smi, match_op_load_true,
+    match_op_load_undefined, match_op_load_zero, match_op_mod, match_op_mod_immediate,
+    match_op_move, match_op_mul, match_op_mul_immediate, match_op_negate, match_op_pop_context,
+    match_op_push_context, match_op_shift_left, match_op_shift_left_immediate,
+    match_op_shift_right, match_op_shift_right_immediate, match_op_shift_right_logical,
     match_op_shift_right_logical_immediate, match_op_store, match_op_store_context_slot,
     match_op_store_global, match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
     match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
@@ -310,6 +310,8 @@ fn step<'h, const STRIDE: usize>(
         Opcode::JumpIfNotUndefined => {
             match_op_jump_if_not_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
+        Opcode::JumpIfNullish => match_op_jump_if_nullish::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::BindThis => match_op_bind_this::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::JumpLoop => op_jump_loop::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Return => {
             let next = op_return(*ip, *regs, acc, ctx, roots);

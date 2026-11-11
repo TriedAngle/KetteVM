@@ -122,6 +122,29 @@ impl<'a> Tagged<'a, Value> {
 }
 
 impl Convert {
+    /// ES 10.2.1.2 OrdinaryCallBindThis step 3: the receiver a non-strict
+    /// function sees. null/undefined become the global object, other
+    /// primitives are boxed, objects pass through.
+    pub fn this_value<'a>(
+        vm: &'a VM,
+        heap: &'a mut Heap,
+        state: &'a ThreadState,
+        receiver: Handle<'_, Value>,
+    ) -> Result<Tagged<'a, Value>> {
+        state.handle_scope(|scope| {
+            let receiver = scope.handle(receiver.as_tagged(heap));
+            if receiver.as_tagged(heap).is_nullish(heap) {
+                let global = vm.known().global_object.get_handle(heap, &scope);
+                return Ok(global.erase().as_tagged(heap));
+            }
+            if !receiver.as_tagged(heap).is_primitive(heap) {
+                return Ok(receiver.as_tagged(heap));
+            }
+            let object = Self::to_object(vm, heap, state, &scope, receiver)?;
+            Ok(object.erase().as_tagged(heap))
+        })
+    }
+
     /// ES 7.1.20 ToObject: wrap primitives, return objects unchanged.
     pub fn to_object<'s>(
         vm: &VM,

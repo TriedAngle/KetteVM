@@ -292,6 +292,7 @@ define_opcodes! {
     /// jump unless acc is `undefined` (pattern/param default guards)
     JumpIfNotUndefined { operands: [Immediate], acc: reads, indices: [Unchecked] },
 
+
     // -- tests and comparisons ---------------------------------------------
     TestReferenceEqual { operands: [Register], acc: reads_writes, indices: [Unchecked] }, // reg; acc = true singleton iff bits(reg) == bits(acc), else false
 
@@ -340,4 +341,11 @@ define_opcodes! {
     CallMethod0 { operands: [Register, Register, Index], acc: writes, indices: [Unchecked, Unchecked, Feedback] },                              // callee, receiver, fb -> acc
     CallMethod1 { operands: [Register, Register, Register, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, Feedback] },          // callee, receiver, arg0, fb -> acc
     CallMethod2 { operands: [Register, Register, Register, Register, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, Unchecked, Feedback] }, // callee, receiver, arg0, arg1, fb -> acc
+
+    /// jump when acc is `undefined` or `null` (`??=` short-circuit)
+    JumpIfNullish { operands: [Immediate], acc: reads, indices: [Unchecked] },
+
+    /// OrdinaryCallBindThis for a non-strict function: convert the receiver
+    /// in place (nullish -> global object, primitive -> wrapper).
+    BindThis { operands: [], indices: [] },
 }

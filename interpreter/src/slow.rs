@@ -817,6 +817,28 @@ fn load_keyed_body<'a>(
     }
 }
 
+#[handler(BindThis)]
+#[cold]
+pub fn slow_bind_this(frame: Frame) {
+    let pc = frame.pc();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let converted = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(0, frame.ctx().heap()));
+        Convert::this_value(vm, frame.ctx().heap_mut(), state, recv)
+    });
+    match converted {
+        Ok(value) => {
+            frame.regs().set(0, value);
+            reenter!(pc)
+        }
+        Err(err) => {
+            frame.set_acc(raise_runtime(frame.ctx().heap_mut(), err));
+            reenter!(pc)
+        }
+    }
+}
+
 #[handler(LoadKeyedProperty)]
 #[cold]
 pub fn slow_keyed_load(frame: Frame) {
@@ -829,6 +851,10 @@ pub fn slow_keyed_load(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
+        // GetValue's ToObject(base) runs before ToPropertyKey(key)
+        if recv.as_tagged(heap).is_nullish(heap) {
+            raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
+        }
         let key = scope.handle(rt_try!(
             heap,
             Object::to_property_key(vm, heap, state, raw_key)
@@ -851,6 +877,10 @@ pub fn slow_keyed_load_reg(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
+        // GetValue's ToObject(base) runs before ToPropertyKey(key)
+        if recv.as_tagged(heap).is_nullish(heap) {
+            raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
+        }
         let key = scope.handle(rt_try!(
             heap,
             Object::to_property_key(vm, heap, state, raw_key)
@@ -1091,6 +1121,10 @@ pub fn keyed_store_body<'a>(
     mode: LanguageMode,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
+        // PutValue's ToObject(base) runs before ToPropertyKey(key)
+        if recv.as_tagged(heap).is_nullish(heap) {
+            raise!(vm, heap, state, VmError::CannotSetPropertyOfNullish);
+        }
         let key = scope.handle(rt_try!(
             heap,
             Object::to_property_key(vm, heap, state, raw_key)

@@ -1481,6 +1481,10 @@ impl Object {
         if !callable.as_tagged(heap).is_callable(heap) {
             bail!(vm, heap, state, VmError::InstanceofRightNotCallable);
         }
+        // OrdinaryHasInstance step 3: a non-object is never an instance.
+        if object.as_tagged(heap).is_primitive(heap) {
+            return Ok(false);
+        }
         // 4. P = Get(C, "prototype") — full [[Get]]; a getter may run user
         // code and move the heap, so only its result has to be rooted here
         state.handle_scope(|scope| {

@@ -118,7 +118,10 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
                     offset: ops.imm(0),
                 });
             }
-            Opcode::JumpIfTruthy | Opcode::JumpIfFalsy | Opcode::JumpIfNotUndefined => {
+            Opcode::JumpIfTruthy
+            | Opcode::JumpIfFalsy
+            | Opcode::JumpIfNotUndefined
+            | Opcode::JumpIfNullish => {
                 jumps.push(JumpSite {
                     pc,
                     op,

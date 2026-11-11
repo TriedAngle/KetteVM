@@ -1207,6 +1207,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         match e {
             Expression::FunctionExpression(f) => f.id.is_none(),
             Expression::ClassExpression(c) => c.id.is_none(),
+            Expression::ArrowFunctionExpression(_) => true,
             _ => false,
         }
     }
@@ -1925,10 +1926,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 Ok(())
             }
             Op::Instanceof => {
-                // acc = lhs instanceof rhs: evaluate rhs first
+                // acc = lhs instanceof rhs: the left operand is evaluated
+                // (and read) before the right one
+                self.expr(&b.left)?;
+                let l = self.b.stage_acc(&temps);
                 self.expr(&b.right)?;
                 let r = self.b.stage_acc(&temps);
-                self.expr(&b.left)?;
+                self.b.load(l);
                 self.b.instance_of(r);
                 Ok(())
             }
@@ -2151,8 +2155,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.load(v);
             return Ok(());
         }
-        if a.operator.is_logical() {
-            return self.err(a.span, "logical assignment");
+        if let Some(op) = a.operator.to_logical_operator() {
+            return self.emit_logical_assign(&a.left, &a.right, op);
         }
         if a.operator.is_assign() {
             self.emit_simple_assign(&a.left, &a.right)
@@ -2163,6 +2167,72 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 .and_then(arith_opcode)
                 .ok_or_else(|| CompileError::new(a.span, "assignment operator"))?;
             self.emit_compound_assign(&a.left, &a.right, op)
+        }
+    }
+
+    /// `&&=`, `||=`, `??=` (ES 13.15.2): evaluate the reference and its old
+    /// value, evaluate the right-hand side only when the old value does not
+    /// short-circuit, and yield the assigned value.
+    fn emit_logical_assign(
+        &mut self,
+        target: &AssignmentTarget<'_>,
+        value: &Expression<'_>,
+        op: LogicalOperator,
+    ) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        let short = self.b.new_label();
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(i) => {
+                self.emit_identifier(i)?;
+                self.emit_logical_skip(op, short);
+                self.expr(value)?;
+                // NamedEvaluation: `a &&= function () {}` names the closure "a"
+                if self.is_anon_function(value) {
+                    self.emit_set_name_const(i.name.as_bytes());
+                }
+                self.store_name(i)?;
+            }
+            t if assign_member_ref(t).is_some() => {
+                let m = assign_member_ref(t).unwrap();
+                if is_this_member(m) {
+                    self.b.note_this_property();
+                }
+                let store = if is_super_member(m) {
+                    self.prepare_super_store(m, &temps)?
+                } else {
+                    self.prepare_property_store(m)?
+                };
+                self.emit_property_load_of(&store);
+                self.emit_logical_skip(op, short);
+                self.expr(value)?;
+                if let StoreTarget::Named { name_idx, .. } = &store
+                    && self.is_anon_function(value)
+                {
+                    let name_idx = *name_idx;
+                    self.emit_set_name_by_const(name_idx);
+                }
+                self.emit_property_store(&store);
+                drop(store);
+            }
+            _ => return self.err(target.span(), "assignment target"),
+        }
+        self.b.bind(short);
+        Ok(())
+    }
+
+    /// Jump to `short` when the accumulator already decides a logical
+    /// assignment; `??=` falls through to the right-hand side via a local
+    /// target, keeping the old value in the accumulator otherwise.
+    fn emit_logical_skip(&mut self, op: LogicalOperator, short: Label) {
+        match op {
+            LogicalOperator::And => self.b.jump_if_falsy(short),
+            LogicalOperator::Or => self.b.jump_if_truthy(short),
+            LogicalOperator::Coalesce => {
+                let evaluate = self.b.new_label();
+                self.b.jump_if_nullish(evaluate);
+                self.b.jump(short);
+                self.b.bind(evaluate);
+            }
         }
     }
 
@@ -3198,7 +3268,19 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.load(original);
             self.b.equal_strict(callee);
             self.b.jump_if_truthy(plain);
-            self.emit_this_for(self.fid, 0);
+            // the eval code's `this` is the caller's; a script root's
+            // ThisBinding is the global object
+            if self.fid == Fid(0) && !matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict) {
+                let idx = self.b.constant(Constant::GlobalObject);
+                self.b.load_constant(idx);
+            } else if let Some(Special::This { owner, depth }) =
+                self.c.facts.special.get(&c.node_id.get())
+            {
+                // inside an arrow, `this` belongs to the enclosing function
+                self.emit_this_for(*owner, *depth);
+            } else {
+                self.emit_this_for(self.fid, 0);
+            }
             let this = self.b.stage_acc(&temps);
             let fb = self.b.new_feedback();
             match argc {
@@ -4931,6 +5013,22 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     }
 
     fn emit_function_body(&mut self) -> Result<(), CompileError> {
+        // OrdinaryCallBindThis (ES 10.2.1.2) runs before parameter
+        // initialization: a non-strict function sees a nullish receiver as
+        // the global object and other primitives boxed. Arrows have no own
+        // `this`; the script root uses the global-object constant.
+        let function = &self.c.facts.functions[self.fid.0 as usize];
+        // conversion is unobservable when nothing reads `this` (directly,
+        // through an arrow, or through a direct eval)
+        let observes_this = self.c.facts.uses_this.contains(&self.fid)
+            || self.c.facts.captures_this.contains(&self.fid);
+        if observes_this
+            && function.kind != FnKind::Script
+            && function.kind != FnKind::Arrow
+            && !function.strict
+        {
+            self.b.bind_this();
+        }
         let layout = &self.c.layouts[self.fid.0 as usize];
         // the script (and each eval compilation) tracks its completion
         // value in a dedicated register between ctx_save and the temps
@@ -5133,9 +5231,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
 
         // store the receiver into the hidden this-slot when a nested
-        // arrow captures it
+        // arrow captures it; the script root has no receiver, its `this`
+        // is the global-object constant
         if let Some(slot) = self.c.layouts[self.fid.0 as usize].this_slot {
-            self.b.load(self.b.this_reg());
+            let root = self.c.facts.functions[self.fid.0 as usize].kind == FnKind::Script
+                && !matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict);
+            if root {
+                let idx = self.b.constant(Constant::GlobalObject);
+                self.b.load_constant(idx);
+            } else {
+                self.b.load(self.b.this_reg());
+            }
             self.b.store_context_slot(slot, 0);
         }
         // expose new.target / the running closure to nested arrows

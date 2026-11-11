@@ -860,6 +860,7 @@ impl FnBuilder {
 
     acc_void!(test_typeof, TestTypeof);
     acc_void!(negate, Negate);
+    acc_void!(bind_this, BindThis);
 
     // -- control flow -----------------------------------------------------------------
 
@@ -905,6 +906,10 @@ impl FnBuilder {
         self.emit_jump_op(Opcode::JumpIfNotUndefined, target);
     }
 
+    pub fn jump_if_nullish(&mut self, target: Label) {
+        self.emit_jump_op(Opcode::JumpIfNullish, target);
+    }
+
     // -- exceptions ----------------------------------------------------------------------
 
     /// Return the accumulator to the caller.
@@ -930,6 +935,7 @@ impl FnBuilder {
                     | Opcode::JumpIfTruthy
                     | Opcode::JumpIfFalsy
                     | Opcode::JumpIfNotUndefined
+                    | Opcode::JumpIfNullish
             ),
             "{op:?} must go through the label/jump methods"
         );
