@@ -29,7 +29,7 @@ pub fn array_length_get<'a>(
     let Some(object) = args.get(heap, 0).as_heap_object() else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
-    if !object.as_ref().is_array(heap) {
+    if !object.as_ref().is_array_exotic(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     Smi::new(object.as_ref().length() as i64).into_tagged()
@@ -52,7 +52,7 @@ pub fn array_length_set<'a>(
         let Some(obj) = holder.as_tagged(heap).as_heap_object() else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        if !obj.as_ref().is_array(heap) {
+        if !obj.as_ref().is_array_exotic(heap) {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let obj = scope.handle(obj);

@@ -4,11 +4,37 @@
 use crate::VmError;
 use crate::bail;
 use crate::{
-    Convert, DenseString, Handle, HandleScope, Heap, Object, PartialDescriptor, Result,
-    ShouldThrow, Smi, ThreadState, VM, Value,
+    Convert, DenseString, Handle, HandleScope, Heap, Object, PartialDescriptor, ProxyObject,
+    Result, ShouldThrow, Smi, Tagged, ThreadState, VM, Value,
 };
 
 impl Object {
+    /// `IsArray ( argument )`
+    /// [ES 7.2.2](https://tc39.es/ecma262/#sec-isarray)
+    /// Follows proxy targets; a revoked proxy yields `None`.
+    pub fn is_array(heap: &Heap, value: Tagged<'_, Value>) -> Option<bool> {
+        let mut value = value;
+        loop {
+            let Some(object) = value.as_heap_object() else {
+                return Some(false);
+            };
+            let kind = object.map(heap).kind();
+            if kind.is_array() {
+                return Some(true);
+            }
+            if !kind.is_proxy() {
+                return Some(false);
+            }
+            // Safety: the map kind proves the concrete ProxyObject layout.
+            let proxy = unsafe { value.cast::<ProxyObject>() };
+            let (target, handler) = proxy.parts(heap);
+            if handler == heap.known().null.get(heap) {
+                return None;
+            }
+            value = target;
+        }
+    }
+
     /// LengthOfArrayLike ( obj )
     /// [ES 7.3.18](https://tc39.es/ecma262/#sec-lengthofarraylike)
     /// Reads `length` and applies ToLength; arrays and strings take a fast
@@ -21,7 +47,7 @@ impl Object {
         obj: Handle<'_, Value>,
     ) -> Result<u64> {
         if let Some(o) = obj.as_tagged(heap).as_heap_object()
-            && o.as_ref().is_array(heap)
+            && o.as_ref().is_array_exotic(heap)
         {
             return Ok(o.as_ref().length() as u64);
         }

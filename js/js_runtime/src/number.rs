@@ -3,6 +3,7 @@
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::VmError;
+use vm_core::extend_lifetime;
 use vm_core::raise;
 
 use vm_core::rt_try;
@@ -57,18 +58,16 @@ pub fn number_value_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    // The result crosses this call boundary, so root it: `wrapper_value`
-    // borrows the heap immutably, and a handle releases that borrow before
-    // the `TypeError` path needs the heap mutably.
-    ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(v) = args
-            .get(heap, 0)
-            .wrapper_value(heap, vm.known(), WrapperKind::Number)
-        else {
-            raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
-        };
-        scope.handle(v).as_tagged(heap).erase()
-    })
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    match args
+        .get(heap, 0)
+        .wrapper_value(heap, vm.known(), WrapperKind::Number)
+    {
+        Some(v) => extend_lifetime!(heap, v),
+        None => raise!(vm, heap, state, VmError::IncompatibleNumberReceiver),
+    }
 }
 
 pub fn number_to_string<'a>(

@@ -6,8 +6,8 @@ use crate::transition::Transition;
 use crate::{
     AccessorInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString, FixedArray,
     Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object, PartialDescriptor,
-    PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi, StringOwn, Tagged,
-    ThreadState, Thrown, VM, Value,
+    PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi, StringOwn, Symbol,
+    Tagged, ThreadState, Thrown, VM, Value,
 };
 
 /// Store semantics:
@@ -406,6 +406,34 @@ impl Object {
         })
     }
 
+    /// `[[GetPrototypeOf]] ( )` after `ToObject`
+    /// [ES 10.1.2](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-getprototypeof)
+    /// [ES 10.5.1](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-getprototypeof)
+    /// Primitive receivers expose their builtin prototype; null/undefined
+    /// throw.
+    pub fn get_prototype<'a>(
+        vm: &'a VM,
+        heap: &'a mut Heap,
+        state: &'a ThreadState,
+        value: Handle<'_, Value>,
+    ) -> Result<Tagged<'a, Value>> {
+        state.handle_scope(|scope| {
+            let receiver = scope.handle(value.as_tagged(heap));
+
+            let value = receiver.as_tagged(heap);
+            if let Some(proto) = value.primitive_prototype(heap) {
+                let proto = scope.handle(proto);
+                return Ok(proto.as_tagged(heap));
+            }
+            if value.is_primitive(heap) {
+                bail!(vm, heap, state, VmError::CannotConvertNullishToObject);
+            }
+
+            let proto = Proxy::get_prototype_of(vm, heap, state, receiver)?;
+            Ok(scope.handle(proto).as_tagged(heap))
+        })
+    }
+
     /// `[[GetOwnProperty]] ( propertyKey )`
     /// [ES 10.1.5](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-getownproperty-p)
     /// [ES 10.4.3.1](https://tc39.es/ecma262/#sec-string-exotic-objects-getownproperty-p)
@@ -436,6 +464,51 @@ impl Object {
             return Ok(None);
         }
         Ok(Self::own_property_ordinary(heap, scope, obj, key))
+    }
+
+    /// `[[OwnPropertyKeys]] ( )`
+    /// [ES 10.1.11](https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-ownpropertykeys)
+    /// [ES 10.4.3.3](https://tc39.es/ecma262/#sec-string-exotic-objects-ownpropertykeys)
+    /// [ES 10.5.11](https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-ownpropertykeys)
+    /// Integer indices ascending, then string keys, then symbol keys.
+    pub fn own_property_keys<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        target: Handle<'_, Value>,
+    ) -> Result<Vec<Handle<'s, Value>>> {
+        if Proxy::is_proxy(heap, target.as_tagged(heap)) {
+            return Proxy::own_keys(vm, heap, state, scope, target);
+        }
+        let mut keys: Vec<Handle<'s, Value>> = Vec::new();
+        if let Some(string) = DenseString::from_receiver(heap, target.as_tagged(heap)) {
+            let length = string.len();
+            for index in 0..length {
+                keys.push(scope.handle(Smi::new(index as i64).into_tagged()));
+            }
+            let Some(object) = target.as_tagged(heap).as_heap_object() else {
+                let length = heap.known().strings.length.get_handle(heap, scope);
+                keys.push(scope.handle(length.as_tagged(heap).erase()));
+                return Ok(keys);
+            };
+            for index in object.element_keys(heap) {
+                if index >= length {
+                    keys.push(scope.handle(Smi::new(index as i64).into_tagged()));
+                }
+            }
+            let length = heap.known().strings.length.get_handle(heap, scope);
+            keys.push(scope.handle(length.as_tagged(heap).erase()));
+            push_named_own_keys(heap, scope, object, true, &mut keys);
+            return Ok(keys);
+        }
+        if let Some(object) = target.as_tagged(heap).as_heap_object() {
+            for index in object.element_keys(heap) {
+                keys.push(scope.handle(Smi::new(index as i64).into_tagged()));
+            }
+            push_named_own_keys(heap, scope, object, false, &mut keys);
+        }
+        Ok(keys)
     }
 
     /// Non-proxy `[[GetOwnProperty]]`: descriptor plus storage location.
@@ -588,7 +661,7 @@ impl Object {
         if obj
             .as_tagged(heap)
             .as_heap_object()
-            .is_some_and(|o| o.is_array(heap))
+            .is_some_and(|o| o.is_array_exotic(heap))
             && name
                 .as_tagged(heap)
                 .as_name()
@@ -1064,6 +1137,31 @@ impl Object {
     }
 }
 
+fn push_named_own_keys<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    object: Tagged<'_, Object>,
+    skip_length: bool,
+    keys: &mut Vec<Handle<'s, Value>>,
+) {
+    let length = heap.known().strings.length.get(heap);
+    for symbols in [false, true] {
+        for descriptor in object.map(heap).descriptors() {
+            let name = descriptor.name(heap).erase();
+            if name.get_as::<Symbol>(heap).is_some() != symbols {
+                continue;
+            }
+            if skip_length && name.ptr_eq(length.erase()) {
+                continue;
+            }
+            if matches!(name.classify_key(heap), Some(Key::Element(_))) {
+                continue;
+            }
+            keys.push(scope.handle(name));
+        }
+    }
+}
+
 fn call_setter(
     vm: &VM,
     heap: &mut Heap,
@@ -1197,7 +1295,7 @@ pub fn own_property_enumerable(
     let object = receiver.as_heap_object()?;
     match key {
         Key::Element(i) => {
-            if object.is_array(heap) && i >= object.length() {
+            if object.is_array_exotic(heap) && i >= object.length() {
                 return None;
             }
             // dense entries are created writable, enumerable, configurable

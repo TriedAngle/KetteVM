@@ -31,7 +31,6 @@ pub use context::{
     info_mode,
 };
 pub use data_handler::{DataHandler, DataHandlerInit};
-pub use descriptor::descriptor_object;
 pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     EntryClass, NumberDictionary, NumberDictionaryInit,

@@ -751,6 +751,12 @@ impl<'s> PropertyDescriptor<'s> {
         }
     }
 
+    pub const fn is_enumerable(&self) -> bool {
+        match self {
+            Self::Data { enumerable, .. } | Self::Accessor { enumerable, .. } => *enumerable,
+        }
+    }
+
     pub const fn is_writable(&self) -> bool {
         matches!(self, Self::Data { writable: true, .. })
     }
@@ -864,7 +870,7 @@ impl Object {
 /// ES 10.4.2.1 steps 2-3 and 10.1.6.1 step 2: a new element needs an
 /// extensible receiver and, for arrays, a writable `length`.
 pub fn can_add_element(heap: &Heap, receiver: Tagged<'_, Object>, index: usize) -> bool {
-    if receiver.is_array(heap)
+    if receiver.is_array_exotic(heap)
         && index >= receiver.length()
         && !receiver.map(heap).length_writable(heap)
     {

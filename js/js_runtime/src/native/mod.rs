@@ -4,6 +4,7 @@
 use vm_core::Errors;
 use vm_core::VmError;
 use vm_core::bail;
+use vm_core::extend_lifetime;
 use vm_core::raise;
 
 use vm_core::Result;
@@ -222,41 +223,6 @@ fn has_property<'a>(
     })
 }
 
-/// Own property keys of an ordinary object or string exotic in
-/// specification order: ascending indices, strings, then symbols.
-/// TODO: a proxy source needs its `ownKeys` trap.
-fn own_property_keys<'s>(
-    heap: &Heap,
-    scope: &'s HandleScope<'_>,
-    receiver: Tagged<'_, Value>,
-) -> Vec<Handle<'s, Value>> {
-    let mut keys: Vec<Handle<'s, Value>> = Vec::new();
-    // string exotics expose their code units as own index properties
-    if let Some(s) = DenseString::from_receiver(heap, receiver) {
-        keys.extend((0..s.len()).map(|i| scope.handle(Smi::new(i as i64))));
-    }
-    let Some(object) = receiver.as_heap_object() else {
-        return keys;
-    };
-    keys.extend(
-        object
-            .element_keys(heap)
-            .into_iter()
-            .map(|i| scope.handle(Smi::new(i as i64))),
-    );
-    let map = object.map(heap);
-    let descriptors = map.descriptors();
-    for symbols in [false, true] {
-        keys.extend(
-            descriptors
-                .iter()
-                .filter(|d| d.name(heap).erase().get_as::<Symbol>(heap).is_some() == symbols)
-                .map(|d| scope.handle(d.name(heap).erase())),
-        );
-    }
-    keys
-}
-
 /// CopyDataProperties ( target, source, excludedItems )
 /// [ES 7.3.25](https://tc39.es/ecma262/#sec-copydataproperties)
 /// Object rest/spread: (excluded..., target, source) -> target.
@@ -292,7 +258,11 @@ fn copy_data_properties<'a>(
         let target = scope
             .cast::<Object>(heap, target.as_tagged(heap))
             .expect("copy target is an object");
-        for key in own_property_keys(heap, &scope, source.as_tagged(heap)) {
+        let keys = rt_try!(
+            heap,
+            Object::own_property_keys(vm, heap, state, &scope, source)
+        );
+        for key in keys {
             let name = scope.handle(key.as_tagged(heap).as_name());
             if excluded
                 .iter()
@@ -633,13 +603,10 @@ fn get_property_lenient<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|scope| {
-        let result = scope.handle(rt_try!(
-            heap,
-            Object::get_property(vm, heap, state, receiver, receiver, name, false)
-        ));
-        result.as_tagged(heap).erase()
-    })
+    match Object::get_property(vm, heap, state, receiver, receiver, name, false) {
+        Ok(result) => extend_lifetime!(heap, result),
+        Err(err) => raise_runtime(heap, err),
+    }
 }
 
 // ---- class definition helpers -----------------------------------------------

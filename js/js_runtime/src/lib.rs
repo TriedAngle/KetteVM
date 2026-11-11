@@ -54,11 +54,11 @@ use number::{
     number_constructor, number_to_fixed, number_to_precision, number_to_string, number_value_of,
 };
 use object::{
-    object_constructor, object_create, object_define_property, object_freeze,
-    object_get_own_property_descriptor, object_get_own_property_names, object_get_prototype_of,
-    object_has_own_property, object_is, object_is_extensible, object_prevent_extensions,
-    object_property_is_enumerable, object_proto_get, object_proto_set, object_seal,
-    object_set_prototype_of, object_to_string,
+    object_constructor, object_create, object_define_properties, object_define_property,
+    object_freeze, object_get_own_property_descriptor, object_get_own_property_names,
+    object_get_prototype_of, object_has_own_property, object_is, object_is_extensible,
+    object_is_frozen, object_is_sealed, object_prevent_extensions, object_property_is_enumerable,
+    object_proto_get, object_proto_set, object_seal, object_set_prototype_of, object_to_string,
 };
 use proxy::{proxy_constructor, proxy_revocable, proxy_revoke};
 use string::{string_constructor, string_to_string, string_value_of};
@@ -191,6 +191,7 @@ pub fn register_builtin_natives(vm: &mut VM) -> BuiltinIndices {
         error_to_string: vm.register_native(error_to_string),
         object: vm.register_native(object_constructor),
         object_create: vm.register_native(object_create),
+        object_define_properties: vm.register_native(object_define_properties),
         object_get_prototype_of: vm.register_native(object_get_prototype_of),
         object_set_prototype_of: vm.register_native(object_set_prototype_of),
         array: vm.register_native(array_constructor),
@@ -278,6 +279,8 @@ pub fn register_builtin_natives(vm: &mut VM) -> BuiltinIndices {
         object_is_extensible: vm.register_native(object_is_extensible),
         object_seal: vm.register_native(object_seal),
         object_freeze: vm.register_native(object_freeze),
+        object_is_frozen: vm.register_native(object_is_frozen),
+        object_is_sealed: vm.register_native(object_is_sealed),
         math_sqrt: vm.register_native(math_sqrt),
         math_abs: vm.register_native(math_abs),
         math_floor: vm.register_native(math_floor),
@@ -320,6 +323,7 @@ pub struct BuiltinIndices {
     pub error_to_string: NativeIndex,
     pub object: NativeIndex,
     pub object_create: NativeIndex,
+    pub object_define_properties: NativeIndex,
     pub object_get_prototype_of: NativeIndex,
     pub object_set_prototype_of: NativeIndex,
     pub array: NativeIndex,
@@ -407,6 +411,8 @@ pub struct BuiltinIndices {
     pub object_is_extensible: NativeIndex,
     pub object_seal: NativeIndex,
     pub object_freeze: NativeIndex,
+    pub object_is_frozen: NativeIndex,
+    pub object_is_sealed: NativeIndex,
     pub math_sqrt: NativeIndex,
     pub math_abs: NativeIndex,
     pub math_floor: NativeIndex,
@@ -998,6 +1004,14 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             "defineProperty",
             idx.object_define_property,
             3,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            object_fn,
+            "defineProperties",
+            idx.object_define_properties,
+            2,
         );
         Object::install_method(
             thread,
@@ -2064,6 +2078,22 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
         );
         Object::install_method(thread, &scope, object_fn, "seal", idx.object_seal, 1);
         Object::install_method(thread, &scope, object_fn, "freeze", idx.object_freeze, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            object_fn,
+            "isFrozen",
+            idx.object_is_frozen,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            object_fn,
+            "isSealed",
+            idx.object_is_sealed,
+            1,
+        );
 
         // ---- value properties of the global object -----------------------------
         let infinity = thread

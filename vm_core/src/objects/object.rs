@@ -10,7 +10,7 @@ use crate::{
     HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind,
     NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
     Result, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
-    Visitor,
+    Visitor, WrapperKind, raise_runtime,
 };
 
 /// What a set action did, for callers that only need to update caches.
@@ -66,7 +66,7 @@ impl Object {
     }
 
     #[inline(always)]
-    pub fn is_array(&self, heap: &Heap) -> bool {
+    pub fn is_array_exotic(&self, heap: &Heap) -> bool {
         self.map(heap).kind().is_array()
     }
 
@@ -79,7 +79,7 @@ impl Object {
         heap: &'a Heap,
         name: Tagged<'a, SlotName>,
     ) -> Option<Tagged<'a, Value>> {
-        if !self.is_array(heap) {
+        if !self.is_array_exotic(heap) {
             return None;
         }
         name.erase()
@@ -201,7 +201,7 @@ impl Object {
     /// other receiver by the elements capacity.
     #[inline]
     pub fn max_element_index(&self, heap: &Heap) -> usize {
-        if self.is_array(heap) {
+        if self.is_array_exotic(heap) {
             return self.length();
         }
         let kind = self.map(heap).kind();
@@ -256,7 +256,7 @@ impl Object {
             // packed: arrays promise capacity covers `length`, so one
             // bounds check suffices; other receivers are bounded by
             // capacity alone
-            if self.is_array(heap) {
+            if self.is_array_exotic(heap) {
                 if i >= self.length() {
                     return None;
                 }
@@ -274,7 +274,7 @@ impl Object {
         }
         // dictionary probe: arrays are additionally bounded by `length`;
         // every other receiver is bounded by the dictionary itself
-        if self.is_array(heap) && i >= self.length() {
+        if self.is_array_exotic(heap) && i >= self.length() {
             return None;
         }
         let dict = self.element_dictionary(heap)?;
@@ -419,7 +419,7 @@ impl Object {
             let capacity = obj.elements_array(heap).map(|e| e.len()).unwrap_or(0);
             // arrays track a logical length; other receivers end at
             // their elements capacity
-            let is_array = obj.is_array(heap);
+            let is_array = obj.is_array_exotic(heap);
             let logical = if is_array { obj.length() } else { capacity };
             (i >= capacity, logical, capacity, dictionary, is_array)
         };
@@ -551,7 +551,7 @@ impl Object {
             let dict = obj
                 .element_dictionary(heap)
                 .expect("dictionary elements have a dictionary");
-            let is_array = obj.is_array(heap);
+            let is_array = obj.is_array_exotic(heap);
             (scope.handle(dict), obj.length(), is_array)
         };
         let existing = match dict.as_tagged(heap).classify(heap, i) {
@@ -644,7 +644,7 @@ impl Object {
         i: usize,
         desc: PropertyDescriptor<'_>,
     ) -> bool {
-        let is_array = receiver.as_tagged(heap).is_array(heap);
+        let is_array = receiver.as_tagged(heap).is_array_exotic(heap);
         if let PropertyDescriptor::Data {
             value,
             writable: true,
@@ -722,7 +722,7 @@ impl Object {
         receiver: &Handle<'_, Object>,
         new_len: usize,
     ) -> bool {
-        if !receiver.as_tagged(heap).is_array(heap) {
+        if !receiver.as_tagged(heap).is_array_exotic(heap) {
             return false;
         }
         if new_len > 32 * 1024 * 1024
@@ -789,30 +789,6 @@ impl Object {
             .length
             .set(heap, obj.erase(), Smi::new(new_len as i64));
         true
-    }
-
-    /// Clear [[Writable]] on the array `length` native accessor, keeping its
-    /// getter/setter.
-    pub fn make_array_length_readonly(
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
-        receiver: &Handle<'_, Object>,
-    ) {
-        let name = heap.known().strings.length.get_handle(heap, scope);
-        let map = receiver.as_tagged(heap).map(heap);
-        let Some((index, descriptor)) = map
-            .descriptors()
-            .iter()
-            .enumerate()
-            .find(|(_, d)| d.name(heap).ptr_eq(name.as_tagged(heap)))
-        else {
-            return;
-        };
-        let flags = descriptor.flags().without_writable();
-        if flags == descriptor.flags() {
-            return;
-        }
-        Transition::replace_native_accessor_flags(heap, scope, *receiver, name, index, flags);
     }
 
     pub fn normalize_elements(
@@ -1313,7 +1289,10 @@ impl Object {
                     Hint::Number => s.number.get(heap).erase(),
                     Hint::String => s.string.get(heap).erase(),
                 });
-                let args = scope.stage(&[hint_string.as_tagged(heap)]);
+                let args = scope.stage(&[
+                    value.as_tagged(heap).erase(),
+                    hint_string.as_tagged(heap).erase(),
+                ]);
                 let result = scope.handle(HostCtx::enter(
                     vm, runtime, &mut *heap, state, exotic, args, None,
                 )?);
@@ -1416,16 +1395,18 @@ impl Object {
             return Ok(Tagged::from(Smi::new(i as i64)));
         }
         state.handle_scope(|scope| {
-            let cond_5 = v.as_tagged(heap).get_as::<Symbol>(heap).is_some();
-            if cond_5 {
+            if v.as_tagged(heap).get_as::<Symbol>(heap).is_some() {
                 return Ok(v.as_tagged(heap).as_name());
             }
-            let is_string = v.as_tagged(heap).get_as::<DenseString>(heap).is_some();
-            let primitive: Handle<'_, Value> = if is_string {
+            let primitive = if v.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
                 v
             } else {
                 scope.handle(Self::to_primitive(vm, heap, state, v, Hint::String)?)
             };
+            // ToPrimitive may itself yield a Symbol (ES 7.1.19 step 3).
+            if primitive.as_tagged(heap).get_as::<Symbol>(heap).is_some() {
+                return Ok(primitive.as_tagged(heap).as_name());
+            }
             // Named lookup compares interned strings by pointer:
             // canonicalize exactly once here, then every downstream
             // bits-compare is sound.
@@ -1435,10 +1416,8 @@ impl Object {
             let stringified = scope.handle(stringified);
             let interned = match scope.cast::<DenseString>(heap, stringified.as_tagged(heap)) {
                 Some(s) => vm.interner().intern_value(heap, &scope, &s),
-                // ToString of a symbol primitive throws (ES 6.1.7.1)
-                None => {
-                    bail!(vm, heap, state, VmError::CannotConvertSymbolToString);
-                }
+                // ToString never yields a non-string.
+                None => bail!(vm, heap, state, VmError::CannotConvertSymbolToString),
             };
             let word = interned.as_tagged(heap);
             // canonical index strings name the same property as their
@@ -1585,18 +1564,19 @@ impl Object {
             .as_heap_object()
             .is_some_and(|function| function.map(heap).kind().is_bound());
         if is_bound {
-            return state.handle_scope(|scope| {
-                let value = scope.handle(HostCtx::enter_bound(
-                    vm,
-                    runtime,
-                    heap,
-                    state,
-                    target,
-                    args,
-                    Some(new_target),
-                )?);
-                Ok(value.as_tagged(heap))
-            });
+            let value = match HostCtx::enter_bound(
+                vm,
+                runtime,
+                heap,
+                state,
+                target,
+                args,
+                Some(new_target),
+            ) {
+                Ok(value) => crate::extend_lifetime!(heap, value),
+                Err(err) => raise_runtime(heap, err),
+            };
+            return Ok(value);
         }
         state.handle_scope(|scope| {
             let derived = target
@@ -1660,5 +1640,45 @@ impl Object {
             )?;
             Ok(obj.as_tagged(heap).erase())
         })
+    }
+}
+
+impl Object {
+    /// The builtin tag of a `ToObject`ed receiver.
+    /// [ES 20.1.3.6](https://tc39.es/ecma262/#sec-object.prototype.tostring)
+    pub fn builtin_tag(heap: &Heap, value: Tagged<'_, Value>) -> Option<&'static str> {
+        let Some(object) = value.as_heap_object() else {
+            return Some("Object");
+        };
+        let kind = object.map(heap).kind();
+        if kind.is_array() {
+            return Some("Array");
+        }
+        if kind.is_proxy() && Self::is_array(heap, value)? {
+            return Some("Array");
+        }
+        if kind.is_arguments() {
+            return Some("Arguments");
+        }
+        if kind.is_callable() {
+            return Some("Function");
+        }
+        if kind.is_error() {
+            return Some("Error");
+        }
+        if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
+            let value = object.slots(heap).at(heap, 0);
+            return Some(match WrapperKind::classify(heap, heap.known(), value) {
+                Some(WrapperKind::Boolean) => "Boolean",
+                Some(WrapperKind::Number) => "Number",
+                Some(WrapperKind::String) => "String",
+                None => "Object",
+            });
+        }
+        if kind.contains(MapKind::DATE) {
+            return Some("Date");
+        }
+        // TODO: step 13 ("RegExp") once RegExp objects exist.
+        Some("Object")
     }
 }

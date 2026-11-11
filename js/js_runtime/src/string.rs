@@ -1,6 +1,7 @@
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::VmError;
+use vm_core::extend_lifetime;
 use vm_core::raise;
 use vm_core::rt_try;
 use vm_core::{Args, Handle, Symbol, Tagged, Value, WrapperKind};
@@ -19,7 +20,12 @@ pub fn string_constructor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let arg = scope.handle(args.get(heap, 1));
+        // ES 22.1.1.1: a missing argument is the empty string, not "undefined".
+        let arg = if args.len() > 1 {
+            args.get_handle(heap, 1)
+        } else {
+            heap.known().strings.empty.get_handle(heap, &scope).erase()
+        };
         if new_target.is_none()
             && let Some(sym) = arg.as_tagged(heap).get_as::<Symbol>(heap)
         {
@@ -55,15 +61,16 @@ pub fn string_value_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(v) = args
-            .get(heap, 0)
-            .wrapper_value(heap, vm.known(), WrapperKind::String)
-        else {
-            raise!(vm, heap, state, VmError::IncompatibleStringReceiver);
-        };
-        scope.handle(v).as_tagged(heap).erase()
-    })
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    match args
+        .get(heap, 0)
+        .wrapper_value(heap, vm.known(), WrapperKind::String)
+    {
+        Some(v) => extend_lifetime!(heap, v),
+        None => raise!(vm, heap, state, VmError::IncompatibleStringReceiver),
+    }
 }
 
 /// `String.prototype.toString ( )`

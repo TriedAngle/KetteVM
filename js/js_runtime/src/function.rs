@@ -7,6 +7,7 @@ use vm_core::Result;
 use vm_core::Runtime;
 use vm_core::VmError;
 use vm_core::bail;
+use vm_core::extend_lifetime;
 use vm_core::raise;
 
 use vm_core::materialize::Materialize;
@@ -144,21 +145,18 @@ pub fn function_call<'a>(
     }
     // args[0] is the receiver, so the tail is exactly (thisArg, ...args)
     let forwarded = state.stack().slice(args.slice_from(1));
-    state.handle_scope(|scope| {
-        let result = match HostCtx::enter(
-            vm,
-            state.runtime(vm, heap),
-            heap,
-            state,
-            function,
-            forwarded,
-            None,
-        ) {
-            Ok(result) => scope.handle(result),
-            Err(err) => return raise_runtime(heap, err),
-        };
-        result.as_tagged(heap).erase()
-    })
+    match HostCtx::enter(
+        vm,
+        state.runtime(vm, heap),
+        heap,
+        state,
+        function,
+        forwarded,
+        None,
+    ) {
+        Ok(result) => extend_lifetime!(heap, result),
+        Err(err) => raise_runtime(heap, err),
+    }
 }
 
 /// `Function.prototype.apply ( thisArg, argArray )`

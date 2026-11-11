@@ -9,82 +9,14 @@ use crate::JSRuntime;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Compare, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_WRITABLE, DenseString,
-    Handle, HandleScope, HandleSlice, Heap, MapKind, NumberDictionary, Object, PartialDescriptor,
-    PropertyDescriptor, Prototype, ProxyObject, ShouldThrow, SlotName, Smi, Symbol, Tagged,
-    ThreadState, VM, Value, WellKnown, WrapperKind, descriptor_object,
+    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, NativeIndex,
+    Object, PartialDescriptor, ShouldThrow, Symbol, Tagged, ThreadState, VM, Value,
+    extend_lifetime, raise_runtime, rt_try,
 };
-use vm_core::{raise_runtime, rt_try};
 
-/// `"[object <tag>]"`, freshly allocated (not interned: the tag may be user text).
-fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tagged<'a, Value> {
-    DenseString::from_utf8(heap, scope, &format!("[object {tag}]"))
-        .as_tagged(heap)
-        .erase()
-}
-
-/// ES 7.2.2 IsArray, including proxy targets (revoked proxies throw).
-pub fn is_array<'a>(heap: &'a Heap, mut value: Tagged<'a, Value>) -> Option<bool> {
-    loop {
-        let Some(object) = value.as_heap_object() else {
-            return Some(false);
-        };
-        let kind = object.map(heap).kind();
-        if kind.is_array() {
-            return Some(true);
-        }
-        if !kind.is_proxy() {
-            return Some(false);
-        }
-        let Some(proxy) = value.get_as::<ProxyObject>(heap) else {
-            return Some(false);
-        };
-        let (target, handler) = proxy.parts(heap);
-        if handler == heap.known().null.get(heap) {
-            return None;
-        }
-        value = target;
-    }
-}
-
-/// Builtin tag for the ToObject'd receiver (ES 20.1.3.6 steps 5-14).
-fn builtin_tag(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<&'static str> {
-    if is_array(heap, receiver)? {
-        return Some("Array");
-    }
-    let Some(object) = receiver.as_heap_object() else {
-        return Some("Object");
-    };
-    let kind = object.map(heap).kind();
-    // [[Call]]: includes callable proxies (a proxy around a function).
-    if kind.is_callable() {
-        return Some("Function");
-    }
-    if kind.is_error() {
-        return Some("Error");
-    }
-    if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
-        // Wrappers carry the primitive in slots[0]; wrapper prototypes are
-        // wrappers too (ES 20.3.3, 20.4.3, 20.5.3). Symbols/BigInts have no
-        // builtin-tag step; their prototypes supply @@toStringTag.
-        let value = object.slots(heap).at(heap, 0);
-        return Some(match WrapperKind::classify(heap, heap.known(), value) {
-            Some(WrapperKind::Number) => "Number",
-            Some(WrapperKind::String) => "String",
-            Some(WrapperKind::Boolean) => "Boolean",
-            None => "Object",
-        });
-    }
-    if kind.contains(MapKind::DATE) {
-        return Some("Date");
-    }
-    if kind.is_arguments() {
-        return Some("Arguments");
-    }
-    Some("Object")
-}
-
-/// `Object.prototype.toString` (ES 20.1.3.6).
+/// `Object.prototype.toString ( )`
+/// [ES 20.1.3.6](https://tc39.es/ecma262/#sec-object.prototype.tostring)
+/// The builtin tag from internal slots, overridden by a String `@@toStringTag`.
 pub fn object_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -94,6 +26,13 @@ pub fn object_to_string<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
+
+    fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tagged<'a, Value> {
+        DenseString::from_utf8(heap, scope, &format!("[object {tag}]"))
+            .as_tagged(heap)
+            .erase()
+    }
+
     state.handle_scope(|scope| {
         let receiver = scope.handle(args.get(heap, 0));
         let value = receiver.as_tagged(heap);
@@ -103,8 +42,6 @@ pub fn object_to_string<'a>(
         if value == vm.known().null.get(heap) {
             return tag_string(heap, &scope, "Null");
         }
-        // ToObject(this): box primitives so the @@toStringTag lookup (and
-        // any getter's receiver) sees the wrapper, as the spec requires.
         let object = if value.is_primitive(heap) {
             match Convert::to_object(vm, heap, state, &scope, receiver) {
                 Ok(object) => scope.handle(object.as_tagged(heap).erase()),
@@ -114,10 +51,9 @@ pub fn object_to_string<'a>(
         } else {
             receiver
         };
-        let Some(default_tag) = builtin_tag(heap, object.as_tagged(heap)) else {
+        let Some(default_tag) = Object::builtin_tag(heap, object.as_tagged(heap)) else {
             raise!(vm, heap, state, VmError::RevokedProxy);
         };
-        // Let tag be ? Get(O, @@toStringTag).
         let symbol = known.to_string_tag_symbol.get_handle(heap, &scope).erase();
         let tag = scope.handle(rt_try!(
             heap,
@@ -132,43 +68,67 @@ pub fn object_to_string<'a>(
     })
 }
 
+/// `Object ( value )`
+/// [ES 20.1.1.1](https://tc39.es/ecma262/#sec-object-value)
+/// Boxes primitives; a `new.target` other than `%Object%` creates an object
+/// from its prototype and ignores `value`.
 pub fn object_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let is_construct = new_target.is_some();
+    let object_index = ctx.runtime::<JSRuntime>().indices.object;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let arg = args.get_handle(heap, 1);
-    if !arg.as_tagged(heap).is_primitive(heap) {
-        // Object(obj) / new Object(obj) return the object unchanged
-        // (ES 20.1.1.1 step 3).
-        return arg.as_tagged(heap);
-    }
-    let nullish = arg.as_tagged(heap).is_nullish(heap);
     state.handle_scope(|scope| {
-        // String/Number/Boolean/Symbol primitives become their wrapper
-        // objects (ES 20.1.1.1 step 3).
-        // TODO: BigInt wrappers are unimplemented, so they fall through.
-        if !nullish && let Ok(boxed) = Convert::to_object(vm, heap, state, &scope, arg) {
-            return boxed.as_tagged(heap).erase();
+        if let Some(new_target) = new_target
+            && !is_native_function(heap, new_target.as_tagged(heap), object_index)
+        {
+            let map = vm.known().object_initial_map.get_handle(heap, &scope);
+            let object = rt_try!(
+                heap,
+                Object::create_from_constructor(
+                    vm,
+                    heap,
+                    state,
+                    &scope,
+                    new_target,
+                    map,
+                    HandleSlice::EMPTY,
+                )
+            );
+            return object.as_tagged(heap).erase();
         }
-        if !is_construct && !nullish {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
+        let value = args.get_handle(heap, 1);
+        if value.as_tagged(heap).is_nullish(heap) {
+            return heap
+                .new_object(
+                    &scope,
+                    vm.known().object_initial_map.get_handle(heap, &scope),
+                    HandleSlice::EMPTY,
+                )
+                .erase();
         }
-        // Object() / Object(undefined) / Object(null) / new Object(): a
-        // fresh ordinary object.
-        heap.new_object(
-            &scope,
-            vm.known().object_initial_map.get_handle(heap, &scope),
-            HandleSlice::EMPTY,
-        )
-        .erase()
+        // TODO: BigInt wrappers are unimplemented.
+        match Convert::to_object(vm, heap, state, &scope, value) {
+            Ok(object) => object.as_tagged(heap).erase(),
+            Err(err) => raise_runtime(heap, err),
+        }
     })
 }
 
+fn is_native_function(heap: &Heap, value: Tagged<'_, Value>, index: NativeIndex) -> bool {
+    value
+        .as_heap_object()
+        .and_then(|object| object.callable_info(heap))
+        .and_then(|info| info.native_index(heap))
+        == Some(index)
+}
+
+/// `Object.getPrototypeOf ( obj )`
+/// [ES 20.1.2.12](https://tc39.es/ecma262/#sec-object.getprototypeof)
+/// Coerces `obj` with `ToObject`, then returns its [[Prototype]].
 pub fn object_get_prototype_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -177,28 +137,16 @@ pub fn object_get_prototype_of<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 1));
-        {
-            let value = receiver.as_tagged(heap);
-            if let Some(proto) = value.primitive_prototype(heap) {
-                let proto = scope.handle(proto);
-                return proto.as_tagged(heap);
-            }
-            if value.is_primitive(heap) {
-                // null / undefined (and symbols, which have no exposed
-                // prototype in this VM): ToObject throws
-                raise!(vm, heap, state, VmError::InvalidOperandType);
-            }
-        }
-        let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(heap, err),
-        };
-        result.as_tagged(heap)
-    })
+    let value = args.get_handle(heap, 1);
+    match Object::get_prototype(vm, heap, state, value) {
+        Ok(proto) => extend_lifetime!(heap, proto),
+        Err(err) => raise_runtime(heap, err),
+    }
 }
 
+/// `get Object.prototype.__proto__`
+/// [ES 20.1.3.8.1](https://tc39.es/ecma262/#sec-get-object.prototype.__proto__)
+/// Coerces `this` with `ToObject`, then returns its [[Prototype]].
 pub fn object_proto_get<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -207,28 +155,16 @@ pub fn object_proto_get<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 0));
-        {
-            let value = receiver.as_tagged(heap);
-            if let Some(proto) = value.primitive_prototype(heap) {
-                let proto = scope.handle(proto);
-                return proto.as_tagged(heap);
-            }
-            if value.is_primitive(heap) {
-                // null / undefined (and symbols, which have no exposed
-                // prototype in this VM): ToObject throws
-                raise!(vm, heap, state, VmError::InvalidOperandType);
-            }
-        }
-        let result = match Proxy::get_prototype_of(vm, heap, state, receiver) {
-            Ok(v) => scope.handle(v),
-            Err(err) => return raise_runtime(heap, err),
-        };
-        result.as_tagged(heap)
-    })
+    let value = args.get_handle(heap, 0);
+    match Object::get_prototype(vm, heap, state, value) {
+        Ok(proto) => extend_lifetime!(heap, proto),
+        Err(err) => raise_runtime(heap, err),
+    }
 }
 
+/// `set Object.prototype.__proto__`
+/// [ES 20.1.3.8.2](https://tc39.es/ecma262/#sec-set-object.prototype.__proto__)
+/// Changes [[Prototype]]; primitives and invalid `proto` values are ignored.
 pub fn object_proto_set<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -237,49 +173,36 @@ pub fn object_proto_set<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 0));
-        let proto = scope.handle(args.get(heap, 1));
-        let nullish = receiver.as_tagged(heap).is_nullish(heap);
-        let receiver_is_object = !receiver.as_tagged(heap).is_primitive(heap);
-        let proto_ok = proto
+    let receiver = args.get_handle(heap, 0);
+    let proto = args.get_handle(heap, 1);
+    // RequireObjectCoercible precedes every other step.
+    if receiver.as_tagged(heap).is_nullish(heap) {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    }
+    // A non-object, non-null proto is ignored (step 2).
+    if proto.as_tagged(heap).is_primitive(heap)
+        && !proto
             .as_tagged(heap)
             .ptr_eq(vm.known().null.get(heap).erase())
-            || !proto.as_tagged(heap).is_primitive(heap);
-        if nullish {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
-        if !proto_ok {
-            return vm.known().undefined.get(heap).erase();
-        }
-        if !receiver_is_object {
-            return vm.known().undefined.get(heap).erase();
-        }
-        if Proxy::is_proxy(heap, receiver.as_tagged(heap)) {
-            return if rt_try!(
-                heap,
-                Proxy::set_prototype_of(vm, heap, state, receiver, proto)
-            ) {
-                vm.known().undefined.get(heap).erase()
-            } else {
-                Errors::raise(vm, heap, state, VmError::InvalidOperandType)
-            };
-        }
-        let target = scope
-            .cast::<Object>(heap, receiver.as_tagged(heap))
-            .expect("receiver checked to be an object");
-        rt_try!(
-            heap,
-            Object::set_prototype(vm, heap, state, &scope, target, proto)
-        );
-        vm.known().undefined.get(heap).erase()
-    })
+    {
+        return vm.known().undefined.get(heap).erase();
+    }
+    if receiver.as_tagged(heap).is_primitive(heap) {
+        return vm.known().undefined.get(heap).erase();
+    }
+    let status = rt_try!(
+        heap,
+        Proxy::set_prototype_of(vm, heap, state, receiver, proto)
+    );
+    if !status {
+        raise!(vm, heap, state, VmError::ProxySetPrototypeOfFalse);
+    }
+    vm.known().undefined.get(heap).erase()
 }
 
-/// `Object.create(O [, Properties])` (ES 20.1.2.2): a fresh extensible
-/// ordinary object with `O` as its [[Prototype]] and no own properties.
-/// The `Properties` argument is accepted only as `undefined` (property
-/// descriptors are not implemented for it yet).
+/// `Object.create ( proto, properties )`
+/// [ES 20.1.2.2](https://tc39.es/ecma262/#sec-object.create)
+/// A fresh ordinary object with `proto` as its [[Prototype]].
 pub fn object_create<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -289,103 +212,40 @@ pub fn object_create<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let proto_arg = args.get(heap, 1);
-        let proto = scope.handle(proto_arg);
-        // If Type(O) is neither Object nor Null, throw a TypeError
-        let proto_ok = proto
-            .as_tagged(heap)
-            .ptr_eq(vm.known().null.get(heap).erase())
-            || !proto.as_tagged(heap).is_primitive(heap);
-        if !proto_ok {
+        let proto = args.get_handle(heap, 1);
+        // If Type(proto) is neither Object nor Null, throw a TypeError
+        if proto.as_tagged(heap).is_primitive(heap)
+            && !proto
+                .as_tagged(heap)
+                .ptr_eq(vm.known().null.get(heap).erase())
+        {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
-        if args.len() > 2 {
-            let props = args.get(heap, 2);
-            let undefined = vm.known().undefined.get(heap).raw();
-            if props.raw() != undefined {
-                raise!(vm, heap, state, VmError::InvalidOperandType);
-            }
-        }
         let map = vm.known().object_initial_map.get_handle(heap, &scope);
-        let empty: [Tagged<'_, Value>; 0] = [];
-        let obj = scope.handle(heap.new_object(&scope, map, scope.stage(&empty)));
-        let obj = scope
-            .cast::<Object>(heap, obj.as_tagged(heap).erase())
-            .expect("fresh object");
+        let obj = heap
+            .new_object(&scope, map, HandleSlice::EMPTY)
+            .as_handle(&scope);
         rt_try!(
             heap,
             Object::set_prototype(vm, heap, state, &scope, obj, proto)
         );
+        let properties = args.get_handle(heap, 2);
+        if !properties
+            .as_tagged(heap)
+            .ptr_eq(vm.known().undefined.get(heap).erase())
+        {
+            rt_try!(
+                heap,
+                define_properties(vm, heap, state, &scope, obj, properties)
+            );
+        }
         obj.as_tagged(heap).erase()
     })
 }
 
-/// `Object.setPrototypeOf(O, proto)` (ES 20.1.2.20): primitives return O
-/// unchanged (after RequireObjectCoercible); proto must be an object or
-/// null; the underlying [[SetPrototypeOf]] may reject (non-extensible
-/// receiver, prototype cycles) with a TypeError.
-/// Own enumerable-property keys in specification order: integer indices
-/// ascending, then string keys in insertion order (ES 8.6.2, the
-/// descriptors array is insertion-ordered).
-pub fn own_property_keys<'a>(
-    heap: &'a Heap,
-    roots: &WellKnown,
-    target: Tagged<'a, Value>,
-) -> Vec<Tagged<'a, Value>> {
-    let mut keys = Vec::new();
-    // String exotic own keys: indices then the non-enumerable "length"
-    // (ES 10.4.3.5). Wrappers may also carry ordinary own descriptors.
-    if let Some(s) = DenseString::from_receiver(heap, target) {
-        keys.reserve(s.len() + 1);
-        for i in 0..s.len() {
-            keys.push(Smi::new(i as i64).into_tagged());
-        }
-        keys.push(roots.strings.length.get(heap).erase());
-    }
-    // element indices ascending, then named descriptors in insertion
-    // order (ES OrdinaryOwnPropertyKeys)
-    if let Some(obj) = target.as_heap_object() {
-        for i in obj.element_keys(heap) {
-            keys.push(Smi::new(i as i64).into_tagged());
-        }
-        for d in obj.map(heap).descriptors() {
-            keys.push(d.name(heap).erase());
-        }
-    }
-    keys
-}
-
-/// One own-property lookup over every receiver shape (string exotic,
-/// proxy trap, ordinary object). `Threw` means user code threw and the
-/// exception sentinel is pending.
-enum OwnProperty {
-    Found { enumerable: bool },
-    Missing,
-}
-
-fn own_property(
-    vm: &VM,
-    heap: &mut Heap,
-    state: &ThreadState,
-    scope: &HandleScope<'_>,
-    receiver: Handle<'_, Value>,
-    key: Handle<'_, Value>,
-) -> Result<OwnProperty> {
-    Ok(
-        match Object::get_own_property(vm, heap, state, scope, receiver, key)? {
-            Some(own) => OwnProperty::Found {
-                enumerable: match own.desc {
-                    PropertyDescriptor::Data { enumerable, .. }
-                    | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
-                },
-            },
-            None => OwnProperty::Missing,
-        },
-    )
-}
-
-/// `Object.prototype.hasOwnProperty(key)` (ES 20.4.3.2, own properties
-/// only).
+/// `Object.prototype.hasOwnProperty ( value )`
+/// [ES 20.1.3.2](https://tc39.es/ecma262/#sec-object.prototype.hasownproperty)
+/// `HasOwnProperty` after coercing `this`; the key is coerced first.
 pub fn object_has_own_property<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -395,29 +255,24 @@ pub fn object_has_own_property<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 0));
-        // ToObject(this): null/undefined throw (ES 20.4.3.2 step 1)
-        if receiver.as_tagged(heap).is_nullish(heap) {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
-        let raw_key = scope.handle(args.get(heap, 1));
-        // the key coercion allocates (float/wrapper keys intern or run
-        // user code): the receiver must stay rooted across it
+        // ToPropertyKey precedes ToObject (ES 20.1.3.2 steps 1-2)
+        let raw_key = args.get_handle(heap, 1);
         let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
-        // root the name: the tagged result anchors the `&mut` borrow
-        let key = scope.handle(key);
-        let key_value = scope.handle(key.as_tagged(heap).erase());
-        match rt_try!(
+        let key = scope.handle(key).erase();
+        let receiver = args.get_handle(heap, 0);
+        let receiver = rt_try!(heap, Convert::to_object(vm, heap, state, &scope, receiver));
+        let found = rt_try!(
             heap,
-            own_property(vm, heap, state, &scope, receiver, key_value)
-        ) {
-            OwnProperty::Found { .. } => Convert::boolean(heap, true),
-            OwnProperty::Missing => Convert::boolean(heap, false),
-        }
+            Object::get_own_property(vm, heap, state, &scope, receiver.erase(), key)
+        )
+        .is_some();
+        Convert::boolean(heap, found)
     })
 }
 
-/// `Object.prototype.propertyIsEnumerable(key)` (ES 20.4.3.5).
+/// `Object.prototype.propertyIsEnumerable ( value )`
+/// [ES 20.1.3.4](https://tc39.es/ecma262/#sec-object.prototype.propertyisenumerable)
+/// `[[GetOwnProperty]]` of the coerced receiver; only own properties count.
 pub fn object_property_is_enumerable<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -427,29 +282,27 @@ pub fn object_property_is_enumerable<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 0));
-        // ToObject(this): null/undefined throw (ES 20.4.3.5 step 1)
-        if receiver.as_tagged(heap).is_nullish(heap) {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
-        let raw_key = scope.handle(args.get(heap, 1));
-        // the key coercion allocates (float/wrapper keys intern or run
-        // user code): the receiver must stay rooted across it
+        // ToPropertyKey precedes ToObject (ES 20.1.3.4 steps 1-2)
+        let raw_key = args.get_handle(heap, 1);
         let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
-        // root the name: the tagged result anchors the `&mut` borrow
-        let key = scope.handle(key);
-        let key_value = scope.handle(key.as_tagged(heap).erase());
-        match rt_try!(
+        let key = scope.handle(key).erase();
+        let receiver = args.get_handle(heap, 0);
+        let receiver = rt_try!(heap, Convert::to_object(vm, heap, state, &scope, receiver));
+        let enumerable = match rt_try!(
             heap,
-            own_property(vm, heap, state, &scope, receiver, key_value)
+            Object::get_own_property(vm, heap, state, &scope, receiver.erase(), key)
         ) {
-            OwnProperty::Found { enumerable } => Convert::boolean(heap, enumerable),
-            OwnProperty::Missing => Convert::boolean(heap, false),
-        }
+            Some(own) => own.desc.is_enumerable(),
+            None => false,
+        };
+        Convert::boolean(heap, enumerable)
     })
 }
 
-/// `Object.getOwnPropertyNames(O)` (ES 20.1.2.7).
+/// `Object.getOwnPropertyNames ( obj )`
+/// [ES 20.1.2.10](https://tc39.es/ecma262/#sec-object.getownpropertynames)
+/// `GetOwnPropertyKeys(obj, string)`: the non-symbol keys of the object,
+/// in ordinary property order.
 pub fn object_get_own_property_names<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -458,21 +311,40 @@ pub fn object_get_own_property_names<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let target = args.get_handle(heap, 1);
-    // array `length` is a real (accessor) descriptor on the array map, so
-    // `own_property_keys` already lists it
+    let value = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
-        let staged = {
-            let mut names = own_property_keys(heap, vm.known(), target.as_tagged(heap));
-            names.retain(|key| key.get_as::<Symbol>(heap).is_none());
-            scope.stage(&names)
-        };
+        // GetOwnPropertyKeys starts with ToObject (ES 20.1.2.11.1)
+        let target = rt_try!(heap, Convert::to_object(vm, heap, state, &scope, value));
+        let keys = rt_try!(
+            heap,
+            Object::own_property_keys(vm, heap, state, &scope, target.erase())
+        );
+        let mut names: Vec<Handle<'_, Value>> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let value = key.as_tagged(heap);
+            if value.get_as::<Symbol>(heap).is_some() {
+                continue;
+            }
+            // Internal element keys are Smis; [[OwnPropertyKeys]] yields the
+            // string spelling of every array index.
+            let name = if value.is_smi() {
+                scope.handle(rt_try!(
+                    heap,
+                    Convert::to_string(vm, heap, state, &scope, key)
+                ))
+            } else {
+                key
+            };
+            names.push(name);
+        }
+        let staged = scope.stage_handles(&names);
         heap.new_array(&scope, staged).erase()
     })
 }
 
-/// `Object.getOwnPropertyDescriptor(O, P)` (ES 20.1.2.5): [[GetOwnProperty]]
-/// converted with FromPropertyDescriptor.
+/// `Object.getOwnPropertyDescriptor ( obj, key )`
+/// [ES 20.1.2.7](https://tc39.es/ecma262/#sec-object.getownpropertydescriptor)
+/// `[[GetOwnProperty]]` converted with FromPropertyDescriptor.
 pub fn object_get_own_property_descriptor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -482,32 +354,94 @@ pub fn object_get_own_property_descriptor<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        // the key coercion allocates (Float keys intern a string): the
-        // target must stay rooted across it
-        let target = args.get(heap, 1);
-        let target = scope.handle(target);
-        let raw_key = args.get(heap, 2);
-        let raw_key = scope.handle(raw_key);
+        let raw_target = args.get_handle(heap, 1);
+        let target = rt_try!(
+            heap,
+            Convert::to_object(vm, heap, state, &scope, raw_target)
+        );
+        let raw_key = args.get_handle(heap, 2);
         let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
-        // root the name: the tagged result anchors the `&mut` borrow
-        let key = scope.handle(key);
-        let key_value = scope.handle(key.as_tagged(heap).erase());
+        let key = scope.handle(key).erase();
         let Some(own) = rt_try!(
             heap,
-            Object::get_own_property(vm, heap, state, &scope, target, key_value)
+            Object::get_own_property(vm, heap, state, &scope, target.erase(), key)
         ) else {
             return vm.known().undefined.get(heap).erase();
         };
         let partial = PartialDescriptor::from(&own.desc);
-        rt_try!(heap, descriptor_object(heap, &scope, &partial)).as_tagged(heap)
+        rt_try!(heap, Object::descriptor_object(heap, &scope, &partial)).as_tagged(heap)
     })
 }
 
-// TODO: implement Object.defineProperties (ES 20.1.2.3) and
-// Reflect.defineProperty (ES 28.1.3.3) on top of Object::define_property.
-/// `Object.defineProperty(O, P, Attributes)` (ES 20.1.2.4):
-/// ToPropertyDescriptor + [[DefineOwnProperty]] (through the
-/// `defineProperty` trap for proxy receivers, ES 20.2.5.6).
+/// `ObjectDefineProperties ( obj, properties )`
+/// [ES 20.1.2.3.1](https://tc39.es/ecma262/#sec-objectdefineproperties)
+/// Collects every enumerable own descriptor first, then defines them all.
+fn define_properties<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    obj: Handle<'_, Object>,
+    properties: Handle<'_, Value>,
+) -> Result<()> {
+    let properties = Convert::to_object(vm, heap, state, scope, properties)?.erase();
+    let keys = Object::own_property_keys(vm, heap, state, scope, properties)?;
+    let mut descriptors: Vec<(Handle<'s, Value>, PartialDescriptor<'s>)> =
+        Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(current) = Object::get_own_property(vm, heap, state, scope, properties, key)?
+        else {
+            continue;
+        };
+        if !current.desc.is_enumerable() {
+            continue;
+        }
+        let desc_obj = Object::get_property(vm, heap, state, properties, properties, key, false)?;
+        let desc_obj = scope.handle(desc_obj);
+        let partial = Object::to_property_descriptor(vm, heap, state, scope, desc_obj)?;
+        descriptors.push((key, partial));
+    }
+    let obj = scope.handle(obj.as_tagged(heap).erase());
+    for (key, partial) in descriptors {
+        Object::define_property_or_throw(vm, heap, state, scope, obj, key, partial)?;
+    }
+    Ok(())
+}
+
+/// `Object.defineProperties ( obj, properties )`
+/// [ES 20.1.2.3](https://tc39.es/ecma262/#sec-object.defineproperties)
+/// Defines own properties from the enumerable descriptors of `properties`.
+pub fn object_define_properties<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let obj = args.get_handle(heap, 1);
+        if obj.as_tagged(heap).is_primitive(heap) {
+            raise!(vm, heap, state, VmError::CannotDefineOnPrimitive);
+        }
+        let obj = scope
+            .cast::<Object>(heap, obj.as_tagged(heap))
+            .expect("checked to be an object");
+        let properties = args.get_handle(heap, 2);
+        rt_try!(
+            heap,
+            define_properties(vm, heap, state, &scope, obj, properties)
+        );
+        obj.as_tagged(heap).erase()
+    })
+}
+
+// TODO: implement Reflect.defineProperty (ES 28.1.3.3) on top of
+// Object::define_property.
+/// `Object.defineProperty ( obj, key, attrs )`
+/// [ES 20.1.2.4](https://tc39.es/ecma262/#sec-object.defineproperty)
+/// ToPropertyDescriptor + [[DefineOwnProperty]] through the
+/// `defineProperty` trap for proxies.
 pub fn object_define_property<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -536,11 +470,15 @@ pub fn object_define_property<'a>(
         ) {
             target.as_tagged(heap).erase()
         } else {
-            Errors::raise(vm, heap, state, VmError::InvalidOperandType)
+            Errors::raise(vm, heap, state, VmError::CannotDefineProperty)
         }
     })
 }
 
+/// `Object.setPrototypeOf ( obj, proto )`
+/// [ES 20.1.2.23](https://tc39.es/ecma262/#sec-object.setprototypeof)
+/// Sets the [[Prototype]] of `obj`; primitives are returned unchanged after
+/// the `proto` argument is validated.
 pub fn object_set_prototype_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -550,52 +488,35 @@ pub fn object_set_prototype_of<'a>(
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let target = args.get(heap, 1);
-        let target = scope.handle(target);
+        let obj = args.get(heap, 1);
+        let obj = scope.handle(obj);
         let proto = args.get(heap, 2);
         let proto = scope.handle(proto);
-        let nullish = target.as_tagged(heap).is_nullish(heap);
-        let target_is_object = !target.as_tagged(heap).is_primitive(heap);
-        let proto_ok = proto
-            .as_tagged(heap)
-            .ptr_eq(vm.known().null.get(heap).erase())
-            || !proto.as_tagged(heap).is_primitive(heap);
-        // RequireObjectCoercible(O) (ES 20.1.2.20 step 1)
-        if nullish {
+        if obj.as_tagged(heap).is_nullish(heap) {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
-        // proto must be Object or Null *before* a primitive O is returned
-        // (step 2 precedes step 3)
-        if !proto_ok {
+        if proto.as_tagged(heap).is_primitive(heap)
+            && !proto
+                .as_tagged(heap)
+                .ptr_eq(vm.known().null.get(heap).erase())
+        {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
-        // primitives are returned unchanged (step 3)
-        if !target_is_object {
-            return target.as_tagged(heap).erase();
+        if obj.as_tagged(heap).is_primitive(heap) {
+            return obj.as_tagged(heap).erase();
         }
-        if Proxy::is_proxy(heap, target.as_tagged(heap)) {
-            return if rt_try!(
-                heap,
-                Proxy::set_prototype_of(vm, heap, state, target, proto)
-            ) {
-                target.as_tagged(heap).erase()
-            } else {
-                Errors::raise(vm, heap, state, VmError::InvalidOperandType)
-            };
+
+        let status = rt_try!(heap, Proxy::set_prototype_of(vm, heap, state, obj, proto));
+        if !status {
+            raise!(vm, heap, state, VmError::ProxySetPrototypeOfFalse);
         }
-        let target_obj = scope
-            .cast::<Object>(heap, target.as_tagged(heap))
-            .expect("target checked to be an object");
-        rt_try!(
-            heap,
-            Object::set_prototype(vm, heap, state, &scope, target_obj, proto)
-        );
-        target.as_tagged(heap).erase()
+        obj.as_tagged(heap).erase()
     })
 }
 
-/// `Object.preventExtensions(O)` (ES 20.1.2.16): through the
-/// `preventExtensions` trap for proxies (ES 20.2.5.3).
+/// `Object.preventExtensions ( obj )`
+/// [ES 20.1.2.20](https://tc39.es/ecma262/#sec-object.preventextensions)
+/// Prevents adding new own properties; primitives are returned unchanged.
 pub fn object_prevent_extensions<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -607,9 +528,6 @@ pub fn object_prevent_extensions<'a>(
     state.handle_scope(|scope| {
         let target = args.get(heap, 1);
         let target = scope.handle(target);
-        if target.as_tagged(heap).is_nullish(heap) {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
         // the (possibly proxy) receiver is returned after traps ran user
         // code: keep it rooted across the call
         if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
@@ -626,29 +544,23 @@ pub fn object_prevent_extensions<'a>(
     })
 }
 
-/// `Object.is(A, B)` (ES 20.1.2.13): SameValue, including NaN and ±0.
+/// `Object.is ( value1, value2 )`
+/// [ES 20.1.2.15](https://tc39.es/ecma262/#sec-object.is)
+/// SameValue: `NaN` equals `NaN`, `+0` and `-0` are distinct.
 pub fn object_is<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm: _, heap, state, ..
-    } = ctx;
-    state.handle_scope(|scope| {
-        let a = args.get_handle(heap, 1);
-        let b = args.get_handle(heap, 2);
-        let a = scope.handle(a.as_tagged(heap).erase());
-        let b = scope.handle(b.as_tagged(heap).erase());
-        Convert::boolean(
-            heap,
-            Compare::same_value(heap, a.as_tagged(heap), b.as_tagged(heap)),
-        )
-    })
+    let HostCtx { heap, .. } = ctx;
+    let value1 = args.get(heap, 1);
+    let value2 = args.get(heap, 2);
+    Convert::boolean(heap, Compare::same_value(heap, value1, value2))
 }
 
-/// `Object.isExtensible(O)` (ES 20.1.2.14): primitives are `false`;
-/// proxies run the `isExtensible` trap with its must-match invariant.
+/// `Object.isExtensible ( obj )`
+/// [ES 20.1.2.16](https://tc39.es/ecma262/#sec-object.isextensible)
+/// Non-objects are not extensible.
 pub fn object_is_extensible<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -657,103 +569,85 @@ pub fn object_is_extensible<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(|_scope| {
-        let target = args.get_handle(heap, 1);
-        if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
-            return Convert::boolean(heap, false);
-        }
-        let v = rt_try!(heap, Proxy::object_is_extensible(vm, heap, state, target));
-        Convert::boolean(heap, v)
-    })
+    let obj = args.get_handle(heap, 1);
+    if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
+        return Convert::boolean(heap, false);
+    }
+    let extensible = rt_try!(heap, Proxy::object_is_extensible(vm, heap, state, obj));
+    Convert::boolean(heap, extensible)
 }
 
-/// SetIntegrityLevel (ES 7.3.15/16) for ordinary objects: clear
-/// `configurable` (and for freeze `writable`) on every element and named
-/// descriptor, drop EXTENDABLE, and (for arrays) make `length` read-only.
-pub fn set_integrity_flags(
+/// `SetIntegrityLevel ( obj, level )`
+/// [ES 7.3.15](https://tc39.es/ecma262/#sec-setintegritylevel)
+/// Prevents extensions, then defines every own property as non-configurable
+/// (and non-writable for `frozen`). This is the generic internal-method
+/// path, so proxies run `ownKeys` / `getOwnPropertyDescriptor` /
+/// `defineProperty` traps.
+fn set_integrity_level(
+    vm: &VM,
     heap: &mut Heap,
+    state: &ThreadState,
     scope: &HandleScope<'_>,
-    obj: Handle<'_, Object>,
-    freeze: bool,
-) {
-    use vm_core::{Map, MapInit, MapKind, SlotFlags};
-
-    if freeze && obj.as_tagged(heap).is_array(heap) {
-        Object::make_array_length_readonly(heap, scope, &obj);
+    target: Handle<'_, Value>,
+    frozen: bool,
+) -> Result<bool> {
+    let status = Proxy::prevent_extensions(vm, heap, state, target)?;
+    if !status {
+        return Ok(false);
     }
-    if !obj.as_tagged(heap).element_keys(heap).is_empty() {
-        // Dense elements cannot carry attributes: normalize once, then
-        // rewrite every entry's details (ES 7.3.15 step 3.a).
-        Object::normalize_elements(heap, scope, &obj);
-        let dict = scope.handle(
-            obj.as_tagged(heap)
-                .element_dictionary(heap)
-                .expect("normalized elements are a dictionary"),
-        );
-        let mut entries: Vec<(usize, Handle<'_, Value>, i64)> = Vec::new();
-        dict.as_tagged(heap)
-            .for_each_entry(heap, |key, value, details| {
-                entries.push((key, scope.handle(value), details));
-            });
-        let mut dict = dict;
-        for (key, value, details) in entries {
-            let mut details = details & !DETAILS_CONFIGURABLE;
-            if freeze && details & DETAILS_ACCESSOR == 0 {
-                details &= !DETAILS_WRITABLE;
+    let keys = Object::own_property_keys(vm, heap, state, scope, target)?;
+    for key in keys {
+        let Some(current) = Object::get_own_property(vm, heap, state, scope, target, key)? else {
+            continue;
+        };
+        let partial = if frozen && current.desc.is_data_descriptor() {
+            PartialDescriptor {
+                writable: Some(false),
+                configurable: Some(false),
+                ..PartialDescriptor::default()
             }
-            dict = NumberDictionary::insert(heap, scope, &dict, key, value, details);
-        }
-        let obj_ref = obj.as_tagged(heap);
-        obj_ref
-            .elements
-            .set(heap, obj_ref.erase(), dict.as_tagged(heap).erase());
-        Prototype::element_mutated(heap, obj_ref);
+        } else {
+            PartialDescriptor {
+                configurable: Some(false),
+                ..PartialDescriptor::default()
+            }
+        };
+        Object::define_property_or_throw(vm, heap, state, scope, target, key, partial)?;
     }
-
-    let (kind, descriptor_count) = {
-        let map = obj.as_tagged(heap).map(heap);
-        (map.kind(), map.descriptors().len())
-    };
-    // clone the map with `configurable` (and for freeze `writable`)
-    // cleared on every descriptor and EXTENDABLE dropped: names are
-    // read under the enter-heap anchor so the descriptor rows stay
-    // anchored across the (allocating) map build
-    heap.allocate_token_enter_heap(Map::layout_for(descriptor_count), |token, heap| {
-        let obj_ref = obj.as_tagged(heap);
-        let map = obj_ref.map(heap);
-        // Safety: fresh map-slot word, rooted below before the allocation.
-        let prototype = scope.handle(map.prototype.get(heap));
-        let descriptors: Vec<(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>)> = map
-            .descriptors()
-            .iter()
-            .map(|d| {
-                let mut flags = d.flags();
-                flags = SlotFlags::new(flags.bits() & !SlotFlags::CONFIGURABLE.bits());
-                if freeze && !flags.is_accessor() {
-                    flags = SlotFlags::new(flags.bits() & !SlotFlags::WRITABLE.bits());
-                }
-                (
-                    scope.handle(d.name(heap)),
-                    flags,
-                    scope.handle(d.value.get(heap)),
-                )
-            })
-            .collect();
-        let new_map = token.allocate::<Map>(MapInit {
-            kind: MapKind::new(kind.bits() & !MapKind::EXTENDABLE.bits()),
-            value_slot_count: map.value_slot_count(),
-            descriptors: &descriptors,
-            prototype,
-        });
-        Prototype::shape_changed(heap, obj_ref.map(heap));
-        obj_ref
-            .header
-            .map
-            .set(heap, obj.as_tagged(heap).erase(), new_map);
-    });
+    Ok(true)
 }
 
-/// `Object.seal(O)` (ES 20.1.2.17).
+/// `TestIntegrityLevel ( obj, level )`
+/// [ES 7.3.16](https://tc39.es/ecma262/#sec-testintegritylevel)
+fn test_integrity_level(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    target: Handle<'_, Value>,
+    frozen: bool,
+) -> Result<bool> {
+    if Proxy::object_is_extensible(vm, heap, state, target)? {
+        return Ok(false);
+    }
+    let keys = Object::own_property_keys(vm, heap, state, scope, target)?;
+    for key in keys {
+        let Some(current) = Object::get_own_property(vm, heap, state, scope, target, key)? else {
+            continue;
+        };
+        if current.desc.is_configurable() {
+            return Ok(false);
+        }
+        if frozen && current.desc.is_data_descriptor() && current.desc.is_writable() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `Object.seal ( obj )`
+/// [ES 20.1.2.22](https://tc39.es/ecma262/#sec-object.seal)
+/// Prevents extensions and makes every own property non-configurable.
 pub fn object_seal<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -763,40 +657,25 @@ pub fn object_seal<'a>(
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 1);
-    if target.as_tagged(heap).is_nullish(heap) {
-        raise!(vm, heap, state, VmError::InvalidOperandType);
+    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+        return target.as_tagged(heap).erase();
     }
-    // traps run user code before the receiver is returned: keep it rooted
     state.handle_scope(|scope| {
-        // Safety: fresh argument word, rooted before any allocation.
-        let target_handle = target;
-        if !Proxy::is_js_receiver(heap, target_handle.as_tagged(heap)) {
-            return target_handle.as_tagged(heap).erase();
-        }
-        // [[PreventExtensions]] first (traps included)
-        let v = rt_try!(
+        let ok = rt_try!(
             heap,
-            Proxy::prevent_extensions(vm, heap, state, target_handle)
+            set_integrity_level(vm, heap, state, &scope, target, false)
         );
-        if !v {
+        if !ok {
             raise!(vm, heap, state, VmError::NotExtensible);
         }
-        // TODO: per-key [[DefineOwnProperty]] through the defineProperty
-        // trap once ownKeys lands (proxy targets); ordinary targets:
-        // re-read through the handle: the trap may have moved the receiver
-        if Proxy::is_proxy(heap, target_handle.as_tagged(heap)) {
-            return target_handle.as_tagged(heap).erase();
-        }
-        let obj = scope
-            .cast::<Object>(heap, target_handle.as_tagged(heap))
-            .expect("checked above");
-        set_integrity_flags(heap, &scope, obj, false);
-        // re-read through the handle: traps may have moved the receiver
-        target_handle.as_tagged(heap).erase()
+        target.as_tagged(heap).erase()
     })
 }
 
-/// `Object.freeze(O)` (ES 20.1.2.9).
+/// `Object.freeze ( obj )`
+/// [ES 20.1.2.6](https://tc39.es/ecma262/#sec-object.freeze)
+/// Prevents extensions and makes every own property non-configurable and
+/// non-writable.
 pub fn object_freeze<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -806,32 +685,66 @@ pub fn object_freeze<'a>(
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 1);
-    if target.as_tagged(heap).is_nullish(heap) {
-        raise!(vm, heap, state, VmError::InvalidOperandType);
+    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+        return target.as_tagged(heap).erase();
     }
-    // traps run user code before the receiver is returned: keep it rooted
     state.handle_scope(|scope| {
-        // Safety: fresh argument word, rooted before any allocation.
-        let target_handle = target;
-        if !Proxy::is_js_receiver(heap, target_handle.as_tagged(heap)) {
-            return target_handle.as_tagged(heap).erase();
-        }
-        let v = rt_try!(
+        let ok = rt_try!(
             heap,
-            Proxy::prevent_extensions(vm, heap, state, target_handle)
+            set_integrity_level(vm, heap, state, &scope, target, true)
         );
-        if !v {
+        if !ok {
             raise!(vm, heap, state, VmError::NotExtensible);
         }
-        // re-read through the handle: the trap may have moved the receiver
-        if Proxy::is_proxy(heap, target_handle.as_tagged(heap)) {
-            return target_handle.as_tagged(heap).erase();
-        }
-        let obj = scope
-            .cast::<Object>(heap, target_handle.as_tagged(heap))
-            .expect("checked above");
-        set_integrity_flags(heap, &scope, obj, true);
-        // re-read through the handle: traps may have moved the receiver
-        target_handle.as_tagged(heap).erase()
+        target.as_tagged(heap).erase()
+    })
+}
+
+/// `Object.isFrozen ( obj )`
+/// [ES 20.1.2.17](https://tc39.es/ecma262/#sec-object.isfrozen)
+/// Whether the object is non-extensible with no configurable or writable
+/// data properties.
+pub fn object_is_frozen<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 1);
+    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+        return Convert::boolean(heap, true);
+    }
+    state.handle_scope(|scope| {
+        let frozen = rt_try!(
+            heap,
+            test_integrity_level(vm, heap, state, &scope, target, true)
+        );
+        Convert::boolean(heap, frozen)
+    })
+}
+
+/// `Object.isSealed ( obj )`
+/// [ES 20.1.2.18](https://tc39.es/ecma262/#sec-object.issealed)
+/// Whether the object is non-extensible with no configurable properties.
+pub fn object_is_sealed<'a>(
+    ctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 1);
+    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+        return Convert::boolean(heap, true);
+    }
+    state.handle_scope(|scope| {
+        let frozen = rt_try!(
+            heap,
+            test_integrity_level(vm, heap, state, &scope, target, false)
+        );
+        Convert::boolean(heap, frozen)
     })
 }

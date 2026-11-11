@@ -1,6 +1,7 @@
 use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::VmError;
+use vm_core::extend_lifetime;
 use vm_core::raise;
 use vm_core::rt_try;
 use vm_core::{Args, Convert, Handle, Tagged, Value, WrapperKind};
@@ -46,15 +47,16 @@ pub fn boolean_value_of<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(v) = args
-            .get(heap, 0)
-            .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
-        else {
-            raise!(vm, heap, state, VmError::IncompatibleBooleanReceiver);
-        };
-        scope.handle(v).as_tagged(heap).erase()
-    })
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    match args
+        .get(heap, 0)
+        .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
+    {
+        Some(v) => extend_lifetime!(heap, v),
+        None => raise!(vm, heap, state, VmError::IncompatibleBooleanReceiver),
+    }
 }
 
 /// `Boolean.prototype.toString ( )`

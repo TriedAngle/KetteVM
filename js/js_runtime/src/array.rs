@@ -7,10 +7,9 @@ use vm_core::{
     Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, LanguageMode,
     Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value,
 };
-use vm_core::{raise_runtime, rt_try};
+use vm_core::{extend_lifetime, raise_runtime, rt_try};
 
 use crate::JSRuntime;
-use crate::object::is_array;
 
 const ARRAY_ITERATOR_KIND_KEY: i64 = 0;
 const ARRAY_ITERATOR_KIND_VALUE: i64 = 1;
@@ -210,7 +209,7 @@ fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<u
         let receiver = args.get_handle(heap, 0);
         let r = receiver.as_tagged(heap);
         let obj = r.as_heap_object()?;
-        if !obj.as_ref().is_array(heap) {
+        if !obj.as_ref().is_array_exotic(heap) {
             return None;
         }
         let len = obj.as_ref().length();
@@ -367,7 +366,7 @@ fn array_pop_fast<'s>(
 ) -> Option<Handle<'s, Value>> {
     let receiver = args.get_handle(heap, 0);
     let obj = receiver.as_tagged(heap).as_heap_object()?;
-    if !obj.as_ref().is_array(heap) || !obj.as_ref().map(heap).length_writable(heap) {
+    if !obj.as_ref().is_array_exotic(heap) || !obj.as_ref().map(heap).length_writable(heap) {
         return None;
     }
     let len = obj.as_ref().length();
@@ -759,7 +758,7 @@ pub fn array_to_string<'a>(
             known.object_to_string.get_handle(heap, &scope).erase()
         };
         let call_args = scope.stage(&[obj.as_tagged(heap).erase()]);
-        let outcome = match HostCtx::enter(
+        match HostCtx::enter(
             vm,
             state.runtime(vm, heap),
             heap,
@@ -768,11 +767,7 @@ pub fn array_to_string<'a>(
             call_args,
             None,
         ) {
-            Ok(value) => Ok(scope.handle(value)),
-            Err(err) => Err(err),
-        };
-        match outcome {
-            Ok(value) => value.as_tagged(heap).erase(),
+            Ok(value) => extend_lifetime!(heap, value),
             Err(err) => raise_runtime(heap, err),
         }
     })
@@ -858,7 +853,7 @@ pub fn array_is_array<'a>(
         vm, heap, state, ..
     } = ctx;
     let arg = args.get(heap, 1);
-    let Some(is_array) = is_array(heap, arg) else {
+    let Some(is_array) = Object::is_array(heap, arg) else {
         raise!(vm, heap, state, VmError::RevokedProxy);
     };
     Convert::boolean(heap, is_array)

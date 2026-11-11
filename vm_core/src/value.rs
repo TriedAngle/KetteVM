@@ -367,6 +367,25 @@ impl<'a> Tagged<'a, Value> {
     }
 }
 
+/// Re-anchor a `Tagged` lifetime to `heap`'s borrow.
+#[macro_export]
+macro_rules! extend_lifetime {
+    ($heap:expr, $value:expr) => {{
+        struct __ExtendLifetime<'b> {
+            value: $crate::Tagged<'b, $crate::Value>,
+            _heap: &'b $crate::Heap,
+        }
+        let __value = $value;
+        let __raw = __value.raw();
+        let __extended = __ExtendLifetime {
+            // Safety: `__value` was live, so no GC happened since it was read.
+            value: unsafe { $crate::Tagged::from_value_unchecked(__raw) },
+            _heap: $heap,
+        };
+        __extended.value
+    }};
+}
+
 impl<'a> Tagged<'a, Smi> {
     pub fn from_smi(smi: Smi) -> Self {
         unsafe { Self::from_value_unchecked(smi.encode()) }

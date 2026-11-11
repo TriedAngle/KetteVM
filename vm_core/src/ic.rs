@@ -1161,7 +1161,7 @@ impl InlineCache {
                 }
             }
             Handler::Smi(kind_smi(KIND_INDEXED_STRING, payload))
-        } else if obj.is_array(heap) {
+        } else if obj.is_array_exotic(heap) {
             // element handlers are dense-only: dictionary arrays take
             // the generic path
             if !map.as_tagged(heap).kind().is_dense_elements() {
@@ -1210,7 +1210,7 @@ impl InlineCache {
         let Some(obj) = recv.as_heap_object() else {
             return;
         };
-        if !obj.is_array(heap) {
+        if !obj.is_array_exotic(heap) {
             return;
         }
         let map = scope.handle(obj.map(heap));

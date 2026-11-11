@@ -3,10 +3,10 @@ use crate::bail;
 use core::alloc::Layout;
 
 use crate::{
-    Args, Compare, Convert, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject,
-    HostCtx, LanguageMode, Map, Object, ObjectKind, OwnProperty, PartialDescriptor,
-    PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName, StoreSemantics,
-    Tagged, ThreadState, Transition, VM, Value, Visitor, descriptor_object,
+    Args, Compare, Convert, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
+    HeapObject, HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty,
+    PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName,
+    Smi, StoreSemantics, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
 };
 
 pub struct Proxy;
@@ -184,6 +184,70 @@ fn enter_trap<'s>(
         bail!(vm, heap, state, VmError::ProxyRevoked(trap.as_str()));
     }
     Ok((scope.handle(target), scope.handle(handler)))
+}
+
+fn same_property_key(heap: &Heap, a: Tagged<'_, Value>, b: Tagged<'_, Value>) -> bool {
+    match (a.classify_key(heap), b.classify_key(heap)) {
+        (Some(Key::Element(a)), Some(Key::Element(b))) => a == b,
+        (Some(Key::Name(a)), Some(Key::Name(b))) => a.erase().ptr_eq(b.erase()),
+        _ => false,
+    }
+}
+
+fn take_property_key(
+    heap: &Heap,
+    keys: &mut Vec<Handle<'_, Value>>,
+    key: Handle<'_, Value>,
+) -> bool {
+    let Some(position) = keys
+        .iter()
+        .position(|item| same_property_key(heap, item.as_tagged(heap), key.as_tagged(heap)))
+    else {
+        return false;
+    };
+    keys.remove(position);
+    true
+}
+
+/// `CreateListFromArrayLike ( trapResultArray, property-key )`
+/// [ES 7.3.19](https://tc39.es/ecma262/#sec-createlistfromarraylike)
+fn trap_result_keys<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    result: Handle<'_, Value>,
+) -> Result<Vec<Handle<'s, Value>>> {
+    if result.as_tagged(heap).is_primitive(heap) {
+        bail!(vm, heap, state, VmError::CreateListFromArrayLikeNonObject);
+    }
+    let length = Object::length_of_array_like(vm, heap, state, scope, result)?;
+    let mut keys: Vec<Handle<'s, Value>> = Vec::with_capacity(length as usize);
+    for index in 0..length {
+        let key = scope.handle(Smi::new(index as i64).into_tagged());
+        let value = scope.handle(Object::get_property(
+            vm,
+            heap,
+            state,
+            result,
+            result,
+            key.erase(),
+            false,
+        )?);
+        if value.as_tagged(heap).get_as::<DenseString>(heap).is_none()
+            && value.as_tagged(heap).get_as::<Symbol>(heap).is_none()
+        {
+            bail!(vm, heap, state, VmError::ProxyOwnKeysInvalidKey);
+        }
+        if keys
+            .iter()
+            .any(|other| same_property_key(heap, other.as_tagged(heap), value.as_tagged(heap)))
+        {
+            bail!(vm, heap, state, VmError::ProxyOwnKeysDuplicate);
+        }
+        keys.push(value);
+    }
+    Ok(keys)
 }
 
 fn own_descriptor_h<'s>(
@@ -672,7 +736,7 @@ fn proxy_define_h(
             should_throw,
         );
     };
-    let desc_obj = descriptor_object(heap, scope, &partial)?;
+    let desc_obj = Object::descriptor_object(heap, scope, &partial)?;
     let trap_name = materialize_trap_key(vm, heap, state, scope, name)?;
     let result = scope.handle(call_trap(
         vm,
@@ -1144,6 +1208,62 @@ impl Proxy {
                 (0..args.len()).map(|i| args.get_handle(heap, i)).collect();
             construct_h(vm, heap, state, &scope, &proxy, &args, &new_target)
         })
+    }
+
+    /// Proxy `[[OwnPropertyKeys]]` (ES 10.5.11), including its invariants.
+    pub fn own_keys<'s>(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &'s HandleScope<'_>,
+        proxy: Handle<'_, Value>,
+    ) -> Result<Vec<Handle<'s, Value>>> {
+        let (target, handler) = enter_trap(vm, heap, state, scope, &proxy, Trap::OwnKeys)?;
+        let Some(trap) = get_trap(vm, heap, state, scope, &handler, Trap::OwnKeys)? else {
+            return Object::own_property_keys(vm, heap, state, scope, target);
+        };
+        let trap_result = scope.handle(call_trap(
+            vm,
+            heap,
+            state,
+            scope,
+            &trap,
+            &[handler, target],
+        )?);
+        let trap_result = trap_result_keys(vm, heap, state, scope, trap_result)?;
+        let extensible = is_extensible_h(vm, heap, state, scope, &target)?;
+        let target_keys = Object::own_property_keys(vm, heap, state, scope, target)?;
+        let mut configurable: Vec<Handle<'_, Value>> = Vec::new();
+        let mut non_configurable: Vec<Handle<'_, Value>> = Vec::new();
+        for key in target_keys {
+            let desc = Object::get_own_property(vm, heap, state, scope, target, key)?;
+            if desc.is_some_and(|desc| !desc.desc.is_configurable()) {
+                non_configurable.push(key);
+            } else {
+                configurable.push(key);
+            }
+        }
+        if extensible && non_configurable.is_empty() {
+            return Ok(trap_result);
+        }
+        let mut unchecked = trap_result.clone();
+        for key in non_configurable {
+            if !take_property_key(heap, &mut unchecked, key) {
+                bail!(vm, heap, state, VmError::ProxyOwnKeysNonConfigurable);
+            }
+        }
+        if extensible {
+            return Ok(trap_result);
+        }
+        for key in configurable {
+            if !take_property_key(heap, &mut unchecked, key) {
+                bail!(vm, heap, state, VmError::ProxyOwnKeysNonExtensible);
+            }
+        }
+        if !unchecked.is_empty() {
+            bail!(vm, heap, state, VmError::ProxyOwnKeysNonExtensible);
+        }
+        Ok(trap_result)
     }
 
     /// Proxy `[[PreventExtensions]]` (ES 20.2.5.3), plus the ordinary path —

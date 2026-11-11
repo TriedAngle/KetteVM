@@ -98,6 +98,7 @@ vm_errors! {
     PreventExtensionsTargetNotObject => Type, "preventExtensions target is not an object";
     FunctionPrototypeNotObject => Type, "Function.prototype is not an object";
     PropertyDescriptorNotObject => Type, "property descriptor must be an object";
+    InvalidPropertyDescriptor => Type, "property descriptor cannot be both data and accessor";
     AccessorNotCallable => Type, "accessor descriptor get/set must be callable or undefined";
     SymbolToPrimitiveNotCallable => Type, "Symbol.toPrimitive is not callable";
     SymbolToPrimitiveNotPrimitive => Type, "Symbol.toPrimitive did not return a primitive";
@@ -138,11 +139,16 @@ vm_errors! {
     ProxyGetPrototypeOfNotObject => Type, "proxy getPrototypeOf trap must return an object or null";
     ProxyHasHiddenNonExtensible => Type, "proxy has trap may not hide a property of a non-extensible target";
     ProxyHasNonConfigurable => Type, "proxy has trap may not hide a non-configurable property";
+    ProxyOwnKeysDuplicate => Type, "proxy ownKeys trap returned duplicate keys";
+    ProxyOwnKeysInvalidKey => Type, "proxy ownKeys trap returned a non-property-key";
+    ProxyOwnKeysNonConfigurable => Type, "proxy ownKeys trap omitted a non-configurable property";
+    ProxyOwnKeysNonExtensible => Type, "proxy ownKeys trap omitted a property of a non-extensible target";
     ProxyPreventExtensionsTrue => Type, "proxy preventExtensions trap returned true for an extensible target";
     ProxyRequiresNew => Type, "constructor Proxy requires 'new'";
     ProxySetAccessorNoSetter => Type, "proxy set trap may not report success for an accessor without a setter";
     ProxySetMismatch => Type, "proxy set trap must match a non-writable, non-configurable property";
     ProxySetPrototypeOfMismatch => Type, "proxy setPrototypeOf trap may not change a non-extensible target's prototype";
+    ProxySetPrototypeOfFalse => Type, "proxy setPrototypeOf trap returned false";
     ProxyTrapNotFunction => Type, "proxy trap is not a function";
 }
 

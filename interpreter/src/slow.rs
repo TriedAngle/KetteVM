@@ -1105,7 +1105,7 @@ pub fn keyed_store_body<'a>(
         if semantics == StoreSemantics::WriteThrough
             && let Some(i) = key.as_tagged(heap).as_index()
             && let Some(obj) = recv.as_tagged(heap).as_heap_object()
-            && obj.is_array(heap)
+            && obj.is_array_exotic(heap)
             && obj.map(heap).kind().is_dense_elements()
         {
             let grew = i >= obj.length();
@@ -1129,7 +1129,7 @@ pub fn keyed_store_body<'a>(
         let grew = element.is_some_and(|i| {
             recv.as_tagged(heap)
                 .as_heap_object()
-                .is_some_and(|obj| obj.is_array(heap) && i >= obj.length())
+                .is_some_and(|obj| obj.is_array_exotic(heap) && i >= obj.length())
         });
         let applied = match Object::set_property(
             vm,
@@ -1152,7 +1152,7 @@ pub fn keyed_store_body<'a>(
             && recv
                 .as_tagged(heap)
                 .as_heap_object()
-                .is_some_and(|obj| obj.is_array(heap))
+                .is_some_and(|obj| obj.is_array_exotic(heap))
         {
             InlineCache::update_store_element(
                 heap,
