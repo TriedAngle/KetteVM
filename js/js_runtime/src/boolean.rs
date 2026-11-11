@@ -1,5 +1,5 @@
 use vm_core::{
-    Args, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, WrapperKind, extend_lifetime,
+    Args, CallInfo, Convert, HostCtx, Object, Tagged, Value, VmError, WrapperKind, extend_lifetime,
     raise, rt_try,
 };
 
@@ -12,20 +12,16 @@ crate::register_natives! {
 /// `Boolean ( value )`
 /// [ES 20.3.1.1](https://tc39.es/ecma262/#sec-boolean-constructor-boolean-value)
 /// Converts `value` with ToBoolean; under `new` it wraps that Boolean.
-fn boolean_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn boolean_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(new_target) = new_target else {
-        let arg = args.get(heap, 1);
+    let Some(new_target) = call.new_target else {
+        let arg = args.get(heap, 0);
         return Convert::boolean(heap, arg.is_truthy(heap));
     };
     state.handle_scope(|scope| {
-        let arg = args.get(heap, 1);
+        let arg = args.get(heap, 0);
         let value = scope.handle(Convert::boolean(heap, arg.is_truthy(heap)));
         let obj = scope.handle(rt_try!(
             heap,
@@ -45,16 +41,13 @@ fn boolean_constructor<'a>(
 /// `Boolean.prototype.valueOf ( )`
 /// [ES 20.3.3.3](https://tc39.es/ecma262/#sec-boolean.prototype.valueof)
 /// Returns the [[BooleanData]] of the receiver (ThisBooleanValue).
-fn boolean_value_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn boolean_value_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    match args
-        .get(heap, 0)
+    match call
+        .receiver
+        .as_tagged(heap)
         .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
     {
         Some(v) => extend_lifetime!(heap, v),
@@ -65,17 +58,14 @@ fn boolean_value_of<'a>(
 /// `Boolean.prototype.toString ( )`
 /// [ES 20.3.3.2](https://tc39.es/ecma262/#sec-boolean.prototype.tostring)
 /// Returns "true" or "false" for the receiver's [[BooleanData]].
-fn boolean_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn boolean_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(v) = args
-        .get(heap, 0)
-        .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
+    let Some(v) =
+        call.receiver
+            .as_tagged(heap)
+            .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
     else {
         raise!(vm, heap, state, VmError::IncompatibleBooleanReceiver);
     };

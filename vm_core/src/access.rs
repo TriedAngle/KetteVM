@@ -1,9 +1,9 @@
 use crate::{
-    AccessorInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString, FixedArray,
-    Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object, PartialDescriptor,
-    PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi, StringOwn, Symbol,
-    Tagged, ThreadState, Thrown, VM, Value, VmError, bail, lookup::Hit, lookup::Lookup,
-    proxy::Proxy, transition::Transition,
+    AccessorInfo, Args, CallInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString,
+    FixedArray, Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object,
+    PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi,
+    StringOwn, Symbol, Tagged, ThreadState, Thrown, VM, Value, VmError, bail, lookup::Hit,
+    lookup::Lookup, proxy::Proxy, transition::Transition,
 };
 
 /// Store semantics:
@@ -1183,10 +1183,15 @@ fn native_accessor_get<'h>(
     let Some(index) = getter else {
         return Ok(heap.known().undefined.get(heap).erase());
     };
-    let args = scope.stage(&[holder.as_tagged(heap).erase()]).as_args();
+    let args = Args::EMPTY;
+    let info = CallInfo {
+        callee: None,
+        receiver: holder,
+        new_target: None,
+    };
     let result = scope.handle(vm.native(index)(
         HostCtx::new(vm, state.runtime(vm, heap), heap, state),
-        None,
+        info,
         args,
     ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
@@ -1208,12 +1213,15 @@ fn native_accessor_set<'h>(
     let Some(index) = setter else {
         return Ok(SetApplied::Rejected);
     };
-    let args = scope
-        .stage(&[holder.as_tagged(heap).erase(), value.as_tagged(heap)])
-        .as_args();
+    let args = scope.stage(&[value.as_tagged(heap)]).as_args();
+    let info = CallInfo {
+        callee: None,
+        receiver: holder,
+        new_target: None,
+    };
     let result = scope.handle(vm.native(index)(
         HostCtx::new(vm, state.runtime(vm, heap), heap, state),
-        None,
+        info,
         args,
     ));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {

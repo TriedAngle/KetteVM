@@ -5,11 +5,11 @@ use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
 use vm_core::{
-    AccessorPair, Compare, ContextInit, ContextObject, Convert, DenseString, Errors, FixedArray,
-    Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object, PropertyDescriptor,
-    Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
-    ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise, raise_runtime,
-    rt_try,
+    AccessorPair, CallInfo, Compare, ContextInit, ContextObject, Convert, DenseString, Errors,
+    FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
+    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
+    VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise,
+    raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -1299,15 +1299,15 @@ macro_rules! apply_store_hit {
                 }
             }
             StoreHit::NativeSetter(index) => {
-                let args = $scope
-                    .stage(&[
-                        $recv.as_tagged($heap).erase(),
-                        $value.as_tagged($heap).erase(),
-                    ])
-                    .as_args();
+                let args = $scope.stage(&[$value.as_tagged($heap).erase()]).as_args();
+                let info = CallInfo {
+                    callee: None,
+                    receiver: $recv,
+                    new_target: None,
+                };
                 let result = $scope.handle($vm.native(index)(
                     HostCtx::new($vm, $state.runtime($vm, $heap), $heap, $state),
-                    None,
+                    info,
                     args,
                 ));
                 if result.as_tagged($heap) == $roots.exception.get($heap).erase() {

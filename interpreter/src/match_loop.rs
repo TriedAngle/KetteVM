@@ -29,15 +29,15 @@ use crate::{
     match_op_sub_immediate, match_op_sub_loc, match_op_test_reference_equal, match_op_test_typeof,
     match_op_throw, match_op_throw_reference_error_if_hole, slow::match_slow_construct,
     utils::CallFault, utils::ConstructStart, utils::StagedCall, utils::bound_apply_staged,
-    utils::call_scatter_start, utils::call_window_start, utils::construct_native,
-    utils::construct_start, utils::proxy_apply_staged, utils::raise_fault, utils::resolve_target,
+    utils::call_native_target, utils::call_scatter_start, utils::call_window_start,
+    utils::construct_native, utils::construct_start, utils::proxy_apply_staged, utils::raise_fault,
+    utils::resolve_target,
 };
 use bytecode::Opcode;
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
-    HandleSlice, Heap, HostCtx, Interpreter, Object, Ops, Regs, Result, Tagged, Termination,
-    ThreadState, Thrown, Unwind, VM, Value, VmError, bail, interpreter::base, interpreter::unwind,
-    raise,
+    HandleSlice, Heap, Interpreter, Object, Ops, Regs, Result, Tagged, Termination, ThreadState,
+    Thrown, Unwind, VM, Value, VmError, bail, interpreter::base, interpreter::unwind, raise,
 };
 
 pub struct MatchInterpreter;
@@ -202,13 +202,16 @@ fn start<'b, 't>(
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => {
             bail!(vm, heap, state, VmError::NotCallable)
         }
-        Some(CallTarget::Native(rt)) => {
-            let f = vm.native(rt);
-            // Safety: this is safe
-            let runtime: &'b dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
-            let nctx = HostCtx::new(vm, runtime, heap, state);
-            Ok(f(nctx, new_target, args.as_args()))
-        }
+        Some(CallTarget::Native(rt)) => Ok(call_native_target(
+            vm,
+            runtime,
+            heap,
+            state,
+            rt,
+            callable.erase(),
+            args,
+            new_target,
+        )),
         Some(CallTarget::Bytecode {
             target,
             info,
@@ -527,8 +530,12 @@ macro_rules! call_enter {
                 *$acc = Acc::set($roots.undefined.get($ctx.heap()).erase());
                 $ctx.code_ptr()
             }
-            Ok(StagedCall::Native { rt, staged }) => {
-                let v = $ctx.call_native(rt, staged);
+            Ok(StagedCall::Native {
+                rt,
+                callee_reg,
+                staged,
+            }) => {
+                let v = $ctx.call_native(rt, callee_reg, staged);
                 reenter!($ctx, $acc, $pc, $next_pc, v)
             }
             Ok(StagedCall::Proxy { callee_reg, staged }) => {

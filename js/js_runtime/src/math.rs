@@ -2,7 +2,7 @@
 
 use std::{sync::atomic::AtomicU64, sync::atomic::Ordering};
 use vm_core::{
-    Args, Handle, Heap, HostCtx, Object, Result, Tagged, ThreadState, VM, Value, rt_try,
+    Args, CallInfo, Heap, HostCtx, Object, Result, Tagged, ThreadState, VM, Value, rt_try,
 };
 
 crate::register_natives! {
@@ -76,7 +76,7 @@ fn math_unary<'a>(
     args: Args,
     f: impl Fn(f64) -> f64,
 ) -> Tagged<'a, Value> {
-    let x = rt_try!(heap, arg_as_f64(vm, heap, state, args, 1));
+    let x = rt_try!(heap, arg_as_f64(vm, heap, state, args, 0));
     heap.new_number(f(x))
 }
 
@@ -91,7 +91,7 @@ fn math_integral<'a>(
     args: Args,
     f: impl Fn(f64) -> f64,
 ) -> Tagged<'a, Value> {
-    if let Some(bits) = args.get(heap, 1).smi_bits() {
+    if let Some(bits) = args.get(heap, 0).smi_bits() {
         return Tagged::from_smi_bits(bits).erase();
     }
     math_unary(vm, heap, state, args, f)
@@ -99,11 +99,7 @@ fn math_integral<'a>(
 
 /// `Math.sqrt(x)` (ES 22.1.2.29): ToNumber, then the IEEE-754 square root
 /// (NaN/negative input → NaN, ±0 → ±0).
-fn math_sqrt<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_sqrt<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -111,11 +107,7 @@ fn math_sqrt<'a>(
 }
 
 /// `Math.log(x)` (ES 22.1.2.15): natural logarithm.
-fn math_log<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_log<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -123,16 +115,12 @@ fn math_log<'a>(
 }
 
 /// `Math.pow(base, exponent)` (ES 22.1.2.20).
-fn math_pow<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_pow<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let base = rt_try!(heap, arg_as_f64(vm, heap, state, args, 1));
-    let exp = rt_try!(heap, arg_as_f64(vm, heap, state, args, 2));
+    let base = rt_try!(heap, arg_as_f64(vm, heap, state, args, 0));
+    let exp = rt_try!(heap, arg_as_f64(vm, heap, state, args, 1));
     heap.new_number(base.powf(exp))
 }
 
@@ -149,11 +137,7 @@ fn js_round(x: f64) -> f64 {
 }
 
 /// `Math.abs(x)` (ES 22.1.2.1).
-fn math_abs<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_abs<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -161,11 +145,7 @@ fn math_abs<'a>(
 }
 
 /// `Math.floor(x)` (ES 22.1.2.11).
-fn math_floor<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_floor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -173,11 +153,7 @@ fn math_floor<'a>(
 }
 
 /// `Math.ceil(x)` (ES 22.1.2.2).
-fn math_ceil<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_ceil<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -185,11 +161,7 @@ fn math_ceil<'a>(
 }
 
 /// `Math.trunc(x)` (ES 22.1.2.31).
-fn math_trunc<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_trunc<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -197,11 +169,7 @@ fn math_trunc<'a>(
 }
 
 /// `Math.round(x)` (ES 22.1.2.24).
-fn math_round<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_round<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -220,7 +188,7 @@ fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value>
     } else {
         f64::NEG_INFINITY
     };
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
         let x = rt_try!(heap, arg_as_f64(vm, heap, state, args, i));
         if x.is_nan() {
@@ -238,30 +206,18 @@ fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value>
 }
 
 /// `Math.min(...args)` (ES 22.1.2.14).
-fn math_min<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_min<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     math_minmax(ctx, args, true)
 }
 
 /// `Math.max(...args)` (ES 22.1.2.13).
-fn math_max<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn math_max<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     math_minmax(ctx, args, false)
 }
 
 /// `Math.random()` (ES 22.1.2.22): a number in `[0, 1)` built from the top
 /// 53 random bits.
-fn math_random<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
-) -> Tagged<'a, Value> {
+fn math_random<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let bits = random_bits() >> 11;
     ctx.heap
         .new_number((bits as f64) * (1.0 / 9_007_199_254_740_992.0))

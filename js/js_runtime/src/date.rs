@@ -15,8 +15,8 @@
 //! through [`time_clip`].
 use crate::JSRuntime;
 use vm_core::{
-    Args, DenseString, Handle, HandleScope, Heap, Hint, HostCtx, MapKind, Object, Result, Tagged,
-    ThreadState, VM, Value, VmError, bail, raise, raise_runtime, rt_try,
+    Args, CallInfo, DenseString, Handle, HandleScope, Heap, Hint, HostCtx, MapKind, Object, Result,
+    Tagged, ThreadState, VM, Value, VmError, bail, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -453,15 +453,11 @@ fn parse_loose(text: &str) -> Option<f64> {
 
 /// `Date.parse(string)` (ES 21.4.3.2): the ISO form plus the formats our
 /// `toGMTString`/`toString` emit. Unparseable input is NaN.
-fn date_parse<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_parse<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let arg = args.get_handle(heap, 1);
+    let arg = args.get_handle(heap, 0);
     // Fast path: a primitive string needs no ToString coercion.
     if let Some(text) = arg.as_tagged(heap).get_as::<DenseString>(heap) {
         let text = text.to_rust_string(heap);
@@ -579,9 +575,9 @@ fn date_from_components(vm: &VM, heap: &mut Heap, state: &ThreadState, args: Arg
     // year, month, date=1, hours=0, minutes=0, seconds=0, ms=0
     let mut parts = [0.0f64; 7];
     parts[2] = 1.0;
-    let count = args.len().saturating_sub(1).min(parts.len());
+    let count = args.len().min(parts.len());
     for (index, part) in parts.iter_mut().enumerate().take(count) {
-        let value = args.get_handle(heap, index + 1);
+        let value = args.get_handle(heap, index);
         *part = component_number(vm, heap, state, value)?;
     }
     parts[0] = make_full_year(parts[0]);
@@ -591,17 +587,13 @@ fn date_from_components(vm: &VM, heap: &mut Heap, state: &ThreadState, args: Arg
 /// `Date ( ...values )`
 /// [ES 21.4.2.1](https://tc39.es/ecma262/#sec-date)
 /// Called, returns `ToDateString(now)`; constructed, wraps the time value.
-fn date_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     // The call form ignores every argument.
-    let Some(new_target) = new_target else {
+    let Some(new_target) = call.new_target else {
         return state.handle_scope(|scope| {
             let text = break_down(time_clip(now_millis()))
                 .map(|broken| format_date_string(&broken))
@@ -611,10 +603,10 @@ fn date_constructor<'a>(
                 .erase()
         });
     };
-    let time = if args.len() < 2 {
+    let time = if args.is_empty() {
         time_clip(now_millis())
-    } else if args.len() == 2 {
-        let value = args.get_handle(heap, 1);
+    } else if args.len() == 1 {
+        let value = args.get_handle(heap, 0);
         rt_try!(heap, date_from_value(vm, heap, state, value))
     } else {
         rt_try!(heap, date_from_components(vm, heap, state, args))
@@ -634,11 +626,7 @@ fn date_constructor<'a>(
 /// `Date.now ( )`
 /// [ES 21.4.3.1](https://tc39.es/ecma262/#sec-date.now)
 /// Returns the current time value in epoch milliseconds.
-fn date_now<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
-) -> Tagged<'a, Value> {
+fn date_now<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     ctx.heap.new_number(time_clip(now_millis()))
 }
 
@@ -652,15 +640,11 @@ fn date_value(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<f64> {
 }
 
 /// `Date.prototype.getTime` (ES 21.4.4.9): the wrapped time value.
-fn date_get_time<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_get_time<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+    let Some(millis) = date_value(heap, call.receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     heap.new_number(millis)
@@ -668,12 +652,8 @@ fn date_get_time<'a>(
 
 /// `Date.prototype.valueOf` (ES 21.4.4.40): the same [[DateValue]] access
 /// as `getTime`.
-fn date_value_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    date_get_time(ctx, None, args)
+fn date_value_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    date_get_time(ctx, call, args)
 }
 
 /// A `Date.prototype.get*` component (ES 21.4.4.2-21.4.4.9/21.4.4.12-21.4.4.19).
@@ -707,11 +687,11 @@ impl Field {
 
 /// Shared body of the getters: `𝔽(op(LocalTime(tv)))`, NaN for an invalid
 /// Date. `LocalTime` is the identity, so the local and UTC forms coincide.
-fn get_field<'a>(ctx: HostCtx<'a>, args: Args, field: Field) -> Tagged<'a, Value> {
+fn get_field<'a>(ctx: HostCtx<'a>, receiver: Handle<'_, Value>, field: Field) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(time) = date_value(heap, args.get(heap, 0)) else {
+    let Some(time) = date_value(heap, receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     match break_down(time) {
@@ -785,6 +765,7 @@ fn store_time<'a>(
 /// that recovers an invalid Date instead of returning NaN.
 fn set_fields<'a>(
     ctx: HostCtx<'a>,
+    receiver: Handle<'_, Value>,
     args: Args,
     span: SetSpan,
     invalid_fills_zero: bool,
@@ -792,19 +773,18 @@ fn set_fields<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let first = span.first();
     // The setter's first component is mandatory in the signature: a missing
     // argument is `undefined`, so ToNumber turns it into NaN.
-    let supplied = args.len().saturating_sub(1).max(1).min(span.count());
+    let supplied = args.len().max(1).min(span.count());
     let mut parts = [0.0f64; 7];
     for (offset, part) in parts[first..first + supplied].iter_mut().enumerate() {
         *part = rt_try!(
             heap,
-            component_number(vm, heap, state, args.get_handle(heap, offset + 1))
+            component_number(vm, heap, state, args.get_handle(heap, offset))
         );
     }
     let current = if current.is_nan() {
@@ -836,21 +816,17 @@ fn set_fields<'a>(
 /// `Date.prototype.setTime ( time )`
 /// [ES 21.4.4.27](https://tc39.es/ecma262/#sec-date.prototype.settime)
 /// Sets the time value to `TimeClip(ToNumber(time))`.
-fn date_set_time<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_set_time<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
+    let receiver = call.receiver;
     if date_value(heap, receiver.as_tagged(heap)).is_none() {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     let time = time_clip(rt_try!(
         heap,
-        component_number(vm, heap, state, args.get_handle(heap, 1))
+        component_number(vm, heap, state, args.get_handle(heap, 0))
     ));
     state.handle_scope(|scope| store_time(heap, &scope, receiver, time))
 }
@@ -860,13 +836,13 @@ fn date_set_time<'a>(
 /// Returns the UTC offset in minutes, always +0 on this UTC-only host.
 fn date_get_timezone_offset<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(time) = date_value(heap, args.get(heap, 0)) else {
+    let Some(time) = date_value(heap, call.receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     // `(tv - LocalTime(tv)) / msPerMinute` with `LocalTime` the identity.
@@ -876,15 +852,11 @@ fn date_get_timezone_offset<'a>(
 /// `Date.prototype.getYear ( )`
 /// [ES B.2.3.1](https://tc39.es/ecma262/#sec-date.prototype.getyear)
 /// Returns the year minus 1900 (legacy).
-fn date_get_year<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_get_year<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(time) = date_value(heap, args.get(heap, 0)) else {
+    let Some(time) = date_value(heap, call.receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     match break_down(time) {
@@ -896,45 +868,29 @@ fn date_get_year<'a>(
 /// `Date.prototype.getDate ( )`
 /// [ES 21.4.4.2](https://tc39.es/ecma262/#sec-date.prototype.getdate)
 /// Returns the day of the month (1..31).
-fn date_get_date<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Date)
+fn date_get_date<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Date)
 }
 
 /// `Date.prototype.getDay ( )`
 /// [ES 21.4.4.3](https://tc39.es/ecma262/#sec-date.prototype.getday)
 /// Returns the weekday (0 = Sunday).
-fn date_get_day<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::WeekDay)
+fn date_get_day<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::WeekDay)
 }
 
 /// `Date.prototype.getFullYear ( )`
 /// [ES 21.4.4.4](https://tc39.es/ecma262/#sec-date.prototype.getfullyear)
 /// Returns the full year.
-fn date_get_full_year<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Year)
+fn date_get_full_year<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Year)
 }
 
 /// `Date.prototype.getHours ( )`
 /// [ES 21.4.4.5](https://tc39.es/ecma262/#sec-date.prototype.gethours)
 /// Returns the hour (0..23).
-fn date_get_hours<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Hours)
+fn date_get_hours<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Hours)
 }
 
 /// `Date.prototype.getMilliseconds ( )`
@@ -942,65 +898,45 @@ fn date_get_hours<'a>(
 /// Returns the millisecond (0..999).
 fn date_get_milliseconds<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Milliseconds)
+    get_field(ctx, call.receiver, Field::Milliseconds)
 }
 
 /// `Date.prototype.getMinutes ( )`
 /// [ES 21.4.4.7](https://tc39.es/ecma262/#sec-date.prototype.getminutes)
 /// Returns the minute (0..59).
-fn date_get_minutes<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Minutes)
+fn date_get_minutes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Minutes)
 }
 
 /// `Date.prototype.getMonth ( )`
 /// [ES 21.4.4.8](https://tc39.es/ecma262/#sec-date.prototype.getmonth)
 /// Returns the month index (0..11).
-fn date_get_month<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Month)
+fn date_get_month<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Month)
 }
 
 /// `Date.prototype.getSeconds ( )`
 /// [ES 21.4.4.9](https://tc39.es/ecma262/#sec-date.prototype.getseconds)
 /// Returns the second (0..59).
-fn date_get_seconds<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Seconds)
+fn date_get_seconds<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Seconds)
 }
 
 /// `Date.prototype.getUTCDate ( )`
 /// [ES 21.4.4.12](https://tc39.es/ecma262/#sec-date.prototype.getutcdate)
 /// Returns the UTC day of the month (1..31).
-fn date_get_utc_date<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Date)
+fn date_get_utc_date<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Date)
 }
 
 /// `Date.prototype.getUTCDay ( )`
 /// [ES 21.4.4.13](https://tc39.es/ecma262/#sec-date.prototype.getutcday)
 /// Returns the UTC weekday (0 = Sunday).
-fn date_get_utc_day<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::WeekDay)
+fn date_get_utc_day<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::WeekDay)
 }
 
 /// `Date.prototype.getUTCFullYear ( )`
@@ -1008,21 +944,17 @@ fn date_get_utc_day<'a>(
 /// Returns the UTC full year.
 fn date_get_utc_full_year<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Year)
+    get_field(ctx, call.receiver, Field::Year)
 }
 
 /// `Date.prototype.getUTCHours ( )`
 /// [ES 21.4.4.15](https://tc39.es/ecma262/#sec-date.prototype.getutchours)
 /// Returns the UTC hour (0..23).
-fn date_get_utc_hours<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Hours)
+fn date_get_utc_hours<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Hours)
 }
 
 /// `Date.prototype.getUTCMilliseconds ( )`
@@ -1030,10 +962,10 @@ fn date_get_utc_hours<'a>(
 /// Returns the UTC millisecond (0..999).
 fn date_get_utc_milliseconds<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Milliseconds)
+    get_field(ctx, call.receiver, Field::Milliseconds)
 }
 
 /// `Date.prototype.getUTCMinutes ( )`
@@ -1041,21 +973,17 @@ fn date_get_utc_milliseconds<'a>(
 /// Returns the UTC minute (0..59).
 fn date_get_utc_minutes<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Minutes)
+    get_field(ctx, call.receiver, Field::Minutes)
 }
 
 /// `Date.prototype.getUTCMonth ( )`
 /// [ES 21.4.4.18](https://tc39.es/ecma262/#sec-date.prototype.getutcmonth)
 /// Returns the UTC month index (0..11).
-fn date_get_utc_month<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Month)
+fn date_get_utc_month<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    get_field(ctx, call.receiver, Field::Month)
 }
 
 /// `Date.prototype.getUTCSeconds ( )`
@@ -1063,43 +991,31 @@ fn date_get_utc_month<'a>(
 /// Returns the UTC second (0..59).
 fn date_get_utc_seconds<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
-    get_field(ctx, args, Field::Seconds)
+    get_field(ctx, call.receiver, Field::Seconds)
 }
 
 /// `Date.prototype.setDate ( ... )`
 /// [ES 21.4.4.20](https://tc39.es/ecma262/#sec-date.prototype.setdate)
 /// Sets the the day of the month and returns the new time value.
-fn date_set_date<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Date, false)
+fn date_set_date<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Date, false)
 }
 
 /// `Date.prototype.setFullYear ( ... )`
 /// [ES 21.4.4.21](https://tc39.es/ecma262/#sec-date.prototype.setfullyear)
 /// Sets the the year (and month/day) and returns the new time value.
-fn date_set_full_year<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Year, true)
+fn date_set_full_year<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Year, true)
 }
 
 /// `Date.prototype.setHours ( ... )`
 /// [ES 21.4.4.22](https://tc39.es/ecma262/#sec-date.prototype.sethours)
 /// Sets the the hour (and minute/second/ms) and returns the new time value.
-fn date_set_hours<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Hours, false)
+fn date_set_hours<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Hours, false)
 }
 
 /// `Date.prototype.setMilliseconds ( ... )`
@@ -1107,54 +1023,38 @@ fn date_set_hours<'a>(
 /// Sets the the millisecond and returns the new time value.
 fn date_set_milliseconds<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Milliseconds, false)
+    set_fields(ctx, call.receiver, args, SetSpan::Milliseconds, false)
 }
 
 /// `Date.prototype.setMinutes ( ... )`
 /// [ES 21.4.4.24](https://tc39.es/ecma262/#sec-date.prototype.setminutes)
 /// Sets the the minute (and second/ms) and returns the new time value.
-fn date_set_minutes<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Minutes, false)
+fn date_set_minutes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Minutes, false)
 }
 
 /// `Date.prototype.setMonth ( ... )`
 /// [ES 21.4.4.25](https://tc39.es/ecma262/#sec-date.prototype.setmonth)
 /// Sets the the month (and day) and returns the new time value.
-fn date_set_month<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Month, false)
+fn date_set_month<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Month, false)
 }
 
 /// `Date.prototype.setSeconds ( ... )`
 /// [ES 21.4.4.26](https://tc39.es/ecma262/#sec-date.prototype.setseconds)
 /// Sets the the second (and ms) and returns the new time value.
-fn date_set_seconds<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Seconds, false)
+fn date_set_seconds<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Seconds, false)
 }
 
 /// `Date.prototype.setUTCDate ( ... )`
 /// [ES 21.4.4.28](https://tc39.es/ecma262/#sec-date.prototype.setutcdate)
 /// Sets the UTC the day of the month and returns the new time value.
-fn date_set_utc_date<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Date, false)
+fn date_set_utc_date<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Date, false)
 }
 
 /// `Date.prototype.setUTCFullYear ( ... )`
@@ -1162,21 +1062,17 @@ fn date_set_utc_date<'a>(
 /// Sets the UTC the year (and month/day) and returns the new time value.
 fn date_set_utc_full_year<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Year, true)
+    set_fields(ctx, call.receiver, args, SetSpan::Year, true)
 }
 
 /// `Date.prototype.setUTCHours ( ... )`
 /// [ES 21.4.4.30](https://tc39.es/ecma262/#sec-date.prototype.setutchours)
 /// Sets the UTC the hour (and minute/second/ms) and returns the new time value.
-fn date_set_utc_hours<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Hours, false)
+fn date_set_utc_hours<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Hours, false)
 }
 
 /// `Date.prototype.setUTCMilliseconds ( ... )`
@@ -1184,63 +1080,47 @@ fn date_set_utc_hours<'a>(
 /// Sets the UTC the millisecond and returns the new time value.
 fn date_set_utc_milliseconds<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Milliseconds, false)
+    set_fields(ctx, call.receiver, args, SetSpan::Milliseconds, false)
 }
 
 /// `Date.prototype.setUTCMinutes ( ... )`
 /// [ES 21.4.4.32](https://tc39.es/ecma262/#sec-date.prototype.setutcminutes)
 /// Sets the UTC the minute (and second/ms) and returns the new time value.
-fn date_set_utc_minutes<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Minutes, false)
+fn date_set_utc_minutes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Minutes, false)
 }
 
 /// `Date.prototype.setUTCMonth ( ... )`
 /// [ES 21.4.4.33](https://tc39.es/ecma262/#sec-date.prototype.setutcmonth)
 /// Sets the UTC the month (and day) and returns the new time value.
-fn date_set_utc_month<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Month, false)
+fn date_set_utc_month<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Month, false)
 }
 
 /// `Date.prototype.setUTCSeconds ( ... )`
 /// [ES 21.4.4.34](https://tc39.es/ecma262/#sec-date.prototype.setutcseconds)
 /// Sets the UTC the second (and ms) and returns the new time value.
-fn date_set_utc_seconds<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    set_fields(ctx, args, SetSpan::Seconds, false)
+fn date_set_utc_seconds<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    set_fields(ctx, call.receiver, args, SetSpan::Seconds, false)
 }
 
 /// `Date.prototype.setYear ( year )`
 /// [ES B.2.3.2](https://tc39.es/ecma262/#sec-date.prototype.setyear)
 /// Sets the legacy year (0..99 means 19xx) and returns the new time value.
-fn date_set_year<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_set_year<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
+    let receiver = call.receiver;
     let Some(current) = date_value(heap, receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let year = rt_try!(
         heap,
-        component_number(vm, heap, state, args.get_handle(heap, 1))
+        component_number(vm, heap, state, args.get_handle(heap, 0))
     );
     let current = if current.is_nan() { 0.0 } else { current };
     let Some(broken) = break_down(current) else {
@@ -1262,14 +1142,15 @@ fn date_set_year<'a>(
 /// format it, or emit `invalid` for an invalid Date.
 fn format_with<'a>(
     ctx: HostCtx<'a>,
-    args: Args,
+    receiver: Handle<'_, Value>,
+    _args: Args,
     format: fn(&Broken) -> String,
     invalid: &'static str,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+    let Some(millis) = date_value(heap, receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let text = match break_down(millis) {
@@ -1285,15 +1166,11 @@ fn format_with<'a>(
 
 /// `Date.prototype.toISOString` (ES 21.4.4.36): the ISO 8601 extended form.
 /// An invalid Date is a RangeError.
-fn date_to_iso_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_to_iso_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+    let Some(millis) = date_value(heap, call.receiver.as_tagged(heap)) else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let Some(broken) = break_down(millis) else {
@@ -1308,36 +1185,24 @@ fn date_to_iso_string<'a>(
 }
 
 /// `Date.prototype.toGMTString` / `toUTCString` (ES 21.4.4.43).
-fn date_to_gmt_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    format_with(ctx, args, format_gmt, "Invalid Date")
+fn date_to_gmt_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    format_with(ctx, call.receiver, args, format_gmt, "Invalid Date")
 }
 
 /// `Date.prototype.toString` (ES 21.4.4.41; UTC-formatted).
-fn date_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    format_with(ctx, args, format_date_string, "Invalid Date")
+fn date_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    format_with(ctx, call.receiver, args, format_date_string, "Invalid Date")
 }
 
 /// `Date.prototype.toJSON` (ES 21.4.4.37): `null` for non-finite time
 /// values, otherwise the result of invoking `this.toISOString()`.
-fn date_to_json<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn date_to_json<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let this = args.get_handle(heap, 0);
+        let this = call.receiver;
         let object = scope.handle(this.as_tagged(heap));
         let primitive = match Object::to_primitive(vm, heap, state, object, Hint::Number) {
             Ok(value) => scope.handle(value),

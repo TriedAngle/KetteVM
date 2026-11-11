@@ -2,12 +2,13 @@
 use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
-    AccessorPair, Args, ArgumentsCreate, ContextObject, Convert, DenseString, Errors, FixedArray,
-    Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object, ObjectSlotsInit,
-    PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics,
-    StringData, Symbol, Tagged, ThreadState, VM, Value, VmError, access::own_property_enumerable,
-    bail, extend_lifetime, frame_context_value, info_is_immutable, info_is_lexical, intrinsics,
-    materialize::Materialize, proxy::Proxy, raise, raise_runtime, rt_try,
+    AccessorPair, Args, ArgumentsCreate, CallInfo, ContextObject, Convert, DenseString, Errors,
+    FixedArray, Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object,
+    ObjectSlotsInit, PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi,
+    StoreSemantics, StringData, Symbol, Tagged, ThreadState, VM, Value, VmError,
+    access::own_property_enumerable, bail, extend_lifetime, frame_context_value, info_is_immutable,
+    info_is_lexical, intrinsics, materialize::Materialize, proxy::Proxy, raise, raise_runtime,
+    rt_try,
 };
 
 mod for_in;
@@ -67,7 +68,7 @@ pub fn native_ids(vm: &mut VM) -> NativeIds {
 /// Throws on null/undefined; returns the argument for the destructuring caller.
 fn require_object_coercible<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -85,7 +86,7 @@ fn require_object_coercible<'a>(
 /// (target, key) -> bool; [[Delete]] on the base object.
 fn delete_property_operator<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -129,7 +130,7 @@ fn delete_property_operator<'a>(
 /// `DeleteBinding` for the frame's environment chain.
 fn delete_identifier_sloppy<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -163,7 +164,7 @@ fn delete_identifier_sloppy<'a>(
 /// ReferenceError in both language modes; the key is never coerced.
 fn delete_super_property<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -175,11 +176,7 @@ fn delete_super_property<'a>(
 /// `in` operator
 /// [ES 13.10.1](https://tc39.es/ecma262/#sec-relational-operators-runtime-semantics-evaluation)
 /// (key, obj) -> bool; proxies run their `has` trap.
-fn has_property<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn has_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -206,7 +203,7 @@ fn has_property<'a>(
 /// Object rest/spread: (excluded..., target, source) -> target.
 fn copy_data_properties<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -280,11 +277,7 @@ fn copy_data_properties<'a>(
 }
 
 /// A fresh private name: (description) -> Symbol.
-fn create_private_name<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn create_private_name<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm: _, heap, state, ..
     } = ctx;
@@ -298,11 +291,7 @@ fn create_private_name<'a>(
 }
 
 /// PrivateGet (ES 7.3.30): (obj, key) -> value, TypeError when absent.
-fn private_get<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn private_get<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -315,11 +304,7 @@ fn private_get<'a>(
 }
 
 /// PrivateSet (ES 7.3.31): (obj, key, value), TypeError when absent.
-fn private_set<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn private_set<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -336,11 +321,7 @@ fn private_set<'a>(
 }
 
 /// `#x in obj`: (key, obj) -> bool (own private presence only).
-fn private_in<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn private_in<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx { heap, .. } = ctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
@@ -353,11 +334,7 @@ fn private_in<'a>(
 
 /// Attach the instance-field array to the class constructor:
 /// (ctor, fields).
-fn set_class_fields<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn set_class_fields<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -384,7 +361,7 @@ fn set_class_fields<'a>(
 /// the result onto it ({w+, e+, c+}).
 fn init_instance_fields<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -589,11 +566,7 @@ fn get_property_lenient<'a>(
 /// constructor after ClassDefinitionEvaluation set its name — an already
 /// explicitly defined `name` wins (ES 15.7.14: SetFunctionName happens
 /// before element installation).
-fn set_function_name<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn set_function_name<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -684,11 +657,7 @@ fn set_function_name<'a>(
 /// flags). Defines one accessor half, merging with an existing pair under
 /// the same key; flags bit 0 marks the getter half, PropertyFlags bits
 /// carry enumerability.
-fn install_accessor<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -728,26 +697,22 @@ fn install_accessor<'a>(
 /// installation): (obj, key, value, flags) -> obj. Define sites are
 /// strict-mode code: a rejected define throws a TypeError. flags are
 /// PropertyFlags bits (the Accessor bit: the value is an AccessorPair).
-fn define_own_property<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn define_own_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
+    let target = args.get_handle(heap, 0);
     let raw_key = args.get_handle(heap, 1);
     let value = args.get_handle(heap, 2);
     let flags = args.get(heap, 3).to_i64().map(|v| v as u32).unwrap_or(0);
-    // the key coercion allocates: receiver and value stay rooted in
+    // the key coercion allocates: target and value stay rooted in
     // their argument handles across it
     state.handle_scope(|scope| {
         let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
         // Type(O) must be Object (ES 20.1.2.4 [[DefineOwnProperty]])
-        if receiver.as_tagged(heap).is_primitive(heap) {
+        if target.as_tagged(heap).is_primitive(heap) {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
         let enumerable = flags & bytecode::PropertyFlags::DontEnum.bits() == 0;
@@ -777,26 +742,14 @@ fn define_own_property<'a>(
         };
         rt_try!(
             heap,
-            Object::define_property_or_throw(
-                vm,
-                heap,
-                state,
-                &scope,
-                receiver,
-                key.erase(),
-                partial
-            )
+            Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
         );
-        receiver.as_tagged(heap)
+        target.as_tagged(heap)
     })
 }
 
 /// [[SetPrototypeOf]] (class prototype wiring): (obj, proto) -> obj.
-fn set_prototype<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn set_prototype<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -818,7 +771,7 @@ fn set_prototype<'a>(
 /// TypeError unless the superclass is null or a constructor.
 fn throw_if_not_constructor_or_null<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -840,7 +793,7 @@ fn throw_if_not_constructor_or_null<'a>(
 /// value is an Object or null.
 fn throw_if_not_object_or_null<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -859,7 +812,7 @@ fn throw_if_not_object_or_null<'a>(
 /// (value) -> value, ReferenceError when `this` is still the hole.
 fn throw_super_not_called_if_hole<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -877,7 +830,7 @@ fn throw_super_not_called_if_hole<'a>(
 /// ReferenceError unless `this` is still the hole (super() runs once).
 fn throw_super_already_called_if_not_hole<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -977,11 +930,7 @@ fn construct_super_construct<'a>(
 
 /// super(...): (args...) -> instance. Resolves the super constructor and
 /// new.target from the executing frame.
-fn construct_super<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn construct_super<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm,
         runtime,
@@ -1009,7 +958,7 @@ fn construct_super<'a>(
 /// derived constructors, ES 15.7.13): () -> instance.
 fn construct_super_all_args<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -1046,11 +995,7 @@ fn construct_super_all_args<'a>(
 /// Arrow-delegated super(): (args..., closure, new_target) -> instance.
 /// The constructor closure and its new.target ride the tail of the
 /// argument window (threaded through .this_function).
-fn construct_super_via<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn construct_super_via<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm,
         runtime,
@@ -1089,11 +1034,7 @@ fn construct_super_via<'a>(
 /// Direct-eval name load: (name) -> value. Walks the frame context chain
 /// by name (slots, then extension objects); unresolved names fall back to
 /// the global object.
-fn load_dynamic_name<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn load_dynamic_name<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -1126,11 +1067,7 @@ fn load_dynamic_name<'a>(
 /// Direct-eval name store: (value, name) -> value. Walks the caller's
 /// context chain in order (slots then extension object per context);
 /// unresolved names store on the global object.
-fn store_dynamic_name<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn store_dynamic_name<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -1223,7 +1160,7 @@ fn store_dynamic_name<'a>(
 
 fn store_repl_global_init<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -1249,11 +1186,7 @@ fn store_repl_global_init<'a>(
 
 /// Sloppy direct-eval declaration. `value == None` is a var; otherwise a
 /// function declaration is installed with that value.
-fn resolve_direct_eval<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn resolve_direct_eval<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let js = &ctx.runtime::<JSRuntime>();
     let ids = &js.ids;
     let HostCtx {
@@ -1480,7 +1413,7 @@ fn declare_eval_binding<'a>(
 
 fn validate_eval_declarations<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -1512,18 +1445,14 @@ fn validate_eval_declarations<'a>(
     })
 }
 
-fn declare_eval_var<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn declare_eval_var<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let name = args.get_handle(ctx.heap, 0);
     declare_eval_binding(ctx, name, None)
 }
 
 fn declare_eval_function<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let name = args.get_handle(ctx.heap, 0);
@@ -1533,7 +1462,7 @@ fn declare_eval_function<'a>(
 
 fn throw_const_assign_error<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -1546,7 +1475,7 @@ fn throw_const_assign_error<'a>(
 /// (first) -> array.
 fn create_rest_parameter<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
@@ -1584,11 +1513,7 @@ fn create_rest_parameter<'a>(
 /// [ES 10.4.4.7](https://tc39.es/ecma262/#sec-createmappedargumentsobject)
 /// (mapped, index0, slot0, ...) -> arguments object. The pairs map argument
 /// indices to the function-context slots holding the parameter bindings.
-fn create_arguments<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn create_arguments<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
@@ -1654,11 +1579,7 @@ fn create_arguments<'a>(
 /// object walked with the split receiver/lookup-start; key coercion runs
 /// after the parent link is resolved (user toString must not change the
 /// chain searched).
-fn super_get_property<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn super_get_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -1708,11 +1629,7 @@ fn super_get_property<'a>(
 /// shadow inherited data properties on `this` unless the write-through
 /// semantics flag is set; the parent link is resolved before any user key
 /// coercion runs.
-fn super_set_property<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn super_set_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;

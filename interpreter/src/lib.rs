@@ -11,7 +11,7 @@ use core::hint::black_box;
 use std::marker::PhantomData;
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
-    Errors, FeedbackVector, FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs,
+    Errors, FeedbackVector, FixedArray, HandleSlice, Heap, NativeIndex, Object, Ops, Regs,
     ScopeInfo, Smi, Tagged, Value, VmError, bootstrap::WellKnown, ic::ElementHit,
     ic::GlobalLexicalHit, ic::InlineCache, ic::LoadHit, ic::MonoProbe, raise, raise_runtime,
 };
@@ -1289,12 +1289,11 @@ fn op_call_native(frame: Frame) {
     let rt = frame.unsigned::<0>();
     let base = frame.signed::<1>();
     let count = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let native = vm.native(NativeIndex(rt));
-    let args = state.stack().window(frame.ctx().frame_base(), base, count);
-    let nctx = HostCtx::new(vm, frame.ctx().runtime(), frame.ctx().heap_mut(), state);
-    let v = native(nctx, None, args);
+    let args = frame
+        .ctx()
+        .stack()
+        .window(frame.ctx().frame_base(), base, count);
+    let v = frame.ctx().call_native_direct(NativeIndex(rt), args);
     frame.set_acc(v);
     reenter!(pc)
 }

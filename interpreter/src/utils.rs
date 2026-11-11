@@ -1,11 +1,41 @@
 use crate::{Ctx, Regs, RootsArg};
 use bytecode::Opcode;
 use vm_core::{
-    Acc, Args, CallTarget, Callee, Errors, FeedbackVector, FunctionKind, Handle, HandleScope, Heap,
-    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Thrown, Value, VmError, WellKnown,
-    ic::CallHit, ic::CallProbe, ic::CallRecord, ic::InlineCache, proxy::Proxy, raise,
-    raise_runtime,
+    Acc, Args, CallInfo, CallTarget, Callee, ErasedRuntimeState, Errors, FeedbackVector,
+    FunctionKind, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, NativeIndex, Object,
+    Tagged, ThreadState, Thrown, VM, Value, VmError, WellKnown, ic::CallHit, ic::CallProbe,
+    ic::CallRecord, ic::InlineCache, proxy::Proxy, raise, raise_runtime,
 };
+
+/// Invoke a native function object from `execute`: `args` is the call
+/// window (receiver at element 0), `callable` is the function object.
+pub fn call_native_target<'a>(
+    vm: &'a VM,
+    runtime: &dyn ErasedRuntimeState,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    rt: NativeIndex,
+    callable: Handle<'_, Value>,
+    args: HandleSlice<'_>,
+    new_target: Option<Handle<'a, Value>>,
+) -> Tagged<'a, Value> {
+    let f = vm.native(rt);
+    // Safety: the runtime state is owned by the VM, which outlives this call.
+    let runtime: &'a dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
+    let receiver = args
+        .get(0)
+        .unwrap_or_else(|| heap.known().undefined.root_handle().erase());
+    let nctx = HostCtx::new(vm, runtime, heap, state);
+    f(
+        nctx,
+        CallInfo {
+            callee: Some(callable),
+            receiver,
+            new_target,
+        },
+        args.slice_from(1).as_args(),
+    )
+}
 
 /// The outcome of a call-site start helper.
 pub enum StagedCall<'a> {
@@ -13,8 +43,13 @@ pub enum StagedCall<'a> {
     Value(Tagged<'a, Value>),
     /// a frame was pushed and made current: enter it at pc 0
     Frame,
-    /// a rooted argument window for a runtime callee
-    Native { rt: NativeIndex, staged: Args },
+    /// a rooted argument window for a runtime callee; `callee_reg` is the
+    /// callee's register in the current frame
+    Native {
+        rt: NativeIndex,
+        callee_reg: i32,
+        staged: Args,
+    },
     /// a proxy apply over a staged window
     Proxy { callee_reg: i32, staged: Args },
     /// a bound function over a staged window
@@ -134,7 +169,11 @@ pub fn resolve_target<'a>(
         None => Err(CallFault::Raise(VmError::NotCallable)),
         Some(CallTarget::Proxy(_)) => Ok(StagedCall::Proxy { callee_reg, staged }),
         Some(CallTarget::Bound { .. }) => Ok(StagedCall::Bound { callee_reg, staged }),
-        Some(CallTarget::Native(rt)) => Ok(StagedCall::Native { rt, staged }),
+        Some(CallTarget::Native(rt)) => Ok(StagedCall::Native {
+            rt,
+            callee_reg,
+            staged,
+        }),
         Some(CallTarget::Bytecode {
             target,
             info,
@@ -209,7 +248,11 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
             let Some(staged) = x.stack().stage_slice(values) else {
                 return Err(CallFault::Raise(VmError::StackOverflow));
             };
-            Ok(StagedCall::Native { rt, staged })
+            Ok(StagedCall::Native {
+                rt,
+                callee_reg,
+                staged,
+            })
         }
         CallProbe::Miss => {
             let Some(staged) = x.stack().stage_slice(values) else {
@@ -267,7 +310,11 @@ pub fn call_window_start<'a, const STRIDE: usize>(
                 staged,
             )
         }
-        CallProbe::Native(rt) => Ok(StagedCall::Native { rt, staged }),
+        CallProbe::Native(rt) => Ok(StagedCall::Native {
+            rt,
+            callee_reg,
+            staged,
+        }),
         CallProbe::Miss => resolve_target(
             x,
             roots,
@@ -561,9 +608,15 @@ pub fn construct_native<'a>(
     if let Some(top) = bump {
         stack.set_top(top);
     }
-    let new_target = Some(stack.reg_handle(base, callee_reg));
+    let callee = stack.reg_handle(base, callee_reg);
+    let receiver = args.get_handle(x.heap(), 0);
+    let info = CallInfo {
+        callee: Some(callee),
+        receiver,
+        new_target: Some(callee),
+    };
     let nctx = HostCtx::new(x.vm(), x.runtime(), x.heap_mut(), state);
-    let v = f(nctx, new_target, args);
+    let v = f(nctx, info, args.slice_from(1));
     if bump.is_some() {
         stack.set_top(saved);
     }

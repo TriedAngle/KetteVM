@@ -3,9 +3,9 @@
 
 use crate::JSRuntime;
 use vm_core::{
-    Args, ContextObject, DenseString, Handle, HandleScope, HandleSlice, Heap, HostCtx, Object,
-    PropertyDescriptor, Result, Runtime, Smi, Tagged, ThreadState, VM, Value, VmError, bail,
-    extend_lifetime, materialize::Materialize, raise, raise_runtime, rt_try,
+    Args, CallInfo, ContextObject, DenseString, Handle, HandleScope, HandleSlice, Heap, HostCtx,
+    Object, PropertyDescriptor, Result, Runtime, Smi, Tagged, ThreadState, VM, Value, VmError,
+    bail, extend_lifetime, materialize::Materialize, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -21,7 +21,7 @@ crate::register_natives! {
 /// Builds and evaluates `function (parameters) { body }`.
 fn function_constructor<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let ids = &ctx.runtime::<JSRuntime>().ids;
@@ -35,8 +35,8 @@ fn function_constructor<'a>(
                 .current_context(heap)
                 .unwrap_or_else(|| vm.known().empty_context.get(heap).erase()),
         );
-        let mut parts: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
-        for i in 1..args.len() {
+        let mut parts: Vec<String> = Vec::with_capacity(args.len());
+        for i in 0..args.len() {
             let arg = args.get_handle(heap, i);
             let text =
                 if i + 1 == args.len() && arg.as_tagged(heap) == vm.known().undefined.get(heap) {
@@ -87,15 +87,11 @@ fn function_constructor<'a>(
 /// `Function.prototype.toString ( )`
 /// [ES 20.2.3.5](https://tc39.es/ecma262/#sec-function.prototype.tostring)
 /// Returns a NativeFunction-syntax source string for a callable receiver.
-fn function_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn function_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let function = args.get_handle(heap, 0);
+    let function = call.receiver;
     if !function.as_tagged(heap).is_callable(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
@@ -130,20 +126,16 @@ fn function_to_string<'a>(
 /// `Function.prototype.call ( thisArg, ...args )`
 /// [ES 20.2.3.3](https://tc39.es/ecma262/#sec-function.prototype.call)
 /// Invokes the callable receiver with `thisArg` and the forwarded arguments.
-fn function_call<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn function_call<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let function = args.get_handle(heap, 0);
+    let function = call.receiver;
     if !function.as_tagged(heap).is_callable(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
-    // args[0] is the receiver, so the tail is exactly (thisArg, ...args)
-    let forwarded = state.stack().slice(args.slice_from(1));
+    // the arguments are already exactly (thisArg, ...args)
+    let forwarded = state.stack().slice(args);
     match HostCtx::enter(
         vm,
         state.runtime(vm, heap),
@@ -161,20 +153,16 @@ fn function_call<'a>(
 /// `Function.prototype.apply ( thisArg, argArray )`
 /// [ES 20.2.3.1](https://tc39.es/ecma262/#sec-function.prototype.apply)
 /// Invokes the callable receiver with `thisArg` and the elements of `argArray`.
-fn function_apply<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn function_apply<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let function = args.get_handle(heap, 0);
+    let function = call.receiver;
     if !function.as_tagged(heap).is_callable(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
-    let this_arg = args.get_handle(heap, 1);
-    let arg_array = args.get_handle(heap, 2);
+    let this_arg = args.get_handle(heap, 0);
+    let arg_array = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
         let elements = if arg_array.as_tagged(heap).is_nullish(heap) {
             Vec::new()
@@ -239,20 +227,16 @@ fn create_list_from_array_like<'s>(
 /// `Function.prototype.bind ( thisArg, ...args )`
 /// [ES 20.2.3.2](https://tc39.es/ecma262/#sec-function.prototype.bind)
 /// Returns a bound function with `thisArg` and the leading arguments fixed.
-fn function_bind<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn function_bind<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let target = args.get_handle(heap, 0);
+    let target = call.receiver;
     if !target.as_tagged(heap).is_callable(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
-    let this_arg = args.get_handle(heap, 1);
-    let prepend: Vec<Handle<'_, Value>> = (2..args.len())
+    let this_arg = args.get_handle(heap, 0);
+    let prepend: Vec<Handle<'_, Value>> = (1..args.len())
         .map(|index| args.get_handle(heap, index))
         .collect();
     let bound_count = prepend.len();

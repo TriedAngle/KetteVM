@@ -3,7 +3,7 @@
 use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
-    Args, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise, raise_runtime, rt_try,
+    Args, CallInfo, Convert, HostCtx, Object, Tagged, Value, VmError, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -15,11 +15,7 @@ crate::register_natives! {
 }
 
 /// GetIterator (ES 8.5.4): (obj) -> iterator.
-pub fn get_iterator<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn get_iterator<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
@@ -56,11 +52,7 @@ pub fn get_iterator<'a>(
 }
 
 /// IteratorNext (ES 8.5.6): (iterator) -> result object.
-pub fn iterator_next<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn iterator_next<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -98,11 +90,7 @@ pub fn iterator_next<'a>(
 }
 
 /// IteratorComplete (ES 8.5.7): (result) -> bool.
-pub fn iterator_done<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn iterator_done<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
@@ -120,11 +108,7 @@ pub fn iterator_done<'a>(
 }
 
 /// IteratorValue (ES 8.5.8): (result) -> value.
-pub fn iterator_value<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn iterator_value<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;

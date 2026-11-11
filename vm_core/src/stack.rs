@@ -30,11 +30,6 @@ pub struct Callee<'a> {
     pub context: Tagged<'a, Value>,
 }
 
-/// A rooted argument window: `count` words at `ptr`, element 0 the
-/// receiver. The words live in GC-visited slots (the stack arena or a
-/// handle scope) which the collector updates in place, so reads are
-/// always current across safepoints and the address is stable.
-///
 /// A missing argument reads as `undefined` (ES clause 18); the actual
 /// count rides [`Args::len`] for algorithms that must distinguish
 /// "not present".
@@ -367,9 +362,9 @@ impl Stack {
         self.slot_unchecked(Self::slot_of(base, i)).store(v);
     }
 
-    /// The call-argument window `[reg_base .. reg_base+count)`: element 0
-    /// (the receiver) is the base register's window slot at
-    /// `reg_base - count + 1`, so the ascending window is element-ordered.
+    /// A contiguous operand window in ascending slot order: element 0 is
+    /// the lowest-addressed register. Construct windows hold the arguments
+    /// (no receiver); call windows go through [`Stack::window`].
     #[inline]
     pub fn args(&self, base: usize, reg_base: i32, count: usize) -> Args {
         if count == 0 {

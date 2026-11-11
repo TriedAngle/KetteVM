@@ -1,8 +1,8 @@
 use crate::JSRuntime;
 use vm_core::{
-    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
-    LanguageMode, Object, Prototype, Result, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError, extend_lifetime, raise, raise_runtime, rt_try,
+    Args, CallInfo, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap,
+    HostCtx, LanguageMode, Object, Prototype, Result, SlotName, Smi, StoreSemantics, Tagged,
+    ThreadState, VM, Value, VmError, extend_lifetime, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -71,16 +71,12 @@ fn get_indexed_value<'s>(
 /// `Array ( ...values )`
 /// [ES 23.1.1.1](https://tc39.es/ecma262/#sec-array-constructor-array)
 /// Creates an array from `values`; the prototype comes from `new.target`.
-fn array_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let proto = match new_target {
+        let proto = match call.new_target {
             Some(nt) => {
                 let name = vm
                     .known()
@@ -101,7 +97,7 @@ fn array_constructor<'a>(
         };
         let proto = scope.cast::<Object>(heap, proto.as_tagged(heap));
 
-        let argv: Vec<Tagged<'_, Value>> = args.iter(heap).skip(1).collect();
+        let argv: Vec<Tagged<'_, Value>> = args.iter(heap).collect();
         let single_len = match argv.as_slice() {
             [v] => {
                 let number = if let Some(smi) = Smi::decode(v.raw()) {
@@ -147,19 +143,15 @@ fn array_constructor<'a>(
 /// `Array.prototype.push ( ...items )`
 /// [ES 23.1.3.23](https://tc39.es/ecma262/#sec-array.prototype.push)
 /// Appends `items` and returns the new length.
-fn array_push<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_push<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    if let Some(len) = array_push_fast(heap, state, args) {
+    if let Some(len) = array_push_fast(heap, state, call.receiver, args) {
         return Smi::new(len as i64).into_tagged();
     }
     state.handle_scope(|scope| {
-        let this = args.get_handle(heap, 0);
+        let this = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, this) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -170,12 +162,12 @@ fn array_push<'a>(
             heap,
             Object::length_of_array_like(vm, heap, state, &scope, obj)
         );
-        let arg_count = args.len().saturating_sub(1) as u64;
+        let arg_count = args.len() as u64;
         if length.saturating_add(arg_count) > (1u64 << 53) - 1 {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
 
-        for i in 1..args.len() {
+        for i in 0..args.len() {
             let item = args.get_handle(heap, i);
             let key = rt_try!(heap, index_key(vm, heap, state, &scope, length)).erase();
             match Object::set_property(
@@ -219,12 +211,16 @@ fn array_push<'a>(
 /// Allocation Free Array push fast path if space is remaining.
 /// Returns `None` when the generic `[[Set]]` algorithm is required.
 #[inline]
-fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<usize> {
-    if args.len() != 2 {
+fn array_push_fast(
+    heap: &mut Heap,
+    state: &ThreadState,
+    receiver: Handle<'_, Value>,
+    args: Args,
+) -> Option<usize> {
+    if args.len() != 1 {
         return None;
     }
     let len = {
-        let receiver = args.get_handle(heap, 0);
         let r = receiver.as_tagged(heap);
         let obj = r.as_heap_object()?;
         if !obj.as_ref().is_array_exotic(heap) {
@@ -242,7 +238,7 @@ fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<u
         if let Some(elements) = obj.as_ref().elements_array(heap)
             && len < elements.len()
         {
-            let arg = args.get_handle(heap, 1);
+            let arg = args.get_handle(heap, 0);
             elements.as_ref().set(heap, len, arg.as_tagged(heap));
             obj.as_ref()
                 .length
@@ -253,10 +249,9 @@ fn array_push_fast(heap: &mut Heap, state: &ThreadState, args: Args) -> Option<u
         len
     };
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
         let obj = receiver.as_tagged(heap).as_heap_object()?;
         let receiver_obj = scope.handle(obj);
-        let arg = args.get_handle(heap, 1);
+        let arg = args.get_handle(heap, 0);
         Object::store_array_element(heap, &scope, &receiver_obj, len, &arg);
         Some(len + 1)
     })
@@ -293,20 +288,16 @@ fn has_own_element(heap: &Heap, obj: Tagged<'_, Object>, index: usize) -> bool {
 /// `Array.prototype.pop ( )`
 /// [ES 23.1.3.22](https://tc39.es/ecma262/#sec-array.prototype.pop)
 /// Removes and returns the last element of an array-like receiver.
-fn array_pop<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_pop<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        if let Some(v) = array_pop_fast(heap, &scope, args) {
+        if let Some(v) = array_pop_fast(heap, &scope, call.receiver) {
             return v.as_tagged(heap);
         }
 
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -385,9 +376,8 @@ fn array_pop<'a>(
 fn array_pop_fast<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
-    args: Args,
+    receiver: Handle<'_, Value>,
 ) -> Option<Handle<'s, Value>> {
-    let receiver = args.get_handle(heap, 0);
     let obj = receiver.as_tagged(heap).as_heap_object()?;
     if !obj.as_ref().is_array_exotic(heap) || !obj.as_ref().map(heap).length_writable(heap) {
         return None;
@@ -417,17 +407,13 @@ fn array_pop_fast<'s>(
 /// [ES 23.1.3.38](https://tc39.es/ecma262/#sec-array.prototype.values)
 /// [ES 23.1.3.40](https://tc39.es/ecma262/#sec-array.prototype-@@iterator)
 /// Creates an array iterator over the receiver.
-fn array_values<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_values<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -449,16 +435,12 @@ fn array_values<'a>(
 /// `%ArrayIteratorPrototype%.next ( )`
 /// [ES 23.1.5.2.1](https://tc39.es/ecma262/#sec-%arrayiteratorprototype%.next)
 /// Advances an array iterator and returns `{ value, done }`.
-fn array_iterator_next<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_iterator_next<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
+    let receiver = call.receiver;
     state.handle_scope(|scope| {
         let Some(iterator) = receiver.as_tagged(heap).as_heap_object() else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
@@ -572,42 +554,34 @@ fn array_iterator_next<'a>(
 /// Returns the receiver.
 fn array_iterator_symbol_iterator<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx { heap, .. } = ctx;
-    args.get(heap, 0)
+    call.receiver.as_tagged(heap)
 }
 
 /// `Array.prototype.join ( separator )`
 /// [ES 23.1.3.18](https://tc39.es/ecma262/#sec-array.prototype.join)
 /// Joins array-like elements with `separator`, using `","` by default.
-fn array_join<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
-    let separator = (args.len() > 1).then(|| args.get_handle(heap, 1));
+    let receiver = call.receiver;
+    let separator = (!args.is_empty()).then(|| args.get_handle(heap, 0));
     join_impl(vm, heap, state, receiver, separator)
 }
 
 /// `Array.prototype.map ( callback [ , thisArg ] )`
 /// [ES 23.1.3.21](https://tc39.es/ecma262/#sec-array.prototype.map)
 /// Maps each present array-like element into a new array.
-fn array_map<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_map<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -616,7 +590,7 @@ fn array_map<'a>(
             heap,
             Object::length_of_array_like(vm, heap, state, &scope, obj)
         );
-        let callback = args.get_handle(heap, 1);
+        let callback = args.get_handle(heap, 0);
         if !callback.as_tagged(heap).is_callable(heap) {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
@@ -624,8 +598,8 @@ fn array_map<'a>(
         if len > u32::MAX as u64 {
             raise!(vm, heap, state, VmError::IndexOutOfBounds);
         }
-        let this_arg = if args.len() > 2 {
-            args.get_handle(heap, 2)
+        let this_arg = if args.len() > 1 {
+            args.get_handle(heap, 1)
         } else {
             vm.known().undefined.get_handle(heap, &scope).erase()
         };
@@ -670,16 +644,12 @@ fn array_map<'a>(
 /// `Array.prototype.reduce ( callback [ , initialValue ] )`
 /// [ES 23.1.3.24](https://tc39.es/ecma262/#sec-array.prototype.reduce)
 /// Reduces present array-like elements from left to right.
-fn array_reduce<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_reduce<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -688,7 +658,7 @@ fn array_reduce<'a>(
             heap,
             Object::length_of_array_like(vm, heap, state, &scope, obj)
         );
-        let callback = args.get_handle(heap, 1);
+        let callback = args.get_handle(heap, 0);
         if !callback.as_tagged(heap).is_callable(heap) {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         }
@@ -696,8 +666,8 @@ fn array_reduce<'a>(
         let exception = vm.known().exception.get_handle(heap, &scope).erase();
         let mut k = 0u64;
 
-        let mut accumulator = if args.len() > 2 {
-            scope.handle(args.get_handle(heap, 2).as_tagged(heap))
+        let mut accumulator = if args.len() > 1 {
+            scope.handle(args.get_handle(heap, 1).as_tagged(heap))
         } else {
             let mut first: Option<Handle<'_, Value>> = None;
             while k < len && first.is_none() {
@@ -755,16 +725,12 @@ fn array_reduce<'a>(
 /// `Array.prototype.toString ( )`
 /// [ES 23.1.3.36](https://tc39.es/ecma262/#sec-array.prototype.tostring)
 /// Calls the receiver's `join`, falling back to `%Object.prototype.toString%`.
-fn array_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let receiver = args.get_handle(heap, 0);
+    let receiver = call.receiver;
     state.handle_scope(|scope| {
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
@@ -867,15 +833,11 @@ fn join_impl<'a>(
 /// [ES 23.1.2.3](https://tc39.es/ecma262/#sec-array.isarray)
 /// [ES 7.2.2](https://tc39.es/ecma262/#sec-isarray)
 /// Returns true when `arg` is an Array, following Proxy targets.
-fn array_is_array<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_is_array<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let arg = args.get(heap, 1);
+    let arg = args.get(heap, 0);
     let Some(is_array) = Object::is_array(heap, arg) else {
         raise!(vm, heap, state, VmError::RevokedProxy);
     };
@@ -908,16 +870,12 @@ fn slice_bound(
 /// `Array.prototype.slice ( start, end )`
 /// [ES 23.1.3.28](https://tc39.es/ecma262/#sec-array.prototype.slice)
 /// Copies the `[start, end)` range into a new array, preserving holes.
-fn array_slice<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_slice<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -934,7 +892,7 @@ fn array_slice<'a>(
                 vm,
                 heap,
                 state,
-                (args.len() > 1).then(|| args.get_handle(heap, 1)),
+                (!args.is_empty()).then(|| args.get_handle(heap, 0)),
                 0.0,
             )
         );
@@ -944,7 +902,7 @@ fn array_slice<'a>(
                 vm,
                 heap,
                 state,
-                (args.len() > 2).then(|| args.get_handle(heap, 2)),
+                (args.len() > 1).then(|| args.get_handle(heap, 1)),
                 len_f,
             )
         );
@@ -1023,18 +981,14 @@ fn array_slice<'a>(
 /// `Array.prototype.sort ( comparator )`
 /// [ES 23.1.3.30](https://tc39.es/ecma262/#sec-array.prototype.sort)
 /// Sorts array-like elements in place with Rust's stable driftsort, keeping holes at the end.
-fn array_sort<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_sort<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
         // Comparator validation happens before ToObject (ES step 1).
-        let cmpfn = if args.len() > 1 {
-            let c = args.get(heap, 1);
+        let cmpfn = if !args.is_empty() {
+            let c = args.get(heap, 0);
             if c != vm.known().undefined.get(heap) {
                 if !c.is_callable(heap) {
                     raise!(vm, heap, state, VmError::InvalidOperandType);
@@ -1047,7 +1001,7 @@ fn array_sort<'a>(
             None
         };
 
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1237,16 +1191,12 @@ fn array_sort<'a>(
 /// `Array.prototype.at ( index )`
 /// [ES 23.1.3.1](https://tc39.es/ecma262/#sec-array.prototype.at)
 /// Element at `index`, counting from the end when negative.
-fn array_at<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_at<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1257,7 +1207,7 @@ fn array_at<'a>(
         );
         let k = rt_try!(
             heap,
-            Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 1), len)
+            Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 0), len)
         );
         if k < 0.0 || k >= len as f64 {
             return vm.known().undefined.get(heap).erase();
@@ -1277,16 +1227,12 @@ fn array_at<'a>(
 /// `Array.prototype.includes ( searchElement [ , fromIndex ] )`
 /// [ES 23.1.3.16](https://tc39.es/ecma262/#sec-array.prototype.includes)
 /// SameValueZero search from `fromIndex`; holes read as `undefined`.
-fn array_includes<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_includes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1298,11 +1244,11 @@ fn array_includes<'a>(
         if len == 0 {
             return Convert::boolean(heap, false);
         }
-        let search = args.get_handle(heap, 1);
+        let search = args.get_handle(heap, 0);
         let len_f = len as f64;
         let mut k = rt_try!(
             heap,
-            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 1), len)
         );
         while k < len_f {
             let key = rt_try!(heap, index_key(vm, heap, state, &scope, k as u64));
@@ -1322,16 +1268,12 @@ fn array_includes<'a>(
 /// `Array.prototype.indexOf ( searchElement [ , fromIndex ] )`
 /// [ES 23.1.3.17](https://tc39.es/ecma262/#sec-array.prototype.indexOf)
 /// Smallest strictly-equal index at or after `fromIndex`, else `-1`.
-fn array_index_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_index_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1343,11 +1285,11 @@ fn array_index_of<'a>(
         if len == 0 {
             return heap.new_number(-1.0);
         }
-        let search = args.get_handle(heap, 1);
+        let search = args.get_handle(heap, 0);
         let len_f = len as f64;
         let mut k = rt_try!(
             heap,
-            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 1), len)
         );
         while k < len_f {
             let index = k as u64;
@@ -1369,16 +1311,12 @@ fn array_index_of<'a>(
 /// `Array.prototype.lastIndexOf ( searchElement [ , fromIndex ] )`
 /// [ES 23.1.3.20](https://tc39.es/ecma262/#sec-array.prototype.lastindexof)
 /// Largest strictly-equal index at or before `fromIndex`, else `-1`.
-fn array_last_index_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_last_index_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1390,12 +1328,12 @@ fn array_last_index_of<'a>(
         if len == 0 {
             return heap.new_number(-1.0);
         }
-        let search = args.get_handle(heap, 1);
+        let search = args.get_handle(heap, 0);
         let len_f = len as f64;
-        let mut k = if args.len() > 2 {
+        let mut k = if args.len() > 1 {
             let absolute = rt_try!(
                 heap,
-                Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 2), len)
+                Convert::to_absolute_index(vm, heap, state, args.get_handle(heap, 1), len)
             );
             absolute.min(len_f - 1.0)
         } else {
@@ -1421,16 +1359,12 @@ fn array_last_index_of<'a>(
 /// `Array.prototype.fill ( value [ , start [ , end ] ] )`
 /// [ES 23.1.3.7](https://tc39.es/ecma262/#sec-array.prototype.fill)
 /// Writes `value` over `[start, end)` and returns the receiver.
-fn array_fill<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_fill<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1440,12 +1374,12 @@ fn array_fill<'a>(
             Object::length_of_array_like(vm, heap, state, &scope, obj)
         );
         let len_f = len as f64;
-        let value = args.get_handle(heap, 1);
+        let value = args.get_handle(heap, 0);
         let mut k = rt_try!(
             heap,
-            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 2), len)
+            Convert::to_clamped_index(vm, heap, state, args.get_handle(heap, 1), len)
         );
-        let end_arg = args.get_handle(heap, 3);
+        let end_arg = args.get_handle(heap, 2);
         let final_index = if end_arg.as_tagged(heap) == vm.known().undefined.get(heap) {
             len_f
         } else {
@@ -1480,16 +1414,12 @@ fn array_fill<'a>(
 /// `Array.prototype.reverse ( )`
 /// [ES 23.1.3.26](https://tc39.es/ecma262/#sec-array.prototype.reverse)
 /// Reverses the elements in place, moving holes with them.
-fn array_reverse<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_reverse<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1612,16 +1542,12 @@ fn array_reverse<'a>(
 /// `Array.prototype.shift ( )`
 /// [ES 23.1.3.27](https://tc39.es/ecma262/#sec-array.prototype.shift)
 /// Removes the first element and shifts the rest down one index.
-fn array_shift<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_shift<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1727,16 +1653,12 @@ fn array_shift<'a>(
 /// `Array.prototype.unshift ( ...items )`
 /// [ES 23.1.3.36](https://tc39.es/ecma262/#sec-array.prototype.unshift)
 /// Prepends the arguments and returns the new length.
-fn array_unshift<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_unshift<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
+        let receiver = call.receiver;
         let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
             Ok(obj) => obj.erase(),
             Err(err) => return raise_runtime(heap, err),
@@ -1745,7 +1667,7 @@ fn array_unshift<'a>(
             heap,
             Object::length_of_array_like(vm, heap, state, &scope, obj)
         );
-        let arg_count = args.len().saturating_sub(1) as u64;
+        let arg_count = args.len() as u64;
         if arg_count > 0 {
             if len.saturating_add(arg_count) > (1u64 << 53) - 1 {
                 raise!(vm, heap, state, VmError::InvalidOperandType);
@@ -1806,7 +1728,7 @@ fn array_unshift<'a>(
             }
             for j in 0..arg_count {
                 let key = rt_try!(heap, index_key(vm, heap, state, &scope, j));
-                let item = args.get_handle(heap, 1 + j as usize);
+                let item = args.get_handle(heap, j as usize);
                 if let Err(err) = Object::set_property(
                     vm,
                     heap,
@@ -1847,17 +1769,13 @@ fn array_unshift<'a>(
 /// `Array.of ( ...items )`
 /// [ES 23.1.2.3](https://tc39.es/ecma262/#sec-array.of)
 /// Builds an array (or constructs a subclass instance) from the arguments.
-fn array_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn array_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let count = args.len().saturating_sub(1) as u64;
-        let this = args.get_handle(heap, 0);
+        let count = args.len() as u64;
+        let this = call.receiver;
         let length_value = scope.handle(heap.new_number(count as f64));
         let is_constructor = this
             .as_tagged(heap)
@@ -1879,7 +1797,7 @@ fn array_of<'a>(
         };
         for j in 0..count {
             let key = rt_try!(heap, index_key(vm, heap, state, &scope, j));
-            let item = args.get_handle(heap, 1 + j as usize);
+            let item = args.get_handle(heap, j as usize);
             match Object::create_data_property_or_throw(
                 vm,
                 heap,

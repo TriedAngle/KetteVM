@@ -1,5 +1,5 @@
 use vm_core::{
-    Args, DenseString, EdgeVisitable, Handle, HandleSlice, HostCtx, Map, MapInit, MapKind,
+    Args, CallInfo, DenseString, EdgeVisitable, HandleSlice, HostCtx, Map, MapInit, MapKind,
     NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, Tagged, VM, Value,
     Visitor, intrinsics::declare_globals, raise_runtime,
 };
@@ -61,19 +61,15 @@ impl Runtime for KetteRuntime {
     }
 }
 
-fn console_print<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn console_print<'a>(nctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    if args.len() < 2 {
+    if args.is_empty() {
         println!();
         return vm.known().undefined.get(heap).erase();
     }
-    let v = args.get_handle(heap, 1);
+    let v = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let text = match Object::to_string(vm, heap, state, v) {
             Ok(t) => {

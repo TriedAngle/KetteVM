@@ -1,8 +1,8 @@
 use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
-    Args, DenseString, FixedArray, Handle, HandleScope, Heap, HostCtx, Object, Result, Smi, Symbol,
-    Tagged, ThreadState, VM, Value, VmError, proxy::Proxy, raise, rt_try,
+    Args, CallInfo, DenseString, FixedArray, Handle, HandleScope, Heap, HostCtx, Object, Result,
+    Smi, Symbol, Tagged, ThreadState, VM, Value, VmError, proxy::Proxy, raise, rt_try,
 };
 
 crate::register_natives! {
@@ -23,7 +23,7 @@ const FOR_IN_VISITED: usize = 3;
 /// Returns an enumerator for `subject`, or undefined for null/undefined.
 pub fn for_in_enumerate<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
@@ -107,11 +107,7 @@ fn for_in_level_keys<'s>(
 /// for-in step (`%ForInIteratorPrototype%.next`)
 /// [ES 14.7.5.10.2.1](https://tc39.es/ecma262/#sec-%foriniteratorprototype%.next)
 /// Returns the next key, or undefined when the chain is exhausted.
-pub fn for_in_next<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn for_in_next<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;

@@ -1,8 +1,8 @@
 //! ES 21.1: the Number constructor and prototype methods.
 
 use vm_core::{
-    Args, Convert, DenseString, Handle, HostCtx, Object, Smi, Tagged, Value, VmError, WrapperKind,
-    extend_lifetime, raise, rt_try,
+    Args, CallInfo, Convert, DenseString, HostCtx, Object, Smi, Tagged, Value, VmError,
+    WrapperKind, extend_lifetime, raise, rt_try,
 };
 
 crate::register_natives! {
@@ -22,26 +22,22 @@ crate::register_natives! {
 /// `Number ( value )`
 /// [ES 21.1.1.1](https://tc39.es/ecma262/#sec-number-constructor-number-value)
 /// Converts `value` with ToNumeric; under `new` it wraps that Number.
-fn number_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let n = rt_try!(
         heap,
         state.handle_scope(|scope| {
-            let arg = if args.len() > 1 {
-                scope.handle(args.get(heap, 1))
+            let arg = if !args.is_empty() {
+                scope.handle(args.get(heap, 0))
             } else {
                 scope.handle(Smi::new(0).into_tagged())
             };
             Object::to_numeric(vm, heap, state, arg)
         })
     );
-    let Some(new_target) = new_target else {
+    let Some(new_target) = call.new_target else {
         return heap.new_number(n);
     };
     state.handle_scope(|scope| {
@@ -64,13 +60,9 @@ fn number_constructor<'a>(
 /// `Number.isFinite ( number )`
 /// [ES 21.1.2.2](https://tc39.es/ecma262/#sec-number.isfinite)
 /// True only for a Number that is finite; never coerces.
-fn number_is_finite<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_is_finite<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let finite = args
-        .get(ctx.heap, 1)
+        .get(ctx.heap, 0)
         .as_number(ctx.heap)
         .is_some_and(f64::is_finite);
     Convert::boolean(ctx.heap, finite)
@@ -79,13 +71,9 @@ fn number_is_finite<'a>(
 /// `Number.isInteger ( number )`
 /// [ES 21.1.2.3](https://tc39.es/ecma262/#sec-number.isinteger)
 /// True only for an integral Number; never coerces.
-fn number_is_integer<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_is_integer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let integer = args
-        .get(ctx.heap, 1)
+        .get(ctx.heap, 0)
         .as_number(ctx.heap)
         .is_some_and(|n| n.is_finite() && n.trunc() == n);
     Convert::boolean(ctx.heap, integer)
@@ -94,13 +82,9 @@ fn number_is_integer<'a>(
 /// `Number.isNaN ( number )`
 /// [ES 21.1.2.4](https://tc39.es/ecma262/#sec-number.isnan)
 /// True only for the NaN Number value; never coerces.
-fn number_is_nan<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_is_nan<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let nan = args
-        .get(ctx.heap, 1)
+        .get(ctx.heap, 0)
         .as_number(ctx.heap)
         .is_some_and(f64::is_nan);
     Convert::boolean(ctx.heap, nan)
@@ -111,12 +95,12 @@ fn number_is_nan<'a>(
 /// True for an integer in the inclusive range ±(2^53 - 1); never coerces.
 fn number_is_safe_integer<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
     let safe = args
-        .get(ctx.heap, 1)
+        .get(ctx.heap, 0)
         .as_number(ctx.heap)
         .is_some_and(|n| n.is_finite() && n.trunc() == n && n.abs() <= MAX_SAFE_INTEGER);
     Convert::boolean(ctx.heap, safe)
@@ -125,16 +109,13 @@ fn number_is_safe_integer<'a>(
 /// `Number.prototype.valueOf ( )`
 /// [ES 21.1.3.7](https://tc39.es/ecma262/#sec-number.prototype.valueof)
 /// Returns `ThisNumberValue(this)`.
-fn number_value_of<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_value_of<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    match args
-        .get(heap, 0)
+    match call
+        .receiver
+        .as_tagged(heap)
         .wrapper_value(heap, vm.known(), WrapperKind::Number)
     {
         Some(v) => extend_lifetime!(heap, v),
@@ -145,22 +126,19 @@ fn number_value_of<'a>(
 /// `Number.prototype.toString ( [ radix ] )`
 /// [ES 21.1.3.6](https://tc39.es/ecma262/#sec-number.prototype.tostring)
 /// `ThisNumberValue(this)` in the requested radix (default 10).
-fn number_to_string<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
         // Root the receiver across the radix coercion (it can run user code).
-        let Some(x) = args
-            .get(heap, 0)
+        let Some(x) = call
+            .receiver
+            .as_tagged(heap)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
             .and_then(|v| v.to_number(heap))
         else {
             raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        let radix = if args.len() > 1 {
-            let arg = args.get_handle(heap, 1);
+        let radix = if !args.is_empty() {
+            let arg = args.get_handle(heap, 0);
             if arg.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
                 10
             } else {
@@ -193,18 +171,19 @@ fn number_to_string<'a>(
 /// the shortest round-tripping significand when omitted.
 fn number_to_exponential<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(x) = args
-            .get(heap, 0)
+        let Some(x) = call
+            .receiver
+            .as_tagged(heap)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
             .and_then(|v| v.to_number(heap))
         else {
             raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        let arg = args.get_handle(heap, 1);
+        let arg = args.get_handle(heap, 0);
         let present = arg.as_tagged(heap) != vm.known().undefined.get(heap).erase();
         let fraction = if present {
             let number = rt_try!(heap, Object::to_numeric(vm, heap, state, arg));
@@ -243,30 +222,27 @@ fn number_to_exponential<'a>(
 /// Implementation-defined; without ECMA-402 this returns the decimal form.
 fn number_to_locale_string<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    number_to_string(ctx, None, args)
+    number_to_string(ctx, call, args)
 }
 
 /// `Number.prototype.toFixed ( fractionDigits )`
 /// [ES 21.1.3.3](https://tc39.es/ecma262/#sec-number.prototype.tofixed)
 /// Fixed-point notation with `fractionDigits` digits after the point.
-fn number_to_fixed<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_to_fixed<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(x) = args
-            .get(heap, 0)
+        let Some(x) = call
+            .receiver
+            .as_tagged(heap)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
             .and_then(|v| v.to_number(heap))
         else {
             raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        let digits = if args.len() > 1 {
-            let arg = args.get_handle(heap, 1);
+        let digits = if !args.is_empty() {
+            let arg = args.get_handle(heap, 0);
             if arg.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
                 0
             } else {
@@ -293,20 +269,17 @@ fn number_to_fixed<'a>(
 /// `Number.prototype.toPrecision ( precision )`
 /// [ES 21.1.3.5](https://tc39.es/ecma262/#sec-number.prototype.toprecision)
 /// `precision` significant digits, fixed or exponential by magnitude.
-fn number_to_precision<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn number_to_precision<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     ctx.handle_scope(|vm, heap, state, scope| {
-        let Some(x) = args
-            .get(heap, 0)
+        let Some(x) = call
+            .receiver
+            .as_tagged(heap)
             .wrapper_value(heap, vm.known(), WrapperKind::Number)
             .and_then(|v| v.to_number(heap))
         else {
             raise!(vm, heap, state, VmError::IncompatibleNumberReceiver);
         };
-        let arg = args.get_handle(heap, 1);
+        let arg = args.get_handle(heap, 0);
         if arg.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
             let v = scope.handle(heap.new_number(x));
             let s = scope.handle(rt_try!(

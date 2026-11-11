@@ -1,5 +1,5 @@
 use crate::{
-    Args, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeIndex,
+    Args, CallInfo, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeIndex,
     Object, PropertyDescriptor, StringInterner, Tagged, Value, WellKnown,
 };
 
@@ -13,7 +13,7 @@ pub struct KetteTools;
 impl KetteTools {
     pub fn force_minor_gc<'a>(
         ctx: HostCtx<'a>,
-        _new_target: Option<Handle<'_, Value>>,
+        _call: CallInfo<'_>,
         _args: Args,
     ) -> Tagged<'a, Value> {
         let HostCtx { vm, heap, .. } = ctx;
@@ -23,7 +23,7 @@ impl KetteTools {
 
     pub fn force_major_gc<'a>(
         ctx: HostCtx<'a>,
-        _new_target: Option<Handle<'_, Value>>,
+        _call: CallInfo<'_>,
         _args: Args,
     ) -> Tagged<'a, Value> {
         let HostCtx { vm, heap, .. } = ctx;
@@ -31,11 +31,7 @@ impl KetteTools {
         vm.known().undefined.get(heap).erase()
     }
 
-    pub fn shutdown<'a>(
-        ctx: HostCtx<'a>,
-        _new_target: Option<Handle<'_, Value>>,
-        _args: Args,
-    ) -> Tagged<'a, Value> {
+    pub fn shutdown<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
         let HostCtx {
             vm, heap, state, ..
         } = ctx;

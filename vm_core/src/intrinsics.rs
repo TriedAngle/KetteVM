@@ -3,7 +3,7 @@
 //! the array exotic object's `length` accessor.
 
 use crate::{
-    AccessorInfo, Args, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
+    AccessorInfo, Args, CallInfo, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
     EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
     MODE_CLASS, MODE_LET, Map, MapInit, MapKind, Object, PropertyDescriptor, Runtime, RuntimeId,
     ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
@@ -17,13 +17,13 @@ use crate::{
 /// Returns the receiver's `[[ArrayLength]]` (a data property in the spec).
 pub fn array_length_get<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(object) = args.get(heap, 0).as_heap_object() else {
+    let Some(object) = call.receiver.as_tagged(heap).as_heap_object() else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     if !object.as_ref().is_array_exotic(heap) {
@@ -35,17 +35,13 @@ pub fn array_length_get<'a>(
 /// ArraySetLength ( array, propertyDesc )
 /// [ES 10.4.2.4](https://tc39.es/ecma262/#sec-arraysetlength)
 /// Applies a new array length; false when remaining elements block the shrink.
-pub fn array_length_set<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn array_length_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let holder = args.get_handle(heap, 0);
-        let value = args.get(heap, 1);
+        let holder = call.receiver;
+        let value = args.get(heap, 0);
         let Some(obj) = holder.as_tagged(heap).as_heap_object() else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
@@ -94,18 +90,14 @@ impl EdgeVisitable for VmCore {
 /// `%Function.prototype%` (ES 19.2.3): the canonical empty function.
 fn function_prototype_call<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    _call: CallInfo<'_>,
     _args: Args,
 ) -> Tagged<'a, Value> {
     ctx.vm.known().undefined.get(ctx.heap).erase()
 }
 
 /// The `%ThrowTypeError%` [[Call]] (ES 10.2.3).
-fn throw_type_error<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
-) -> Tagged<'a, Value> {
+fn throw_type_error<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -400,11 +392,7 @@ pub fn create_global_function_binding(
         .expect("global function binding define cannot throw")
 }
 
-pub fn declare_globals<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+pub fn declare_globals<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;

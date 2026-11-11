@@ -4,9 +4,9 @@ use crate::{FloatReg, Frame, RootsArg};
 use bytecode::Opcode;
 use handler_derive::{handler, handler_become, handler_table};
 use vm_core::{
-    Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors,
-    FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs,
-    Result, Tagged, ThreadState, Thrown, VM, Value, VmError, bail,
+    Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
+    HandleSlice, Heap, Interpreter, NativeIndex, Object, Ops, Regs, Result, Tagged, ThreadState,
+    Thrown, VM, Value, VmError, bail,
 };
 
 use crate::slow::*;
@@ -151,7 +151,11 @@ macro_rules! call_enter {
         let (acc, value) = match $result {
             Ok(StagedCall::Frame) => ($acc, false),
             Ok(StagedCall::Value(v)) => (Acc::set(v), true),
-            Ok(StagedCall::Native { rt, staged }) => (Acc::set($ctx.call_native(rt, staged)), true),
+            Ok(StagedCall::Native {
+                rt,
+                callee_reg,
+                staged,
+            }) => (Acc::set($ctx.call_native(rt, callee_reg, staged)), true),
             Ok(StagedCall::Proxy { callee_reg, staged }) => (
                 proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged),
                 true,
@@ -349,14 +353,16 @@ fn enter<'a, 't>(
         Some(CallTarget::Proxy(_)) | Some(CallTarget::Bound { .. }) => {
             bail!(vm, heap, state, VmError::NotCallable)
         }
-        Some(CallTarget::Native(rt)) => {
-            let f = vm.native(rt);
-            // Safety: the runtime state is owned by the VM, which outlives
-            // this call.
-            let runtime: &'a dyn ErasedRuntimeState = unsafe { core::mem::transmute(runtime) };
-            let nctx = HostCtx::new(vm, runtime, heap, state);
-            Ok(Acc::set(f(nctx, new_target, args.as_args())))
-        }
+        Some(CallTarget::Native(rt)) => Ok(Acc::set(call_native_target(
+            vm,
+            runtime,
+            heap,
+            state,
+            rt,
+            callable.erase(),
+            args,
+            new_target,
+        ))),
         Some(CallTarget::Bytecode {
             target,
             info,

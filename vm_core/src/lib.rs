@@ -68,7 +68,7 @@ pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
 
 pub use intrinsics::VmCore;
 pub use native::{
-    HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
+    CallInfo, HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CallTarget, CallableInfoInit,

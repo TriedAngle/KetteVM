@@ -2,8 +2,8 @@
 
 use crate::JSRuntime;
 use vm_core::{
-    Args, Handle, HandleSlice, HostCtx, Object, PropertyDescriptor, Smi, Tagged, Value, VmError,
-    proxy::Proxy, raise, rt_try,
+    Args, CallInfo, Handle, HandleSlice, HostCtx, Object, PropertyDescriptor, Smi, Tagged, Value,
+    VmError, proxy::Proxy, raise, rt_try,
 };
 
 crate::register_natives! {
@@ -17,20 +17,16 @@ crate::register_natives! {
 /// Requires `new`; both arguments must be Objects. The proxy map mirrors the
 /// target's callability so `typeof` and `[[Call]]`/`[[Construct]]` dispatch
 /// stay observable.
-fn proxy_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let construct = new_target.is_some();
+fn proxy_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let construct = call.new_target.is_some();
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     if !construct {
         raise!(vm, heap, state, VmError::ProxyRequiresNew);
     }
-    let target = args.get_handle(heap, 1);
-    let handler = args.get_handle(heap, 2);
+    let target = args.get_handle(heap, 0);
+    let handler = args.get_handle(heap, 1);
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
         && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
     if !ok {
@@ -43,18 +39,14 @@ fn proxy_constructor<'a>(
 /// [ES 28.2.2.1](https://tc39.es/ecma262/#sec-proxy.revocable)
 /// Returns `{ proxy, revoke }`; `revoke` is a built-in function with no
 /// arguments that revokes `proxy` and returns `undefined` (idempotently).
-fn proxy_revocable<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn proxy_revocable<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let known = &ctx.runtime::<JSRuntime>().known;
     let idx = &ctx.runtime::<JSRuntime>().indices;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let target = args.get_handle(heap, 1);
-    let handler = args.get_handle(heap, 2);
+    let target = args.get_handle(heap, 0);
+    let handler = args.get_handle(heap, 1);
     let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
         && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
     if !ok {
@@ -133,13 +125,9 @@ fn proxy_revocable<'a>(
 /// Hidden `__revokeProxy(p)`: nulls the proxy's target/handler slots
 /// (idempotent — a null handler already means revoked). Called only by
 /// the REVOKE_PRELUDE closure, which guards it with a done-flag.
-fn proxy_revoke<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn proxy_revoke<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx { vm, heap, .. } = ctx;
-    let proxy = args.get_handle(heap, 1);
+    let proxy = args.get_handle(heap, 0);
     Proxy::revoke(heap, proxy);
     vm.known().undefined.get(heap).erase()
 }

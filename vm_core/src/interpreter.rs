@@ -4,8 +4,8 @@
 //! raise paths stay cold and out of line.
 
 use crate::{
-    Args, Errors, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, RuntimeId,
-    ThreadState, VM, VmError, Word, api::ErasedRuntimeState, heap::Heap, heap::Register,
+    Args, CallInfo, Errors, FeedbackVector, FixedArray, Handle, HostCtx, LanguageMode, NativeIndex,
+    RuntimeId, ThreadState, VM, VmError, Word, api::ErasedRuntimeState, heap::Heap, heap::Register,
     stack::FrameMeta, stack::Stack, value::Tagged, value::Value,
 };
 use bytecode::Opcode;
@@ -356,8 +356,37 @@ impl<'s, 'h> Ctx<'s, 'h> {
         }
     }
 
+    /// Invoke a native function object in place: `window` carries the
+    /// receiver at element 0, `callee_reg` is the callee's register in the
+    /// current frame.
     #[inline(always)]
-    pub fn call_native(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
+    pub fn call_native(
+        &mut self,
+        rt: NativeIndex,
+        callee_reg: i32,
+        window: Args,
+    ) -> Tagged<'_, Value> {
+        let callee = self.stack().reg_handle(self.frame_base(), callee_reg);
+        let receiver = window.get_handle(self.heap(), 0);
+        self.call_native_inner(rt, Some(callee), receiver, window.slice_from(1))
+    }
+
+    /// Invoke a registry native in place: `args` are the declared
+    /// arguments, there is no callee and the receiver is undefined.
+    #[inline(always)]
+    pub fn call_native_direct(&mut self, rt: NativeIndex, args: Args) -> Tagged<'_, Value> {
+        let receiver = self.heap().known().undefined.root_handle().erase();
+        self.call_native_inner(rt, None, receiver, args)
+    }
+
+    #[inline(always)]
+    fn call_native_inner(
+        &mut self,
+        rt: NativeIndex,
+        callee: Option<Handle<'_, Value>>,
+        receiver: Handle<'_, Value>,
+        args: Args,
+    ) -> Tagged<'_, Value> {
         let (vm, state) = (self.vm, self.state);
         let f = vm.native(rt);
         let stack = state.stack();
@@ -367,7 +396,15 @@ impl<'s, 'h> Ctx<'s, 'h> {
             stack.set_top(top);
         }
         let nctx = HostCtx::new(vm, state.runtime(vm, self.heap()), self.heap_mut(), state);
-        let v = f(nctx, None, args);
+        let v = f(
+            nctx,
+            CallInfo {
+                callee,
+                receiver,
+                new_target: None,
+            },
+            args,
+        );
         if bump.is_some() {
             stack.set_top(saved);
         }

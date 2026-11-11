@@ -76,7 +76,8 @@ impl<'a> HostCtx<'a> {
     /// Invoke `callable` ([[Call]]) when `new_target` is `None`, or
     /// [[Construct]] with `new.target` = that handle when `Some`
     /// (ES 9.2.2). The callable is a rooted handle; the result is anchored to
-    /// the `heap` borrow and `heap` stays usable.
+    /// the `heap` borrow and `heap` stays usable. `args` is a call window:
+    /// element 0 is the receiver, the rest are the arguments.
     pub fn enter<'h, 'r>(
         vm: &'h VM,
         runtime: &'h dyn ErasedRuntimeState,
@@ -177,9 +178,20 @@ impl<'a> HostCtx<'a> {
     }
 }
 
-/// The native-call ABI (tier 1)
-pub type NativeFn =
-    for<'a, 'nt> fn(HostCtx<'a>, Option<Handle<'nt, Value>>, Args) -> Tagged<'a, Value>;
+/// Values a call supplies beyond its argument list.
+///
+/// `receiver` is always present (undefiened if not explicit)
+/// `callee` is `None` for internal registry calls and native accessors
+#[derive(Copy, Clone)]
+pub struct CallInfo<'a> {
+    /// function object whose `[[Call]]`/`[[Construct]]` is running.
+    pub callee: Option<Handle<'a, Value>>,
+    /// `this`, or the undefined root when the call has no receiver.
+    pub receiver: Handle<'a, Value>,
+    /// `new.target` for `[[Construct]]`.
+    pub new_target: Option<Handle<'a, Value>>,
+}
+pub type NativeFn = for<'a, 'i> fn(HostCtx<'a>, CallInfo<'i>, Args) -> Tagged<'a, Value>;
 
 /// Return the exception sentinel for an already-pending exception.
 pub fn raise_runtime<'a>(heap: &'a Heap, _thrown: Thrown) -> Tagged<'a, Value> {
@@ -242,8 +254,6 @@ impl Default for NativeRegistry {
     }
 }
 
-/// The running frame's context (CallNative runs in place, so the
-/// interpreter's cache still holds the frame executing the call).
 /// The current (calling) frame's context: `CallNative` runs in place, so
 /// the interpreter's cache still holds the frame executing the call.
 pub fn frame_context_value<'a>(state: &ThreadState, heap: &'a Heap) -> Option<Tagged<'a, Value>> {

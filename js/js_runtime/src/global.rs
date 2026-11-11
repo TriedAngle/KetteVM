@@ -1,10 +1,10 @@
 //! ES 19: function properties of the global object (eval, isNaN).
 use crate::JSRuntime;
 use vm_core::{
-    Args, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap,
-    HostCtx, Object, Result, Runtime, SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
-    Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown, materialize::Materialize, raise,
-    raise_runtime, rt_try,
+    Args, CallInfo, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope,
+    HandleSlice, Heap, HostCtx, Object, Result, Runtime, SCOPE_DECLARATION, SCOPE_SCRIPT,
+    ScopeInfo, ScopeInfoInit, Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown,
+    materialize::Materialize, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -18,16 +18,12 @@ crate::register_natives! {
     console_log,
 }
 
-fn eval_runtime<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn eval_runtime<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let ids = &ctx.runtime::<JSRuntime>().ids;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let source = args.get_handle(heap, 1);
+    let source = args.get_handle(heap, 0);
     if source.as_tagged(heap).get_as::<DenseString>(heap).is_none() {
         return source.as_tagged(heap).erase();
     }
@@ -90,18 +86,14 @@ fn eval_global_context<'s>(
 /// `isNaN ( number )`
 /// [ES 19.2.3](https://tc39.es/ecma262/#sec-isnan-number)
 /// Number(x) is NaN.
-fn is_nan<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn is_nan<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let n = rt_try!(
         heap,
         state.handle_scope(|scope| {
-            let arg = scope.handle(args.get(heap, 1));
+            let arg = scope.handle(args.get(heap, 0));
             Object::to_numeric(vm, heap, state, arg)
         })
     );
@@ -111,18 +103,14 @@ fn is_nan<'a>(
 /// `isFinite ( number )`
 /// [ES 19.2.2](https://tc39.es/ecma262/#sec-isfinite-number)
 /// Number(x) is finite.
-fn is_finite<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn is_finite<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let n = rt_try!(
         heap,
         state.handle_scope(|scope| {
-            let arg = scope.handle(args.get(heap, 1));
+            let arg = scope.handle(args.get(heap, 0));
             Object::to_numeric(vm, heap, state, arg)
         })
     );
@@ -132,15 +120,11 @@ fn is_finite<'a>(
 /// `parseFloat ( string )`
 /// [ES 19.2.4](https://tc39.es/ecma262/#sec-parsefloat-string)
 /// Longest leading `StrDecimalLiteral` of `string`; no radix or hex form.
-fn parse_float<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn parse_float<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let input = args.get_handle(heap, 1);
+    let input = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, input)));
         let dense = s
@@ -166,16 +150,12 @@ fn parse_float<'a>(
 /// [ES 19.2.5](https://tc39.es/ecma262/#sec-parseint-string-radix)
 /// Longest integer prefix of `string` in `radix`, honoring a `0x` prefix
 /// when `radix` is 0 or 16.
-fn parse_int<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn parse_int<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let input = args.get_handle(heap, 1);
-    let radix_arg = args.get_handle(heap, 2);
+    let input = args.get_handle(heap, 0);
+    let radix_arg = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
         // ToString first: step order is observable through `valueOf`.
         let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, input)));
@@ -240,19 +220,15 @@ fn parse_int<'a>(
 
 /// `print(x)`: ToString(x) to stdout followed by a newline (a shell
 /// convenience, not an ES builtin; the Octane runner reports through it).
-fn print<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn print<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    if args.len() < 2 {
+    if args.is_empty() {
         println!();
         return vm.known().undefined.get(heap).erase();
     }
-    let arg = args.get_handle(heap, 1);
+    let arg = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let s = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, arg)));
         let text = s
@@ -312,16 +288,12 @@ fn console_arg_cold(
 /// `console.log(...args)`: ToString every argument, join with single
 /// spaces, and write the result to stdout followed by a newline (Node's
 /// single-line formatting; a shell convenience, not an ES builtin).
-fn console_log<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn console_log<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let mut parts: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
-    for i in 1..args.len() {
+    let mut parts: Vec<String> = Vec::with_capacity(args.len());
+    for i in 0..args.len() {
         // Safety: `i < args.len()`, so the slot exists.
         let arg = args.get_handle(heap, i);
         if let Some(text) = primitive_to_string(heap, vm.known(), arg.as_tagged(heap)) {
@@ -339,11 +311,7 @@ fn console_log<'a>(
 
 /// `performance.now()`: fractional milliseconds since the Unix epoch
 /// (shell timing convenience mirroring the browser API).
-fn performance_now<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    _args: Args,
-) -> Tagged<'a, Value> {
+fn performance_now<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64() * 1000.0)

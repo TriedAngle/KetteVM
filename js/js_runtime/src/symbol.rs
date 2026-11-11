@@ -1,7 +1,7 @@
 //! ES 20.4: Symbol objects.
 use vm_core::{
-    Args, DenseString, Errors, FixedArray, Handle, HandleScope, Heap, HostCtx, MapKind, Object,
-    Symbol, Tagged, Value, VmError, raise, rt_try,
+    Args, CallInfo, DenseString, Errors, FixedArray, Handle, HandleScope, Heap, HostCtx, MapKind,
+    Object, Symbol, Tagged, Value, VmError, raise, rt_try,
 };
 
 crate::register_natives! {
@@ -18,19 +18,15 @@ crate::register_natives! {
 /// [ES 20.4.1.1](https://tc39.es/ecma262/#sec-symbol-constructor)
 /// Creates a new Symbol whose `[[Description]]` is `description` (or
 /// `undefined`); `new Symbol()` is a TypeError.
-fn symbol_constructor<'a>(
-    ctx: HostCtx<'a>,
-    new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn symbol_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    if new_target.is_some() {
+    if call.new_target.is_some() {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     state.handle_scope(|scope| {
-        let description = scope.handle(args.get(heap, 1));
+        let description = scope.handle(args.get(heap, 0));
         if description.as_tagged(heap) == vm.known().undefined.get(heap).erase() {
             return Symbol::new(heap, &scope, None).as_tagged(heap).erase();
         }
@@ -52,20 +48,20 @@ fn symbol_constructor<'a>(
 /// Returns the `[[Description]]` of the receiver.
 fn symbol_prototype_description<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(
-        |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
+    state.handle_scope(|scope| {
+        match this_symbol_value(heap, &scope, call.receiver.as_tagged(heap)) {
             Some(symbol) => symbol.as_tagged(heap).as_ref().description(heap),
             None => {
                 raise!(vm, heap, state, VmError::IncompatibleSymbolReceiver);
             }
-        },
-    )
+        }
+    })
 }
 
 /// `Symbol.prototype.toString ( )`
@@ -73,14 +69,14 @@ fn symbol_prototype_description<'a>(
 /// Returns `"Symbol(" + description + ")"`.
 fn symbol_prototype_to_string<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 0));
+        let receiver = scope.handle(call.receiver.as_tagged(heap));
         let Some(symbol) = this_symbol_value(heap, &scope, receiver.as_tagged(heap)) else {
             raise!(vm, heap, state, VmError::IncompatibleSymbolReceiver);
         };
@@ -95,18 +91,18 @@ fn symbol_prototype_to_string<'a>(
 /// Returns the receiver's `[[SymbolData]]`.
 fn symbol_prototype_value_of<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
+    call: CallInfo<'_>,
+    _args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    state.handle_scope(
-        |scope| match this_symbol_value(heap, &scope, args.get(heap, 0)) {
+    state.handle_scope(|scope| {
+        match this_symbol_value(heap, &scope, call.receiver.as_tagged(heap)) {
             Some(symbol) => symbol.as_tagged(heap).erase(),
             None => Errors::raise(vm, heap, state, VmError::IncompatibleSymbolReceiver),
-        },
-    )
+        }
+    })
 }
 
 /// `Symbol.prototype [ %Symbol.toPrimitive% ] ( hint )`
@@ -114,25 +110,21 @@ fn symbol_prototype_value_of<'a>(
 /// Returns the receiver's symbol; `hint` is ignored.
 fn symbol_prototype_to_primitive<'a>(
     ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
+    call: CallInfo<'_>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    symbol_prototype_value_of(ctx, None, args)
+    symbol_prototype_value_of(ctx, call, args)
 }
 
 /// `Symbol.for ( key )`
 /// [ES 20.4.2.4](https://tc39.es/ecma262/#sec-symbol.for)
 /// Returns the registered symbol for `key`, registering a new one on first use.
-fn symbol_for<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn symbol_for<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let key = scope.handle(args.get(heap, 1));
+        let key = scope.handle(args.get(heap, 0));
         let key = scope.handle(rt_try!(heap, Object::to_string(vm, heap, state, key)));
         let key = scope
             .cast::<DenseString>(heap, key.as_tagged(heap))
@@ -157,17 +149,13 @@ fn symbol_for<'a>(
 /// [ES 20.4.2.8](https://tc39.es/ecma262/#sec-symbol.keyfor)
 /// Returns the registry key of `symbol`, or `undefined` when it was not
 /// created by `Symbol.for`.
-fn symbol_key_for<'a>(
-    ctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
+fn symbol_key_for<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let receiver = scope.handle(args.get(heap, 1));
-        let Some(symbol) = receiver.as_tagged(heap).get_as::<Symbol>(heap) else {
+        let symbol = scope.handle(args.get(heap, 0));
+        let Some(symbol) = symbol.as_tagged(heap).get_as::<Symbol>(heap) else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
         let table = vm.known().global_symbol_registry.get(heap);
