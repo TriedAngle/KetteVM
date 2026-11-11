@@ -1,20 +1,17 @@
-use std::collections::{HashMap, HashSet};
-
 use oxc_ast::AstKind;
-use oxc_ast::ast::*;
 use oxc_ast_visit::{
-    Visit,
-    walk::{
-        walk_block_statement, walk_for_in_statement, walk_for_of_statement, walk_for_statement,
-        walk_switch_case,
-    },
+    Visit, walk::walk_block_statement, walk::walk_for_in_statement, walk::walk_for_of_statement,
+    walk::walk_for_statement, walk::walk_switch_case,
 };
 use oxc_semantic::{AstNodes, Scoping, Semantic};
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::node::NodeId;
-use oxc_syntax::reference::ReferenceId;
-use oxc_syntax::scope::{ScopeFlags, ScopeId};
-use oxc_syntax::symbol::{SymbolFlags, SymbolId};
+use oxc_syntax::{
+    node::NodeId, reference::ReferenceId, scope::ScopeFlags, scope::ScopeId, symbol::SymbolFlags,
+    symbol::SymbolId,
+};
+use std::{collections::HashMap, collections::HashSet};
+
+use oxc_ast::ast::*;
 
 /// Index into [`Facts::functions`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

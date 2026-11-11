@@ -3,18 +3,13 @@
 //! keep inlining into interpreter crates across the crate boundary;
 //! raise paths stay cold and out of line.
 
-use core::cell::Cell;
-
-use bytecode::Opcode;
-
-use crate::api::ErasedRuntimeState;
-use crate::heap::{Heap, Register};
-use crate::stack::{FrameMeta, Stack};
-use crate::value::{Tagged, Value};
 use crate::{
     Args, Errors, FeedbackVector, FixedArray, HostCtx, LanguageMode, NativeIndex, RuntimeId,
-    ThreadState, VM, VmError, Word,
+    ThreadState, VM, VmError, Word, api::ErasedRuntimeState, heap::Heap, heap::Register,
+    stack::FrameMeta, stack::Stack, value::Tagged, value::Value,
 };
+use bytecode::Opcode;
+use core::cell::Cell;
 
 /// Loop back-edge ticks between safepoint polls.
 pub const SAFEPOINT_INTERVAL: u32 = 1 << 12;

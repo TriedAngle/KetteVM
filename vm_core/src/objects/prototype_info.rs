@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     EdgeVisitable, GcSlot, Header, Heap, HeapObject, ObjectKind, OptionGcSlot, Smi, Tagged, Value,
     Visitor, WeakFixedArray,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct PrototypeInfo {

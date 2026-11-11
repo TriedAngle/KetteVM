@@ -1,11 +1,9 @@
 //! Array exotic object length policy: LengthOfArrayLike, ArraySetLength,
 //! and the ToUint32/ToNumber pair ArraySetLength needs.
 
-use crate::VmError;
-use crate::bail;
 use crate::{
     Convert, DenseString, Handle, HandleScope, Heap, Object, PartialDescriptor, ProxyObject,
-    Result, ShouldThrow, Smi, Tagged, ThreadState, VM, Value,
+    Result, ShouldThrow, Smi, Tagged, ThreadState, VM, Value, VmError, bail,
 };
 
 impl Object {

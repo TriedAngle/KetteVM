@@ -1,12 +1,11 @@
 //! The extension API: choosing an interpreter and plugging in a language
 //! runtime.
 
-use core::any::Any;
-
 use crate::{
     EdgeVisitable, Handle, HandleSlice, Heap, Object, Result, SetupError, Tagged, ThreadState, VM,
     Value,
 };
+use core::any::Any;
 
 /// The interpreter entry: [[Call]]/[[Construct]] on a bytecode callable.
 /// Stored as a plain fn pointer in `SharedVM` (set once from the

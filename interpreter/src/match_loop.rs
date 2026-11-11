@@ -2,22 +2,8 @@
 //! `step::<1>` for narrow instructions and `step::<2>` for wide ones.
 //! Flow-free: hot state stays in locals; only `Ctx` owns interpreter state.
 
-use bytecode::Opcode;
-use vm_core::VmError;
-use vm_core::bail;
-use vm_core::raise;
-
-use vm_core::interpreter::{base, unwind};
-
-use crate::RootsArg;
-use crate::slow::match_slow_construct;
-use crate::utils::{
-    CallFault, ConstructStart, StagedCall, bound_apply_staged, call_scatter_start,
-    call_window_start, construct_native, construct_start, proxy_apply_staged, raise_fault,
-    resolve_target,
-};
 use crate::{
-    match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
+    RootsArg, match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
     match_op_bitwise_and, match_op_bitwise_and_immediate, match_op_bitwise_or,
     match_op_bitwise_or_immediate, match_op_bitwise_xor, match_op_bitwise_xor_immediate,
     match_op_call_native, match_op_compare_jump, match_op_create_block_context,
@@ -41,12 +27,17 @@ use crate::{
     match_op_store_global, match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
     match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
     match_op_sub_immediate, match_op_sub_loc, match_op_test_reference_equal, match_op_test_typeof,
-    match_op_throw, match_op_throw_reference_error_if_hole,
+    match_op_throw, match_op_throw_reference_error_if_hole, slow::match_slow_construct,
+    utils::CallFault, utils::ConstructStart, utils::StagedCall, utils::bound_apply_staged,
+    utils::call_scatter_start, utils::call_window_start, utils::construct_native,
+    utils::construct_start, utils::proxy_apply_staged, utils::raise_fault, utils::resolve_target,
 };
+use bytecode::Opcode;
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
     HandleSlice, Heap, HostCtx, Interpreter, Object, Ops, Regs, Result, Tagged, Termination,
-    ThreadState, Thrown, Unwind, VM, Value,
+    ThreadState, Thrown, Unwind, VM, Value, VmError, bail, interpreter::base, interpreter::unwind,
+    raise,
 };
 
 pub struct MatchInterpreter;

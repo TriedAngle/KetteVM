@@ -1,12 +1,9 @@
-use core::alloc::Layout;
-use core::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
+use core::{alloc::Layout, ptr::NonNull};
 use heap_api::{
     AllocError, GcHost, HeapBackend, HeapPtr, HeapStats, LocalHeap, RawCell, SharedHeap, Tlab,
     Visitor, Word,
 };
+use std::{sync::Arc, sync::atomic::AtomicUsize, sync::atomic::Ordering};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DummyHeapConfig {

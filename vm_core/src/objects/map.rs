@@ -1,10 +1,9 @@
-use core::alloc::Layout;
-
 use crate::{
     AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
     HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
     Smi, Symbol, Tagged, Value, Visitor, WeakFixedArray,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct Map {

@@ -1,21 +1,18 @@
 //! Become (nightly, `fast`) backend.
 
+use crate::{FloatReg, Frame, RootsArg};
 use bytecode::Opcode;
 use handler_derive::{handler, handler_become, handler_table};
-use vm_core::VmError;
-use vm_core::bail;
-
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors,
     FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object, Ops, Regs,
-    Result, Tagged, ThreadState, Thrown, VM, Value,
+    Result, Tagged, ThreadState, Thrown, VM, Value, VmError, bail,
 };
 
 use crate::slow::*;
 #[cfg(feature = "star_fusion")]
 use crate::star_lookahead;
 use crate::utils::*;
-use crate::{FloatReg, Frame, RootsArg};
 
 /// Instruction Pointer
 #[macro_export]

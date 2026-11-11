@@ -1,8 +1,3 @@
-use crate::VmError;
-use crate::bail;
-use core::alloc::Layout;
-
-use crate::errors::Errors;
 use crate::{
     AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
@@ -10,8 +5,9 @@ use crate::{
     HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind,
     NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
     Result, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
-    Visitor, WrapperKind, raise_runtime,
+    Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
 };
+use core::alloc::Layout;
 
 /// What a set action did, for callers that only need to update caches.
 pub enum SetApplied {

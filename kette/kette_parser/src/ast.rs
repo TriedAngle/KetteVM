@@ -1,4 +1,4 @@
-use crate::plumbing::{ByteSpan, Symbol, SymbolTable};
+use crate::{plumbing::ByteSpan, plumbing::Symbol, plumbing::SymbolTable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u32);

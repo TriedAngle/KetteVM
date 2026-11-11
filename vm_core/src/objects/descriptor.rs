@@ -1,10 +1,8 @@
 //! ES `ToPropertyDescriptor`: JS descriptor object -> partial descriptor.
 
-use crate::VmError;
-use crate::bail;
 use crate::{
     Convert, Handle, HandleScope, HandleSlice, Heap, Object, PartialDescriptor, PropertyDescriptor,
-    Result, SlotName, ThreadState, VM, Value,
+    Result, SlotName, ThreadState, VM, Value, VmError, bail,
 };
 
 impl Object {

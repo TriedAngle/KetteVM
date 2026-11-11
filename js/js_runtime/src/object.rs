@@ -1,23 +1,38 @@
 //! ES 20.1: the Object constructor, statics, and prototype methods.
-use vm_core::Errors;
-use vm_core::HostCtx;
-use vm_core::Result;
-use vm_core::VmError;
-use vm_core::raise;
-
 use crate::JSRuntime;
-use vm_core::proxy::Proxy;
-
 use vm_core::{
-    Args, Compare, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, NativeIndex,
-    Object, PartialDescriptor, ShouldThrow, Symbol, Tagged, ThreadState, VM, Value,
-    extend_lifetime, raise_runtime, rt_try,
+    Args, Compare, Convert, DenseString, Errors, Handle, HandleScope, HandleSlice, Heap, HostCtx,
+    NativeIndex, Object, PartialDescriptor, Result, ShouldThrow, Symbol, Tagged, ThreadState, VM,
+    Value, VmError, extend_lifetime, proxy::Proxy, raise, raise_runtime, rt_try,
 };
+
+crate::register_natives! {
+    object_to_string,
+    object -> object_constructor,
+    object_create,
+    object_define_properties,
+    object_get_prototype_of,
+    object_set_prototype_of,
+    object_has_own_property,
+    object_is,
+    object_property_is_enumerable,
+    object_proto_get,
+    object_proto_set,
+    object_get_own_property_names,
+    object_get_own_property_descriptor,
+    object_define_property,
+    object_prevent_extensions,
+    object_is_extensible,
+    object_seal,
+    object_freeze,
+    object_is_frozen,
+    object_is_sealed,
+}
 
 /// `Object.prototype.toString ( )`
 /// [ES 20.1.3.6](https://tc39.es/ecma262/#sec-object.prototype.tostring)
 /// The builtin tag from internal slots, overridden by a String `@@toStringTag`.
-pub fn object_to_string<'a>(
+fn object_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -72,7 +87,7 @@ pub fn object_to_string<'a>(
 /// [ES 20.1.1.1](https://tc39.es/ecma262/#sec-object-value)
 /// Boxes primitives; a `new.target` other than `%Object%` creates an object
 /// from its prototype and ignores `value`.
-pub fn object_constructor<'a>(
+fn object_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -129,7 +144,7 @@ fn is_native_function(heap: &Heap, value: Tagged<'_, Value>, index: NativeIndex)
 /// `Object.getPrototypeOf ( obj )`
 /// [ES 20.1.2.12](https://tc39.es/ecma262/#sec-object.getprototypeof)
 /// Coerces `obj` with `ToObject`, then returns its [[Prototype]].
-pub fn object_get_prototype_of<'a>(
+fn object_get_prototype_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -147,7 +162,7 @@ pub fn object_get_prototype_of<'a>(
 /// `get Object.prototype.__proto__`
 /// [ES 20.1.3.8.1](https://tc39.es/ecma262/#sec-get-object.prototype.__proto__)
 /// Coerces `this` with `ToObject`, then returns its [[Prototype]].
-pub fn object_proto_get<'a>(
+fn object_proto_get<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -165,7 +180,7 @@ pub fn object_proto_get<'a>(
 /// `set Object.prototype.__proto__`
 /// [ES 20.1.3.8.2](https://tc39.es/ecma262/#sec-set-object.prototype.__proto__)
 /// Changes [[Prototype]]; primitives and invalid `proto` values are ignored.
-pub fn object_proto_set<'a>(
+fn object_proto_set<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -203,7 +218,7 @@ pub fn object_proto_set<'a>(
 /// `Object.create ( proto, properties )`
 /// [ES 20.1.2.2](https://tc39.es/ecma262/#sec-object.create)
 /// A fresh ordinary object with `proto` as its [[Prototype]].
-pub fn object_create<'a>(
+fn object_create<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -246,7 +261,7 @@ pub fn object_create<'a>(
 /// `Object.prototype.hasOwnProperty ( value )`
 /// [ES 20.1.3.2](https://tc39.es/ecma262/#sec-object.prototype.hasownproperty)
 /// `HasOwnProperty` after coercing `this`; the key is coerced first.
-pub fn object_has_own_property<'a>(
+fn object_has_own_property<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -273,7 +288,7 @@ pub fn object_has_own_property<'a>(
 /// `Object.prototype.propertyIsEnumerable ( value )`
 /// [ES 20.1.3.4](https://tc39.es/ecma262/#sec-object.prototype.propertyisenumerable)
 /// `[[GetOwnProperty]]` of the coerced receiver; only own properties count.
-pub fn object_property_is_enumerable<'a>(
+fn object_property_is_enumerable<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -303,7 +318,7 @@ pub fn object_property_is_enumerable<'a>(
 /// [ES 20.1.2.10](https://tc39.es/ecma262/#sec-object.getownpropertynames)
 /// `GetOwnPropertyKeys(obj, string)`: the non-symbol keys of the object,
 /// in ordinary property order.
-pub fn object_get_own_property_names<'a>(
+fn object_get_own_property_names<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -345,7 +360,7 @@ pub fn object_get_own_property_names<'a>(
 /// `Object.getOwnPropertyDescriptor ( obj, key )`
 /// [ES 20.1.2.7](https://tc39.es/ecma262/#sec-object.getownpropertydescriptor)
 /// `[[GetOwnProperty]]` converted with FromPropertyDescriptor.
-pub fn object_get_own_property_descriptor<'a>(
+fn object_get_own_property_descriptor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -411,7 +426,7 @@ fn define_properties<'s>(
 /// `Object.defineProperties ( obj, properties )`
 /// [ES 20.1.2.3](https://tc39.es/ecma262/#sec-object.defineproperties)
 /// Defines own properties from the enumerable descriptors of `properties`.
-pub fn object_define_properties<'a>(
+fn object_define_properties<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -442,7 +457,7 @@ pub fn object_define_properties<'a>(
 /// [ES 20.1.2.4](https://tc39.es/ecma262/#sec-object.defineproperty)
 /// ToPropertyDescriptor + [[DefineOwnProperty]] through the
 /// `defineProperty` trap for proxies.
-pub fn object_define_property<'a>(
+fn object_define_property<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -479,7 +494,7 @@ pub fn object_define_property<'a>(
 /// [ES 20.1.2.23](https://tc39.es/ecma262/#sec-object.setprototypeof)
 /// Sets the [[Prototype]] of `obj`; primitives are returned unchanged after
 /// the `proto` argument is validated.
-pub fn object_set_prototype_of<'a>(
+fn object_set_prototype_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -517,7 +532,7 @@ pub fn object_set_prototype_of<'a>(
 /// `Object.preventExtensions ( obj )`
 /// [ES 20.1.2.20](https://tc39.es/ecma262/#sec-object.preventextensions)
 /// Prevents adding new own properties; primitives are returned unchanged.
-pub fn object_prevent_extensions<'a>(
+fn object_prevent_extensions<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -547,7 +562,7 @@ pub fn object_prevent_extensions<'a>(
 /// `Object.is ( value1, value2 )`
 /// [ES 20.1.2.15](https://tc39.es/ecma262/#sec-object.is)
 /// SameValue: `NaN` equals `NaN`, `+0` and `-0` are distinct.
-pub fn object_is<'a>(
+fn object_is<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -561,7 +576,7 @@ pub fn object_is<'a>(
 /// `Object.isExtensible ( obj )`
 /// [ES 20.1.2.16](https://tc39.es/ecma262/#sec-object.isextensible)
 /// Non-objects are not extensible.
-pub fn object_is_extensible<'a>(
+fn object_is_extensible<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -648,7 +663,7 @@ fn test_integrity_level(
 /// `Object.seal ( obj )`
 /// [ES 20.1.2.22](https://tc39.es/ecma262/#sec-object.seal)
 /// Prevents extensions and makes every own property non-configurable.
-pub fn object_seal<'a>(
+fn object_seal<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -676,7 +691,7 @@ pub fn object_seal<'a>(
 /// [ES 20.1.2.6](https://tc39.es/ecma262/#sec-object.freeze)
 /// Prevents extensions and makes every own property non-configurable and
 /// non-writable.
-pub fn object_freeze<'a>(
+fn object_freeze<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -704,7 +719,7 @@ pub fn object_freeze<'a>(
 /// [ES 20.1.2.17](https://tc39.es/ecma262/#sec-object.isfrozen)
 /// Whether the object is non-extensible with no configurable or writable
 /// data properties.
-pub fn object_is_frozen<'a>(
+fn object_is_frozen<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -728,7 +743,7 @@ pub fn object_is_frozen<'a>(
 /// `Object.isSealed ( obj )`
 /// [ES 20.1.2.18](https://tc39.es/ecma262/#sec-object.issealed)
 /// Whether the object is non-extensible with no configurable properties.
-pub fn object_is_sealed<'a>(
+fn object_is_sealed<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

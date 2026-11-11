@@ -6,26 +6,20 @@
 #![allow(unused_imports, unused_macros, unused_unsafe, unused_variables)]
 #![allow(dead_code)]
 
-use vm_core::Errors;
-use vm_core::VmError;
-use vm_core::raise;
-
+use bytecode::Opcode;
 use core::hint::black_box;
 use std::marker::PhantomData;
+use vm_core::{
+    Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
+    Errors, FeedbackVector, FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs,
+    ScopeInfo, Smi, Tagged, Value, VmError, bootstrap::WellKnown, ic::ElementHit,
+    ic::GlobalLexicalHit, ic::InlineCache, ic::LoadHit, ic::MonoProbe, raise, raise_runtime,
+};
 
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
 #[cfg(feature = "fast")]
 use handler_derive::{handler_become as handler, handler_table};
-
-use bytecode::Opcode;
-use vm_core::bootstrap::WellKnown;
-use vm_core::ic::{ElementHit, GlobalLexicalHit, InlineCache, LoadHit, MonoProbe};
-use vm_core::{
-    Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
-    FeedbackVector, FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs,
-    ScopeInfo, Smi, Tagged, Value, raise_runtime,
-};
 
 #[cfg(feature = "fast")]
 #[path = "become.rs"]

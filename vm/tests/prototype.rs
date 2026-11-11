@@ -1,8 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ic::{InlineCache, LoadHit};
 use vm::{
     DefaultInterpreter, FeedbackVector, FeedbackVectorInit, FixedArray, Handle, HandleScope,
-    HandleSlice, Object, PropertyDescriptor, SlotName, Smi, Thread, VM, Value,
+    HandleSlice, Object, PropertyDescriptor, SlotName, Smi, Thread, VM, Value, ic::InlineCache,
+    ic::LoadHit,
 };
 
 fn test_vm() -> Thread {

@@ -2,25 +2,24 @@
 //! toString/call/apply/bind.
 
 use crate::JSRuntime;
-use vm_core::HostCtx;
-use vm_core::Result;
-use vm_core::Runtime;
-use vm_core::VmError;
-use vm_core::bail;
-use vm_core::extend_lifetime;
-use vm_core::raise;
-
-use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, DenseString, Handle, HandleScope, HandleSlice, Heap, Object,
-    PropertyDescriptor, Smi, Tagged, ThreadState, VM, Value,
+    Args, ContextObject, DenseString, Handle, HandleScope, HandleSlice, Heap, HostCtx, Object,
+    PropertyDescriptor, Result, Runtime, Smi, Tagged, ThreadState, VM, Value, VmError, bail,
+    extend_lifetime, materialize::Materialize, raise, raise_runtime, rt_try,
 };
-use vm_core::{raise_runtime, rt_try};
+
+crate::register_natives! {
+    function_to_string,
+    function_bind,
+    function_call,
+    function_apply,
+    function_constructor,
+}
 
 /// `Function ( ...parameterArgs, bodyArg )`
 /// [ES 20.2.1.1](https://tc39.es/ecma262/#sec-function-p1-p2-pn-body)
 /// Builds and evaluates `function (parameters) { body }`.
-pub fn function_constructor<'a>(
+fn function_constructor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -88,7 +87,7 @@ pub fn function_constructor<'a>(
 /// `Function.prototype.toString ( )`
 /// [ES 20.2.3.5](https://tc39.es/ecma262/#sec-function.prototype.tostring)
 /// Returns a NativeFunction-syntax source string for a callable receiver.
-pub fn function_to_string<'a>(
+fn function_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -131,7 +130,7 @@ pub fn function_to_string<'a>(
 /// `Function.prototype.call ( thisArg, ...args )`
 /// [ES 20.2.3.3](https://tc39.es/ecma262/#sec-function.prototype.call)
 /// Invokes the callable receiver with `thisArg` and the forwarded arguments.
-pub fn function_call<'a>(
+fn function_call<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -162,7 +161,7 @@ pub fn function_call<'a>(
 /// `Function.prototype.apply ( thisArg, argArray )`
 /// [ES 20.2.3.1](https://tc39.es/ecma262/#sec-function.prototype.apply)
 /// Invokes the callable receiver with `thisArg` and the elements of `argArray`.
-pub fn function_apply<'a>(
+fn function_apply<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -240,7 +239,7 @@ fn create_list_from_array_like<'s>(
 /// `Function.prototype.bind ( thisArg, ...args )`
 /// [ES 20.2.3.2](https://tc39.es/ecma262/#sec-function.prototype.bind)
 /// Returns a bound function with `thisArg` and the leading arguments fixed.
-pub fn function_bind<'a>(
+fn function_bind<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

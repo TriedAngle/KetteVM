@@ -1,12 +1,9 @@
-use crate::VmError;
-use crate::bail;
-use core::alloc::Layout;
-
 use crate::{
     AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
     Map, MapInit, MapKind, MaybeWeak, Object, Prototype, Result, SlotFlags, SlotName, Smi, Symbol,
-    Tagged, ThreadState, VM, Value, WeakFixedArray, WeakFixedArrayInit,
+    Tagged, ThreadState, VM, Value, VmError, WeakFixedArray, WeakFixedArrayInit, bail,
 };
+use core::alloc::Layout;
 
 pub enum SiblingChange<'s> {
     Prototype(Handle<'s, Value>),

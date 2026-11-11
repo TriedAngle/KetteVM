@@ -1,21 +1,24 @@
 //! ES 20.4: Symbol objects.
-use vm_core::Errors;
-use vm_core::VmError;
-use vm_core::raise;
-
-use vm_core::HostCtx;
-use vm_core::rt_try;
-
 use vm_core::{
-    Args, DenseString, FixedArray, Handle, HandleScope, Heap, MapKind, Object, Symbol, Tagged,
-    Value,
+    Args, DenseString, Errors, FixedArray, Handle, HandleScope, Heap, HostCtx, MapKind, Object,
+    Symbol, Tagged, Value, VmError, raise, rt_try,
 };
+
+crate::register_natives! {
+    symbol -> symbol_constructor,
+    symbol_description -> symbol_prototype_description,
+    symbol_to_string -> symbol_prototype_to_string,
+    symbol_value_of -> symbol_prototype_value_of,
+    symbol_to_primitive -> symbol_prototype_to_primitive,
+    symbol_for,
+    symbol_key_for,
+}
 
 /// `Symbol ( [ description ] )`
 /// [ES 20.4.1.1](https://tc39.es/ecma262/#sec-symbol-constructor)
 /// Creates a new Symbol whose `[[Description]]` is `description` (or
 /// `undefined`); `new Symbol()` is a TypeError.
-pub fn symbol_constructor<'a>(
+fn symbol_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -47,7 +50,7 @@ pub fn symbol_constructor<'a>(
 /// `get Symbol.prototype.description`
 /// [ES 20.4.3.2](https://tc39.es/ecma262/#sec-symbol.prototype.description)
 /// Returns the `[[Description]]` of the receiver.
-pub fn symbol_prototype_description<'a>(
+fn symbol_prototype_description<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -68,7 +71,7 @@ pub fn symbol_prototype_description<'a>(
 /// `Symbol.prototype.toString ( )`
 /// [ES 20.4.3.3](https://tc39.es/ecma262/#sec-symbol.prototype.tostring)
 /// Returns `"Symbol(" + description + ")"`.
-pub fn symbol_prototype_to_string<'a>(
+fn symbol_prototype_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -90,7 +93,7 @@ pub fn symbol_prototype_to_string<'a>(
 /// `Symbol.prototype.valueOf ( )`
 /// [ES 20.4.3.4](https://tc39.es/ecma262/#sec-symbol.prototype.valueof)
 /// Returns the receiver's `[[SymbolData]]`.
-pub fn symbol_prototype_value_of<'a>(
+fn symbol_prototype_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -109,7 +112,7 @@ pub fn symbol_prototype_value_of<'a>(
 /// `Symbol.prototype [ %Symbol.toPrimitive% ] ( hint )`
 /// [ES 20.4.3.5](https://tc39.es/ecma262/#sec-symbol.prototype-@@toprimitive)
 /// Returns the receiver's symbol; `hint` is ignored.
-pub fn symbol_prototype_to_primitive<'a>(
+fn symbol_prototype_to_primitive<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -120,7 +123,7 @@ pub fn symbol_prototype_to_primitive<'a>(
 /// `Symbol.for ( key )`
 /// [ES 20.4.2.4](https://tc39.es/ecma262/#sec-symbol.for)
 /// Returns the registered symbol for `key`, registering a new one on first use.
-pub fn symbol_for<'a>(
+fn symbol_for<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -154,7 +157,7 @@ pub fn symbol_for<'a>(
 /// [ES 20.4.2.8](https://tc39.es/ecma262/#sec-symbol.keyfor)
 /// Returns the registry key of `symbol`, or `undefined` when it was not
 /// created by `Symbol.for`.
-pub fn symbol_key_for<'a>(
+fn symbol_key_for<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

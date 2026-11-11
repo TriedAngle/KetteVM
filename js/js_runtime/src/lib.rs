@@ -18,55 +18,30 @@ pub mod proxy;
 pub mod string;
 pub mod symbol;
 
-use array::{
-    array_constructor, array_is_array, array_iterator_next, array_iterator_symbol_iterator,
-    array_join, array_map, array_pop, array_push, array_reduce, array_slice, array_sort,
-    array_to_string, array_values,
-};
-use boolean::{boolean_constructor, boolean_to_string, boolean_value_of};
-use date::{
-    date_constructor, date_get_date, date_get_day, date_get_full_year, date_get_hours,
-    date_get_milliseconds, date_get_minutes, date_get_month, date_get_seconds, date_get_time,
-    date_get_timezone_offset, date_get_utc_date, date_get_utc_day, date_get_utc_full_year,
-    date_get_utc_hours, date_get_utc_milliseconds, date_get_utc_minutes, date_get_utc_month,
-    date_get_utc_seconds, date_get_year, date_now, date_parse, date_set_date, date_set_full_year,
-    date_set_hours, date_set_milliseconds, date_set_minutes, date_set_month, date_set_seconds,
-    date_set_time, date_set_utc_date, date_set_utc_full_year, date_set_utc_hours,
-    date_set_utc_milliseconds, date_set_utc_minutes, date_set_utc_month, date_set_utc_seconds,
-    date_set_year, date_to_gmt_string, date_to_iso_string, date_to_json, date_to_string,
-    date_value_of,
-};
-use error::{
-    error_constructor, error_is_error, error_to_string, eval_error_constructor,
-    range_error_constructor, reference_error_constructor, syntax_error_constructor,
-    type_error_constructor, uri_error_constructor,
-};
-use function::{
-    function_apply, function_bind, function_call, function_constructor, function_to_string,
-};
-use global::{console_log, eval_runtime, is_nan, performance_now, print};
-use js_compiler::native::NativeIds;
-use math::{
-    math_abs, math_ceil, math_floor, math_log, math_max, math_min, math_pow, math_random,
-    math_round, math_sqrt, math_trunc,
-};
-use number::{
-    number_constructor, number_to_fixed, number_to_precision, number_to_string, number_value_of,
-};
-use object::{
-    object_constructor, object_create, object_define_properties, object_define_property,
-    object_freeze, object_get_own_property_descriptor, object_get_own_property_names,
-    object_get_prototype_of, object_has_own_property, object_is, object_is_extensible,
-    object_is_frozen, object_is_sealed, object_prevent_extensions, object_property_is_enumerable,
-    object_proto_get, object_proto_set, object_seal, object_set_prototype_of, object_to_string,
-};
-use proxy::{proxy_constructor, proxy_revocable, proxy_revoke};
-use string::{string_constructor, string_to_string, string_value_of};
-use symbol::{
-    symbol_constructor, symbol_for, symbol_key_for, symbol_prototype_description,
-    symbol_prototype_to_primitive, symbol_prototype_to_string, symbol_prototype_value_of,
-};
+/// Generate a module's `register` function from native names.
+///
+/// `field` maps to `ids.field = vm.register_native(field)`; use
+/// `field -> function` when the `BuiltinIndices` field and function names
+/// differ.
+#[macro_export]
+macro_rules! register_natives {
+    ($($field:ident $(-> $function:ident)?),* $(,)?) => {
+        pub fn register(
+            vm: &mut ::vm_core::VM,
+            ids: &mut $crate::BuiltinIndices,
+        ) {
+            $(
+                ids.$field = vm.register_native(
+                    $crate::register_natives!(@function $field $(-> $function)?)
+                );
+            )*
+        }
+    };
+    (@function $field:ident) => { $field };
+    (@function $field:ident -> $function:ident) => { $function };
+}
 
+use js_compiler::native::NativeIds;
 use vm_core::{
     DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Map, MapInit, MapKind,
     NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, SlotFlags, SlotName,
@@ -167,135 +142,20 @@ impl EdgeVisitable for JSRuntime {
 
 /// Register the native functions behind the builtins.
 pub fn register_builtin_natives(vm: &mut VM) -> BuiltinIndices {
-    BuiltinIndices {
-        eval: vm.register_native(eval_runtime),
-        string: vm.register_native(string_constructor),
-        string_value_of: vm.register_native(string_value_of),
-        string_to_string: vm.register_native(string_to_string),
-        reference_error: vm.register_native(reference_error_constructor),
-        range_error: vm.register_native(range_error_constructor),
-        syntax_error: vm.register_native(syntax_error_constructor),
-        eval_error: vm.register_native(eval_error_constructor),
-        uri_error: vm.register_native(uri_error_constructor),
-        function_to_string: vm.register_native(function_to_string),
-        object_to_string: vm.register_native(object_to_string),
-        number: vm.register_native(number_constructor),
-        number_value_of: vm.register_native(number_value_of),
-        number_to_string: vm.register_native(number_to_string),
-        boolean: vm.register_native(boolean_constructor),
-        boolean_value_of: vm.register_native(boolean_value_of),
-        boolean_to_string: vm.register_native(boolean_to_string),
-        error: vm.register_native(error_constructor),
-        type_error: vm.register_native(type_error_constructor),
-        error_is_error: vm.register_native(error_is_error),
-        error_to_string: vm.register_native(error_to_string),
-        object: vm.register_native(object_constructor),
-        object_create: vm.register_native(object_create),
-        object_define_properties: vm.register_native(object_define_properties),
-        object_get_prototype_of: vm.register_native(object_get_prototype_of),
-        object_set_prototype_of: vm.register_native(object_set_prototype_of),
-        array: vm.register_native(array_constructor),
-        is_nan: vm.register_native(is_nan),
-        array_values: vm.register_native(array_values),
-        array_push: vm.register_native(array_push),
-        array_pop: vm.register_native(array_pop),
-        array_map: vm.register_native(array_map),
-        array_reduce: vm.register_native(array_reduce),
-        math_log: vm.register_native(math_log),
-        math_pow: vm.register_native(math_pow),
-        number_to_fixed: vm.register_native(number_to_fixed),
-        number_to_precision: vm.register_native(number_to_precision),
-        date: vm.register_native(date_constructor),
-        date_now: vm.register_native(date_now),
-        date_value_of: vm.register_native(date_value_of),
-        date_get_time: vm.register_native(date_get_time),
-        date_get_date: vm.register_native(date_get_date),
-        date_get_day: vm.register_native(date_get_day),
-        date_get_full_year: vm.register_native(date_get_full_year),
-        date_get_hours: vm.register_native(date_get_hours),
-        date_get_milliseconds: vm.register_native(date_get_milliseconds),
-        date_get_minutes: vm.register_native(date_get_minutes),
-        date_get_month: vm.register_native(date_get_month),
-        date_get_seconds: vm.register_native(date_get_seconds),
-        date_get_timezone_offset: vm.register_native(date_get_timezone_offset),
-        date_get_utc_date: vm.register_native(date_get_utc_date),
-        date_get_utc_day: vm.register_native(date_get_utc_day),
-        date_get_utc_full_year: vm.register_native(date_get_utc_full_year),
-        date_get_utc_hours: vm.register_native(date_get_utc_hours),
-        date_get_utc_milliseconds: vm.register_native(date_get_utc_milliseconds),
-        date_get_utc_minutes: vm.register_native(date_get_utc_minutes),
-        date_get_utc_month: vm.register_native(date_get_utc_month),
-        date_get_utc_seconds: vm.register_native(date_get_utc_seconds),
-        date_get_year: vm.register_native(date_get_year),
-        date_set_date: vm.register_native(date_set_date),
-        date_set_full_year: vm.register_native(date_set_full_year),
-        date_set_hours: vm.register_native(date_set_hours),
-        date_set_milliseconds: vm.register_native(date_set_milliseconds),
-        date_set_minutes: vm.register_native(date_set_minutes),
-        date_set_month: vm.register_native(date_set_month),
-        date_set_seconds: vm.register_native(date_set_seconds),
-        date_set_time: vm.register_native(date_set_time),
-        date_set_utc_date: vm.register_native(date_set_utc_date),
-        date_set_utc_full_year: vm.register_native(date_set_utc_full_year),
-        date_set_utc_hours: vm.register_native(date_set_utc_hours),
-        date_set_utc_milliseconds: vm.register_native(date_set_utc_milliseconds),
-        date_set_utc_minutes: vm.register_native(date_set_utc_minutes),
-        date_set_utc_month: vm.register_native(date_set_utc_month),
-        date_set_utc_seconds: vm.register_native(date_set_utc_seconds),
-        date_set_year: vm.register_native(date_set_year),
-        date_to_string: vm.register_native(date_to_string),
-        date_to_iso_string: vm.register_native(date_to_iso_string),
-        date_to_json: vm.register_native(date_to_json),
-        date_to_gmt_string: vm.register_native(date_to_gmt_string),
-        date_parse: vm.register_native(date_parse),
-        print: vm.register_native(print),
-        performance_now: vm.register_native(performance_now),
-        array_iterator_next: vm.register_native(array_iterator_next),
-        array_iterator_symbol_iterator: vm.register_native(array_iterator_symbol_iterator),
-        symbol: vm.register_native(symbol_constructor),
-        symbol_description: vm.register_native(symbol_prototype_description),
-        symbol_to_string: vm.register_native(symbol_prototype_to_string),
-        symbol_value_of: vm.register_native(symbol_prototype_value_of),
-        symbol_to_primitive: vm.register_native(symbol_prototype_to_primitive),
-        symbol_for: vm.register_native(symbol_for),
-        symbol_key_for: vm.register_native(symbol_key_for),
-        object_has_own_property: vm.register_native(object_has_own_property),
-        object_is: vm.register_native(object_is),
-        object_property_is_enumerable: vm.register_native(object_property_is_enumerable),
-        object_proto_get: vm.register_native(object_proto_get),
-        object_proto_set: vm.register_native(object_proto_set),
-        object_get_own_property_names: vm.register_native(object_get_own_property_names),
-        object_get_own_property_descriptor: vm.register_native(object_get_own_property_descriptor),
-        object_define_property: vm.register_native(object_define_property),
-        function_bind: vm.register_native(function_bind),
-        function_call: vm.register_native(function_call),
-        function_apply: vm.register_native(function_apply),
-        function_constructor: vm.register_native(function_constructor),
-        array_is_array: vm.register_native(array_is_array),
-        proxy: vm.register_native(proxy_constructor),
-        proxy_revocable: vm.register_native(proxy_revocable),
-        proxy_revoke: vm.register_native(proxy_revoke),
-        object_prevent_extensions: vm.register_native(object_prevent_extensions),
-        object_is_extensible: vm.register_native(object_is_extensible),
-        object_seal: vm.register_native(object_seal),
-        object_freeze: vm.register_native(object_freeze),
-        object_is_frozen: vm.register_native(object_is_frozen),
-        object_is_sealed: vm.register_native(object_is_sealed),
-        math_sqrt: vm.register_native(math_sqrt),
-        math_abs: vm.register_native(math_abs),
-        math_floor: vm.register_native(math_floor),
-        math_ceil: vm.register_native(math_ceil),
-        math_trunc: vm.register_native(math_trunc),
-        math_round: vm.register_native(math_round),
-        math_min: vm.register_native(math_min),
-        math_max: vm.register_native(math_max),
-        math_random: vm.register_native(math_random),
-        console_log: vm.register_native(console_log),
-        array_join: vm.register_native(array_join),
-        array_to_string: vm.register_native(array_to_string),
-        array_slice: vm.register_native(array_slice),
-        array_sort: vm.register_native(array_sort),
-    }
+    let mut ids = BuiltinIndices::default();
+    array::register(vm, &mut ids);
+    boolean::register(vm, &mut ids);
+    date::register(vm, &mut ids);
+    error::register(vm, &mut ids);
+    function::register(vm, &mut ids);
+    global::register(vm, &mut ids);
+    math::register(vm, &mut ids);
+    number::register(vm, &mut ids);
+    object::register(vm, &mut ids);
+    proxy::register(vm, &mut ids);
+    string::register(vm, &mut ids);
+    symbol::register(vm, &mut ids);
+    ids
 }
 
 #[derive(Default)]

@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     DenseString, EdgeVisitable, FixedArray, GcSlot, Handle, HandleSlice, Header, Heap, HeapObject,
     Object, ObjectKind, OptionGcSlot, Smi, Tagged, Value, Visitor,
 };
+use core::alloc::Layout;
 
 /// `ScopeInfo::flags` bit: the context is a variable-declaration
 /// environment (`var` declarations hoist here).

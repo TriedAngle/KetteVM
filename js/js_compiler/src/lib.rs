@@ -16,12 +16,11 @@ pub mod native;
 
 pub use codegen::CompileError;
 
+use native::NativeIds;
 use oxc_allocator::Allocator;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-
-use native::NativeIds;
 
 pub use bytecode::{FrontendError, Program, SourceMode};
 

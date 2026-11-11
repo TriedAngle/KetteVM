@@ -1,28 +1,25 @@
-use std::collections::HashMap;
-
-use oxc_ast::ast::*;
-use oxc_semantic::Scoping;
-use oxc_span::{GetSpan, Span};
-use oxc_syntax::node::NodeId;
-use oxc_syntax::scope::{ScopeFlags, ScopeId};
-use oxc_syntax::symbol::{SymbolFlags, SymbolId};
-
+use crate::{
+    analysis::ClassIdx, analysis::Facts, analysis::Fid, analysis::FnBody, analysis::FnKind,
+    analysis::Home, analysis::MemberKind, analysis::Mode, analysis::RootBinding, analysis::Special,
+    analysis::root_binding, native::NativeIds,
+};
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
     GlobalFunctionDecl, Label, Opcode, Program, PropertyFlags, Reg, RegList, RtArg, ScopeLayout,
     ScopeLocal, TempScope,
 };
+use oxc_semantic::Scoping;
+use oxc_span::{GetSpan, Span};
+use oxc_syntax::{
+    node::NodeId, scope::ScopeFlags, scope::ScopeId, symbol::SymbolFlags, symbol::SymbolId,
+};
+use std::collections::HashMap;
 use vm_core::{
     INFO_GLOBAL, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, SCOPE_DECLARATION, SCOPE_REPL,
     SCOPE_SCRIPT,
 };
 
-use crate::native::NativeIds;
-
-use crate::analysis::{
-    ClassIdx, Facts, Fid, FnBody, FnKind, Home, MemberKind, Mode, RootBinding, Special,
-    root_binding,
-};
+use oxc_ast::ast::*;
 
 /// A construct the materializer does not support yet.
 #[derive(Debug, Clone, PartialEq, Eq)]

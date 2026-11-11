@@ -9,18 +9,12 @@
 //! function table and knows nothing about the language that produced it.
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FeedbackVector,
-    FeedbackVectorInit, FixedArray, FunctionKind, Handle, HandleScope, HandleSlice,
+    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, DenseString,
+    FeedbackVector, FeedbackVectorInit, FixedArray, FunctionKind, Handle, HandleScope, HandleSlice,
     HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, RuntimeId, ScopeInfo,
-    ScopeInfoInit, Value, decode_wtf8, mode_from_strict,
+    ScopeInfoInit, Smi, StringData, Thread, ThreadState, VM, Value, decode_wtf8, mode_from_strict,
 };
-
 use bytecode::{CallableKind, Constant, FunctionId, Program};
-
-use crate::DenseString;
-use crate::Smi;
-use crate::StringData;
-use crate::{Thread, ThreadState, VM};
 
 /// Namespace for turning compiled programs into VM heap objects.
 pub struct Materialize;

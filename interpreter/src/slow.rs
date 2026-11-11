@@ -1,26 +1,21 @@
+use crate::{FloatReg, Ops, Regs, RootsArg};
+use bytecode::Opcode;
 #[cfg(feature = "fast")]
 use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
-use vm_core::VmError;
-use vm_core::raise;
-
-use bytecode::Opcode;
-
-use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
-use vm_core::proxy::Proxy;
 use vm_core::{
     AccessorPair, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass, Errors,
     FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
     PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, raise_runtime, rt_try,
+    VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise,
+    raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
 use crate::{Acc, Ctx};
 #[cfg(feature = "fast")]
 use crate::{Acc, Ctx, TableArg, throw_dispatch};
-use crate::{FloatReg, Ops, Regs, RootsArg};
 #[cfg(feature = "fast")]
 use crate::{
     acc, call_enter, dispatch, dispatch_frame, float, ip, next, pc, reenter, regs, set_acc,

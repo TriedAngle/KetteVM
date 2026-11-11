@@ -8,9 +8,8 @@
 //!
 //! Usage: cargo run -p vm --example test262 -- <harness...> <test-file-or-dir>...
 
-use std::path::{Path, PathBuf};
-
 use mark_sweep::{MarkSweep, MarkSweepConfig};
+use std::{path::Path, path::PathBuf};
 use vm::ScriptError;
 
 /// Features whose syntax/runtime is not implemented at all: flagged

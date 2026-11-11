@@ -1,5 +1,4 @@
 use core::ptr::NonNull;
-
 use heap_api::{AllocError, HeapPtr};
 
 /// Lazily-committed anonymous memory mapping. Pages are provided by the OS

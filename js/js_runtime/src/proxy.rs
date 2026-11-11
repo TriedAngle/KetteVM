@@ -1,20 +1,21 @@
 //! ES 28.2: the Proxy constructor and Proxy.revocable.
 
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::PropertyDescriptor;
-use vm_core::VmError;
-use vm_core::proxy::Proxy;
-use vm_core::raise;
-use vm_core::rt_try;
-use vm_core::{Args, Handle, HandleSlice, Smi, Tagged, Value};
-
 use crate::JSRuntime;
+use vm_core::{
+    Args, Handle, HandleSlice, HostCtx, Object, PropertyDescriptor, Smi, Tagged, Value, VmError,
+    proxy::Proxy, raise, rt_try,
+};
+
+crate::register_natives! {
+    proxy -> proxy_constructor,
+    proxy_revocable,
+    proxy_revoke,
+}
 
 /// `new Proxy(target, handler)` (ES 20.2.1.1): both must be JSReceivers;
 /// the map's capability bits mirror the target's so callability is
 /// observable (`typeof`, future `Call`/`Construct` dispatch).
-pub fn proxy_constructor<'a>(
+fn proxy_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -40,7 +41,7 @@ pub fn proxy_constructor<'a>(
 /// `{ proxy, revoke }`; the revoke closure is the JS template installed
 /// by REVOKE_PRELUDE (it keeps the idempotence flag and calls the
 /// hidden `__revokeProxy` runtime).
-pub fn proxy_revocable<'a>(
+fn proxy_revocable<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -135,7 +136,7 @@ pub fn proxy_revocable<'a>(
 /// Hidden `__revokeProxy(p)`: nulls the proxy's target/handler slots
 /// (idempotent — a null handler already means revoked). Called only by
 /// the REVOKE_PRELUDE closure, which guards it with a done-flag.
-pub fn proxy_revoke<'a>(
+fn proxy_revoke<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

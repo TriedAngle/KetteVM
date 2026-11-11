@@ -1,21 +1,21 @@
 //! ES 19: function properties of the global object (eval, isNaN).
-use vm_core::VmError;
-use vm_core::raise;
-
 use crate::JSRuntime;
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::Result;
-use vm_core::Runtime;
-use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap,
-    SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, Smi, Tagged, ThreadState, VM, Value,
-    WellKnown,
+    HostCtx, Object, Result, Runtime, SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
+    Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown, materialize::Materialize, raise,
+    raise_runtime, rt_try,
 };
-use vm_core::{raise_runtime, rt_try};
 
-pub fn eval_runtime<'a>(
+crate::register_natives! {
+    eval -> eval_runtime,
+    is_nan,
+    print,
+    performance_now,
+    console_log,
+}
+
+fn eval_runtime<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -85,7 +85,7 @@ fn eval_global_context<'s>(
 }
 
 /// `isNaN(x)`: ToNumber(x) is NaN.
-pub fn is_nan<'a>(
+fn is_nan<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -105,7 +105,7 @@ pub fn is_nan<'a>(
 
 /// `print(x)`: ToString(x) to stdout followed by a newline (a shell
 /// convenience, not an ES builtin; the Octane runner reports through it).
-pub fn print<'a>(
+fn print<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -177,7 +177,7 @@ fn console_arg_cold(
 /// `console.log(...args)`: ToString every argument, join with single
 /// spaces, and write the result to stdout followed by a newline (Node's
 /// single-line formatting; a shell convenience, not an ES builtin).
-pub fn console_log<'a>(
+fn console_log<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -204,7 +204,7 @@ pub fn console_log<'a>(
 
 /// `performance.now()`: fractional milliseconds since the Unix epoch
 /// (shell timing convenience mirroring the browser API).
-pub fn performance_now<'a>(
+fn performance_now<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,

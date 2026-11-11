@@ -94,10 +94,7 @@ use proc_macro2::{
     Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream as TokenStream2, TokenTree,
 };
 use quote::{format_ident, quote};
-use syn::Token;
-use syn::parse_macro_input;
-use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
+use syn::{Token, parse_macro_input, punctuated::Punctuated, spanned::Spanned};
 
 const EXITS: &[&str] = &[
     "next",

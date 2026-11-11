@@ -1,6 +1,7 @@
-use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::{
+    ptr, sync::Condvar, sync::Mutex, sync::MutexGuard, sync::OnceLock, sync::atomic::AtomicBool,
+    sync::atomic::AtomicU8, sync::atomic::Ordering,
+};
 
 const PARKED: u8 = 0b01;
 const REQUESTED: u8 = 0b10;

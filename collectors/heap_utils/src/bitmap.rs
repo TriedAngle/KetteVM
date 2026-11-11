@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{sync::atomic::AtomicU64, sync::atomic::Ordering};
 
 /// Address-indexed atomic bitmap over `[base, base + size)`
 /// Addresses must be granule-aligned.

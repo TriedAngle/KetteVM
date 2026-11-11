@@ -1,15 +1,25 @@
-use vm_core::HostCtx;
-use vm_core::Result;
-use vm_core::VmError;
-use vm_core::raise;
-
-use vm_core::{
-    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, LanguageMode,
-    Object, Prototype, Smi, StoreSemantics, Tagged, ThreadState, VM, Value,
-};
-use vm_core::{extend_lifetime, raise_runtime, rt_try};
-
 use crate::JSRuntime;
+use vm_core::{
+    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
+    LanguageMode, Object, Prototype, Result, Smi, StoreSemantics, Tagged, ThreadState, VM, Value,
+    VmError, extend_lifetime, raise, raise_runtime, rt_try,
+};
+
+crate::register_natives! {
+    array -> array_constructor,
+    array_values,
+    array_push,
+    array_pop,
+    array_map,
+    array_reduce,
+    array_iterator_next,
+    array_iterator_symbol_iterator,
+    array_is_array,
+    array_join,
+    array_to_string,
+    array_slice,
+    array_sort,
+}
 
 const ARRAY_ITERATOR_KIND_KEY: i64 = 0;
 const ARRAY_ITERATOR_KIND_VALUE: i64 = 1;
@@ -52,7 +62,7 @@ fn get_indexed_value<'s>(
 /// `Array ( ...values )`
 /// [ES 23.1.1.1](https://tc39.es/ecma262/#sec-array-constructor-array)
 /// Creates an array from `values`; the prototype comes from `new.target`.
-pub fn array_constructor<'a>(
+fn array_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -128,7 +138,7 @@ pub fn array_constructor<'a>(
 /// `Array.prototype.push ( ...items )`
 /// [ES 23.1.3.23](https://tc39.es/ecma262/#sec-array.prototype.push)
 /// Appends `items` and returns the new length.
-pub fn array_push<'a>(
+fn array_push<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -270,7 +280,7 @@ fn has_own_element(heap: &Heap, obj: Tagged<'_, Object>, index: usize) -> bool {
 /// `Array.prototype.pop ( )`
 /// [ES 23.1.3.22](https://tc39.es/ecma262/#sec-array.prototype.pop)
 /// Removes and returns the last element of an array-like receiver.
-pub fn array_pop<'a>(
+fn array_pop<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -394,7 +404,7 @@ fn array_pop_fast<'s>(
 /// [ES 23.1.3.38](https://tc39.es/ecma262/#sec-array.prototype.values)
 /// [ES 23.1.3.40](https://tc39.es/ecma262/#sec-array.prototype-@@iterator)
 /// Creates an array iterator over the receiver.
-pub fn array_values<'a>(
+fn array_values<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -426,7 +436,7 @@ pub fn array_values<'a>(
 /// `%ArrayIteratorPrototype%.next ( )`
 /// [ES 23.1.5.2.1](https://tc39.es/ecma262/#sec-%arrayiteratorprototype%.next)
 /// Advances an array iterator and returns `{ value, done }`.
-pub fn array_iterator_next<'a>(
+fn array_iterator_next<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -547,7 +557,7 @@ pub fn array_iterator_next<'a>(
 /// `Iterator.prototype [ %Symbol.iterator% ] ( )`
 /// [ES 27.1.3.3.18](https://tc39.es/ecma262/#sec-iterator.prototype-%symbol.iterator%)
 /// Returns the receiver.
-pub fn array_iterator_symbol_iterator<'a>(
+fn array_iterator_symbol_iterator<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -559,7 +569,7 @@ pub fn array_iterator_symbol_iterator<'a>(
 /// `Array.prototype.join ( separator )`
 /// [ES 23.1.3.18](https://tc39.es/ecma262/#sec-array.prototype.join)
 /// Joins array-like elements with `separator`, using `","` by default.
-pub fn array_join<'a>(
+fn array_join<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -575,7 +585,7 @@ pub fn array_join<'a>(
 /// `Array.prototype.map ( callback [ , thisArg ] )`
 /// [ES 23.1.3.21](https://tc39.es/ecma262/#sec-array.prototype.map)
 /// Maps each present array-like element into a new array.
-pub fn array_map<'a>(
+fn array_map<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -647,7 +657,7 @@ pub fn array_map<'a>(
 /// `Array.prototype.reduce ( callback [ , initialValue ] )`
 /// [ES 23.1.3.24](https://tc39.es/ecma262/#sec-array.prototype.reduce)
 /// Reduces present array-like elements from left to right.
-pub fn array_reduce<'a>(
+fn array_reduce<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -732,7 +742,7 @@ pub fn array_reduce<'a>(
 /// `Array.prototype.toString ( )`
 /// [ES 23.1.3.36](https://tc39.es/ecma262/#sec-array.prototype.tostring)
 /// Calls the receiver's `join`, falling back to `%Object.prototype.toString%`.
-pub fn array_to_string<'a>(
+fn array_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -844,7 +854,7 @@ fn join_impl<'a>(
 /// [ES 23.1.2.3](https://tc39.es/ecma262/#sec-array.isarray)
 /// [ES 7.2.2](https://tc39.es/ecma262/#sec-isarray)
 /// Returns true when `arg` is an Array, following Proxy targets.
-pub fn array_is_array<'a>(
+fn array_is_array<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -885,7 +895,7 @@ fn slice_bound(
 /// `Array.prototype.slice ( start, end )`
 /// [ES 23.1.3.28](https://tc39.es/ecma262/#sec-array.prototype.slice)
 /// Copies the `[start, end)` range into a new array, preserving holes.
-pub fn array_slice<'a>(
+fn array_slice<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1000,7 +1010,7 @@ pub fn array_slice<'a>(
 /// `Array.prototype.sort ( comparator )`
 /// [ES 23.1.3.30](https://tc39.es/ecma262/#sec-array.prototype.sort)
 /// Sorts array-like elements in place with Rust's stable driftsort, keeping holes at the end.
-pub fn array_sort<'a>(
+fn array_sort<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

@@ -1,8 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-
-use core::cell::Cell as StdCell;
-use core::ptr::NonNull;
+use core::{cell::Cell as StdCell, ptr::NonNull};
+use std::{sync::Arc, sync::Mutex, sync::Weak, sync::atomic::AtomicBool, sync::atomic::Ordering};
 
 pub mod access;
 pub mod api;

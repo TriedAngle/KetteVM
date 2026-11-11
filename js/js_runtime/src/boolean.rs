@@ -1,15 +1,18 @@
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::VmError;
-use vm_core::extend_lifetime;
-use vm_core::raise;
-use vm_core::rt_try;
-use vm_core::{Args, Convert, Handle, Tagged, Value, WrapperKind};
+use vm_core::{
+    Args, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, WrapperKind, extend_lifetime,
+    raise, rt_try,
+};
+
+crate::register_natives! {
+    boolean -> boolean_constructor,
+    boolean_value_of,
+    boolean_to_string,
+}
 
 /// `Boolean ( value )`
 /// [ES 20.3.1.1](https://tc39.es/ecma262/#sec-boolean-constructor-boolean-value)
 /// Converts `value` with ToBoolean; under `new` it wraps that Boolean.
-pub fn boolean_constructor<'a>(
+fn boolean_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -42,7 +45,7 @@ pub fn boolean_constructor<'a>(
 /// `Boolean.prototype.valueOf ( )`
 /// [ES 20.3.3.3](https://tc39.es/ecma262/#sec-boolean.prototype.valueof)
 /// Returns the [[BooleanData]] of the receiver (ThisBooleanValue).
-pub fn boolean_value_of<'a>(
+fn boolean_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -62,7 +65,7 @@ pub fn boolean_value_of<'a>(
 /// `Boolean.prototype.toString ( )`
 /// [ES 20.3.3.2](https://tc39.es/ecma262/#sec-boolean.prototype.tostring)
 /// Returns "true" or "false" for the receiver's [[BooleanData]].
-pub fn boolean_to_string<'a>(
+fn boolean_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

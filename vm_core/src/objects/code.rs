@@ -1,6 +1,5 @@
-use core::{alloc::Layout, cell::UnsafeCell};
-
 use crate::{EdgeVisitable, GcSlot, Header, Heap, HeapObject, ObjectKind, RuntimeId, Smi, Visitor};
+use core::{alloc::Layout, cell::UnsafeCell};
 
 #[repr(C)]
 pub struct Code {

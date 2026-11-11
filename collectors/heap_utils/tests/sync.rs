@@ -1,5 +1,5 @@
 use heap_utils::{LocalNode, Safepoint};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{sync::atomic::AtomicBool, sync::atomic::AtomicUsize, sync::atomic::Ordering};
 
 fn spin_until(mut f: impl FnMut() -> bool) {
     while !f() {

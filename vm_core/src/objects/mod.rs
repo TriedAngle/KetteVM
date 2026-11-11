@@ -52,11 +52,10 @@ pub use script_context::{
 pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
 pub use symbol::Symbol;
 
-use core::{alloc::Layout, ptr::NonNull};
-
 use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
 };
+use core::{alloc::Layout, ptr::NonNull};
 
 pub trait HeapObject: 'static {
     type Init<'a>;

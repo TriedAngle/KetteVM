@@ -3,11 +3,10 @@
 use bytecode::{Opcode, emit};
 use interpreter::BecomeInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm_core::Runtime;
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FeedbackVector, FeedbackVectorInit,
-    FixedArray, Handle, HandleScope, Heap, MODE_SLOPPY, Object, ObjectSlotsInit, Smi, Tagged,
-    Thread, VM, Value,
+    FixedArray, Handle, HandleScope, Heap, MODE_SLOPPY, Object, ObjectSlotsInit, Runtime, Smi,
+    Tagged, Thread, VM, Value,
 };
 
 /// The `#[handler]`-based interpreter plugs into `VM::new` like any

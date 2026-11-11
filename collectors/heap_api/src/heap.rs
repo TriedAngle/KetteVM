@@ -1,10 +1,5 @@
-use core::{
-    alloc::Layout,
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
 use crate::{ObjectAddr, Tlab, Word};
+use core::{alloc::Layout, cell::UnsafeCell, sync::atomic::AtomicU64, sync::atomic::Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocError {

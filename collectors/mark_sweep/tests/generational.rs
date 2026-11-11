@@ -1,9 +1,6 @@
 use core::alloc::Layout;
-
 use heap_api::{AllocError, GcHost, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, Word};
-
-use mark_sweep::heap::{MarkSweepConfig, MarkSweepLocal, MarkSweepState};
-
+use mark_sweep::{heap::MarkSweepConfig, heap::MarkSweepLocal, heap::MarkSweepState};
 use std::sync::Arc;
 
 /// Node size for the fake host: fixed, so `layout_of` works identically on

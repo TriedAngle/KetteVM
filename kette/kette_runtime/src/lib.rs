@@ -1,9 +1,7 @@
-use vm_core::intrinsics::declare_globals;
-use vm_core::raise_runtime;
 use vm_core::{
     Args, DenseString, EdgeVisitable, Handle, HandleSlice, HostCtx, Map, MapInit, MapKind,
     NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, Tagged, VM, Value,
-    Visitor,
+    Visitor, intrinsics::declare_globals, raise_runtime,
 };
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).

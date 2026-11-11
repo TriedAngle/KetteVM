@@ -1,14 +1,14 @@
 use core::alloc::Layout;
-
 use heap_api::{
     AllocError, GcHost, HeapBackend, HeapPtr, RawCell, STRONG_PTR, TAG_MASK, Tlab, Visitor, Word,
 };
-
-use mark_sweep::heap::{MarkSweep, MarkSweepConfig, MarkSweepLocal, MarkSweepState};
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use mark_sweep::{
+    heap::MarkSweep, heap::MarkSweepConfig, heap::MarkSweepLocal, heap::MarkSweepState,
+};
+use std::{
+    collections::HashMap, sync::Arc, sync::LazyLock, sync::Mutex, sync::atomic::AtomicBool,
+    sync::atomic::Ordering,
+};
 
 static SIZES: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 

@@ -2,10 +2,8 @@
 //! and assert on function metadata and the emitted instruction stream.
 //! (Runtime behavior is covered by the `vm` test suite.)
 
-use bytecode::Opcode;
-use bytecode::{FrontendErrorKind, Function, FunctionId, Program, SourceMode};
-use js_compiler::compile_js;
-use js_compiler::native::NativeIds;
+use bytecode::{FrontendErrorKind, Function, FunctionId, Opcode, Program, SourceMode};
+use js_compiler::{compile_js, native::NativeIds};
 use vm_core::NativeIndex;
 
 /// Ids are placeholders: this tool never executes the program.

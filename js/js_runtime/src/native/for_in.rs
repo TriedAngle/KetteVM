@@ -1,14 +1,9 @@
 //! for-in enumeration (ES 14.7.5): a hidden enumerator object that walks
 //! the prototype chain lazily, one own-key snapshot per level.
-use vm_core::VmError;
-use vm_core::raise;
-
-use crate::JSRuntime;
-use crate::known::JsKnown;
-use vm_core::access::own_property_enumerable;
+use crate::{JSRuntime, known::JsKnown};
 use vm_core::{
     Args, DenseString, FixedArray, Float, Handle, HandleScope, Heap, HostCtx, Object, Smi, Symbol,
-    Tagged, VM, Value, WellKnown,
+    Tagged, VM, Value, VmError, WellKnown, access::own_property_enumerable, raise,
 };
 
 /// Enumerator slot layout (a hidden object of `for_in_enumerator_map`):

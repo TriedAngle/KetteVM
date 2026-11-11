@@ -1,9 +1,8 @@
-use std::sync::{Mutex, MutexGuard};
-
 use crate::{
     Cell, CellInit, FixedArray, Handle, HandleScope, Heap, Map, MapKind, MaybeWeak, Object,
     PrototypeInfo, PrototypeInfoInit, Smi, Tagged, Value, WeakFixedArray, WeakFixedArrayInit,
 };
+use std::{sync::Mutex, sync::MutexGuard};
 
 pub struct PrototypeRegistry {
     lock: Mutex<()>,

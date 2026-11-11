@@ -18,10 +18,11 @@
 //! speculatively and ordinary expression parsing resumes when no `:`
 //! follows. Slots must precede `|params|`, which must precede the body.
 
-use crate::ast::{Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, SlotKind, UnaryOp};
-use crate::plumbing::ParseError;
-use crate::token::{ByteSpan, Token, TokenKind, TokenValue};
-use crate::{CharStream, Scanner, Symbol, SymbolTable};
+use crate::{
+    CharStream, Scanner, Symbol, SymbolTable, ast::Ast, ast::BinaryOp, ast::Node, ast::NodeId,
+    ast::NodeList, ast::ObjectParts, ast::SlotKind, ast::UnaryOp, plumbing::ParseError,
+    token::ByteSpan, token::Token, token::TokenKind, token::TokenValue,
+};
 
 fn is_name_kind(kind: TokenKind) -> bool {
     kind == TokenKind::Identifier || kind.is_keyword()

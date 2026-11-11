@@ -2,16 +2,13 @@
 //! instantiation (ES 9.1.1.4.16, shared by the JS front end and Kette) and
 //! the array exotic object's `length` accessor.
 
-use crate::VmError;
-use crate::lookup::{Hit, Lookup};
-use crate::raise;
-use crate::tools::KetteTools;
 use crate::{
     AccessorInfo, Args, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
     EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
     MODE_CLASS, MODE_LET, Map, MapInit, MapKind, Object, PropertyDescriptor, Runtime, RuntimeId,
-    ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor,
-    frame_context_value, info_is_lexical, info_mode, mode_from_strict, rt_try,
+    ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
+    frame_context_value, info_is_lexical, info_mode, lookup::Hit, lookup::Lookup, mode_from_strict,
+    raise, rt_try, tools::KetteTools,
 };
 
 // ---- array `length` ----

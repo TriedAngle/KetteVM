@@ -1,5 +1,3 @@
-use core::ptr::NonNull;
-
 use crate::{
     AccessorInfo, AccessorInfoInit, Cell, CellInit, ContextInit, ContextObject, DenseString,
     EdgeVisitable, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice, Heap, Map,
@@ -7,6 +5,7 @@ use crate::{
     PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
     SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
 };
+use core::ptr::NonNull;
 
 pub struct WellKnown {
     // vm internal machinery: sentinels, canonical empties, builtin maps

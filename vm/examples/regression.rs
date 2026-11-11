@@ -10,10 +10,8 @@
 //! fresh VM with `tests/regression/harness/assert.js` prepended. Tests are
 //! sharded across `KETTEVM_JOBS` workers (default: available parallelism).
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-
 use mark_sweep::{MarkSweep, MarkSweepConfig};
+use std::{panic::AssertUnwindSafe, panic::catch_unwind, path::Path, path::PathBuf};
 use vm::{DefaultInterpreter, JSRuntime, JavascriptCompiler, VM, VmCore};
 
 enum Outcome {

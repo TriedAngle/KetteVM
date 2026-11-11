@@ -2,12 +2,12 @@
 //! survivors, the write barrier retains old-to-young edges, weak cells
 //! settle, and traced chains stay consistent.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
-
 use heap_tests::vm;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
+use std::{
+    sync::Arc, sync::atomic::AtomicBool, sync::atomic::AtomicUsize, sync::atomic::Ordering,
+    time::Duration,
+};
 use vm::{DenseString, FixedArray, Handle, HandleScope, Smi, Thread, VM};
 
 fn test_vm() -> VM {

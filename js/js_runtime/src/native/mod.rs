@@ -1,35 +1,21 @@
 //! The natives `CallNative` dispatches to: compiled-language semantics (each
 //! cites its ES section), not JS-visible library functions. [`register`]
 //! assigns their ids in the VM's native registry.
-use vm_core::Errors;
-use vm_core::VmError;
-use vm_core::bail;
-use vm_core::extend_lifetime;
-use vm_core::raise;
-
-use vm_core::Result;
-use vm_core::Runtime;
-mod for_in;
-mod iterators;
-
-use vm_core::{
-    AccessorPair, Args, ArgumentsCreate, ContextObject, Convert, DenseString, FixedArray, Handle,
-    HandleSlice, Heap, Key, LanguageMode, Object, ObjectSlotsInit, PropertyDescriptor, SlotName,
-    Smi, StoreSemantics, StringData, Symbol, Tagged, Value, info_is_immutable, info_is_lexical,
-};
-
 use crate::JSRuntime;
 use for_in::{for_in_enumerate, for_in_next};
 use iterators::{get_iterator, iterator_done, iterator_next, iterator_value};
 use js_compiler::native::NativeIds;
-use vm_core::HandleScope;
-use vm_core::PartialDescriptor;
-use vm_core::ThreadState;
-use vm_core::access::own_property_enumerable;
-use vm_core::intrinsics;
-use vm_core::materialize::Materialize;
-use vm_core::proxy::Proxy;
-use vm_core::{HostCtx, VM, frame_context_value, raise_runtime, rt_try};
+use vm_core::{
+    AccessorPair, Args, ArgumentsCreate, ContextObject, Convert, DenseString, Errors, FixedArray,
+    Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object, ObjectSlotsInit,
+    PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics,
+    StringData, Symbol, Tagged, ThreadState, VM, Value, VmError, access::own_property_enumerable,
+    bail, extend_lifetime, frame_context_value, info_is_immutable, info_is_lexical, intrinsics,
+    materialize::Materialize, proxy::Proxy, raise, raise_runtime, rt_try,
+};
+
+mod for_in;
+mod iterators;
 
 /// Register every helper and collect the ids the compiler emits.
 pub fn register(vm: &mut VM) -> NativeIds {

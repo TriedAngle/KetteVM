@@ -1,10 +1,8 @@
-use std::borrow::Cow;
-
-use crate::Result;
 use crate::{
-    GcSlot, Handle, HandleScope, HandleSlice, Heap, Map, Object, PropertyDescriptor, Tagged,
-    ThreadState, Thrown, VM, Value,
+    GcSlot, Handle, HandleScope, HandleSlice, Heap, Map, Object, PropertyDescriptor, Result,
+    Tagged, ThreadState, Thrown, VM, Value,
 };
+use std::borrow::Cow;
 
 macro_rules! vm_errors {
     ($( $variant:ident => $kind:ident, $text:literal ; )*) => {

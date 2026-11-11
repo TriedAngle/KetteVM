@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, ObjectKind, Smi, Tagged,
     Value, Visitor,
 };
+use core::alloc::Layout;
 
 /// The sparse-array elements backing store: an open-addressing hash
 /// table keyed by array index. FixedArray-shaped, with a three-word

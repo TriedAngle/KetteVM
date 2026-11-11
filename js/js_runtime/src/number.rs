@@ -1,20 +1,22 @@
 //! ES 21.1: the Number constructor and prototype methods.
 
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::VmError;
-use vm_core::extend_lifetime;
-use vm_core::raise;
-
-use vm_core::rt_try;
 use vm_core::{
-    Args, Convert, DenseString, Handle, Heap, Smi, Tagged, Value, WellKnown, WrapperKind,
+    Args, Convert, DenseString, Handle, Heap, HostCtx, Object, Smi, Tagged, Value, VmError,
+    WellKnown, WrapperKind, extend_lifetime, raise, rt_try,
 };
+
+crate::register_natives! {
+    number -> number_constructor,
+    number_value_of,
+    number_to_string,
+    number_to_fixed,
+    number_to_precision,
+}
 
 /// `Number ( value )`
 /// [ES 21.1.1.1](https://tc39.es/ecma262/#sec-number-constructor-number-value)
 /// Converts `value` with ToNumeric; under `new` it wraps that Number.
-pub fn number_constructor<'a>(
+fn number_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -53,7 +55,7 @@ pub fn number_constructor<'a>(
     })
 }
 
-pub fn number_value_of<'a>(
+fn number_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -70,7 +72,7 @@ pub fn number_value_of<'a>(
     }
 }
 
-pub fn number_to_string<'a>(
+fn number_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -102,7 +104,7 @@ fn number_receiver(heap: &Heap, roots: &WellKnown, args: Args) -> Option<f64> {
 
 /// `Number.prototype.toFixed(fractionDigits?)` (ES 21.1.3.3): fixed-point
 /// notation with `fractionDigits` digits after the decimal point.
-pub fn number_to_fixed<'a>(
+fn number_to_fixed<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -142,7 +144,7 @@ pub fn number_to_fixed<'a>(
 
 /// `Number.prototype.toPrecision(precision?)` (ES 21.1.3.6): `precision`
 /// significant digits, fixed or exponential per the magnitude.
-pub fn number_to_precision<'a>(
+fn number_to_precision<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

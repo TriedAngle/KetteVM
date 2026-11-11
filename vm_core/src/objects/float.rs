@@ -1,6 +1,5 @@
-use core::{alloc::Layout, cell::Cell};
-
 use crate::{EdgeVisitable, Header, Heap, HeapObject, ObjectKind, Visitor};
+use core::{alloc::Layout, cell::Cell};
 
 #[repr(C)]
 pub struct Float {

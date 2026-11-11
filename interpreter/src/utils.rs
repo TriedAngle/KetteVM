@@ -1,18 +1,11 @@
+use crate::{Ctx, Regs, RootsArg};
 use bytecode::Opcode;
-use vm_core::VmError;
-use vm_core::raise;
-
-use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
-use vm_core::proxy::Proxy;
 use vm_core::{
     Acc, Args, CallTarget, Callee, Errors, FeedbackVector, FunctionKind, Handle, HandleScope, Heap,
-    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Thrown, Value, WellKnown,
+    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Thrown, Value, VmError, WellKnown,
+    ic::CallHit, ic::CallProbe, ic::CallRecord, ic::InlineCache, proxy::Proxy, raise,
     raise_runtime,
 };
-
-use crate::{Regs, RootsArg};
-
-use crate::Ctx;
 
 /// The outcome of a call-site start helper.
 pub enum StagedCall<'a> {

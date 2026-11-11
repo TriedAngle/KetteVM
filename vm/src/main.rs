@@ -1,10 +1,8 @@
-use std::io::Write;
-use std::path::Path;
-
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, ScriptError, Thread, VM, VmCore};
+use std::{io::Write, path::Path};
 use vm::{
-    DenseString, Float, Heap, JavascriptCompiler, KetteCompiler, SlotName, Smi, Tagged, Value,
+    Compiler, DefaultInterpreter, DenseString, Float, Heap, JSRuntime, JavascriptCompiler,
+    KetteCompiler, KetteRuntime, ScriptError, SlotName, Smi, Tagged, Thread, VM, Value, VmCore,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]

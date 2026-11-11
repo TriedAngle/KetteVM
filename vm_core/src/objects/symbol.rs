@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, ObjectKind,
     Tagged, Value, Visitor,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct Symbol {

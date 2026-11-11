@@ -1,5 +1,4 @@
 use heap_tests::for_each_backend;
-
 use vm::{DenseString, FixedArray, HeapBackend, Smi};
 
 fn well_known_survive_cycles<B: HeapBackend>()

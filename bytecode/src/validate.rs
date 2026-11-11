@@ -1,6 +1,7 @@
-use crate::opcodes::IndexKind;
-use crate::program::{Constant, Function, Program};
-use crate::{Opcode, Operand, REGISTER_FILE_START, jump_target, try_decode};
+use crate::{
+    Opcode, Operand, REGISTER_FILE_START, jump_target, opcodes::IndexKind, program::Constant,
+    program::Function, program::Program, try_decode,
+};
 
 /// A compiled function (or program) is malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

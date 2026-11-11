@@ -1,12 +1,23 @@
 //! ES 22.1 (Math): function properties of the Math namespace object.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use vm_core::Result;
+use std::{sync::atomic::AtomicU64, sync::atomic::Ordering};
+use vm_core::{
+    Args, Handle, Heap, HostCtx, Object, Result, Tagged, ThreadState, VM, Value, rt_try,
+};
 
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::rt_try;
-use vm_core::{Args, Handle, Heap, Tagged, ThreadState, VM, Value};
+crate::register_natives! {
+    math_log,
+    math_pow,
+    math_sqrt,
+    math_abs,
+    math_floor,
+    math_ceil,
+    math_trunc,
+    math_round,
+    math_min,
+    math_max,
+    math_random,
+}
 
 /// TODO: better distribution
 /// xorshift64
@@ -88,7 +99,7 @@ fn math_integral<'a>(
 
 /// `Math.sqrt(x)` (ES 22.1.2.29): ToNumber, then the IEEE-754 square root
 /// (NaN/negative input → NaN, ±0 → ±0).
-pub fn math_sqrt<'a>(
+fn math_sqrt<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -100,7 +111,7 @@ pub fn math_sqrt<'a>(
 }
 
 /// `Math.log(x)` (ES 22.1.2.15): natural logarithm.
-pub fn math_log<'a>(
+fn math_log<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -112,7 +123,7 @@ pub fn math_log<'a>(
 }
 
 /// `Math.pow(base, exponent)` (ES 22.1.2.20).
-pub fn math_pow<'a>(
+fn math_pow<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -138,7 +149,7 @@ fn js_round(x: f64) -> f64 {
 }
 
 /// `Math.abs(x)` (ES 22.1.2.1).
-pub fn math_abs<'a>(
+fn math_abs<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -150,7 +161,7 @@ pub fn math_abs<'a>(
 }
 
 /// `Math.floor(x)` (ES 22.1.2.11).
-pub fn math_floor<'a>(
+fn math_floor<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -162,7 +173,7 @@ pub fn math_floor<'a>(
 }
 
 /// `Math.ceil(x)` (ES 22.1.2.2).
-pub fn math_ceil<'a>(
+fn math_ceil<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -174,7 +185,7 @@ pub fn math_ceil<'a>(
 }
 
 /// `Math.trunc(x)` (ES 22.1.2.31).
-pub fn math_trunc<'a>(
+fn math_trunc<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -186,7 +197,7 @@ pub fn math_trunc<'a>(
 }
 
 /// `Math.round(x)` (ES 22.1.2.24).
-pub fn math_round<'a>(
+fn math_round<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -227,7 +238,7 @@ fn math_minmax<'a>(ctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value>
 }
 
 /// `Math.min(...args)` (ES 22.1.2.14).
-pub fn math_min<'a>(
+fn math_min<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -236,7 +247,7 @@ pub fn math_min<'a>(
 }
 
 /// `Math.max(...args)` (ES 22.1.2.13).
-pub fn math_max<'a>(
+fn math_max<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -246,7 +257,7 @@ pub fn math_max<'a>(
 
 /// `Math.random()` (ES 22.1.2.22): a number in `[0, 1)` built from the top
 /// 53 random bits.
-pub fn math_random<'a>(
+fn math_random<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,

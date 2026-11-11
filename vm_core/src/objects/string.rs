@@ -1,9 +1,8 @@
-use core::{alloc::Layout, cell::UnsafeCell, cmp::Ordering};
-
 use crate::{
     EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, Key, Map, MapKind,
     ObjectKind, PropertyDescriptor, SlotName, Smi, Tagged, Value, Visitor,
 };
+use core::{alloc::Layout, cell::UnsafeCell, cmp::Ordering};
 
 /// A String exotic own key (ES 10.4.3.4 StringGetOwnProperty): `length` or
 /// an in-range code-unit index. The one-code-unit value is materialized by

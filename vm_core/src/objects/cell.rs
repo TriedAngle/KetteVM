@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     EdgeVisitable, Header, Heap, HeapObject, MaybeWeak, MaybeWeakGcSlot, ObjectKind, Tagged, Value,
     Visitor,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct Cell {

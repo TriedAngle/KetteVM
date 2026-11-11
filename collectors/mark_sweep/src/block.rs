@@ -1,8 +1,6 @@
-use core::alloc::Layout;
-
-use heap_api::{GcHost, HeapPtr, ObjectAddr};
-
 use crate::chunk::ChunkHeader;
+use core::alloc::Layout;
+use heap_api::{GcHost, HeapPtr, ObjectAddr};
 
 pub const ALIGN: usize = 16;
 

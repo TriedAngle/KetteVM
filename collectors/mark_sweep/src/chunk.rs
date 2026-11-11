@@ -1,12 +1,11 @@
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
+use crate::{block::ALIGN, block::FreeList, block::need_for};
 use core::alloc::Layout;
-
 use heap_api::{AllocError, CellRef, GcHost, HeapPtr, ObjectAddr};
 use heap_utils::MMapBuffer;
-
-use crate::block::{ALIGN, FreeList, need_for};
+use std::{
+    sync::Arc, sync::Mutex, sync::atomic::AtomicU8, sync::atomic::AtomicU64,
+    sync::atomic::AtomicUsize, sync::atomic::Ordering,
+};
 
 pub const CHUNK_SIZE: usize = 256 * 1024;
 

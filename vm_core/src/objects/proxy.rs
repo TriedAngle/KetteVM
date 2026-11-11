@@ -1,13 +1,11 @@
-use crate::VmError;
-use crate::bail;
-use core::alloc::Layout;
-
 use crate::{
     Args, Compare, Convert, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
     HeapObject, HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty,
     PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName,
-    Smi, StoreSemantics, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    Smi, StoreSemantics, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor, VmError,
+    bail,
 };
+use core::alloc::Layout;
 
 pub struct Proxy;
 

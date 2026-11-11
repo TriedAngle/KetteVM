@@ -1,9 +1,9 @@
+use crate::{
+    CallableKind, Opcode, Operand, Scale, emit, program::Constant, program::Function,
+    program::HandlerEntry,
+};
 use core::cell::Cell;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use crate::program::{Constant, Function, HandlerEntry};
-use crate::{CallableKind, Opcode, Operand, Scale, emit};
+use std::{collections::HashMap, sync::atomic::AtomicU32, sync::atomic::Ordering};
 
 /// One staged argument of a runtime call: where the value for a window
 /// slot comes from. [`RtArg::Acc`] captures the accumulator's current

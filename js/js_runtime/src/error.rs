@@ -1,16 +1,24 @@
-use vm_core::Errors;
-use vm_core::HostCtx;
-use vm_core::VmError;
-use vm_core::raise;
 use vm_core::{
-    Args, Convert, DenseString, Handle, HandleScope, Heap, Map, Object, Tagged, ThreadState, Value,
+    Args, Convert, DenseString, Errors, Handle, HandleScope, Heap, HostCtx, Map, Object, Tagged,
+    ThreadState, VM, Value, VmError, raise, rt_try,
 };
-use vm_core::{VM, rt_try};
+
+crate::register_natives! {
+    reference_error -> reference_error_constructor,
+    range_error -> range_error_constructor,
+    syntax_error -> syntax_error_constructor,
+    eval_error -> eval_error_constructor,
+    uri_error -> uri_error_constructor,
+    error -> error_constructor,
+    type_error -> type_error_constructor,
+    error_is_error,
+    error_to_string,
+}
 
 /// `Error ( message [ , options ] )`
 /// [ES 20.5.1.1](https://tc39.es/ecma262/#sec-error-constructor)
 /// Creates an Error object with non-enumerable `message` and `cause`.
-pub fn error_constructor<'a>(
+fn error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -26,7 +34,7 @@ pub fn error_constructor<'a>(
 
 /// `EvalError ( message [ , options ] )`
 /// [ES 20.5.5.1](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-evalerror)
-pub fn eval_error_constructor<'a>(
+fn eval_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -42,7 +50,7 @@ pub fn eval_error_constructor<'a>(
 
 /// `RangeError ( message [ , options ] )`
 /// [ES 20.5.5.2](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-rangeerror)
-pub fn range_error_constructor<'a>(
+fn range_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -58,7 +66,7 @@ pub fn range_error_constructor<'a>(
 
 /// `ReferenceError ( message [ , options ] )`
 /// [ES 20.5.5.3](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-referenceerror)
-pub fn reference_error_constructor<'a>(
+fn reference_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -74,7 +82,7 @@ pub fn reference_error_constructor<'a>(
 
 /// `SyntaxError ( message [ , options ] )`
 /// [ES 20.5.5.4](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-syntaxerror)
-pub fn syntax_error_constructor<'a>(
+fn syntax_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -90,7 +98,7 @@ pub fn syntax_error_constructor<'a>(
 
 /// `TypeError ( message [ , options ] )`
 /// [ES 20.5.5.5](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-typeerror)
-pub fn type_error_constructor<'a>(
+fn type_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -106,7 +114,7 @@ pub fn type_error_constructor<'a>(
 
 /// `URIError ( message [ , options ] )`
 /// [ES 20.5.5.6](https://tc39.es/ecma262/#sec-native-error-types-used-in-this-standard-urierror)
-pub fn uri_error_constructor<'a>(
+fn uri_error_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -142,7 +150,7 @@ fn make_error<'a>(
 /// `Error.isError ( arg )`
 /// [ES 20.5.2.1](https://tc39.es/ecma262/#sec-error.iserror)
 /// True when `arg` is an Object with an [[ErrorData]] slot.
-pub fn error_is_error<'a>(
+fn error_is_error<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -158,7 +166,7 @@ pub fn error_is_error<'a>(
 /// `Error.prototype.toString ( )`
 /// [ES 20.5.3.4](https://tc39.es/ecma262/#sec-error.prototype.tostring)
 /// Returns `"name: message"`, omitting either part when it is empty.
-pub fn error_to_string<'a>(
+fn error_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

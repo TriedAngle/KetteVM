@@ -1,10 +1,9 @@
-use core::alloc::Layout;
-
 use crate::{
     ContextObject, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
     HeapObject, INFO_GLOBAL, ObjectKind, Result, Smi, Tagged, Value, Visitor, VmError,
     info_is_immutable, info_is_lexical,
 };
+use core::alloc::Layout;
 
 const INITIAL_HASH_CAPACITY: usize = 16;
 

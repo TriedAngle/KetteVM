@@ -1,11 +1,7 @@
+use crate::{Handle, HandleScope, Heap, HeapObject, MapKind, Object, SlotName};
 use core::{marker::PhantomData, ptr::NonNull};
 
-use crate::{Heap, HeapObject, MapKind, Object};
-
 // imports flattened
-use crate::Handle;
-use crate::HandleScope;
-use crate::SlotName;
 
 // The word/tag representation is shared with the heap ABI crate; the VM
 // layers the typed Value/Tagged wrappers on top of it.

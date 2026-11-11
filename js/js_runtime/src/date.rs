@@ -13,21 +13,57 @@
 //! Time values follow ES 21.4.1.1/21.4.1.31: integral milliseconds in the
 //! inclusive range ±8.64e15; anything else is NaN. Every entry point funnels
 //! through [`time_clip`].
-use vm_core::VmError;
-use vm_core::bail;
-use vm_core::raise;
-
-use vm_core::Handle;
-use vm_core::Hint;
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::Result;
-use vm_core::{Args, HandleScope, Heap};
-use vm_core::{DenseString, MapKind, Tagged, Value};
-use vm_core::{ThreadState, VM};
-use vm_core::{raise_runtime, rt_try};
-
 use crate::JSRuntime;
+use vm_core::{
+    Args, DenseString, Handle, HandleScope, Heap, Hint, HostCtx, MapKind, Object, Result, Tagged,
+    ThreadState, VM, Value, VmError, bail, raise, raise_runtime, rt_try,
+};
+
+crate::register_natives! {
+    date -> date_constructor,
+    date_now,
+    date_value_of,
+    date_get_time,
+    date_get_date,
+    date_get_day,
+    date_get_full_year,
+    date_get_hours,
+    date_get_milliseconds,
+    date_get_minutes,
+    date_get_month,
+    date_get_seconds,
+    date_get_timezone_offset,
+    date_get_utc_date,
+    date_get_utc_day,
+    date_get_utc_full_year,
+    date_get_utc_hours,
+    date_get_utc_milliseconds,
+    date_get_utc_minutes,
+    date_get_utc_month,
+    date_get_utc_seconds,
+    date_get_year,
+    date_set_date,
+    date_set_full_year,
+    date_set_hours,
+    date_set_milliseconds,
+    date_set_minutes,
+    date_set_month,
+    date_set_seconds,
+    date_set_time,
+    date_set_utc_date,
+    date_set_utc_full_year,
+    date_set_utc_hours,
+    date_set_utc_milliseconds,
+    date_set_utc_minutes,
+    date_set_utc_month,
+    date_set_utc_seconds,
+    date_set_year,
+    date_to_string,
+    date_to_iso_string,
+    date_to_json,
+    date_to_gmt_string,
+    date_parse,
+}
 
 /// Milliseconds in a UTC day.
 const MS_PER_DAY_I64: i64 = 86_400_000;
@@ -417,7 +453,7 @@ fn parse_loose(text: &str) -> Option<f64> {
 
 /// `Date.parse(string)` (ES 21.4.3.2): the ISO form plus the formats our
 /// `toGMTString`/`toString` emit. Unparseable input is NaN.
-pub fn date_parse<'a>(
+fn date_parse<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -555,7 +591,7 @@ fn date_from_components(vm: &VM, heap: &mut Heap, state: &ThreadState, args: Arg
 /// `Date ( ...values )`
 /// [ES 21.4.2.1](https://tc39.es/ecma262/#sec-date)
 /// Called, returns `ToDateString(now)`; constructed, wraps the time value.
-pub fn date_constructor<'a>(
+fn date_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -598,7 +634,7 @@ pub fn date_constructor<'a>(
 /// `Date.now ( )`
 /// [ES 21.4.3.1](https://tc39.es/ecma262/#sec-date.now)
 /// Returns the current time value in epoch milliseconds.
-pub fn date_now<'a>(
+fn date_now<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
@@ -616,7 +652,7 @@ fn date_value(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<f64> {
 }
 
 /// `Date.prototype.getTime` (ES 21.4.4.9): the wrapped time value.
-pub fn date_get_time<'a>(
+fn date_get_time<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -632,7 +668,7 @@ pub fn date_get_time<'a>(
 
 /// `Date.prototype.valueOf` (ES 21.4.4.40): the same [[DateValue]] access
 /// as `getTime`.
-pub fn date_value_of<'a>(
+fn date_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -800,7 +836,7 @@ fn set_fields<'a>(
 /// `Date.prototype.setTime ( time )`
 /// [ES 21.4.4.27](https://tc39.es/ecma262/#sec-date.prototype.settime)
 /// Sets the time value to `TimeClip(ToNumber(time))`.
-pub fn date_set_time<'a>(
+fn date_set_time<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -822,7 +858,7 @@ pub fn date_set_time<'a>(
 /// `Date.prototype.getTimezoneOffset ( )`
 /// [ES 21.4.4.11](https://tc39.es/ecma262/#sec-date.prototype.gettimezoneoffset)
 /// Returns the UTC offset in minutes, always +0 on this UTC-only host.
-pub fn date_get_timezone_offset<'a>(
+fn date_get_timezone_offset<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -840,7 +876,7 @@ pub fn date_get_timezone_offset<'a>(
 /// `Date.prototype.getYear ( )`
 /// [ES B.2.3.1](https://tc39.es/ecma262/#sec-date.prototype.getyear)
 /// Returns the year minus 1900 (legacy).
-pub fn date_get_year<'a>(
+fn date_get_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -860,7 +896,7 @@ pub fn date_get_year<'a>(
 /// `Date.prototype.getDate ( )`
 /// [ES 21.4.4.2](https://tc39.es/ecma262/#sec-date.prototype.getdate)
 /// Returns the day of the month (1..31).
-pub fn date_get_date<'a>(
+fn date_get_date<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -871,7 +907,7 @@ pub fn date_get_date<'a>(
 /// `Date.prototype.getDay ( )`
 /// [ES 21.4.4.3](https://tc39.es/ecma262/#sec-date.prototype.getday)
 /// Returns the weekday (0 = Sunday).
-pub fn date_get_day<'a>(
+fn date_get_day<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -882,7 +918,7 @@ pub fn date_get_day<'a>(
 /// `Date.prototype.getFullYear ( )`
 /// [ES 21.4.4.4](https://tc39.es/ecma262/#sec-date.prototype.getfullyear)
 /// Returns the full year.
-pub fn date_get_full_year<'a>(
+fn date_get_full_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -893,7 +929,7 @@ pub fn date_get_full_year<'a>(
 /// `Date.prototype.getHours ( )`
 /// [ES 21.4.4.5](https://tc39.es/ecma262/#sec-date.prototype.gethours)
 /// Returns the hour (0..23).
-pub fn date_get_hours<'a>(
+fn date_get_hours<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -904,7 +940,7 @@ pub fn date_get_hours<'a>(
 /// `Date.prototype.getMilliseconds ( )`
 /// [ES 21.4.4.6](https://tc39.es/ecma262/#sec-date.prototype.getmilliseconds)
 /// Returns the millisecond (0..999).
-pub fn date_get_milliseconds<'a>(
+fn date_get_milliseconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -915,7 +951,7 @@ pub fn date_get_milliseconds<'a>(
 /// `Date.prototype.getMinutes ( )`
 /// [ES 21.4.4.7](https://tc39.es/ecma262/#sec-date.prototype.getminutes)
 /// Returns the minute (0..59).
-pub fn date_get_minutes<'a>(
+fn date_get_minutes<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -926,7 +962,7 @@ pub fn date_get_minutes<'a>(
 /// `Date.prototype.getMonth ( )`
 /// [ES 21.4.4.8](https://tc39.es/ecma262/#sec-date.prototype.getmonth)
 /// Returns the month index (0..11).
-pub fn date_get_month<'a>(
+fn date_get_month<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -937,7 +973,7 @@ pub fn date_get_month<'a>(
 /// `Date.prototype.getSeconds ( )`
 /// [ES 21.4.4.9](https://tc39.es/ecma262/#sec-date.prototype.getseconds)
 /// Returns the second (0..59).
-pub fn date_get_seconds<'a>(
+fn date_get_seconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -948,7 +984,7 @@ pub fn date_get_seconds<'a>(
 /// `Date.prototype.getUTCDate ( )`
 /// [ES 21.4.4.12](https://tc39.es/ecma262/#sec-date.prototype.getutcdate)
 /// Returns the UTC day of the month (1..31).
-pub fn date_get_utc_date<'a>(
+fn date_get_utc_date<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -959,7 +995,7 @@ pub fn date_get_utc_date<'a>(
 /// `Date.prototype.getUTCDay ( )`
 /// [ES 21.4.4.13](https://tc39.es/ecma262/#sec-date.prototype.getutcday)
 /// Returns the UTC weekday (0 = Sunday).
-pub fn date_get_utc_day<'a>(
+fn date_get_utc_day<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -970,7 +1006,7 @@ pub fn date_get_utc_day<'a>(
 /// `Date.prototype.getUTCFullYear ( )`
 /// [ES 21.4.4.14](https://tc39.es/ecma262/#sec-date.prototype.getutcfullyear)
 /// Returns the UTC full year.
-pub fn date_get_utc_full_year<'a>(
+fn date_get_utc_full_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -981,7 +1017,7 @@ pub fn date_get_utc_full_year<'a>(
 /// `Date.prototype.getUTCHours ( )`
 /// [ES 21.4.4.15](https://tc39.es/ecma262/#sec-date.prototype.getutchours)
 /// Returns the UTC hour (0..23).
-pub fn date_get_utc_hours<'a>(
+fn date_get_utc_hours<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -992,7 +1028,7 @@ pub fn date_get_utc_hours<'a>(
 /// `Date.prototype.getUTCMilliseconds ( )`
 /// [ES 21.4.4.16](https://tc39.es/ecma262/#sec-date.prototype.getutcmilliseconds)
 /// Returns the UTC millisecond (0..999).
-pub fn date_get_utc_milliseconds<'a>(
+fn date_get_utc_milliseconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1003,7 +1039,7 @@ pub fn date_get_utc_milliseconds<'a>(
 /// `Date.prototype.getUTCMinutes ( )`
 /// [ES 21.4.4.17](https://tc39.es/ecma262/#sec-date.prototype.getutcminutes)
 /// Returns the UTC minute (0..59).
-pub fn date_get_utc_minutes<'a>(
+fn date_get_utc_minutes<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1014,7 +1050,7 @@ pub fn date_get_utc_minutes<'a>(
 /// `Date.prototype.getUTCMonth ( )`
 /// [ES 21.4.4.18](https://tc39.es/ecma262/#sec-date.prototype.getutcmonth)
 /// Returns the UTC month index (0..11).
-pub fn date_get_utc_month<'a>(
+fn date_get_utc_month<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1025,7 +1061,7 @@ pub fn date_get_utc_month<'a>(
 /// `Date.prototype.getUTCSeconds ( )`
 /// [ES 21.4.4.19](https://tc39.es/ecma262/#sec-date.prototype.getutcseconds)
 /// Returns the UTC second (0..59).
-pub fn date_get_utc_seconds<'a>(
+fn date_get_utc_seconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1036,7 +1072,7 @@ pub fn date_get_utc_seconds<'a>(
 /// `Date.prototype.setDate ( ... )`
 /// [ES 21.4.4.20](https://tc39.es/ecma262/#sec-date.prototype.setdate)
 /// Sets the the day of the month and returns the new time value.
-pub fn date_set_date<'a>(
+fn date_set_date<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1047,7 +1083,7 @@ pub fn date_set_date<'a>(
 /// `Date.prototype.setFullYear ( ... )`
 /// [ES 21.4.4.21](https://tc39.es/ecma262/#sec-date.prototype.setfullyear)
 /// Sets the the year (and month/day) and returns the new time value.
-pub fn date_set_full_year<'a>(
+fn date_set_full_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1058,7 +1094,7 @@ pub fn date_set_full_year<'a>(
 /// `Date.prototype.setHours ( ... )`
 /// [ES 21.4.4.22](https://tc39.es/ecma262/#sec-date.prototype.sethours)
 /// Sets the the hour (and minute/second/ms) and returns the new time value.
-pub fn date_set_hours<'a>(
+fn date_set_hours<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1069,7 +1105,7 @@ pub fn date_set_hours<'a>(
 /// `Date.prototype.setMilliseconds ( ... )`
 /// [ES 21.4.4.23](https://tc39.es/ecma262/#sec-date.prototype.setmilliseconds)
 /// Sets the the millisecond and returns the new time value.
-pub fn date_set_milliseconds<'a>(
+fn date_set_milliseconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1080,7 +1116,7 @@ pub fn date_set_milliseconds<'a>(
 /// `Date.prototype.setMinutes ( ... )`
 /// [ES 21.4.4.24](https://tc39.es/ecma262/#sec-date.prototype.setminutes)
 /// Sets the the minute (and second/ms) and returns the new time value.
-pub fn date_set_minutes<'a>(
+fn date_set_minutes<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1091,7 +1127,7 @@ pub fn date_set_minutes<'a>(
 /// `Date.prototype.setMonth ( ... )`
 /// [ES 21.4.4.25](https://tc39.es/ecma262/#sec-date.prototype.setmonth)
 /// Sets the the month (and day) and returns the new time value.
-pub fn date_set_month<'a>(
+fn date_set_month<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1102,7 +1138,7 @@ pub fn date_set_month<'a>(
 /// `Date.prototype.setSeconds ( ... )`
 /// [ES 21.4.4.26](https://tc39.es/ecma262/#sec-date.prototype.setseconds)
 /// Sets the the second (and ms) and returns the new time value.
-pub fn date_set_seconds<'a>(
+fn date_set_seconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1113,7 +1149,7 @@ pub fn date_set_seconds<'a>(
 /// `Date.prototype.setUTCDate ( ... )`
 /// [ES 21.4.4.28](https://tc39.es/ecma262/#sec-date.prototype.setutcdate)
 /// Sets the UTC the day of the month and returns the new time value.
-pub fn date_set_utc_date<'a>(
+fn date_set_utc_date<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1124,7 +1160,7 @@ pub fn date_set_utc_date<'a>(
 /// `Date.prototype.setUTCFullYear ( ... )`
 /// [ES 21.4.4.29](https://tc39.es/ecma262/#sec-date.prototype.setutcfullyear)
 /// Sets the UTC the year (and month/day) and returns the new time value.
-pub fn date_set_utc_full_year<'a>(
+fn date_set_utc_full_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1135,7 +1171,7 @@ pub fn date_set_utc_full_year<'a>(
 /// `Date.prototype.setUTCHours ( ... )`
 /// [ES 21.4.4.30](https://tc39.es/ecma262/#sec-date.prototype.setutchours)
 /// Sets the UTC the hour (and minute/second/ms) and returns the new time value.
-pub fn date_set_utc_hours<'a>(
+fn date_set_utc_hours<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1146,7 +1182,7 @@ pub fn date_set_utc_hours<'a>(
 /// `Date.prototype.setUTCMilliseconds ( ... )`
 /// [ES 21.4.4.31](https://tc39.es/ecma262/#sec-date.prototype.setutcmilliseconds)
 /// Sets the UTC the millisecond and returns the new time value.
-pub fn date_set_utc_milliseconds<'a>(
+fn date_set_utc_milliseconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1157,7 +1193,7 @@ pub fn date_set_utc_milliseconds<'a>(
 /// `Date.prototype.setUTCMinutes ( ... )`
 /// [ES 21.4.4.32](https://tc39.es/ecma262/#sec-date.prototype.setutcminutes)
 /// Sets the UTC the minute (and second/ms) and returns the new time value.
-pub fn date_set_utc_minutes<'a>(
+fn date_set_utc_minutes<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1168,7 +1204,7 @@ pub fn date_set_utc_minutes<'a>(
 /// `Date.prototype.setUTCMonth ( ... )`
 /// [ES 21.4.4.33](https://tc39.es/ecma262/#sec-date.prototype.setutcmonth)
 /// Sets the UTC the month (and day) and returns the new time value.
-pub fn date_set_utc_month<'a>(
+fn date_set_utc_month<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1179,7 +1215,7 @@ pub fn date_set_utc_month<'a>(
 /// `Date.prototype.setUTCSeconds ( ... )`
 /// [ES 21.4.4.34](https://tc39.es/ecma262/#sec-date.prototype.setutcseconds)
 /// Sets the UTC the second (and ms) and returns the new time value.
-pub fn date_set_utc_seconds<'a>(
+fn date_set_utc_seconds<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1190,7 +1226,7 @@ pub fn date_set_utc_seconds<'a>(
 /// `Date.prototype.setYear ( year )`
 /// [ES B.2.3.2](https://tc39.es/ecma262/#sec-date.prototype.setyear)
 /// Sets the legacy year (0..99 means 19xx) and returns the new time value.
-pub fn date_set_year<'a>(
+fn date_set_year<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1249,7 +1285,7 @@ fn format_with<'a>(
 
 /// `Date.prototype.toISOString` (ES 21.4.4.36): the ISO 8601 extended form.
 /// An invalid Date is a RangeError.
-pub fn date_to_iso_string<'a>(
+fn date_to_iso_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1272,7 +1308,7 @@ pub fn date_to_iso_string<'a>(
 }
 
 /// `Date.prototype.toGMTString` / `toUTCString` (ES 21.4.4.43).
-pub fn date_to_gmt_string<'a>(
+fn date_to_gmt_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1281,7 +1317,7 @@ pub fn date_to_gmt_string<'a>(
 }
 
 /// `Date.prototype.toString` (ES 21.4.4.41; UTC-formatted).
-pub fn date_to_string<'a>(
+fn date_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -1291,7 +1327,7 @@ pub fn date_to_string<'a>(
 
 /// `Date.prototype.toJSON` (ES 21.4.4.37): `null` for non-finite time
 /// values, otherwise the result of invoking `this.toISOString()`.
-pub fn date_to_json<'a>(
+fn date_to_json<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

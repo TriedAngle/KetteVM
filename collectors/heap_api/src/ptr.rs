@@ -1,7 +1,5 @@
+use crate::{heap::RawCell, value::Word};
 use core::ptr::NonNull;
-
-use crate::heap::RawCell;
-use crate::value::Word;
 
 /// A pointer into collector-managed memory.
 #[derive(PartialEq, Eq, Hash)]

@@ -1,13 +1,8 @@
-use core::{
-    cell::{Cell, UnsafeCell},
-    marker::PhantomData,
-    ptr::NonNull,
-};
-
-use crate::stack::Args;
 use crate::{
     EdgeVisitable, GcSlot, HANDLE_BLOCK_SIZE, Heap, HeapObject, Register, Tagged, Value, Visitor,
+    stack::Args,
 };
+use core::{cell::Cell, cell::UnsafeCell, marker::PhantomData, ptr::NonNull};
 
 /// A rooted reference to a `T` that survives relocation by the GC.
 /// Weak references cannot be rooted: they live in `MaybeWeakGcSlot`s as

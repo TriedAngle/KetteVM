@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     EdgeVisitable, GcSlot, Header, Heap, HeapObject, Map, MaybeWeak, MaybeWeakGcSlot, ObjectKind,
     Smi, Tagged, Value, Visitor, WeakFixedArray,
 };
+use core::alloc::Layout;
 
 /// `[feedback, feedback_extra]` and encodes its IC state in
 /// the base slot's contents:

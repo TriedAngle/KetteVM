@@ -1,9 +1,8 @@
-use core::alloc::Layout;
-
 use crate::{
     EdgeVisitable, GcSlot, Header, Heap, HeapObject, Map, MaybeWeak, MaybeWeakGcSlot, ObjectKind,
     Smi, Tagged, Value, Visitor,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct DataHandler {

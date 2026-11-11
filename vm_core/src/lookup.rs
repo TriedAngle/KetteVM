@@ -1,8 +1,7 @@
-use crate::proxy::Proxy;
 use crate::{
     AccessorInfo, AccessorPair, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE,
     DETAILS_WRITABLE, DenseString, FixedArray, Handle, HandleScope, Heap, Key, Object, SlotFlags,
-    SlotName, StringOwn, Tagged, Value,
+    SlotName, StringOwn, Tagged, Value, proxy::Proxy,
 };
 
 /// One resolved position of the walk: where the property lives and

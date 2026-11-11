@@ -1,8 +1,6 @@
-use crate::VmError;
-use crate::bail;
 use crate::{
     DenseString, Float, Handle, HandleScope, Heap, Object, Result, StringData, Symbol, Tagged,
-    ThreadState, VM, Value, WrapperKind,
+    ThreadState, VM, Value, VmError, WrapperKind, bail,
 };
 
 /// ToPrimitive hint (ES 7.1.1).

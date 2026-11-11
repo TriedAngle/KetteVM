@@ -1,13 +1,9 @@
-use crate::VmError;
-use crate::bail;
-use crate::lookup::{Hit, Lookup};
-use crate::proxy::Proxy;
-use crate::transition::Transition;
 use crate::{
     AccessorInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString, FixedArray,
     Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object, PartialDescriptor,
     PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi, StringOwn, Symbol,
-    Tagged, ThreadState, Thrown, VM, Value,
+    Tagged, ThreadState, Thrown, VM, Value, VmError, bail, lookup::Hit, lookup::Lookup,
+    proxy::Proxy, transition::Transition,
 };
 
 /// Store semantics:

@@ -1,10 +1,9 @@
-use core::alloc::Layout;
-
 use crate::{
     Code, DenseString, EdgeVisitable, FeedbackVector, FixedArray, GcSlot, Handle, HandlerTable,
     Header, Heap, HeapObject, LanguageMode, NativeIndex, ObjectKind, OptionGcSlot, SlotName, Smi,
     Tagged, Value, Visitor,
 };
+use core::alloc::Layout;
 
 #[repr(C)]
 pub struct CallableInfoObject {

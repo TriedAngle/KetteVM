@@ -1,16 +1,11 @@
-use std::sync::Arc;
-
 use crate::{
     AllocError, FixedArray, Float, GcHost, Handle, HandleScope, HandleSlice, HeapBackend,
     HeapObject, HeapStats, LocalHeap, Map, MaybeWeak, Object, ObjectInit, ObjectSlotsInit,
     PrototypeRegistry, RawCell, STRONG_PTR, SharedHeap, Smi, Tagged, Tlab, Value, Visitor,
-    WeakFixedArray, Word,
+    WEAK_PTR, WeakFixedArray, Word, bootstrap::WellKnown,
 };
-
-use crate::bootstrap::WellKnown;
-
-use crate::WEAK_PTR;
 use core::{alloc::Layout, cell::Cell, marker::PhantomData, ops::FnOnce, ptr::NonNull};
+use std::sync::Arc;
 
 pub struct AllocToken<'heap> {
     heap: &'heap mut Heap,

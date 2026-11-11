@@ -1,18 +1,17 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
-
+use crate::{
+    block::ALIGN, block::need_for, chunk::Chunk, chunk::ChunkHeader, chunk::ChunkedHeap,
+    chunk::Reservation,
+};
 use core::alloc::Layout;
-use std::thread::JoinHandle;
-
 use heap_api::{
     AllocError, CLEARED, CellRef, GcHost, HeapBackend, HeapPtr, HeapStats, LocalHeap, ObjectAddr,
     RawCell, STRONG_PTR, SharedHeap, TAG_MASK, Tlab, Visitor, WEAK_PTR, Word,
 };
-
 use heap_utils::{LocalNode, Safepoint};
-
-use crate::block::{ALIGN, need_for};
-use crate::chunk::{Chunk, ChunkHeader, ChunkedHeap, Reservation};
+use std::{
+    sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
+    sync::atomic::AtomicUsize, sync::atomic::Ordering, thread::JoinHandle,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MarkSweepConfig {

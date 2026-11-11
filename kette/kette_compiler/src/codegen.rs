@@ -11,6 +11,7 @@
 //! enclosing function, so their `let`s share its scope. `f(args)` binds
 //! the callee itself as `self` — the call is the `value` send.
 
+use crate::CompileError;
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
     Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
@@ -20,8 +21,6 @@ use kette_parser::{
     Symbol, UnaryOp,
 };
 use vm_core::{MODE_VAR, NativeIndex, SCOPE_DECLARATION};
-
-use crate::CompileError;
 
 /// `node -> function index` for every callable object (script is 0).
 fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {

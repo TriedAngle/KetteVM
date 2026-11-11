@@ -1,11 +1,8 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use crate::{
-    DenseString, EdgeVisitable, Handle, HandleScope, Heap, StringData, Visitor, string_content_hash,
+    DenseString, EdgeVisitable, Handle, HandleScope, Heap, StringData, Visitor,
+    heap::MaybeWeakGcSlot, string_content_hash,
 };
-
-use crate::heap::MaybeWeakGcSlot;
+use std::{collections::HashMap, sync::Mutex};
 
 enum InternKey {
     Latin1(Box<[u8]>),

@@ -1,17 +1,19 @@
-use vm_core::HostCtx;
-use vm_core::Object;
-use vm_core::VmError;
-use vm_core::extend_lifetime;
-use vm_core::raise;
-use vm_core::rt_try;
-use vm_core::{Args, Handle, Symbol, Tagged, Value, WrapperKind};
-
 use crate::symbol::descriptive_string;
+use vm_core::{
+    Args, Handle, HostCtx, Object, Symbol, Tagged, Value, VmError, WrapperKind, extend_lifetime,
+    raise, rt_try,
+};
+
+crate::register_natives! {
+    string -> string_constructor,
+    string_value_of,
+    string_to_string,
+}
 
 /// `String ( value )`
 /// [ES 22.1.1.1](https://tc39.es/ecma262/#sec-string-constructor-string-value)
 /// Converts `value` to a string (describing Symbols); under `new` it wraps it.
-pub fn string_constructor<'a>(
+fn string_constructor<'a>(
     ctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -56,7 +58,7 @@ pub fn string_constructor<'a>(
 /// `String.prototype.valueOf ( )`
 /// [ES 22.1.3.35](https://tc39.es/ecma262/#sec-string.prototype.valueof)
 /// Returns the [[StringData]] of the receiver.
-pub fn string_value_of<'a>(
+fn string_value_of<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -76,7 +78,7 @@ pub fn string_value_of<'a>(
 /// `String.prototype.toString ( )`
 /// [ES 22.1.3.29](https://tc39.es/ecma262/#sec-string.prototype.tostring)
 /// Returns the [[StringData]] of the receiver.
-pub fn string_to_string<'a>(
+fn string_to_string<'a>(
     ctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,

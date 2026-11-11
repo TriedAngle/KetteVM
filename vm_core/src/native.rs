@@ -1,9 +1,6 @@
-use crate::Result;
-use crate::VmError;
-use crate::api::Runtime;
 use crate::{
-    Args, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Tagged, ThreadState,
-    Thrown, VM, Value,
+    Args, ErasedRuntimeState, Handle, HandleScope, HandleSlice, Heap, Object, Result, Tagged,
+    ThreadState, Thrown, VM, Value, VmError, api::Runtime,
 };
 
 /// Return `Err(Thrown)` after materializing `err`.

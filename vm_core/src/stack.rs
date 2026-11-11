@@ -1,9 +1,8 @@
-use core::cell::Cell;
-
 use crate::{
     CallableInfoObject, Code, EdgeVisitable, FeedbackVector, FixedArray, Handle, HandleSlice, Heap,
     Object, Register, Smi, Tagged, Value, Visitor,
 };
+use core::cell::Cell;
 
 /// Number of slots in a thread's interpreter stack.
 pub const STACK_SLOTS: usize = 16 * 1024;

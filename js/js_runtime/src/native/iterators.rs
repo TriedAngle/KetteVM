@@ -1,10 +1,9 @@
 //! Iterator protocol natives (ES 8.5): GetIterator, IteratorNext,
 //! IteratorComplete and IteratorValue.
-use vm_core::VmError;
-use vm_core::raise;
-
 use crate::JSRuntime;
-use vm_core::{Args, Convert, Handle, HostCtx, Object, Tagged, Value, raise_runtime, rt_try};
+use vm_core::{
+    Args, Convert, Handle, HostCtx, Object, Tagged, Value, VmError, raise, raise_runtime, rt_try,
+};
 
 /// GetIterator (ES 8.5.4): (obj) -> iterator.
 pub fn get_iterator<'a>(

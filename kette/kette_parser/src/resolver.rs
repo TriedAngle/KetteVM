@@ -4,9 +4,8 @@
 //! (`|params|` marker or non-empty body). `if` branches compile inline,
 //! so their `let`s belong to the enclosing scope, in source order.
 
-use crate::plumbing::{ByteSpan, Symbol};
+use crate::{Ast, Node, NodeId, SlotKind, plumbing::ByteSpan, plumbing::Symbol};
 
-use crate::{Ast, Node, NodeId, SlotKind};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub u32);
 
