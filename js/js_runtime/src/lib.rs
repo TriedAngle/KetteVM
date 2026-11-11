@@ -174,6 +174,8 @@ pub struct BuiltinIndices {
     pub number: NativeIndex,
     pub number_value_of: NativeIndex,
     pub number_to_string: NativeIndex,
+    pub number_to_exponential: NativeIndex,
+    pub number_to_locale_string: NativeIndex,
     pub boolean: NativeIndex,
     pub boolean_value_of: NativeIndex,
     pub boolean_to_string: NativeIndex,
@@ -400,9 +402,25 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             thread,
             &scope,
             number_proto,
+            "toExponential",
+            idx.number_to_exponential,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            number_proto,
             "toFixed",
             idx.number_to_fixed,
             1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            number_proto,
+            "toLocaleString",
+            idx.number_to_locale_string,
+            0,
         );
         Object::install_method(
             thread,
