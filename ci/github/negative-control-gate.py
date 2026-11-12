@@ -89,19 +89,28 @@ if not need:
 
 # ── Rule 1 (span-level): on each declared branch, every
 # ── NOT-opted-out test region must be cosmetic-equal.  ──
+# Every violation is collected and reported — one round of fixing.
+missing, fetched, violations = [], {}, []
 for b in branches:
     ref = b[1:] if b.startswith("/") else b
     if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-        print(f"REJECT: branch {ref} not found"); sys.exit(1)
+        missing.append(ref)
+        continue
     sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+    fetched[ref] = sha
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []
         sp_h = spans_for(f, head_texts[f]) or []
         for path, kind in region_diff.changed_test_regions(f, sp_b, br, sp_h, head_texts[f]):
             if kind == "changed" and (f, path) not in dropped:
-                print(f"REJECT: {ref} changes test {f} :: {path} beyond whitespace")
-                sys.exit(1)
+                violations.append((ref, f, path))
+for ref in missing:
+    print(f"REJECT: branch {ref} not found")
+for ref, f, path in violations:
+    print(f"REJECT: {ref} changes test {f} :: {path} beyond whitespace")
+if missing or violations:
+    sys.exit(1)
 if branches:
     print("rule 1 ok: every branch is test-region-identical (whitespace-neutral)")
 else:
@@ -187,15 +196,16 @@ if not branches:
     sys.exit(1)
 
 # ── Branches: each remaining test must fail somewhere. ──
+# Broken branches don't abort the sweep: every branch is built and
+# every broken one reported, so one CI round lists everything.
 results = {k: False for k in need_b}
-for b in branches:
-    ref = b[1:] if b.startswith("/") else b
-    sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+broken = []
+for ref, sha in sorted(fetched.items()):
     sh("git", "checkout", "-q", "--detach", sha)
     print(f"=== {ref}: building")
     if build(check=False).returncode != 0:
-        print(f"REJECT: branch {ref} does not build — a broken negative control proves nothing")
-        sys.exit(1)
+        broken.append(ref)
+        continue
     for (f, p) in sorted(need_b):
         failed = run_test(f, p, check=False).returncode != 0
         print(f"  {f} :: {p}: {'FAIL (caught)' if failed else 'pass'}")
@@ -203,9 +213,15 @@ for b in branches:
             results[(f, p)] = True
 
 missed = [k for k, caught in results.items() if not caught]
+rejected = False
 if missed:
     print("REJECT: tests that pass on EVERY negative-control branch:")
     for (f, p) in sorted(missed):
         print(f"   {f} :: {p}")
+    rejected = True
+for ref in broken:
+    print(f"REJECT: branch {ref} does not build — a broken negative control proves nothing")
+    rejected = True
+if rejected:
     sys.exit(1)
 print("gate ok: every changed test fails on at least one branch")
