@@ -17,6 +17,7 @@ members = [
     "trace",
     "vm",
     "vm_core",
+    "tools/test-spans",
 ]
 
 [workspace.package]

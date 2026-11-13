@@ -11,4 +11,4 @@ benchmarks/BENCHMARKS.md
 .vscode
 .DS_Store
 no/
-off/
+off/__pycache__/

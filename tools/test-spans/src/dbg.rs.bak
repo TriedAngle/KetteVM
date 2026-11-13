@@ -1,0 +1,11 @@
+fn main() {
+    let path = std::env::args().nth(1).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let parse = ra_ap_syntax::SourceFile::parse(&text, ra_ap_syntax::Edition::CURRENT);
+    use ra_ap_syntax::AstNode;
+    let n = parse.tree().syntax().children().count();
+    eprintln!("top-level children: {n}");
+    for c in parse.tree().syntax().children().take(6) {
+        eprintln!("kind={:?}", c.kind());
+    }
+}

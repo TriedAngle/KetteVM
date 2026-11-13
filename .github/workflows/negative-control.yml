@@ -1,0 +1,134 @@
+name: negative-control
+
+# The negative-control gate (ported from JonasOberhauser/agent-scripts
+# #143/#156): every test touched or added by a PR must FAIL on at
+# least one companion fault branch — proving the test can actually
+# fail — OR be its own negative control (fail in its own last-touch
+# commit, the test-first RED shape).
+#
+# PR message contract (opt-in per PR):
+#
+#     Negative Control:
+#     ```
+#     /branch/A
+#     /branch/B
+#     ```
+#
+# Rules:
+#   1. Span-level (tools/test-spans over ra_ap_syntax): every test
+#      REGION must be whitespace-neutral identical between the PR head
+#      and each declared branch — reformat-only diffs are cosmetic, not
+#      violations; any other test change rejects.
+#   2. Every changed test (by span path) must FAIL on at least one
+#      declared branch when run there (cargo test -- path --exact).
+#   3. A changed test that passes on every branch rejects the PR.
+#   4. Self-control: a changed test that FAILS in the LAST commit that
+#      touched its file is its own negative control — no branch needed.
+#      Only the last touching commit counts; a non-building own-commit
+#      proves nothing.
+#   5. A declared branch that does not exist rejects (gracefully); a
+#      branch that does not BUILD rejects (a broken control proves
+#      nothing).
+#   6. Cosmetic opt-out — a PR-body block:
+#
+#      The following tests have been touched only cosmetically:
+#      ```
+#      mod::foo_test_blah
+#      ```
+#
+#      drops the listed tests from rules 1 and 2 (a human reviewer
+#      verifies the claim; the log marks them).
+#
+# KetteVM's two test kinds (both under tests/, mapped automatically):
+#   - `<crate>/tests/<name>.rs`  → cargo test -p <crate> --test <name>
+#   - `tests/regression/**.js`   → cargo run -p vm --example
+#                                  regression -- <file> (exit code)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: negative-control-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: /target
+
+jobs:
+  gate:
+    name: negative control (tests must be able to fail)
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 40
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the base..head, branch, and self-control diffs need history
+          persist-credentials: false
+
+      - name: Parse the PR-body blocks
+        id: parse
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          # Read the body from the raw event file (byte-faithful, no
+          # API call, no gh dependency - the container image ships no
+          # gh CLI). Interpolating the body through an env mapping
+          # YAML-folds multi-line values: blank lines are eaten and
+          # lines run together, hiding the "Negative Control:" marker.
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              event = json.load(f)
+          body = (event.get("pull_request") or {}).get("body") or ""
+
+          branches = []
+          cosmetic = []
+          in_block = False
+          seen_marker = False
+          # Which block we are inside of: "nc" (branches) or "cosmetic".
+          which = None
+          for line in body.splitlines():
+              stripped = line.strip()
+              low = stripped.lower()
+              # A NEW marker resets any earlier block: PR bodies quote
+              # the contract (example blocks) - the LAST declaration
+              # is the real one.
+              if low.startswith("negative control") and stripped.endswith(":"):
+                  seen_marker = True; which = "nc"; branches = []; in_block = False
+                  continue
+              if low.startswith("the following tests have been touched only cosmetically"):
+                  seen_marker = True; which = "cosmetic"; cosmetic = []; in_block = False
+                  continue
+              if not seen_marker:
+                  continue
+              if stripped.startswith("```"):
+                  in_block = not in_block
+                  continue
+              if in_block and which == "nc" and stripped.startswith("/"):
+                  branches.append(stripped)
+              if in_block and which == "cosmetic" and stripped:
+                  cosmetic.append(stripped)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"branches={json.dumps(branches)}\n")
+              out.write(f"cosmetic={json.dumps(cosmetic)}\n")
+          print("negative-control branches:", branches or "(none)")
+          print("cosmetic-only tests:", cosmetic or "(none)")
+          PY
+
+      - name: Gate — identical test regions, every changed test fails somewhere
+        env:
+          BRANCHES: ${{ steps.parse.outputs.branches }}
+          COSMETIC: ${{ steps.parse.outputs.cosmetic }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          python3 ci/github/negative-control-gate.py
