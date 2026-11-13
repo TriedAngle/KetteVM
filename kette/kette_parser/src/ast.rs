@@ -155,6 +155,13 @@ pub enum Node {
         then: NodeId,
         else_: Option<NodeId>,
     },
+
+    /// `while cond { body }`; the body is a `StmtList` compiled inline and
+    /// the whole expression evaluates to null.
+    While {
+        cond: NodeId,
+        body: NodeId,
+    },
 }
 
 impl Node {

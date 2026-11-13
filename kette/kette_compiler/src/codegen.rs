@@ -56,6 +56,10 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
                 collect_branch(ast, *else_, out);
             }
         }
+        Node::While { cond, body } => {
+            collect_objects(ast, *cond, out);
+            collect_branch(ast, *body, out);
+        }
         Node::Array { elements } => {
             for &element in ast.list_items(*elements) {
                 collect_objects(ast, element, out);
@@ -549,6 +553,7 @@ impl<'a> FunctionGen<'a> {
                 self.b.load(result);
                 Ok(())
             }
+            Node::While { .. } => self.emit_while(node),
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
             Node::Slot { .. } => unreachable!("slots are only reachable through their object"),
@@ -891,6 +896,26 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn emit_while(&mut self, node: NodeId) -> Result<(), CompileError> {
+        let Node::While { cond, body } = *self.ast.node(node) else {
+            unreachable!("emit_while called on a While node");
+        };
+        let temps = self.b.temp_scope();
+        let sink = temps.temp();
+        let start = self.b.new_label();
+        let end = self.b.new_label();
+        self.b.bind(start);
+        self.expr(cond)?;
+        self.b.jump_if_falsy(end);
+        self.emit_body(body, sink)?;
+        if self.b.is_live() {
+            self.b.jump(start);
+        }
+        self.b.bind(end);
+        self.b.load_null();
+        Ok(())
     }
 
     /// An `if` branch: a statement list storing into `sink`, or a

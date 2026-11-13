@@ -1,0 +1,242 @@
+// Kette port of raylib's `textures_portal_window.c` example.
+// Run: cargo run -q -p vm -- kette/examples/raylib/portal_window.ktt
+//
+// Differences from the C original, because Kette has no `for` statement and
+// no macros:
+//   - loops are `while`
+//   - raylib colour constants and `PI` are bound explicitly
+//   - `MatrixToFloat` is replaced by passing the matrix buffer's address
+//     (`matrix.pointer.cast(pointer_f32)`) to `rlMultMatrixf`
+//   - `sinf`/`cosf` come from libc
+//   - text literals are wrapped once with `FFI.cstring`
+//
+// Aggregates returned by C (Vector3, Color, ...) live in externally allocated
+// `CBuffer`s. There is no finalizer, so the frame loop opens a manual
+// allocation scope and frees everything created inside it:
+//
+//     FFI.scope_begin() ... FFI.scope_end()
+//
+// Values created before the loop (camera, render texture, colours, strings)
+// live outside any scope and stay allocated.
+
+let raylib = FFI.library("/opt/homebrew/lib/libraylib.dylib")
+let libc = FFI.library(null)
+
+let CString = FFI.pointer(FFI.char)
+
+let Vector3 = FFI.struct([["x", FFI.f32], ["y", FFI.f32], ["z", FFI.f32]])
+let Color = FFI.struct([["r", FFI.u8], ["g", FFI.u8], ["b", FFI.u8], ["a", FFI.u8]])
+let Texture2D = FFI.struct([
+    ["id", FFI.u32],
+    ["width", FFI.i32],
+    ["height", FFI.i32],
+    ["mipmaps", FFI.i32],
+    ["format", FFI.i32]
+])
+// raylib 5.5 layout: a leading framebuffer id; raylib 6.0 dropped it.
+let RenderTexture2D = FFI.struct([["id", FFI.u32], ["texture", Texture2D], ["depth", Texture2D]])
+let Camera3D = FFI.struct([
+    ["position", Vector3],
+    ["target", Vector3],
+    ["up", Vector3],
+    ["fovy", FFI.f32],
+    ["projection", FFI.i32]
+])
+
+// raylib enums and rlgl constants
+let CAMERA_FREE = 1
+let CAMERA_PERSPECTIVE = 0
+let RL_QUADS = 7
+let RL_PROJECTION = 5889
+let RL_MODELVIEW = 5888
+let PI = 3.14159265358979323846
+
+let WHITE = Color.new(255, 255, 255, 255)
+let BLACK = Color.new(0, 0, 0, 255)
+let GRAY = Color.new(130, 130, 130, 255)
+let DARKGRAY = Color.new(80, 80, 80, 255)
+let GOLD = Color.new(255, 203, 0, 255)
+let ORANGE = Color.new(255, 161, 0, 255)
+let MAROON = Color.new(190, 33, 55, 255)
+let LIME = Color.new(0, 158, 47, 255)
+let DARKGREEN = Color.new(0, 117, 44, 255)
+let PURPLE = Color.new(200, 122, 255, 255)
+let MAGENTA = Color.new(255, 0, 255, 255)
+let RAYWHITE = Color.new(245, 245, 245, 255)
+
+// window / timing
+let InitWindow = raylib.fn("InitWindow", FFI.fn([FFI.i32, FFI.i32, CString], FFI.void))
+let CloseWindow = raylib.fn("CloseWindow", FFI.fn([], FFI.void))
+let WindowShouldClose = raylib.fn("WindowShouldClose", FFI.fn([], FFI.bool))
+let SetTargetFPS = raylib.fn("SetTargetFPS", FFI.fn([FFI.i32], FFI.void))
+let DisableCursor = raylib.fn("DisableCursor", FFI.fn([], FFI.void))
+let GetTime = raylib.fn("GetTime", FFI.fn([], FFI.f64))
+
+// text
+let DrawText = raylib.fn("DrawText", FFI.fn([CString, FFI.i32, FFI.i32, FFI.i32, Color], FFI.void))
+
+// shapes
+let ClearBackground = raylib.fn("ClearBackground", FFI.fn([Color], FFI.void))
+let DrawGrid = raylib.fn("DrawGrid", FFI.fn([FFI.i32, FFI.f32], FFI.void))
+let DrawSphere = raylib.fn("DrawSphere", FFI.fn([Vector3, FFI.f32, Color], FFI.void))
+let DrawSphereWires = raylib.fn("DrawSphereWires", FFI.fn([Vector3, FFI.f32, FFI.i32, FFI.i32, Color], FFI.void))
+let DrawCube = raylib.fn("DrawCube", FFI.fn([Vector3, FFI.f32, FFI.f32, FFI.f32, Color], FFI.void))
+let DrawCubeWires = raylib.fn("DrawCubeWires", FFI.fn([Vector3, FFI.f32, FFI.f32, FFI.f32, Color], FFI.void))
+let DrawRectangle = raylib.fn("DrawRectangle", FFI.fn([FFI.i32, FFI.i32, FFI.i32, FFI.i32, Color], FFI.void))
+let DrawRectangleLines = raylib.fn("DrawRectangleLines", FFI.fn([FFI.i32, FFI.i32, FFI.i32, FFI.i32, Color], FFI.void))
+let Fade = raylib.fn("Fade", FFI.fn([Color, FFI.f32], Color))
+
+// 3D mode and render textures
+let BeginMode3D = raylib.fn("BeginMode3D", FFI.fn([Camera3D], FFI.void))
+let EndMode3D = raylib.fn("EndMode3D", FFI.fn([], FFI.void))
+let UpdateCamera = raylib.fn("UpdateCamera", FFI.fn([FFI.pointer(Camera3D), FFI.i32], FFI.void))
+let LoadRenderTexture = raylib.fn("LoadRenderTexture", FFI.fn([FFI.i32, FFI.i32], RenderTexture2D))
+let UnloadRenderTexture = raylib.fn("UnloadRenderTexture", FFI.fn([RenderTexture2D], FFI.void))
+let BeginTextureMode = raylib.fn("BeginTextureMode", FFI.fn([RenderTexture2D], FFI.void))
+let EndTextureMode = raylib.fn("EndTextureMode", FFI.fn([], FFI.void))
+let BeginDrawing = raylib.fn("BeginDrawing", FFI.fn([], FFI.void))
+let EndDrawing = raylib.fn("EndDrawing", FFI.fn([], FFI.void))
+
+// raymath
+let Vector3Add = raylib.fn("Vector3Add", FFI.fn([Vector3, Vector3], Vector3))
+let Vector3Subtract = raylib.fn("Vector3Subtract", FFI.fn([Vector3, Vector3], Vector3))
+let Vector3Normalize = raylib.fn("Vector3Normalize", FFI.fn([Vector3], Vector3))
+let Vector3CrossProduct = raylib.fn("Vector3CrossProduct", FFI.fn([Vector3, Vector3], Vector3))
+let Vector3DotProduct = raylib.fn("Vector3DotProduct", FFI.fn([Vector3, Vector3], FFI.f32))
+
+// rlgl
+let rlSetTexture = raylib.fn("rlSetTexture", FFI.fn([FFI.u32], FFI.void))
+let rlBegin = raylib.fn("rlBegin", FFI.fn([FFI.i32], FFI.void))
+let rlEnd = raylib.fn("rlEnd", FFI.fn([], FFI.void))
+let rlColor4ub = raylib.fn("rlColor4ub", FFI.fn([FFI.u8, FFI.u8, FFI.u8, FFI.u8], FFI.void))
+let rlNormal3f = raylib.fn("rlNormal3f", FFI.fn([FFI.f32, FFI.f32, FFI.f32], FFI.void))
+let rlTexCoord2f = raylib.fn("rlTexCoord2f", FFI.fn([FFI.f32, FFI.f32], FFI.void))
+let rlVertex3f = raylib.fn("rlVertex3f", FFI.fn([FFI.f32, FFI.f32, FFI.f32], FFI.void))
+
+// libc
+let sinf = libc.fn("sinf", FFI.fn([FFI.f32], FFI.f32))
+let cosf = libc.fn("cosf", FFI.fn([FFI.f32], FFI.f32))
+
+let screenWidth = 800
+let screenHeight = 450
+InitWindow(screenWidth, screenHeight, FFI.cstring("raylib [textures] example - portal window"))
+
+let camera = Camera3D.new()
+camera.set("position", Vector3.new(0, 2.5, 7))
+camera.set("target", Vector3.new(0, 1.8, 0))
+camera.set("up", Vector3.new(0, 1, 0))
+camera.set("fovy", 45)
+camera.set("projection", CAMERA_PERSPECTIVE)
+
+let archBottomLeft = Vector3.new(-1.5, 0, 0)
+let archBottomRight = Vector3.new(1.5, 0, 0)
+let archTopLeft = Vector3.new(-1.5, 4, 0)
+
+let portalA = Vector3.new(0, 0, 0)
+let portalB = Vector3.new(0, 0, -60)
+let rtPortalView = LoadRenderTexture(480, 640)
+let portalTextureId = rtPortalView.get("texture").get("id")
+
+DisableCursor()
+SetTargetFPS(60)
+
+// Dimension B is rendered with a normal 3D camera. The original example uses
+// an oblique frustum built from rlSetMatrixProjection/rlMultMatrixf; that path
+// depends on raylib 6.0's matrix layout and does not line up on 5.5, so the
+// portal keeps the scene but not the exact off-axis correction.
+let cameraB = Camera3D.new()
+cameraB.set("position", Vector3Add(camera.get("position"), Vector3Subtract(portalB, portalA)))
+cameraB.set("target", Vector3.new(portalB.get("x"), 2, portalB.get("z")))
+cameraB.set("up", Vector3.new(0, 1, 0))
+cameraB.set("fovy", 32)
+cameraB.set("projection", CAMERA_PERSPECTIVE)
+
+let hudBackground = Fade(BLACK, 0.75)
+let portalBackground = Color.new(10, 5, 20, 255)
+let labelTitle = FFI.cstring("PORTAL WINDOW")
+let labelLine1 = FFI.cstring("Look through the golden arch into Dimension B")
+let labelLine2 = FFI.cstring("Controls: Mouse to look | WASD to move")
+
+let portalOffset = Vector3Subtract(portalB, portalA)
+let pillarA = Vector3.new(-3.5, 2, 0)
+let pillarB = Vector3.new(3.5, 2, 0)
+let archCenter = Vector3.new(0, 2, 0)
+let archBase = Vector3.new(0, 0.05, 0)
+let archWall = Vector3.new(0, 2, -0.05)
+let zero = Vector3.new(0, 0, 0)
+
+while !WindowShouldClose() {
+    FFI.scope_begin()
+    UpdateCamera(camera.pointer(), CAMERA_FREE)
+    let time = GetTime()
+
+    cameraB.set("position", Vector3Add(camera.get("position"), portalOffset))
+
+    BeginTextureMode(rtPortalView)
+    ClearBackground(portalBackground)
+    BeginMode3D(cameraB)
+    DrawGrid(30, 0.8)
+
+    let corePos = Vector3Add(portalB, Vector3.new(0, 2 + sinf(time * 2.5) * 0.4, -4))
+    DrawSphere(corePos, 1.2, PURPLE)
+    DrawSphereWires(corePos, 1.25, 16, 16, MAGENTA)
+
+    let i = 0
+    while i < 4 {
+        let angle = time * 1.5 + i * (PI / 2)
+        let pos = Vector3Add(portalB, Vector3.new(
+            sinf(angle) * 2.5,
+            2 + cosf(time * 3 + i) * 0.5,
+            -4 + cosf(angle) * 2.5))
+        DrawCube(pos, 0.5, 0.5, 0.5, LIME)
+        DrawCubeWires(pos, 0.52, 0.52, 0.52, DARKGREEN)
+        i = i + 1
+    }
+
+    EndMode3D()
+    EndTextureMode()
+
+    BeginDrawing()
+    ClearBackground(RAYWHITE)
+    BeginMode3D(camera)
+    DrawGrid(20, 1)
+
+    DrawCube(pillarA, 0.8, 4, 0.8, DARKGRAY)
+    DrawCubeWires(pillarA, 0.8, 4, 0.8, ORANGE)
+    DrawCube(pillarB, 0.8, 4, 0.8, DARKGRAY)
+    DrawCubeWires(pillarB, 0.8, 4, 0.8, ORANGE)
+
+    DrawCubeWires(archCenter, 3.2, 4.2, 0.2, GOLD)
+    DrawCube(archBase, 3.4, 0.1, 0.6, MAROON)
+    DrawCube(archWall, 3.1, 4.1, 0.05, MAROON)
+
+    rlSetTexture(portalTextureId)
+    rlBegin(RL_QUADS)
+    rlColor4ub(255, 255, 255, 255)
+    rlNormal3f(0, 0, 1)
+    rlTexCoord2f(0, 0)
+    rlVertex3f(archBottomLeft.get("x"), archBottomLeft.get("y"), archBottomLeft.get("z"))
+    rlTexCoord2f(1, 0)
+    rlVertex3f(archBottomRight.get("x"), archBottomRight.get("y"), archBottomRight.get("z"))
+    rlTexCoord2f(1, 1)
+    rlVertex3f(archBottomRight.get("x"), 4, archBottomRight.get("z"))
+    rlTexCoord2f(0, 1)
+    rlVertex3f(archTopLeft.get("x"), archTopLeft.get("y"), archTopLeft.get("z"))
+    rlEnd()
+    rlSetTexture(0)
+
+    EndMode3D()
+
+    DrawRectangle(15, 15, 520, 100, hudBackground)
+    DrawRectangleLines(15, 15, 520, 100, GOLD)
+    DrawText(labelTitle, 28, 25, 20, GOLD)
+    DrawText(labelLine1, 28, 52, 20, RAYWHITE)
+    DrawText(labelLine2, 28, 80, 20, GRAY)
+
+    EndDrawing()
+    FFI.scope_end()
+}
+
+UnloadRenderTexture(rtPortalView)
+CloseWindow()
+print("done")

@@ -33,10 +33,11 @@ crate::register_natives! {
 /// [ES 20.1.3.6](https://tc39.es/ecma262/#sec-object.prototype.tostring)
 /// The builtin tag from internal slots, overridden by a String `@@toStringTag`.
 fn object_to_string<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
-    let known = &ctx.runtime::<JSRuntime>().known;
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
+    // May run from another front end (e.g. Kette printing an object).
+    let known = &vm.runtime::<JSRuntime>().known;
 
     fn tag_string<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, tag: &str) -> Tagged<'a, Value> {
         DenseString::from_utf8(heap, scope, &format!("[object {tag}]"))

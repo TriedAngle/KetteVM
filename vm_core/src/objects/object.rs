@@ -1,5 +1,5 @@
 use crate::{
-    AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
+    AccessorPair, CFunction, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
@@ -36,6 +36,11 @@ impl Object {
         let kind = self.map(heap).kind();
         if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
             return None;
+        }
+        if kind.is_c_function() {
+            // Safety: the map kind is the type witness.
+            let function = unsafe { self.tagged(heap).cast::<CFunction>() };
+            return Some(function.info.get(heap));
         }
         // every non-exotic callable is laid out as [info, context]
         self.slots(heap)
@@ -371,6 +376,15 @@ impl<'a> Tagged<'a, Value> {
         }
         if !kind.is_callable() {
             return None;
+        }
+        if kind.is_c_function() {
+            // Safety: the map kind is the type witness.
+            let function = unsafe { obj.cast::<CFunction>() };
+            return function
+                .info
+                .get(heap)
+                .native_index(heap)
+                .map(CallTarget::Native);
         }
         // every non-runtime callable object is laid out with
         // `[callable info, context]` in its first two slots
@@ -1014,6 +1028,10 @@ impl HeapObject for Object {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Oddball
+                | ObjectKind::CPointer
+                | ObjectKind::ForeignLibrary
+                | ObjectKind::CFunction
+                | ObjectKind::CBuffer
         )
     }
     type Init<'a> = ObjectInit<'a>;

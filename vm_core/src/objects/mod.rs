@@ -1,5 +1,8 @@
 pub mod array;
 pub mod byte_array;
+pub mod c_buffer;
+pub mod c_function;
+pub mod c_pointer;
 pub mod callable;
 pub mod cell;
 pub mod code;
@@ -9,6 +12,7 @@ pub mod descriptor;
 pub mod dictionary;
 pub mod feedback;
 pub mod float;
+pub mod foreign_library;
 mod helpers;
 pub mod js_array;
 pub mod map;
@@ -21,6 +25,9 @@ pub mod symbol;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
 pub use byte_array::FixedByteArray;
+pub use c_buffer::{CBuffer, CBufferInit};
+pub use c_function::{CFunction, CFunctionInit};
+pub use c_pointer::{CPointer, CPointerFlags, CPointerInit};
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
 pub use code::{Code, CodeInit};
@@ -37,6 +44,7 @@ pub use dictionary::{
 };
 pub use feedback::{FeedbackVector, FeedbackVectorInit};
 pub use float::Float;
+pub use foreign_library::{ForeignLibrary, ForeignLibraryInit};
 pub use helpers::WrapperKind;
 pub use map::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ElementsKind, Key, Map, MapInit, MapKind,
@@ -155,6 +163,15 @@ pub enum ObjectKind {
     ScriptContextTable = 26,
     /// Internal name -> script-context-index hash table.
     NameToIndexHashTable = 27,
+    /// A C pointer handle: type id, raw address, flags. Shares the `Object`
+    /// prefix so ordinary property/prototype machinery works on it.
+    CPointer = 28,
+    /// A loaded foreign library: dynamic-loader handle and path.
+    ForeignLibrary = 29,
+    /// A callable C function pointer plus its signature and library.
+    CFunction = 30,
+    /// Storage for a C aggregate value (struct, union, array).
+    CBuffer = 31,
 }
 
 impl ObjectKind {
@@ -170,6 +187,10 @@ impl ObjectKind {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Proxy
+                | ObjectKind::CPointer
+                | ObjectKind::ForeignLibrary
+                | ObjectKind::CFunction
+                | ObjectKind::CBuffer
         )
     }
 }
@@ -212,6 +233,10 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).layout()
             }
+            ObjectKind::CPointer => (*addr.cast::<CPointer>().as_ptr()).layout(),
+            ObjectKind::ForeignLibrary => (*addr.cast::<ForeignLibrary>().as_ptr()).layout(),
+            ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).layout(),
+            ObjectKind::CBuffer => (*addr.cast::<CBuffer>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -271,6 +296,12 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).visit_edges(visitor)
             }
+            ObjectKind::CPointer => (*addr.cast::<CPointer>().as_ptr()).visit_edges(visitor),
+            ObjectKind::ForeignLibrary => {
+                (*addr.cast::<ForeignLibrary>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).visit_edges(visitor),
+            ObjectKind::CBuffer => (*addr.cast::<CBuffer>().as_ptr()).visit_edges(visitor),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray

@@ -1,0 +1,43 @@
+// C arrays, array element access, and pointer arithmetic/indexing.
+// Run:  cargo run -q -p vm -- kette/kette_tests/ffi_arrays.ktt
+// Check: kette/kette_tests/check.py
+
+let I32x4 = FFI.array(FFI.i32, 4)
+let values = I32x4.new()
+values.set(0, 7)
+values.set(3, 9)
+Test.assert(values.get(0), 7)
+Test.assert(values.get(1), 0)
+Test.assert(values.get(3), 9)
+
+// An array buffer decays to a pointer to its first element.
+let p = values.pointer()
+Test.assert(p.get(3), 9)
+p.set(1, 42)
+Test.assert(values.get(1), 42)
+
+let advanced = p.add(2)
+Test.assert(advanced.get(0), 0)
+Test.assert(advanced.get(1), 9)
+
+// Typed pointer writes go through the pointee type.
+advanced.set(0, 11)
+Test.assert(values.get(2), 11)
+
+// char* pointer arithmetic reads bytes
+let text = FFI.cstring("abc")
+Test.assert(text.get(0), 97)
+Test.assert(text.add(1).get(0), 98)
+Test.assert(text.add(2).get(0), 99)
+Test.assert(text.add(3).get(0), 0)
+
+// struct fields are addressable by name; a pointer to a struct yields
+// struct values (copies) when indexed
+let Point = FFI.struct([["x", FFI.i32], ["y", FFI.i32]])
+let point = Point.new(3, 5)
+Test.assert(point.get("x"), 3)
+Test.assert(point.get("y"), 5)
+let point_pointer = point.pointer()
+Test.assert(point_pointer.get(0).get("y"), 5)
+point.set("x", 8)
+Test.assert(point.get("x"), 8)

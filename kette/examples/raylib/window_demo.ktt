@@ -1,0 +1,29 @@
+// Kette + raylib: open a window, draw a few frames, close.
+// Run: cargo run -q -p vm -- kette/examples/raylib/window_demo.ktt
+
+let raylib = FFI.library("/opt/homebrew/lib/libraylib.dylib")
+let CString = FFI.pointer(FFI.char)
+
+let InitWindow = raylib.fn("InitWindow", FFI.fn([FFI.i32, FFI.i32, CString], FFI.void))
+let CloseWindow = raylib.fn("CloseWindow", FFI.fn([], FFI.void))
+let SetTargetFPS = raylib.fn("SetTargetFPS", FFI.fn([FFI.i32], FFI.void))
+let BeginDrawing = raylib.fn("BeginDrawing", FFI.fn([], FFI.void))
+let EndDrawing = raylib.fn("EndDrawing", FFI.fn([], FFI.void))
+let ClearBuffers = raylib.fn("rlClearScreenBuffers", FFI.fn([], FFI.void))
+let GetScreenWidth = raylib.fn("GetScreenWidth", FFI.fn([], FFI.i32))
+let GetFrameTime = raylib.fn("GetFrameTime", FFI.fn([], FFI.f32))
+
+InitWindow(800, 450, FFI.cstring("kette + raylib"))
+SetTargetFPS(60)
+print(GetScreenWidth())
+
+let frames = 0
+while frames < 90 {
+    BeginDrawing()
+    ClearBuffers()
+    EndDrawing()
+    frames = frames + 1
+}
+print(GetFrameTime())
+CloseWindow()
+print("done")

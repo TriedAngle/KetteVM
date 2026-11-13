@@ -167,6 +167,7 @@ impl Resolver<'_> {
                     self.collect_branch_decls(else_);
                 }
             }
+            Node::While { body, .. } => self.collect_branch_decls(body),
             Node::Object(ref parts) => {
                 // slot values evaluate in the enclosing scope
                 for &slot in self.ast.list_items(parts.slots) {
@@ -299,6 +300,11 @@ impl Resolver<'_> {
                 if let Some(else_) = else_ {
                     self.resolve_branch(else_);
                 }
+            }
+            Node::While { cond, body } => {
+                let (cond, body) = (*cond, *body);
+                self.resolve_node(cond);
+                self.resolve_branch(body);
             }
             Node::Array { elements } => {
                 for &element in ast.list_items(*elements) {

@@ -20,6 +20,7 @@ where
         known.null.get(heap).raw(),
         known.smi_map.get(heap).raw(),
         known.float_map.get(heap).raw(),
+        known.c_pointer_map.get(heap).raw(),
         known.array_map.get(heap).raw(),
         known.byte_array_map.get(heap).raw(),
         known.code_map.get(heap).raw(),

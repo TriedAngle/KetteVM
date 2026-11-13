@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod compare;
 pub mod convert;
 pub mod errors;
+pub mod ffi;
 pub mod handle;
 pub mod heap;
 pub mod ic;
@@ -28,6 +29,8 @@ pub use objects::object::SetApplied;
 pub use objects::proxy;
 pub use objects::script_context::{global_lexical_get, global_lexical_set};
 pub use objects::string;
+
+pub use ffi::FfiState;
 
 pub use access::{OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
@@ -71,20 +74,21 @@ pub use native::{
     CallInfo, HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CallTarget, CallableInfoInit,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CBuffer, CBufferInit, CFunction,
+    CFunctionInit, CPointer, CPointerFlags, CPointerInit, CallTarget, CallableInfoInit,
     CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject,
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, FeedbackVector,
-    FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, GlobalLexicalBinding,
-    HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
-    INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,
-    MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
-    NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
-    PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotDescriptor,
-    SlotFlags, SlotName, StringData, StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit,
-    WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode, object_kind,
-    object_layout, string_content_hash, visit_object,
+    FeedbackVectorInit, FixedArray, FixedByteArray, Float, ForeignLibrary, ForeignLibraryInit,
+    FunctionKind, GlobalLexicalBinding, HandlerEntry, HandlerEntryInit, HandlerTable,
+    HandlerTableInit, Header, HeapObject, INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST,
+    MODE_LET, MODE_VAR, Map, MapInit, MapKind, NameToIndexHashTable, NameToIndexHashTableInit,
+    NumberDictionary, NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit,
+    PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL,
+    SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
+    SlotDescriptor, SlotFlags, SlotName, StringData, StringOwn, Symbol, WeakFixedArray,
+    WeakFixedArrayInit, WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode,
+    object_kind, object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
