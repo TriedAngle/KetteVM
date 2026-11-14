@@ -1,8 +1,8 @@
 pub mod array;
 pub mod byte_array;
-pub mod c_buffer;
 pub mod c_function;
 pub mod c_pointer;
+pub mod c_value;
 pub mod callable;
 pub mod cell;
 pub mod code;
@@ -22,12 +22,13 @@ pub mod proxy;
 pub mod script_context;
 pub mod string;
 pub mod symbol;
+pub mod type_info;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
 pub use byte_array::FixedByteArray;
-pub use c_buffer::{CBuffer, CBufferInit};
 pub use c_function::{CFunction, CFunctionInit};
 pub use c_pointer::{CPointer, CPointerFlags, CPointerInit};
+pub use c_value::{CValue, CValueInit};
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
 pub use code::{Code, CodeInit};
@@ -59,6 +60,7 @@ pub use script_context::{
 };
 pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
 pub use symbol::Symbol;
+pub use type_info::{TypeInfo, TypeInfoInit};
 
 use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
@@ -171,7 +173,9 @@ pub enum ObjectKind {
     /// A callable C function pointer plus its signature and library.
     CFunction = 30,
     /// Storage for a C aggregate value (struct, union, array).
-    CBuffer = 31,
+    CValue = 31,
+    /// A C type descriptor: kind, layout, related types, call plan.
+    TypeInfo = 32,
 }
 
 impl ObjectKind {
@@ -190,7 +194,8 @@ impl ObjectKind {
                 | ObjectKind::CPointer
                 | ObjectKind::ForeignLibrary
                 | ObjectKind::CFunction
-                | ObjectKind::CBuffer
+                | ObjectKind::CValue
+                | ObjectKind::TypeInfo
         )
     }
 }
@@ -236,7 +241,8 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::CPointer => (*addr.cast::<CPointer>().as_ptr()).layout(),
             ObjectKind::ForeignLibrary => (*addr.cast::<ForeignLibrary>().as_ptr()).layout(),
             ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).layout(),
-            ObjectKind::CBuffer => (*addr.cast::<CBuffer>().as_ptr()).layout(),
+            ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
+            ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -301,7 +307,8 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
                 (*addr.cast::<ForeignLibrary>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).visit_edges(visitor),
-            ObjectKind::CBuffer => (*addr.cast::<CBuffer>().as_ptr()).visit_edges(visitor),
+            ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).visit_edges(visitor),
+            ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).visit_edges(visitor),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray

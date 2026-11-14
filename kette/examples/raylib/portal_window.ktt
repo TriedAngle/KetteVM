@@ -6,7 +6,7 @@
 //   - loops are `while`
 //   - raylib colour constants and `PI` are bound explicitly
 //   - `MatrixToFloat` is replaced by passing the matrix buffer's address
-//     (`matrix.pointer.cast(pointer_f32)`) to `rlMultMatrixf`
+//     (`matrix.pointer().cast(FFI.f32)`) to `rlMultMatrixf`
 //   - `sinf`/`cosf` come from libc
 //   - text literals are wrapped once with `FFI.cstring`
 //

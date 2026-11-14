@@ -1,18 +1,26 @@
-//! C type identity, layout, and the runtime type table.
+//! C type identity, layout, and interning.
 //!
-//! `CType` is a nominal C type, not a language object map. It describes C ABI
-//! identity and byte layout only. Struct and union types are distinct values
-//! even when their layout matches; primitives, pointers, arrays, and function
-//! signatures are interned structurally.
+//! A type is a heap object (`TypeInfo`) and its identity is object identity. A
+//! `TypeId` is a stable integer handle into the registry, used only for
+//! interning keys and diagnostics; hot paths never touch the registry.
 
+use crate::bootstrap::smi_slot;
+use crate::ffi::plan::CallPlan;
+use crate::ffi::{FfiError, FfiResult};
+use crate::{
+    EdgeVisitable, FixedArray, GcSlot, Handle, HandleScope, Heap, Smi, Tagged, TypeInfo,
+    TypeInfoInit, VM, Value, Visitor,
+};
 use core::alloc::Layout;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Stable handle into the type table.
+/// Stable handle into the type registry.
 ///
-/// Ids are append-only for the lifetime of the table: `CPointer` and
-/// `CFunction` objects store them, so they can never be renumbered.
+/// Ids are append-only: a type is never removed or renumbered, so an id always
+/// names the same type. Built-in ids are `0..BUILTIN_COUNT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeId(u32);
 
@@ -63,7 +71,6 @@ impl TypeId {
     /// C `wchar_t`: 4 bytes signed on the targets KetteVM builds for.
     pub const WCHAR: Self = Self::I32;
 
-    /// Number of reserved primitive ids, in registration order.
     pub const BUILTIN_COUNT: u32 = 13;
 
     pub const fn index(self) -> usize {
@@ -77,51 +84,21 @@ impl TypeId {
     pub const fn from_i64(bits: i64) -> Self {
         Self(bits as u32)
     }
+
+    pub const fn builtin(kind: TypeKind) -> Option<Self> {
+        if (kind as usize) < TypeKind::BUILTIN_COUNT {
+            Some(Self(kind as u32))
+        } else {
+            None
+        }
+    }
 }
 
-const POINTER_SIZE: usize = core::mem::size_of::<*const ()>();
-
-/// Calling convention of a function type.
-///
-/// Platforms use their default C convention; the field exists so a plan can
-/// carry a non-default convention on Windows without a new type system.
+/// The shape of a C type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Abi {
-    C,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructType {
-    pub name: Option<String>,
-    pub fields: Vec<Field>,
-    pub layout: Layout,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArrayType {
-    pub element: TypeId,
-    pub len: usize,
-    pub layout: Layout,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FunctionType {
-    pub params: Vec<TypeId>,
-    pub result: TypeId,
-    pub variadic: bool,
-    pub abi: Abi,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Field {
-    pub name: Option<String>,
-    pub ty: TypeId,
-    pub offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CType {
-    Void,
+#[repr(u8)]
+pub enum TypeKind {
+    Void = 0,
     Bool,
     I8,
     U8,
@@ -133,40 +110,88 @@ pub enum CType {
     U64,
     F32,
     F64,
-    /// C `char`: one byte, signedness follows the target.
     Char,
-    Pointer(TypeId),
-    Struct(StructType),
-    Union(StructType),
-    /// A fixed-length array. `len == 0` is a C flexible array member tail.
-    Array(ArrayType),
-    Function(FunctionType),
+    Pointer,
+    Struct,
+    Union,
+    Array,
+    Function,
 }
 
-impl CType {
-    /// Layout of a complete object type; `None` for function types, which are
-    /// never objects.
-    pub fn layout(&self) -> Option<Layout> {
-        let (size, align) = match self {
-            CType::Void => (0, 1),
-            CType::Bool | CType::I8 | CType::U8 | CType::Char => (1, 1),
-            CType::I16 | CType::U16 => (2, 2),
-            CType::I32 | CType::U32 | CType::F32 => (4, 4),
-            // 8 on the 64-bit targets KetteVM builds for. i386 SysV aligns
-            // `long long` and `double` to 4, so 32-bit support needs a
-            // per-target alignment table before it can reuse this.
-            CType::I64 | CType::U64 | CType::F64 => (8, 8),
-            CType::Pointer(_) => (POINTER_SIZE, POINTER_SIZE),
-            CType::Struct(s) | CType::Union(s) => return Some(s.layout),
-            CType::Array(a) => return Some(a.layout),
-            CType::Function(_) => return None,
-        };
-        Layout::from_size_align(size, align).ok()
+impl TypeKind {
+    pub const BUILTIN_COUNT: usize = 13;
+
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Void,
+            1 => Self::Bool,
+            2 => Self::I8,
+            3 => Self::U8,
+            4 => Self::I16,
+            5 => Self::U16,
+            6 => Self::I32,
+            7 => Self::U32,
+            8 => Self::I64,
+            9 => Self::U64,
+            10 => Self::F32,
+            11 => Self::F64,
+            12 => Self::Char,
+            13 => Self::Pointer,
+            14 => Self::Struct,
+            15 => Self::Union,
+            16 => Self::Array,
+            17 => Self::Function,
+            _ => panic!("invalid C type kind"),
+        }
     }
 
-    pub const fn is_function(&self) -> bool {
-        matches!(self, CType::Function(_))
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Void => "void",
+            Self::Bool => "bool",
+            Self::I8 => "i8",
+            Self::U8 => "u8",
+            Self::I16 => "i16",
+            Self::U16 => "u16",
+            Self::I32 => "i32",
+            Self::U32 => "u32",
+            Self::I64 => "i64",
+            Self::U64 => "u64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Char => "char",
+            Self::Pointer => "pointer",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Array => "array",
+            Self::Function => "function",
+        }
     }
+
+    /// Size and alignment of a built-in type.
+    pub const fn builtin_layout(self) -> (usize, usize) {
+        match self {
+            Self::Void => (0, 1),
+            Self::Bool | Self::I8 | Self::U8 | Self::Char => (1, 1),
+            Self::I16 | Self::U16 => (2, 2),
+            Self::I32 | Self::U32 | Self::F32 => (4, 4),
+            // 8 on the 64-bit targets KetteVM builds for. i386 SysV aligns
+            // `long long` and `double` to 4.
+            Self::I64 | Self::U64 | Self::F64 => (8, 8),
+            Self::Pointer | Self::Struct | Self::Union | Self::Array | Self::Function => (
+                core::mem::size_of::<*const ()>(),
+                core::mem::size_of::<*const ()>(),
+            ),
+        }
+    }
+}
+
+const POINTER_SIZE: usize = core::mem::size_of::<*const ()>();
+
+/// Calling convention of a function type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Abi {
+    C,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,9 +221,9 @@ impl fmt::Display for TypeError {
 
 impl std::error::Error for TypeError {}
 
-/// Structural identity of interned types.
+/// Structural identity of an interned type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum StructuralKey {
+enum TypeKey {
     Pointer(TypeId),
     Array(TypeId, usize),
     Function {
@@ -207,245 +232,440 @@ enum StructuralKey {
         variadic: bool,
         abi: Abi,
     },
+    Struct {
+        name: Option<String>,
+        fields: Vec<(Option<String>, TypeId, usize)>,
+    },
+    Union {
+        name: Option<String>,
+        fields: Vec<(Option<String>, TypeId, usize)>,
+    },
 }
 
-/// The runtime type table.
+struct RegistryInner {
+    types: HashMap<TypeId, GcSlot<TypeInfo>>,
+    interned: HashMap<TypeKey, TypeId>,
+}
+
+/// Owns every C type and interns the structural ones.
 ///
-/// Append-only: ids stay valid forever. Struct and union types are nominal and
-/// are never deduplicated; primitives, pointers, arrays, and function
-/// signatures are interned structurally.
-pub struct TypeTable {
-    types: Vec<CType>,
-    structural: HashMap<StructuralKey, TypeId>,
+/// Only type creation takes the lock; call, field, pointer and conversion
+/// paths read `GcSlot<TypeInfo>`/`TypeInfo` directly.
+pub struct TypeRegistry {
+    next_id: AtomicU32,
+    inner: Mutex<RegistryInner>,
 }
 
-impl TypeTable {
+impl TypeRegistry {
     pub fn new() -> Self {
-        let mut types = Vec::with_capacity(TypeId::BUILTIN_COUNT as usize);
-        types.push(CType::Void);
-        types.push(CType::Bool);
-        types.push(CType::I8);
-        types.push(CType::U8);
-        types.push(CType::I16);
-        types.push(CType::U16);
-        types.push(CType::I32);
-        types.push(CType::U32);
-        types.push(CType::I64);
-        types.push(CType::U64);
-        types.push(CType::F32);
-        types.push(CType::F64);
-        types.push(CType::Char);
-        debug_assert_eq!(types.len() as u32, TypeId::BUILTIN_COUNT);
         Self {
-            types,
-            structural: HashMap::new(),
+            next_id: AtomicU32::new(TypeId::BUILTIN_COUNT),
+            inner: Mutex::new(RegistryInner {
+                types: HashMap::new(),
+                interned: HashMap::new(),
+            }),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.types.len()
+        self.inner
+            .lock()
+            .expect("ffi type registry poisoned")
+            .types
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.types.is_empty()
+        self.len() == 0
     }
 
-    pub fn get(&self, id: TypeId) -> &CType {
-        self.types
-            .get(id.index())
-            .unwrap_or_else(|| panic!("unknown C type id {id:?}"))
+    /// Register a type under an explicit id. Used for built-ins at install.
+    pub fn register(&self, id: TypeId, ty: Tagged<TypeInfo>) {
+        let slot = smi_slot::<TypeInfo>();
+        slot.init_tagged(ty);
+        self.inner
+            .lock()
+            .expect("ffi type registry poisoned")
+            .types
+            .insert(id, slot);
     }
 
-    pub fn try_get(&self, id: TypeId) -> Option<&CType> {
-        self.types.get(id.index())
+    /// Resolve a type id. Diagnostic paths only.
+    pub fn get<'a>(&self, heap: &'a Heap, id: TypeId) -> Option<Tagged<'a, TypeInfo>> {
+        let inner = self.inner.lock().expect("ffi type registry poisoned");
+        inner.types.get(&id).map(|slot| slot.get(heap))
     }
 
-    /// Layout of a complete object type; `None` for function types.
-    pub fn layout(&self, id: TypeId) -> Option<Layout> {
-        self.get(id).layout()
+    fn reserve_id(&self) -> TypeId {
+        TypeId(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn require_object(&self, id: TypeId) -> Result<Layout, TypeError> {
-        if id == TypeId::VOID {
-            return Err(TypeError::VoidField);
+    fn probe<'s>(
+        &self,
+        heap: &Heap,
+        scope: &'s HandleScope<'_>,
+        key: &TypeKey,
+    ) -> Option<Handle<'s, TypeInfo>> {
+        let inner = self.inner.lock().expect("ffi type registry poisoned");
+        let id = *inner.interned.get(key)?;
+        let slot = inner.types.get(&id)?;
+        Some(slot.get(heap).as_handle(scope))
+    }
+
+    /// Insert `ty` under `key`; returns the existing type if another thread
+    /// won the race.
+    fn publish<'s>(
+        &self,
+        heap: &Heap,
+        scope: &'s HandleScope<'_>,
+        key: TypeKey,
+        id: TypeId,
+        ty: &Handle<'s, TypeInfo>,
+    ) -> Option<Handle<'s, TypeInfo>> {
+        let mut inner = self.inner.lock().expect("ffi type registry poisoned");
+        if let Some(existing) = inner.interned.get(&key) {
+            let slot = inner
+                .types
+                .get(existing)
+                .expect("interned type id without a type");
+            return Some(slot.get(heap).as_handle(scope));
         }
-        self.layout(id).ok_or(TypeError::FunctionField)
+        let slot = smi_slot::<TypeInfo>();
+        slot.init_tagged(ty.as_tagged(heap));
+        inner.types.insert(id, slot);
+        inner.interned.insert(key, id);
+        None
     }
 
-    fn push(&mut self, key: StructuralKey, ty: CType) -> TypeId {
-        let id = TypeId(self.types.len() as u32);
-        self.types.push(ty);
-        self.structural.insert(key, id);
-        id
-    }
-
-    pub fn pointer_to(&mut self, pointee: TypeId) -> TypeId {
-        let key = StructuralKey::Pointer(pointee);
-        if let Some(id) = self.structural.get(&key) {
-            return *id;
+    pub fn pointer_to<'s>(
+        &self,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        pointee: &Handle<TypeInfo>,
+    ) -> Handle<'s, TypeInfo> {
+        let pointee_id = pointee.as_tagged(heap).id();
+        let key = TypeKey::Pointer(pointee_id);
+        if let Some(existing) = self.probe(heap, scope, &key) {
+            return existing;
         }
-        self.push(key, CType::Pointer(pointee))
+        let id = self.reserve_id();
+        let ty = heap.allocate_handle::<TypeInfo>(
+            TypeInfoInit {
+                kind: TypeKind::Pointer,
+                id,
+                size: POINTER_SIZE,
+                align: POINTER_SIZE,
+                flags: 0,
+                name: None,
+                pointee: Some(pointee.clone()),
+                element: None,
+                len: 0,
+                fields: None,
+                params: None,
+                result: None,
+                cif: 0,
+            },
+            scope,
+        );
+        match self.publish(heap, scope, key, id, &ty) {
+            Some(existing) => existing,
+            None => ty,
+        }
     }
 
-    pub fn array_of(&mut self, element: TypeId, len: usize) -> Result<TypeId, TypeError> {
-        let element_layout = self.require_object(element)?;
+    pub fn array_of<'s>(
+        &self,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        element: &Handle<TypeInfo>,
+        len: usize,
+    ) -> Result<Handle<'s, TypeInfo>, TypeError> {
+        let element_layout = require_object(element.as_tagged(heap))?;
         let size = element_layout
             .size()
             .checked_mul(len)
             .ok_or(TypeError::SizeOverflow)?;
         let layout = Layout::from_size_align(size, element_layout.align())
             .map_err(|_| TypeError::SizeOverflow)?;
-        let key = StructuralKey::Array(element, len);
-        if let Some(id) = self.structural.get(&key) {
-            return Ok(*id);
+        let key = TypeKey::Array(element.as_tagged(heap).id(), len);
+        if let Some(existing) = self.probe(heap, scope, &key) {
+            return Ok(existing);
         }
-        Ok(self.push(
-            key,
-            CType::Array(ArrayType {
-                element,
+        let id = self.reserve_id();
+        let ty = heap.allocate_handle::<TypeInfo>(
+            TypeInfoInit {
+                kind: TypeKind::Array,
+                id,
+                size: layout.size(),
+                align: layout.align(),
+                flags: 0,
+                name: None,
+                pointee: None,
+                element: Some(element.clone()),
                 len,
-                layout,
-            }),
-        ))
+                fields: None,
+                params: None,
+                result: None,
+                cif: 0,
+            },
+            scope,
+        );
+        Ok(match self.publish(heap, scope, key, id, &ty) {
+            Some(existing) => existing,
+            None => ty,
+        })
     }
 
-    pub fn function(
-        &mut self,
-        params: Vec<TypeId>,
-        result: TypeId,
-        variadic: bool,
-        abi: Abi,
-    ) -> Result<TypeId, TypeError> {
-        for &param in &params {
-            self.require_object(param)?;
-        }
-        if result != TypeId::VOID {
-            self.require_object(result)?;
-        }
-        let key = StructuralKey::Function {
-            params: params.clone(),
-            result,
-            variadic,
-            abi,
-        };
-        if let Some(id) = self.structural.get(&key) {
-            return Ok(*id);
-        }
-        Ok(self.push(
-            key,
-            CType::Function(FunctionType {
-                params,
-                result,
-                variadic,
-                abi,
-            }),
-        ))
-    }
-
-    /// Define a nominal struct. Field types must already exist and be complete.
-    pub fn define_struct(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, TypeId)>,
-    ) -> Result<TypeId, TypeError> {
-        let (fields, layout) = self.layout_fields(fields, false)?;
-        let id = TypeId(self.types.len() as u32);
-        self.types.push(CType::Struct(StructType {
-            name,
-            fields,
-            layout,
-        }));
-        Ok(id)
-    }
-
-    /// Define a nominal union. Field types must already exist and be complete.
-    pub fn define_union(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, TypeId)>,
-    ) -> Result<TypeId, TypeError> {
-        let (fields, layout) = self.layout_fields(fields, true)?;
-        let id = TypeId(self.types.len() as u32);
-        self.types.push(CType::Union(StructType {
-            name,
-            fields,
-            layout,
-        }));
-        Ok(id)
-    }
-
-    fn layout_fields(
+    pub fn function<'s>(
         &self,
-        fields: Vec<(Option<String>, TypeId)>,
-        union: bool,
-    ) -> Result<(Vec<Field>, Layout), TypeError> {
-        let mut out = Vec::with_capacity(fields.len());
-        let mut offset = 0usize;
-        let mut max_size = 0usize;
-        let mut align = 1usize;
-        for (name, ty) in fields {
-            if let Some(name) = &name
-                && out
-                    .iter()
-                    .any(|field: &Field| field.name.as_deref() == Some(name))
-            {
-                return Err(TypeError::DuplicateField(name.clone()));
-            }
-            let field_layout = self.require_object(ty)?;
-            align = align.max(field_layout.align());
-            if union {
-                out.push(Field {
-                    name,
-                    ty,
-                    offset: 0,
-                });
-                max_size = max_size.max(field_layout.size());
-                continue;
-            }
-            offset = align_up(offset, field_layout.align()).ok_or(TypeError::SizeOverflow)?;
-            out.push(Field { name, ty, offset });
-            offset = offset
-                .checked_add(field_layout.size())
-                .ok_or(TypeError::SizeOverflow)?;
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        params: &[Handle<TypeInfo>],
+        result: &Handle<TypeInfo>,
+        variadic: bool,
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
+        for param in params {
+            require_object(param.as_tagged(heap)).map_err(FfiError::from)?;
         }
-        let size = align_up(max_size.max(offset), align).ok_or(TypeError::SizeOverflow)?;
-        let layout = Layout::from_size_align(size, align).map_err(|_| TypeError::SizeOverflow)?;
-        Ok((out, layout))
-    }
-
-    /// Field of a struct or union by name.
-    pub fn field(&self, id: TypeId, name: &str) -> Result<&Field, TypeError> {
-        let fields = match self.get(id) {
-            CType::Struct(s) | CType::Union(s) => &s.fields,
-            _ => return Err(TypeError::NotAStruct(id)),
+        if result.as_tagged(heap).kind() != TypeKind::Void {
+            require_object(result.as_tagged(heap)).map_err(FfiError::from)?;
+        }
+        let key = TypeKey::Function {
+            params: params
+                .iter()
+                .map(|param| param.as_tagged(heap).id())
+                .collect(),
+            result: result.as_tagged(heap).id(),
+            variadic,
+            abi: Abi::C,
         };
-        fields
+        if let Some(existing) = self.probe(heap, scope, &key) {
+            return Ok(existing);
+        }
+        let plan = CallPlan::new(heap, params, result, variadic)?;
+        let id = self.reserve_id();
+        let values: Vec<Tagged<Value>> = params
             .iter()
-            .find(|field| field.name.as_deref() == Some(name))
-            .ok_or_else(|| TypeError::UnknownField(name.to_string()))
+            .map(|param| param.as_tagged(heap).erase())
+            .collect();
+        let staged = scope.stage(&values);
+        drop(values);
+        let params_array = heap.allocate_handle::<FixedArray>(staged, scope);
+        let raw = Box::into_raw(Box::new(plan));
+        let ty = heap.allocate_handle::<TypeInfo>(
+            TypeInfoInit {
+                kind: TypeKind::Function,
+                id,
+                size: 0,
+                align: 1,
+                flags: if variadic {
+                    crate::objects::type_info::FLAG_VARIADIC
+                } else {
+                    0
+                },
+                name: None,
+                pointee: None,
+                element: None,
+                len: 0,
+                fields: None,
+                params: Some(params_array),
+                result: Some(result.clone()),
+                cif: raw as usize,
+            },
+            scope,
+        );
+        match self.publish(heap, scope, key, id, &ty) {
+            Some(existing) => {
+                // Safety: the plan was never shared; the winning type has its own.
+                unsafe { drop(Box::from_raw(raw)) };
+                Ok(existing)
+            }
+            None => Ok(ty),
+        }
     }
 
-    pub fn field_offset(&self, id: TypeId, name: &str) -> Result<usize, TypeError> {
-        Ok(self.field(id, name)?.offset)
+    pub fn define_struct<'s>(
+        &self,
+        vm: &VM,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        name: Option<&str>,
+        fields: &[(Option<&str>, Handle<TypeInfo>)],
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
+        self.define_composite(vm, heap, scope, name, fields, false)
     }
 
-    pub fn field_type(&self, id: TypeId, name: &str) -> Result<TypeId, TypeError> {
-        Ok(self.field(id, name)?.ty)
+    pub fn define_union<'s>(
+        &self,
+        vm: &VM,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        name: Option<&str>,
+        fields: &[(Option<&str>, Handle<TypeInfo>)],
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
+        self.define_composite(vm, heap, scope, name, fields, true)
     }
 
-    /// Element type and length of an array type.
-    pub fn array_element(&self, id: TypeId) -> Result<(TypeId, usize), TypeError> {
-        match self.get(id) {
-            CType::Array(a) => Ok((a.element, a.len)),
-            _ => Err(TypeError::NotAnArray(id)),
+    fn define_composite<'s>(
+        &self,
+        vm: &VM,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        name: Option<&str>,
+        fields: &[(Option<&str>, Handle<TypeInfo>)],
+        union: bool,
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
+        let mut layouts = Vec::with_capacity(fields.len());
+        for (field_name, ty) in fields {
+            let layout = require_object(ty.as_tagged(heap)).map_err(FfiError::from)?;
+            layouts.push((field_name.map(str::to_string), layout));
+        }
+        let (field_layouts, layout) = layout_fields(layouts, union).map_err(FfiError::from)?;
+        let key = match union {
+            true => TypeKey::Union {
+                name: name.map(str::to_string),
+                fields: fields
+                    .iter()
+                    .zip(&field_layouts)
+                    .map(|((field_name, ty), (_, offset))| {
+                        (
+                            field_name.map(str::to_string),
+                            ty.as_tagged(heap).id(),
+                            *offset,
+                        )
+                    })
+                    .collect(),
+            },
+            false => TypeKey::Struct {
+                name: name.map(str::to_string),
+                fields: fields
+                    .iter()
+                    .zip(&field_layouts)
+                    .map(|((field_name, ty), (_, offset))| {
+                        (
+                            field_name.map(str::to_string),
+                            ty.as_tagged(heap).id(),
+                            *offset,
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        if let Some(existing) = self.probe(heap, scope, &key) {
+            return Ok(existing);
+        }
+        let id = self.reserve_id();
+        let mut name_handles = Vec::with_capacity(fields.len());
+        for (field_name, _) in fields {
+            name_handles.push(
+                field_name.map(|field_name| vm.interner().intern_str(heap, scope, field_name)),
+            );
+        }
+        let type_name = name.map(|name| vm.interner().intern_str(heap, scope, name));
+        let mut values: Vec<Tagged<Value>> = Vec::with_capacity(fields.len() * 3);
+        for (index, ((_, ty), (_, offset))) in fields.iter().zip(&field_layouts).enumerate() {
+            let name_value = match &name_handles[index] {
+                Some(name) => name.as_tagged(heap).erase(),
+                None => heap.known().the_hole.get(heap).erase(),
+            };
+            values.push(name_value);
+            values.push(ty.as_tagged(heap).erase());
+            values.push(Smi::new(*offset as i64).into_tagged());
+        }
+        let staged = scope.stage(&values);
+        drop(values);
+        let field_array = heap.allocate_handle::<FixedArray>(staged, scope);
+        let ty = heap.allocate_handle::<TypeInfo>(
+            TypeInfoInit {
+                kind: if union {
+                    TypeKind::Union
+                } else {
+                    TypeKind::Struct
+                },
+                id,
+                size: layout.size(),
+                align: layout.align(),
+                flags: 0,
+                name: type_name,
+                pointee: None,
+                element: None,
+                len: 0,
+                fields: Some(field_array),
+                params: None,
+                result: None,
+                cif: 0,
+            },
+            scope,
+        );
+        Ok(match self.publish(heap, scope, key, id, &ty) {
+            Some(existing) => existing,
+            None => ty,
+        })
+    }
+}
+
+impl Default for TypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EdgeVisitable for TypeRegistry {
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        let inner = self.inner.lock().expect("ffi type registry poisoned");
+        for slot in inner.types.values() {
+            visitor.visit(slot.as_raw());
         }
     }
 }
 
-impl Default for TypeTable {
-    fn default() -> Self {
-        Self::new()
+impl fmt::Debug for TypeRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypeRegistry")
+            .field("types", &self.len())
+            .finish()
     }
+}
+
+fn require_object(ty: Tagged<TypeInfo>) -> Result<Layout, TypeError> {
+    if ty.kind() == TypeKind::Void {
+        return Err(TypeError::VoidField);
+    }
+    ty.object_layout().ok_or(TypeError::FunctionField)
+}
+
+/// C field layout: declaration-order offsets for structs, offset 0 for unions.
+fn layout_fields(
+    fields: Vec<(Option<String>, Layout)>,
+    union: bool,
+) -> Result<(Vec<(Option<String>, usize)>, Layout), TypeError> {
+    let mut out = Vec::with_capacity(fields.len());
+    let mut offset = 0usize;
+    let mut max_size = 0usize;
+    let mut align = 1usize;
+    for (name, field_layout) in fields {
+        if let Some(name) = &name
+            && out
+                .iter()
+                .any(|(existing, _): &(Option<String>, usize)| existing.as_deref() == Some(name))
+        {
+            return Err(TypeError::DuplicateField(name.clone()));
+        }
+        align = align.max(field_layout.align());
+        if union {
+            out.push((name, 0));
+            max_size = max_size.max(field_layout.size());
+            continue;
+        }
+        offset = align_up(offset, field_layout.align()).ok_or(TypeError::SizeOverflow)?;
+        out.push((name, offset));
+        offset = offset
+            .checked_add(field_layout.size())
+            .ok_or(TypeError::SizeOverflow)?;
+    }
+    let size = align_up(max_size.max(offset), align).ok_or(TypeError::SizeOverflow)?;
+    let layout = Layout::from_size_align(size, align).map_err(|_| TypeError::SizeOverflow)?;
+    Ok((out, layout))
 }
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
@@ -453,398 +673,4 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
     value
         .checked_add(align - 1)
         .map(|value| value & !(align - 1))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::mem::{align_of, offset_of, size_of};
-
-    // Raylib mirrors: the first real consumer of the layout code.
-
-    #[repr(C)]
-    struct Color {
-        r: u8,
-        g: u8,
-        b: u8,
-        a: u8,
-    }
-
-    #[repr(C)]
-    struct Vector2 {
-        x: f32,
-        y: f32,
-    }
-
-    #[repr(C)]
-    struct Rectangle {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    }
-
-    #[repr(C)]
-    struct Camera2D {
-        offset: Vector2,
-        target: Vector2,
-        rotation: f32,
-        zoom: f32,
-    }
-
-    #[repr(C)]
-    struct Texture2D {
-        id: u32,
-        width: i32,
-        height: i32,
-        mipmaps: i32,
-        format: i32,
-    }
-
-    #[repr(C)]
-    struct Matrix {
-        m: [f32; 16],
-    }
-
-    #[repr(C)]
-    struct Padded {
-        a: u8,
-        b: u32,
-        c: u16,
-    }
-
-    #[repr(C)]
-    union Word {
-        i: u64,
-        f: f64,
-        bytes: [u8; 8],
-    }
-
-    fn assert_layout(table: &TypeTable, id: TypeId, size: usize, align: usize) {
-        assert_eq!(
-            table.layout(id),
-            Some(Layout::from_size_align(size, align).unwrap())
-        );
-    }
-
-    fn assert_offset(table: &TypeTable, id: TypeId, name: &str, offset: usize) {
-        assert_eq!(table.field_offset(id, name).unwrap(), offset);
-    }
-
-    #[test]
-    fn builtins_are_registered_in_id_order() {
-        let table = TypeTable::new();
-        assert_eq!(table.len() as u32, TypeId::BUILTIN_COUNT);
-        assert_eq!(table.get(TypeId::VOID), &CType::Void);
-        assert_eq!(table.get(TypeId::BOOL), &CType::Bool);
-        assert_eq!(table.get(TypeId::CHAR), &CType::Char);
-        assert_eq!(table.get(TypeId::F64), &CType::F64);
-        assert_layout(&table, TypeId::BOOL, 1, 1);
-        assert_layout(&table, TypeId::I8, 1, 1);
-        assert_layout(&table, TypeId::I16, 2, 2);
-        assert_layout(&table, TypeId::I32, 4, 4);
-        assert_layout(&table, TypeId::I64, 8, 8);
-        assert_layout(&table, TypeId::F32, 4, 4);
-        assert_layout(&table, TypeId::F64, 8, 8);
-        assert_eq!(
-            table.layout(TypeId::VOID),
-            Some(Layout::from_size_align(0, 1).unwrap())
-        );
-    }
-
-    #[test]
-    fn color_has_no_padding() {
-        let mut table = TypeTable::new();
-        let color = table
-            .define_struct(
-                Some("Color".into()),
-                vec![
-                    (Some("r".into()), TypeId::U8),
-                    (Some("g".into()), TypeId::U8),
-                    (Some("b".into()), TypeId::U8),
-                    (Some("a".into()), TypeId::U8),
-                ],
-            )
-            .unwrap();
-        assert_layout(&table, color, size_of::<Color>(), align_of::<Color>());
-        assert_offset(&table, color, "r", offset_of!(Color, r));
-        assert_offset(&table, color, "g", offset_of!(Color, g));
-        assert_offset(&table, color, "b", offset_of!(Color, b));
-        assert_offset(&table, color, "a", offset_of!(Color, a));
-    }
-
-    #[test]
-    fn vector2_matches_c() {
-        let mut table = TypeTable::new();
-        let vector2 = table
-            .define_struct(
-                Some("Vector2".into()),
-                vec![
-                    (Some("x".into()), TypeId::F32),
-                    (Some("y".into()), TypeId::F32),
-                ],
-            )
-            .unwrap();
-        assert_layout(&table, vector2, size_of::<Vector2>(), align_of::<Vector2>());
-        assert_offset(&table, vector2, "x", offset_of!(Vector2, x));
-        assert_offset(&table, vector2, "y", offset_of!(Vector2, y));
-    }
-
-    #[test]
-    fn rectangle_and_nested_camera2d() {
-        let mut table = TypeTable::new();
-        let vector2 = table
-            .define_struct(
-                Some("Vector2".into()),
-                vec![
-                    (Some("x".into()), TypeId::F32),
-                    (Some("y".into()), TypeId::F32),
-                ],
-            )
-            .unwrap();
-        let rectangle = table
-            .define_struct(
-                Some("Rectangle".into()),
-                vec![
-                    (Some("x".into()), TypeId::F32),
-                    (Some("y".into()), TypeId::F32),
-                    (Some("width".into()), TypeId::F32),
-                    (Some("height".into()), TypeId::F32),
-                ],
-            )
-            .unwrap();
-        assert_layout(
-            &table,
-            rectangle,
-            size_of::<Rectangle>(),
-            align_of::<Rectangle>(),
-        );
-        assert_offset(&table, rectangle, "width", offset_of!(Rectangle, width));
-
-        let camera = table
-            .define_struct(
-                Some("Camera2D".into()),
-                vec![
-                    (Some("offset".into()), vector2),
-                    (Some("target".into()), vector2),
-                    (Some("rotation".into()), TypeId::F32),
-                    (Some("zoom".into()), TypeId::F32),
-                ],
-            )
-            .unwrap();
-        assert_layout(
-            &table,
-            camera,
-            size_of::<Camera2D>(),
-            align_of::<Camera2D>(),
-        );
-        assert_offset(&table, camera, "offset", offset_of!(Camera2D, offset));
-        assert_offset(&table, camera, "target", offset_of!(Camera2D, target));
-        assert_offset(&table, camera, "rotation", offset_of!(Camera2D, rotation));
-        assert_offset(&table, camera, "zoom", offset_of!(Camera2D, zoom));
-    }
-
-    #[test]
-    fn texture2d_and_matrix_match_c() {
-        let mut table = TypeTable::new();
-        let texture = table
-            .define_struct(
-                Some("Texture2D".into()),
-                vec![
-                    (Some("id".into()), TypeId::U32),
-                    (Some("width".into()), TypeId::I32),
-                    (Some("height".into()), TypeId::I32),
-                    (Some("mipmaps".into()), TypeId::I32),
-                    (Some("format".into()), TypeId::I32),
-                ],
-            )
-            .unwrap();
-        assert_layout(
-            &table,
-            texture,
-            size_of::<Texture2D>(),
-            align_of::<Texture2D>(),
-        );
-        assert_offset(&table, texture, "mipmaps", offset_of!(Texture2D, mipmaps));
-
-        let floats = table.array_of(TypeId::F32, 16).unwrap();
-        let matrix = table
-            .define_struct(Some("Matrix".into()), vec![(Some("m".into()), floats)])
-            .unwrap();
-        assert_layout(&table, matrix, size_of::<Matrix>(), align_of::<Matrix>());
-        assert_layout(
-            &table,
-            floats,
-            size_of::<[f32; 16]>(),
-            align_of::<[f32; 16]>(),
-        );
-    }
-
-    #[test]
-    fn padding_matches_c() {
-        let mut table = TypeTable::new();
-        let padded = table
-            .define_struct(
-                Some("Padded".into()),
-                vec![
-                    (Some("a".into()), TypeId::U8),
-                    (Some("b".into()), TypeId::U32),
-                    (Some("c".into()), TypeId::U16),
-                ],
-            )
-            .unwrap();
-        assert_layout(&table, padded, size_of::<Padded>(), align_of::<Padded>());
-        assert_offset(&table, padded, "a", offset_of!(Padded, a));
-        assert_offset(&table, padded, "b", offset_of!(Padded, b));
-        assert_offset(&table, padded, "c", offset_of!(Padded, c));
-    }
-
-    #[test]
-    fn union_matches_c() {
-        let mut table = TypeTable::new();
-        let bytes = table.array_of(TypeId::U8, 8).unwrap();
-        let word = table
-            .define_union(
-                Some("Word".into()),
-                vec![
-                    (Some("i".into()), TypeId::U64),
-                    (Some("f".into()), TypeId::F64),
-                    (Some("bytes".into()), bytes),
-                ],
-            )
-            .unwrap();
-        assert_layout(&table, word, size_of::<Word>(), align_of::<Word>());
-        assert_offset(&table, word, "i", 0);
-        assert_offset(&table, word, "f", 0);
-        assert_offset(&table, word, "bytes", 0);
-    }
-
-    #[test]
-    fn pointer_and_function_types_are_interned() {
-        let mut table = TypeTable::new();
-        let pointer = table.pointer_to(TypeId::U8);
-        assert_eq!(pointer, table.pointer_to(TypeId::U8));
-        assert_layout(&table, pointer, POINTER_SIZE, POINTER_SIZE);
-
-        let void_fn = table.function(vec![], TypeId::VOID, false, Abi::C).unwrap();
-        assert_eq!(
-            void_fn,
-            table.function(vec![], TypeId::VOID, false, Abi::C).unwrap()
-        );
-        assert_eq!(table.layout(void_fn), None);
-
-        let strlen = table
-            .function(vec![pointer], TypeId::U64, false, Abi::C)
-            .unwrap();
-        assert_eq!(
-            strlen,
-            table
-                .function(vec![pointer], TypeId::U64, false, Abi::C)
-                .unwrap()
-        );
-        assert_ne!(strlen, void_fn);
-    }
-
-    #[test]
-    fn nominal_structs_with_equal_layout_are_distinct() {
-        let mut table = TypeTable::new();
-        let a = table
-            .define_struct(
-                Some("A".into()),
-                vec![
-                    (Some("x".into()), TypeId::I32),
-                    (Some("y".into()), TypeId::I32),
-                ],
-            )
-            .unwrap();
-        let b = table
-            .define_struct(
-                Some("B".into()),
-                vec![
-                    (Some("x".into()), TypeId::I32),
-                    (Some("y".into()), TypeId::I32),
-                ],
-            )
-            .unwrap();
-        assert_ne!(a, b);
-        assert_eq!(table.layout(a), table.layout(b));
-    }
-
-    #[test]
-    fn array_of_struct_uses_struct_size() {
-        let mut table = TypeTable::new();
-        let vector2 = table
-            .define_struct(
-                Some("Vector2".into()),
-                vec![
-                    (Some("x".into()), TypeId::F32),
-                    (Some("y".into()), TypeId::F32),
-                ],
-            )
-            .unwrap();
-        let array = table.array_of(vector2, 4).unwrap();
-        assert_layout(&table, array, size_of::<[Vector2; 4]>(), 4);
-    }
-
-    #[test]
-    fn flexible_array_member_has_zero_size() {
-        let mut table = TypeTable::new();
-        let tail = table.array_of(TypeId::U8, 0).unwrap();
-        let header = table
-            .define_struct(
-                Some("Header".into()),
-                vec![
-                    (Some("len".into()), TypeId::U32),
-                    (Some("data".into()), tail),
-                ],
-            )
-            .unwrap();
-        assert_eq!(table.field_offset(header, "data"), Ok(4));
-        assert_layout(&table, header, 4, 4);
-    }
-
-    #[test]
-    fn rejects_invalid_object_types() {
-        let mut table = TypeTable::new();
-        assert_eq!(
-            table.define_struct(None, vec![(None, TypeId::VOID)]),
-            Err(TypeError::VoidField)
-        );
-        let f = table.function(vec![], TypeId::VOID, false, Abi::C).unwrap();
-        assert_eq!(
-            table.define_struct(None, vec![(None, f)]),
-            Err(TypeError::FunctionField)
-        );
-        assert_eq!(table.array_of(TypeId::VOID, 1), Err(TypeError::VoidField));
-    }
-
-    #[test]
-    fn rejects_duplicate_field_names() {
-        let mut table = TypeTable::new();
-        assert_eq!(
-            table.define_struct(
-                None,
-                vec![
-                    (Some("x".into()), TypeId::I32),
-                    (Some("x".into()), TypeId::I32)
-                ],
-            ),
-            Err(TypeError::DuplicateField("x".into()))
-        );
-    }
-
-    #[test]
-    fn platform_aliases_have_expected_widths() {
-        let table = TypeTable::new();
-        let long = table.layout(TypeId::C_LONG).unwrap();
-        if cfg!(windows) || cfg!(target_pointer_width = "32") {
-            assert_eq!(long.size(), 4);
-        } else {
-            assert_eq!(long.size(), 8);
-        }
-        assert_eq!(
-            table.layout(TypeId::SIZE).unwrap().size(),
-            core::mem::size_of::<usize>()
-        );
-    }
 }

@@ -1,6 +1,6 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{Abi, TypeId};
-use vm::{CPointer, DefaultInterpreter, Handle, HandleScope, Heap, VM, VmCore};
+use vm::ffi::TypeKind;
+use vm::{CPointer, DefaultInterpreter, Handle, HandleScope, Heap, TypeInfo, VM, VmCore};
 
 fn test_vm() -> VM {
     VM::new::<MarkSweep, DefaultInterpreter>(MarkSweepConfig::default())
@@ -9,35 +9,43 @@ fn test_vm() -> VM {
         .expect("failed to install the VM core")
 }
 
+fn builtin<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    kind: TypeKind,
+) -> Handle<'s, TypeInfo> {
+    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+}
+
 fn function_pointer<'s>(
     vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     library: &Handle<vm::ForeignLibrary>,
     name: &str,
-    params: Vec<TypeId>,
-    result: TypeId,
+    params: &[Handle<TypeInfo>],
+    result: &Handle<TypeInfo>,
 ) -> Handle<'s, vm::CFunction> {
     let core = vm.runtime::<VmCore>();
     let ffi = &core.ffi;
-    let (signature, target_type) = {
-        let mut types = ffi.types_mut();
-        let signature = types.function(params, result, false, Abi::C).unwrap();
-        let target_type = types.pointer_to(signature);
-        (signature, target_type)
-    };
+    let signature = ffi
+        .types()
+        .function(heap, scope, params, result, false)
+        .expect("signature");
     let target = ffi
-        .library_symbol(heap, scope, library, name, target_type)
+        .library_symbol(heap, scope, library, name, &signature)
         .expect("symbol");
-    ffi.function(heap, scope, core.ffi_call, signature, &target, library)
+    ffi.function(heap, scope, core.ffi_call, &signature, &target, library)
         .expect("function")
 }
 
-fn char_pointer(vm: &VM) -> TypeId {
+fn char_pointer<'s>(vm: &VM, heap: &mut Heap, scope: &'s HandleScope<'_>) -> Handle<'s, TypeInfo> {
+    let char_ty = builtin(vm, heap, scope, TypeKind::Char);
     vm.runtime::<VmCore>()
         .ffi
-        .types_mut()
-        .pointer_to(TypeId::CHAR)
+        .types()
+        .pointer_to(heap, scope, &char_ty)
 }
 
 fn cstring<'s>(
@@ -61,21 +69,23 @@ fn calls_strlen_through_a_cfunction() {
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
+        let param = char_pointer(&vm, thread.heap(), &scope);
+        let result = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
         let strlen = function_pointer(
             &vm,
             thread.heap(),
             &scope,
             &library,
             "strlen",
-            vec![char_pointer(&vm)],
-            TypeId::SIZE,
+            &[param],
+            &result,
         );
 
         let text = cstring(&vm, thread.heap(), &scope, "hello");
         let callee = scope.handle(strlen.as_tagged(thread.heap()).erase());
         let args = scope.stage(&[text.as_tagged(thread.heap()).erase()]);
         let raw = ffi
-            .call_raw(thread.heap(), &callee, args.as_args())
+            .call_raw(thread.heap(), &scope, &callee, args.as_args())
             .expect("call");
         let value = ffi.read_raw(thread.heap(), &scope, &raw, None);
         assert_eq!(value.to_i64(), Some(5));
@@ -95,20 +105,22 @@ fn raylib_text_length_when_available() {
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, Some(path))
             .expect("open raylib");
+        let param = char_pointer(&vm, thread.heap(), &scope);
+        let result = builtin(&vm, thread.heap(), &scope, TypeKind::U32);
         let text_length = function_pointer(
             &vm,
             thread.heap(),
             &scope,
             &library,
             "TextLength",
-            vec![char_pointer(&vm)],
-            TypeId::U32,
+            &[param],
+            &result,
         );
         let text = cstring(&vm, thread.heap(), &scope, "hello raylib");
         let callee = scope.handle(text_length.as_tagged(thread.heap()).erase());
         let args = scope.stage(&[text.as_tagged(thread.heap()).erase()]);
         let raw = ffi
-            .call_raw(thread.heap(), &callee, args.as_args())
+            .call_raw(thread.heap(), &scope, &callee, args.as_args())
             .expect("call");
         let value = ffi.read_raw(thread.heap(), &scope, &raw, None);
         assert_eq!(value.to_i64(), Some(12));

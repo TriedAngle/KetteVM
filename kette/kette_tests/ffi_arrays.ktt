@@ -37,7 +37,41 @@ let Point = FFI.struct([["x", FFI.i32], ["y", FFI.i32]])
 let point = Point.new(3, 5)
 Test.assert(point.get("x"), 3)
 Test.assert(point.get("y"), 5)
+Test.assert(point.x, 3)
+Test.assert(point.y, 5)
+point.x = 11
+Test.assert(point.x, 11)
+Test.assert(point.get("x"), 11)
 let point_pointer = point.pointer()
 Test.assert(point_pointer.get(0).get("y"), 5)
 point.set("x", 8)
 Test.assert(point.get("x"), 8)
+
+// aggregate fields are zero-copy views: writes go through
+let Vec2 = FFI.struct([["x", FFI.i32], ["y", FFI.i32]])
+let Rect = FFI.struct([["origin", Vec2], ["size", Vec2]])
+let rect = Rect.new()
+rect.origin.x = 7
+rect.size.y = 9
+Test.assert(rect.origin.x, 7)
+Test.assert(rect.size.y, 9)
+Test.assert(rect.get("origin").x, 7)
+
+// type.wrap(pointer) is a view over borrowed memory
+let wrapped = Point.wrap(point.pointer())
+Test.assert(wrapped.x, 8)
+wrapped.y = 21
+Test.assert(point.y, 21)
+
+// copy detaches
+let detached = point.copy()
+detached.x = 99
+Test.assert(point.x, 8)
+Test.assert(detached.x, 99)
+
+// pointer to pointer
+let I32p = FFI.pointer(FFI.i32)
+let slot = FFI.array(I32p, 1).new()
+slot.set(0, values.pointer())
+let back = slot.get(0)
+Test.assert(back.get(0), 7)

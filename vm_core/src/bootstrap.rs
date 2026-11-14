@@ -45,7 +45,7 @@ pub struct WellKnown {
     /// A guest-visible C type descriptor: one internal `TypeId` slot.
     pub c_type_map: GcSlot<Map>,
     /// Storage for a C aggregate value.
-    pub c_buffer_map: GcSlot<Map>,
+    pub c_value_map: GcSlot<Map>,
     pub feedback_vector_map: GcSlot<Map>,
     /// Maps of the prototype-validity machinery: `Cell` and `PrototypeInfo`.
     pub cell_map: GcSlot<Map>,
@@ -281,7 +281,7 @@ impl WellKnown {
             foreign_library_map: smi_slot::<Map>(),
             c_function_map: smi_slot::<Map>(),
             c_type_map: smi_slot::<Map>(),
-            c_buffer_map: smi_slot::<Map>(),
+            c_value_map: smi_slot::<Map>(),
             feedback_vector_map: smi_slot::<Map>(),
             cell_map: smi_slot::<Map>(),
             prototype_info_map: smi_slot::<Map>(),
@@ -372,7 +372,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.foreign_library_map.as_raw());
         visitor.visit(self.c_function_map.as_raw());
         visitor.visit(self.c_type_map.as_raw());
-        visitor.visit(self.c_buffer_map.as_raw());
+        visitor.visit(self.c_value_map.as_raw());
         visitor.visit(self.feedback_vector_map.as_raw());
         visitor.visit(self.cell_map.as_raw());
         visitor.visit(self.prototype_info_map.as_raw());
@@ -632,10 +632,10 @@ pub fn bootstrap_basics(heap: &mut Heap) {
             .union(MapKind::EXTENDABLE),
     );
     known.c_function_map.init(c_function_map.as_tagged(heap));
-    let c_type_map = alloc_map_with_slots(heap, &scope, MapKind::OBJECT, 1);
+    let c_type_map = alloc_map(heap, &scope, MapKind::C_TYPE);
     known.c_type_map.init(c_type_map.as_tagged(heap));
-    let c_buffer_map = alloc_map(heap, &scope, MapKind::C_BUFFER.union(MapKind::EXTENDABLE));
-    known.c_buffer_map.init(c_buffer_map.as_tagged(heap));
+    let c_value_map = alloc_map(heap, &scope, MapKind::C_VALUE.union(MapKind::EXTENDABLE));
+    known.c_value_map.init(c_value_map.as_tagged(heap));
     let array_map = alloc_map(heap, &scope, MapKind::FIXED_ARRAY);
     let byte_array_map = alloc_map(heap, &scope, MapKind::FIXED_BYTE_ARRAY);
     let code_map = alloc_map(heap, &scope, MapKind::CODE);
@@ -792,6 +792,7 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
             AccessorInfoInit {
                 getter: None,
                 setter: None,
+                data: None,
             },
             &scope,
         );

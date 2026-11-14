@@ -1,8 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{FfiError, TypeId};
+use vm::ffi::{FfiError, TypeKind, ValueRead};
 use vm::{
     CPointer, CPointerFlags, CPointerInit, DefaultInterpreter, Handle, HandleScope, Heap, HeapPtr,
-    RawCell, Smi, VM, Visitor, VmCore, visit_object,
+    RawCell, Smi, TypeInfo, VM, Visitor, VmCore, visit_object,
 };
 
 fn test_vm() -> VM {
@@ -12,11 +12,20 @@ fn test_vm() -> VM {
         .expect("failed to install the VM core")
 }
 
+fn builtin<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    kind: TypeKind,
+) -> Handle<'s, TypeInfo> {
+    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+}
+
 fn allocate<'s>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     vm: &VM,
-    ty: TypeId,
+    ty: &Handle<TypeInfo>,
 ) -> Handle<'s, CPointer> {
     vm.runtime::<VmCore>()
         .ffi
@@ -28,13 +37,13 @@ fn allocate<'s>(
 fn raw_pointer<'s>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
-    ty: TypeId,
+    ty: &Handle<TypeInfo>,
     address: usize,
     flags: CPointerFlags,
 ) -> Handle<'s, CPointer> {
     heap.allocate_handle::<CPointer>(
         CPointerInit {
-            type_id: ty,
+            pointee: ty.clone(),
             address,
             flags,
             library: None,
@@ -49,10 +58,11 @@ fn allocation_is_zeroed_and_vm_backed() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let pointer = allocate(thread.heap(), &scope, &vm, TypeId::U64);
+        let u64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
+        let pointer = allocate(thread.heap(), &scope, &vm, &u64_ty);
         let heap = thread.heap();
         let p = pointer.as_tagged(heap);
-        assert_eq!(p.c_type(), TypeId::U64);
+        assert!(p.pointee(heap).ptr_eq(u64_ty.as_tagged(heap)));
         assert!(p.is_live());
         assert!(!p.is_null(heap));
         assert!(p.flags().contains(CPointerFlags::VM_BACKED));
@@ -65,12 +75,18 @@ fn scalar_roundtrip_at_each_width() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let u8_ptr = allocate(thread.heap(), &scope, &vm, TypeId::U8);
-        let i16_ptr = allocate(thread.heap(), &scope, &vm, TypeId::I16);
-        let u32_ptr = allocate(thread.heap(), &scope, &vm, TypeId::U32);
-        let i64_ptr = allocate(thread.heap(), &scope, &vm, TypeId::I64);
-        let f32_ptr = allocate(thread.heap(), &scope, &vm, TypeId::F32);
-        let f64_ptr = allocate(thread.heap(), &scope, &vm, TypeId::F64);
+        let u8_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U8);
+        let i16_ty = builtin(&vm, thread.heap(), &scope, TypeKind::I16);
+        let u32_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U32);
+        let i64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::I64);
+        let f32_ty = builtin(&vm, thread.heap(), &scope, TypeKind::F32);
+        let f64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::F64);
+        let u8_ptr = allocate(thread.heap(), &scope, &vm, &u8_ty);
+        let i16_ptr = allocate(thread.heap(), &scope, &vm, &i16_ty);
+        let u32_ptr = allocate(thread.heap(), &scope, &vm, &u32_ty);
+        let i64_ptr = allocate(thread.heap(), &scope, &vm, &i64_ty);
+        let f32_ptr = allocate(thread.heap(), &scope, &vm, &f32_ty);
+        let f64_ptr = allocate(thread.heap(), &scope, &vm, &f64_ty);
 
         let heap = thread.heap();
         let p = u8_ptr.as_tagged(heap);
@@ -106,19 +122,13 @@ fn unaligned_access_works() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let bytes = vm
-            .runtime::<VmCore>()
-            .ffi
-            .types_mut()
-            .array_of(TypeId::U8, 32)
-            .unwrap();
-        let base = allocate(thread.heap(), &scope, &vm, bytes);
+        let u64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
         let owner = thread
             .heap()
             .allocate_handle::<vm::FixedByteArray>(&[0u8; 32], &scope);
         let unaligned = thread.heap().allocate_handle::<CPointer>(
             CPointerInit {
-                type_id: TypeId::U64,
+                pointee: u64_ty,
                 address: 1,
                 flags: CPointerFlags::VM_BACKED,
                 library: None,
@@ -126,7 +136,6 @@ fn unaligned_access_works() {
             },
             &scope,
         );
-        drop(base);
 
         let heap = thread.heap();
         let p = unaligned.as_tagged(heap);
@@ -144,17 +153,12 @@ fn null_and_dead_are_distinct_errors() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let null = raw_pointer(
-            thread.heap(),
-            &scope,
-            TypeId::U64,
-            0,
-            CPointerFlags::BORROWED,
-        );
+        let u64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
+        let null = raw_pointer(thread.heap(), &scope, &u64_ty, 0, CPointerFlags::BORROWED);
         let dead = raw_pointer(
             thread.heap(),
             &scope,
-            TypeId::U64,
+            &u64_ty,
             0x1000,
             CPointerFlags::BORROWED.union(CPointerFlags::DEAD),
         );
@@ -185,7 +189,8 @@ fn payload_is_never_visited_as_a_gc_edge() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let pointer = allocate(thread.heap(), &scope, &vm, TypeId::U64);
+        let u64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
+        let pointer = allocate(thread.heap(), &scope, &vm, &u64_ty);
         let heap = thread.heap();
         let raw = pointer.as_tagged(heap).as_ref();
         let address_cell = &raw.address as *const RawCell as usize;
@@ -195,7 +200,11 @@ fn payload_is_never_visited_as_a_gc_edge() {
         // Safety: `object` is a live heap object of this VM.
         unsafe { visit_object(object, &mut visited) };
 
-        assert_eq!(visited.0.len(), 5, "map, slots, elements, library, owner");
+        assert_eq!(
+            visited.0.len(),
+            6,
+            "map, slots, elements, type, library, owner"
+        );
         assert!(!visited.0.contains(&address_cell));
     });
 }
@@ -206,10 +215,14 @@ fn array_elements_and_pointer_arithmetic() {
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
         let ffi = &vm.runtime::<VmCore>().ffi;
-        let array = ffi.types_mut().array_of(TypeId::I32, 4).unwrap();
-        let buffer = ffi.buffer(thread.heap(), &scope, array).unwrap();
+        let i32_ty = builtin(&vm, thread.heap(), &scope, TypeKind::I32);
+        let array = ffi
+            .types()
+            .array_of(thread.heap(), &scope, &i32_ty, 4)
+            .unwrap();
+        let buffer = ffi.value(thread.heap(), &scope, &array).unwrap();
         for index in 0..4 {
-            ffi.buffer_set_index(
+            ffi.value_set_index(
                 thread.heap(),
                 &buffer,
                 index,
@@ -218,22 +231,31 @@ fn array_elements_and_pointer_arithmetic() {
             .unwrap();
         }
 
-        let raw = ffi.buffer_get_index_raw(thread.heap(), &buffer, 2).unwrap();
-        let value = ffi.read_raw(thread.heap(), &scope, &raw, None);
+        let read = ffi
+            .value_get_index(thread.heap(), &scope, &buffer, 2)
+            .unwrap();
+        let value = match read {
+            ValueRead::View(view) => view.as_tagged(thread.heap()).erase(),
+            ValueRead::Raw(raw) => ffi.read_raw(thread.heap(), &scope, &raw, None),
+        };
         assert_eq!(value.to_i64(), Some(20));
         assert_eq!(
-            ffi.buffer_get_index_raw(thread.heap(), &buffer, 4).err(),
+            ffi.value_get_index(thread.heap(), &scope, &buffer, 4).err(),
             Some(FfiError::IndexOutOfBounds)
         );
 
-        let element_pointer = ffi.types_mut().pointer_to(TypeId::I32);
         let data = {
             let heap = thread.heap();
-            scope.handle(buffer.as_tagged(heap).data(heap))
+            scope.handle(
+                buffer
+                    .as_tagged(heap)
+                    .inline_data(heap)
+                    .expect("owned value has inline data"),
+            )
         };
         let storage = thread.heap().allocate_handle::<CPointer>(
             CPointerInit {
-                type_id: element_pointer,
+                pointee: i32_ty,
                 address: 0,
                 flags: CPointerFlags::VM_BACKED,
                 library: None,
@@ -260,7 +282,8 @@ fn vm_backed_data_survives_collection() {
     vm.arm_gc_stress();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let pointer = allocate(thread.heap(), &scope, &vm, TypeId::U64);
+        let u64_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U64);
+        let pointer = allocate(thread.heap(), &scope, &vm, &u64_ty);
         {
             let heap = thread.heap();
             pointer
@@ -271,7 +294,7 @@ fn vm_backed_data_survives_collection() {
 
         // churn: each allocation collects under gc stress
         for _ in 0..8 {
-            let _ = allocate(thread.heap(), &scope, &vm, TypeId::U64);
+            let _ = allocate(thread.heap(), &scope, &vm, &u64_ty);
         }
         thread.heap().collect();
 

@@ -435,7 +435,8 @@ impl MapKind {
     pub const C_POINTER: MapKind = MapKind(ObjectKind::CPointer as u64);
     pub const FOREIGN_LIBRARY: MapKind = MapKind(ObjectKind::ForeignLibrary as u64);
     pub const C_FUNCTION: MapKind = MapKind(ObjectKind::CFunction as u64);
-    pub const C_BUFFER: MapKind = MapKind(ObjectKind::CBuffer as u64);
+    pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
+    pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -486,7 +487,8 @@ impl MapKind {
             Self::C_POINTER => ObjectKind::CPointer,
             Self::FOREIGN_LIBRARY => ObjectKind::ForeignLibrary,
             Self::C_FUNCTION => ObjectKind::CFunction,
-            Self::C_BUFFER => ObjectKind::CBuffer,
+            Self::C_VALUE => ObjectKind::CValue,
+            Self::C_TYPE => ObjectKind::TypeInfo,
             _ => panic!("invalid object kind"),
         }
     }
@@ -516,7 +518,8 @@ impl MapKind {
             || k == ObjectKind::CPointer as u64
             || k == ObjectKind::ForeignLibrary as u64
             || k == ObjectKind::CFunction as u64
-            || k == ObjectKind::CBuffer as u64
+            || k == ObjectKind::CValue as u64
+            || k == ObjectKind::TypeInfo as u64
     }
 
     /// Whether this map is a Proxy.
@@ -805,11 +808,14 @@ pub struct AccessorInfo {
     pub getter: GcSlot<Smi>,
     /// Native registry index of the setter; `-1` means absent.
     pub setter: GcSlot<Smi>,
+    /// Opaque per-accessor state handed to the native callback.
+    pub data: GcSlot<Value>,
 }
 
-pub struct AccessorInfoInit {
+pub struct AccessorInfoInit<'a> {
     pub getter: Option<NativeIndex>,
     pub setter: Option<NativeIndex>,
+    pub data: Option<Handle<'a, Value>>,
 }
 
 impl AccessorInfo {
@@ -832,6 +838,14 @@ impl AccessorInfo {
         Self::decode(self.setter.to_smi())
     }
 
+    /// The opaque payload attached to this accessor.
+    pub fn data<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
+        if self.data.raw() == heap.known().the_hole.raw() {
+            return None;
+        }
+        Some(self.data.get(heap))
+    }
+
     /// Point the accessor at native registry slots (the front end does this
     /// after installing its runtime table).
     pub fn set_natives(
@@ -848,7 +862,7 @@ impl AccessorInfo {
 
 impl HeapObject for AccessorInfo {
     const KIND: ObjectKind = ObjectKind::AccessorInfo;
-    type Init<'a> = AccessorInfoInit;
+    type Init<'a> = AccessorInfoInit<'a>;
 
     fn layout_for(_config: &Self::Init<'_>) -> Layout {
         Layout::new::<Self>()
@@ -861,6 +875,12 @@ impl HeapObject for AccessorInfo {
             .init(heap.known().accessor_info_map.get(heap));
         self.getter.set(heap, host, Self::encode(config.getter));
         self.setter.set(heap, host, Self::encode(config.setter));
+        match &config.data {
+            Some(data) => self.data.set(heap, host, data.as_tagged(heap)),
+            None => self
+                .data
+                .set(heap, host, heap.known().the_hole.get(heap).erase()),
+        }
     }
 
     fn header(&self) -> &Header {
@@ -875,5 +895,6 @@ impl HeapObject for AccessorInfo {
 impl EdgeVisitable for AccessorInfo {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
+        visitor.visit(self.data.as_raw());
     }
 }

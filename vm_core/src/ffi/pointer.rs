@@ -1,8 +1,10 @@
 //! Pointer operations: allocation, liveness, and typed memory access.
 
 use crate::ffi::memory::{copy_in, copy_out};
-use crate::ffi::{FfiError, FfiResult, FfiState, TypeId};
-use crate::{CPointer, CPointerFlags, CPointerInit, FixedByteArray, Handle, HandleScope, Heap};
+use crate::ffi::{FfiError, FfiResult, FfiState};
+use crate::{
+    CPointer, CPointerFlags, CPointerInit, FixedByteArray, Handle, HandleScope, Heap, TypeInfo,
+};
 
 impl FfiState {
     /// Allocate a typed, zeroed C object in a VM-owned byte array.
@@ -13,12 +15,13 @@ impl FfiState {
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
-        type_id: TypeId,
+        ty: &Handle<TypeInfo>,
     ) -> FfiResult<Handle<'s, CPointer>> {
-        let layout = self
-            .types()
-            .layout(type_id)
-            .ok_or(FfiError::NotAnObject(type_id))?;
+        let (id, layout) = {
+            let info = ty.as_tagged(heap);
+            (info.id(), info.object_layout())
+        };
+        let layout = layout.ok_or(FfiError::NotAnObject(id))?;
         if layout.align() > 16 {
             return Err(FfiError::UnsupportedAlignment(layout.align()));
         }
@@ -26,7 +29,7 @@ impl FfiState {
         let data = heap.allocate_handle::<FixedByteArray>(&vec![0u8; size], scope);
         Ok(heap.allocate_handle::<CPointer>(
             CPointerInit {
-                type_id,
+                pointee: ty.clone(),
                 address: 0,
                 flags: CPointerFlags::VM_BACKED,
                 library: None,

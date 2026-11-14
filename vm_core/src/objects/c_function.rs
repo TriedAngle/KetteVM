@@ -13,16 +13,15 @@
 //! `Object::call_target` dispatches it to the trampoline native, which reads
 //! these fields back from the callee.
 
-use crate::ffi::TypeId;
 use crate::{
     CPointer, CallableInfoObject, EdgeVisitable, FixedArray, ForeignLibrary, GcSlot, Handle,
-    Header, Heap, HeapObject, ObjectKind, OptionGcSlot, Smi, Tagged, Value, Visitor,
+    Header, Heap, HeapObject, ObjectKind, OptionGcSlot, Smi, Tagged, TypeInfo, Value, Visitor,
 };
 use core::alloc::Layout;
 
 pub struct CFunctionInit<'a> {
     pub info: Handle<'a, CallableInfoObject>,
-    pub signature: TypeId,
+    pub signature: Handle<'a, TypeInfo>,
     pub target: Handle<'a, CPointer>,
     pub library: Option<Handle<'a, ForeignLibrary>>,
 }
@@ -35,8 +34,8 @@ pub struct CFunction {
     pub length: GcSlot<Smi>,
 
     pub info: GcSlot<CallableInfoObject>,
-    /// TypeId of the function type this pointer was declared with.
-    pub signature: GcSlot<Smi>,
+    /// The function type this pointer was declared with.
+    pub signature: GcSlot<TypeInfo>,
     pub target: GcSlot<CPointer>,
     pub library: OptionGcSlot<ForeignLibrary>,
 }
@@ -46,8 +45,8 @@ impl CFunction {
         self.info.get(heap)
     }
 
-    pub fn signature(&self) -> TypeId {
-        TypeId::from_i64(self.signature.to_smi_unchecked().value())
+    pub fn signature<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
+        self.signature.get(heap)
     }
 
     pub fn target<'a>(&self, heap: &'a Heap) -> Tagged<'a, CPointer> {
@@ -74,8 +73,7 @@ impl HeapObject for CFunction {
         self.elements.init(empty.erase());
         self.length.init_tagged(Smi::new(0).into());
         self.info.init_tagged(config.info.as_tagged(heap));
-        self.signature
-            .init_tagged(Smi::new(config.signature.as_i64()).into());
+        self.signature.init_tagged(config.signature.as_tagged(heap));
         self.target.init_tagged(config.target.as_tagged(heap));
         match &config.library {
             Some(library) => self
@@ -100,6 +98,7 @@ impl EdgeVisitable for CFunction {
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
         visitor.visit(self.info.as_raw());
+        visitor.visit(self.signature.as_raw());
         visitor.visit(self.target.as_raw());
         visitor.visit(self.library.as_raw());
     }

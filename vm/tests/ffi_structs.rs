@@ -1,8 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{Abi, TypeId};
+use vm::ffi::{FfiError, TypeKind, ValueRead};
 use vm::{
-    CFunction, DefaultInterpreter, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, VM,
-    VmCore,
+    CFunction, DefaultInterpreter, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, TypeInfo,
+    VM, VmCore,
 };
 
 fn test_vm() -> VM {
@@ -12,15 +12,28 @@ fn test_vm() -> VM {
         .expect("failed to install the VM core")
 }
 
-fn struct_type(vm: &VM, fields: &[(&str, TypeId)]) -> TypeId {
-    let fields = fields
+fn builtin<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    kind: TypeKind,
+) -> Handle<'s, TypeInfo> {
+    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+}
+
+fn struct_type<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    fields: &[(&str, Handle<TypeInfo>)],
+) -> Handle<'s, TypeInfo> {
+    let fields: Vec<(Option<&str>, Handle<TypeInfo>)> = fields
         .iter()
-        .map(|(name, ty)| (Some(name.to_string()), *ty))
+        .map(|(name, ty)| (Some(*name), ty.clone()))
         .collect();
     vm.runtime::<VmCore>()
         .ffi
-        .types_mut()
-        .define_struct(None, fields)
+        .define_struct(vm, heap, scope, None, &fields)
         .expect("struct")
 }
 
@@ -30,21 +43,19 @@ fn function_pointer<'s>(
     scope: &'s HandleScope<'_>,
     library: &Handle<ForeignLibrary>,
     name: &str,
-    params: Vec<TypeId>,
-    result: TypeId,
+    params: &[Handle<TypeInfo>],
+    result: &Handle<TypeInfo>,
 ) -> Handle<'s, CFunction> {
     let core = vm.runtime::<VmCore>();
     let ffi = &core.ffi;
-    let (signature, target_type) = {
-        let mut types = ffi.types_mut();
-        let signature = types.function(params, result, false, Abi::C).unwrap();
-        let target_type = types.pointer_to(signature);
-        (signature, target_type)
-    };
+    let signature = ffi
+        .types()
+        .function(heap, scope, params, result, false)
+        .expect("signature");
     let target = ffi
-        .library_symbol(heap, scope, library, name, target_type)
+        .library_symbol(heap, scope, library, name, &signature)
         .expect("symbol");
-    ffi.function(heap, scope, core.ffi_call, signature, &target, library)
+    ffi.function(heap, scope, core.ffi_call, &signature, &target, library)
         .expect("function")
 }
 
@@ -65,34 +76,38 @@ fn struct_by_value_argument() {
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, Some(path))
             .expect("open");
+        let u8_ty = builtin(&vm, thread.heap(), &scope, TypeKind::U8);
         let color = struct_type(
             &vm,
+            thread.heap(),
+            &scope,
             &[
-                ("r", TypeId::U8),
-                ("g", TypeId::U8),
-                ("b", TypeId::U8),
-                ("a", TypeId::U8),
+                ("r", u8_ty.clone()),
+                ("g", u8_ty.clone()),
+                ("b", u8_ty.clone()),
+                ("a", u8_ty),
             ],
         );
+        let i32_ty = builtin(&vm, thread.heap(), &scope, TypeKind::I32);
         let function = function_pointer(
             &vm,
             thread.heap(),
             &scope,
             &library,
             "ColorToInt",
-            vec![color],
-            TypeId::I32,
+            &[color.clone()],
+            &i32_ty,
         );
-        let buffer = ffi.buffer(thread.heap(), &scope, color).unwrap();
+        let buffer = ffi.value(thread.heap(), &scope, &color).unwrap();
         for (name, value) in [("r", 255), ("g", 0), ("b", 0), ("a", 128)] {
-            ffi.buffer_set(thread.heap(), &buffer, name, Smi::new(value).into_tagged())
+            ffi.value_set_field(thread.heap(), &buffer, name, Smi::new(value).into_tagged())
                 .unwrap();
         }
 
         let callee = scope.handle(function.as_tagged(thread.heap()).erase());
         let args = scope.stage(&[buffer.as_tagged(thread.heap()).erase()]);
         let raw = ffi
-            .call_raw(thread.heap(), &callee, args.as_args())
+            .call_raw(thread.heap(), &scope, &callee, args.as_args())
             .expect("call");
         let value = ffi.read_raw(thread.heap(), &scope, &raw, None);
         assert_eq!(value.to_i64(), Some(0xFF00_0080u32 as i32 as i64));
@@ -111,22 +126,28 @@ fn hfa_struct_arguments_and_return() {
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, Some(path))
             .expect("open");
-        let vector2 = struct_type(&vm, &[("x", TypeId::F32), ("y", TypeId::F32)]);
+        let f32_ty = builtin(&vm, thread.heap(), &scope, TypeKind::F32);
+        let vector2 = struct_type(
+            &vm,
+            thread.heap(),
+            &scope,
+            &[("x", f32_ty.clone()), ("y", f32_ty)],
+        );
         let function = function_pointer(
             &vm,
             thread.heap(),
             &scope,
             &library,
             "Vector2Add",
-            vec![vector2, vector2],
-            vector2,
+            &[vector2.clone(), vector2.clone()],
+            &vector2,
         );
-        let left = ffi.buffer(thread.heap(), &scope, vector2).unwrap();
-        let right = ffi.buffer(thread.heap(), &scope, vector2).unwrap();
+        let left = ffi.value(thread.heap(), &scope, &vector2).unwrap();
+        let right = ffi.value(thread.heap(), &scope, &vector2).unwrap();
         for (buffer, values) in [(&left, (1, 2)), (&right, (3, 4))] {
-            ffi.buffer_set(thread.heap(), buffer, "x", Smi::new(values.0).into_tagged())
+            ffi.value_set_field(thread.heap(), buffer, "x", Smi::new(values.0).into_tagged())
                 .unwrap();
-            ffi.buffer_set(thread.heap(), buffer, "y", Smi::new(values.1).into_tagged())
+            ffi.value_set_field(thread.heap(), buffer, "y", Smi::new(values.1).into_tagged())
                 .unwrap();
         }
 
@@ -136,21 +157,35 @@ fn hfa_struct_arguments_and_return() {
             scope.stage(&[left.as_tagged(heap).erase(), right.as_tagged(heap).erase()])
         };
         let raw = ffi
-            .call_raw(thread.heap(), &callee, args.as_args())
+            .call_raw(thread.heap(), &scope, &callee, args.as_args())
             .expect("call");
         let result = scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None));
         let result = {
             let heap = thread.heap();
-            result.as_tagged(heap).get_as::<vm::CBuffer>(heap).unwrap()
+            result.as_tagged(heap).get_as::<vm::CValue>(heap).unwrap()
         };
         let result = scope.handle(result);
         let x = {
-            let raw = ffi.buffer_get_raw(thread.heap(), &result, "x").expect("x");
-            scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None))
+            let read = ffi
+                .value_get_field(thread.heap(), &scope, &result, "x")
+                .expect("x");
+            match read {
+                ValueRead::View(view) => scope.handle(view.as_tagged(thread.heap()).erase()),
+                ValueRead::Raw(raw) => {
+                    scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None))
+                }
+            }
         };
         let y = {
-            let raw = ffi.buffer_get_raw(thread.heap(), &result, "y").expect("y");
-            scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None))
+            let read = ffi
+                .value_get_field(thread.heap(), &scope, &result, "y")
+                .expect("y");
+            match read {
+                ValueRead::View(view) => scope.handle(view.as_tagged(thread.heap()).erase()),
+                ValueRead::Raw(raw) => {
+                    scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None))
+                }
+            }
         };
         let heap = thread.heap();
         let x = x.as_tagged(heap).get_as::<Float>(heap).unwrap().value.get();

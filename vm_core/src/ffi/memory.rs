@@ -31,6 +31,15 @@ pub fn copy_in(address: usize, bytes: &[u8]) {
     unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len()) };
 }
 
+/// Copy `len` bytes from `src` to `dst`.
+pub fn copy_bytes(src: usize, dst: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    // Safety: the caller checked both regions are live and non-overlapping.
+    unsafe { ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len) };
+}
+
 /// Copy `out.len()` bytes from `offset` bytes past `address` into `out`.
 pub fn copy_out_at(address: usize, offset: usize, out: &mut [u8]) {
     if out.is_empty() {

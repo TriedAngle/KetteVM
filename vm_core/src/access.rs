@@ -144,8 +144,9 @@ impl Object {
                 }
                 Hit::NativeAccessor { holder, info, .. } => {
                     let getter = info.getter();
+                    let accessor = scope.handle(info.erase());
                     let holder = scope.handle(holder.erase());
-                    native_accessor_get(vm, heap, state, &scope, getter, holder)
+                    native_accessor_get(vm, heap, state, &scope, getter, accessor, holder)
                 }
             }
         })
@@ -238,7 +239,10 @@ impl Object {
                         Ok(SetApplied::Rejected)
                     } else {
                         let setter = info.setter();
-                        native_accessor_set(vm, heap, state, &scope, setter, receiver, value)
+                        let accessor = scope.handle(info.erase());
+                        native_accessor_set(
+                            vm, heap, state, &scope, setter, accessor, receiver, value,
+                        )
                     }
                 }
                 Hit::Data {
@@ -910,14 +914,10 @@ impl Object {
                         return reject_ordinary(vm, state, heap, should_throw);
                     };
                     let holder = scope.handle(receiver.as_tagged(heap).erase());
+                    let setter = info.as_tagged(heap).setter();
+                    let accessor = info.erase();
                     match native_accessor_set(
-                        vm,
-                        heap,
-                        state,
-                        scope,
-                        info.as_tagged(heap).setter(),
-                        holder,
-                        value,
+                        vm, heap, state, scope, setter, accessor, holder, value,
                     )? {
                         SetApplied::Rejected => {
                             return should_throw.reject(vm, heap, state);
@@ -1178,6 +1178,7 @@ fn native_accessor_get<'h>(
     state: &'h ThreadState,
     scope: &HandleScope<'_>,
     getter: Option<NativeIndex>,
+    accessor: Handle<'_, Value>,
     holder: Handle<'_, Value>,
 ) -> Result<Tagged<'h, Value>> {
     let Some(index) = getter else {
@@ -1185,7 +1186,7 @@ fn native_accessor_get<'h>(
     };
     let args = Args::EMPTY;
     let info = CallInfo {
-        callee: None,
+        callee: Some(accessor),
         receiver: holder,
         new_target: None,
     };
@@ -1207,6 +1208,7 @@ fn native_accessor_set<'h>(
     state: &'h ThreadState,
     scope: &HandleScope<'_>,
     setter: Option<NativeIndex>,
+    accessor: Handle<'_, Value>,
     holder: Handle<'_, Value>,
     value: Handle<'_, Value>,
 ) -> Result<SetApplied> {
@@ -1215,7 +1217,7 @@ fn native_accessor_set<'h>(
     };
     let args = scope.stage(&[value.as_tagged(heap)]).as_args();
     let info = CallInfo {
-        callee: None,
+        callee: Some(accessor),
         receiver: holder,
         new_target: None,
     };

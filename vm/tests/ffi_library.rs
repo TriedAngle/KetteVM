@@ -1,8 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{Abi, FfiError, TypeId};
+use vm::ffi::{FfiError, TypeKind};
 use vm::{
-    CPointer, CPointerFlags, DefaultInterpreter, ForeignLibrary, Handle, HandleScope, Heap, VM,
-    VmCore,
+    CPointer, CPointerFlags, DefaultInterpreter, ForeignLibrary, Handle, HandleScope, Heap,
+    TypeInfo, VM, VmCore,
 };
 
 fn test_vm() -> VM {
@@ -12,12 +12,26 @@ fn test_vm() -> VM {
         .expect("failed to install the VM core")
 }
 
+fn builtin<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    kind: TypeKind,
+) -> Handle<'s, TypeInfo> {
+    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+}
+
 /// The pointer type used for a library function symbol.
-fn function_pointer(vm: &VM) -> TypeId {
+fn function_pointer<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+) -> Handle<'s, TypeInfo> {
     let ffi = &vm.runtime::<VmCore>().ffi;
-    let mut types = ffi.types_mut();
-    let function = types.function(vec![], TypeId::I32, false, Abi::C).unwrap();
-    types.pointer_to(function)
+    let result = builtin(vm, heap, scope, TypeKind::I32);
+    ffi.types()
+        .function(heap, scope, &[], &result, false)
+        .expect("function type")
 }
 
 fn open<'s>(
@@ -39,10 +53,10 @@ fn symbol<'s>(
     library: &Handle<ForeignLibrary>,
     name: &str,
 ) -> Handle<'s, CPointer> {
-    let ty = function_pointer(vm);
+    let ty = function_pointer(vm, heap, scope);
     vm.runtime::<VmCore>()
         .ffi
-        .library_symbol(heap, scope, library, name, ty)
+        .library_symbol(heap, scope, library, name, &ty)
         .expect("library symbol")
 }
 
@@ -83,13 +97,13 @@ fn missing_symbol_is_reported() {
     thread.handle_scope(|thread, scope| {
         let ffi = &vm.runtime::<VmCore>().ffi;
         let library = open(&vm, thread.heap(), &scope, None);
-        let ty = function_pointer(&vm);
+        let ty = function_pointer(&vm, thread.heap(), &scope);
         let result = ffi.library_symbol(
             thread.heap(),
             &scope,
             &library,
             "kettevm_no_such_symbol",
-            ty,
+            &ty,
         );
         assert!(matches!(result, Err(FfiError::SymbolNotFound { .. })));
     });
@@ -108,18 +122,6 @@ fn bad_path_is_reported() {
             Some("/nonexistent/kettevm-no-such-library.dylib"),
         );
         assert!(matches!(result, Err(FfiError::LoadFailed(_))));
-    });
-}
-
-#[test]
-fn symbol_requires_a_pointer_type() {
-    let vm = test_vm();
-    let mut thread = vm.attach();
-    thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
-        let library = open(&vm, thread.heap(), &scope, None);
-        let result = ffi.library_symbol(thread.heap(), &scope, &library, "malloc", TypeId::I32);
-        assert!(matches!(result, Err(FfiError::NotAPointer(TypeId::I32))));
     });
 }
 

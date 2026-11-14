@@ -89,9 +89,8 @@ pub struct VmCore {
 }
 
 impl EdgeVisitable for VmCore {
-    fn visit_edges(&self, _visitor: &mut dyn Visitor) {
-        // FFI state holds only host-side type data; it has no GC edges yet.
-        // Caching a prototype or well-known FFI object here would add one.
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        self.ffi.visit_edges(visitor);
     }
 }
 

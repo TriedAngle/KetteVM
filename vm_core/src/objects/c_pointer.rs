@@ -14,10 +14,9 @@
 //! `NULL` is `address == 0`; it is a value, not a flag. `DEAD` is a separate
 //! flag and makes the pointer unusable even if its bits are non-null.
 
-use crate::ffi::TypeId;
 use crate::{
     EdgeVisitable, FixedArray, FixedByteArray, ForeignLibrary, GcSlot, Handle, Header, Heap,
-    HeapObject, ObjectKind, OptionGcSlot, RawCell, Smi, Tagged, Value, Visitor,
+    HeapObject, ObjectKind, OptionGcSlot, RawCell, Smi, Tagged, TypeInfo, Value, Visitor,
 };
 use core::alloc::Layout;
 
@@ -54,7 +53,8 @@ impl CPointerFlags {
 }
 
 pub struct CPointerInit<'a> {
-    pub type_id: TypeId,
+    /// The type this pointer points at.
+    pub pointee: Handle<'a, TypeInfo>,
     /// An absolute address, or an offset into `owner` for `VM_BACKED`
     /// pointers.
     pub address: usize,
@@ -72,7 +72,7 @@ pub struct CPointer {
     pub elements: GcSlot<Value>,
     pub length: GcSlot<Smi>,
 
-    pub type_id: GcSlot<Smi>,
+    pub pointee: GcSlot<TypeInfo>,
     pub address: RawCell,
     pub flags: GcSlot<Smi>,
     /// Strong reference to the owning library.
@@ -97,8 +97,8 @@ impl CPointer {
         self.owner.get(heap)
     }
 
-    pub fn c_type(&self) -> TypeId {
-        TypeId::from_i64(self.type_id.to_smi_unchecked().value())
+    pub fn pointee<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
+        self.pointee.get(heap)
     }
 
     /// The stored word: an absolute address, or an offset for `VM_BACKED`.
@@ -165,8 +165,7 @@ impl HeapObject for CPointer {
         self.slots.init(empty);
         self.elements.init(empty.erase());
         self.length.init_tagged(Smi::new(0).into());
-        self.type_id
-            .init_tagged(Smi::new(config.type_id.as_i64()).into());
+        self.pointee.init_tagged(config.pointee.as_tagged(heap));
         self.flags
             .init_tagged(Smi::new(config.flags.bits() as i64).into());
         self.address.store_raw(config.address as u64);
@@ -196,6 +195,7 @@ impl EdgeVisitable for CPointer {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
+        visitor.visit(self.pointee.as_raw());
         visitor.visit(self.library.as_raw());
         visitor.visit(self.owner.as_raw());
     }

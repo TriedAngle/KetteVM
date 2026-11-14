@@ -1,10 +1,10 @@
 //! Loading libraries and resolving their symbols.
 
 use crate::ffi::platform;
-use crate::ffi::{CType, FfiError, FfiResult, FfiState, TypeId};
+use crate::ffi::{FfiError, FfiResult, FfiState, TypeKind};
 use crate::{
     CPointer, CPointerFlags, CPointerInit, ForeignLibrary, ForeignLibraryInit, Handle, HandleScope,
-    Heap, VM,
+    Heap, TypeInfo, VM,
 };
 
 impl FfiState {
@@ -17,14 +17,14 @@ impl FfiState {
         path: Option<&str>,
     ) -> FfiResult<Handle<'s, ForeignLibrary>> {
         let address = platform::open(path)?;
-        let handle_type = self.types_mut().pointer_to(TypeId::VOID);
+        let void = scope.handle(self.builtin(heap, TypeKind::Void));
         let mut flags = CPointerFlags::LIBRARY.union(CPointerFlags::BORROWED);
         if path.is_none() {
             flags = flags.union(CPointerFlags::PROCESS);
         }
         let handle = heap.allocate_handle::<CPointer>(
             CPointerInit {
-                type_id: handle_type,
+                pointee: void,
                 address,
                 flags,
                 library: None,
@@ -61,11 +61,8 @@ impl FfiState {
         scope: &'s HandleScope<'_>,
         library: &Handle<ForeignLibrary>,
         name: &str,
-        ty: TypeId,
+        ty: &Handle<TypeInfo>,
     ) -> FfiResult<Handle<'s, CPointer>> {
-        if !matches!(self.types().get(ty), CType::Pointer(_)) {
-            return Err(FfiError::NotAPointer(ty));
-        }
         let lookup = {
             let library = library.as_tagged(heap);
             if !library.is_live(heap) {
@@ -76,7 +73,7 @@ impl FfiState {
         let address = platform::symbol(lookup, name)?;
         let pointer = heap.allocate_handle::<CPointer>(
             CPointerInit {
-                type_id: ty,
+                pointee: ty.clone(),
                 address,
                 flags: CPointerFlags::LIBRARY.union(CPointerFlags::BORROWED),
                 library: None,

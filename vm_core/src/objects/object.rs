@@ -1031,7 +1031,8 @@ impl HeapObject for Object {
                 | ObjectKind::CPointer
                 | ObjectKind::ForeignLibrary
                 | ObjectKind::CFunction
-                | ObjectKind::CBuffer
+                | ObjectKind::CValue
+                | ObjectKind::TypeInfo
         )
     }
     type Init<'a> = ObjectInit<'a>;
