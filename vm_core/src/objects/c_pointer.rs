@@ -1,6 +1,6 @@
 //! The C pointer object.
 //!
-//! A `CPointer` is a typed handle: a C `TypeId`, a raw address, and flags.
+//! A `CPointer` is a typed handle: a C `TypeId`, an address, and flags.
 //! It shares the `Object` prefix so ordinary property and prototype machinery
 //! works on it, but the payload lives outside the GC-scanned slots:
 //!
@@ -8,14 +8,16 @@
 //! - `address` is a raw word and is never visited
 //! - `library` is a strong reference to the owning `ForeignLibrary`; it keeps
 //!   the DLL object alive while the pointer is alive
+//! - `owner` is the byte array backing a `VM_BACKED` pointer; the GC may move
+//!   it, so the stored word is an offset and the address is derived on read
 //!
 //! `NULL` is `address == 0`; it is a value, not a flag. `DEAD` is a separate
 //! flag and makes the pointer unusable even if its bits are non-null.
 
 use crate::ffi::TypeId;
 use crate::{
-    EdgeVisitable, FixedArray, ForeignLibrary, GcSlot, Header, Heap, HeapObject, ObjectKind,
-    OptionGcSlot, RawCell, Smi, Tagged, Value, Visitor,
+    EdgeVisitable, FixedArray, FixedByteArray, ForeignLibrary, GcSlot, Handle, Header, Heap,
+    HeapObject, ObjectKind, OptionGcSlot, RawCell, Smi, Tagged, Value, Visitor,
 };
 use core::alloc::Layout;
 
@@ -25,9 +27,10 @@ pub struct CPointerFlags(u8);
 impl CPointerFlags {
     pub const NONE: Self = Self(0);
     pub const DEAD: Self = Self(1 << 0);
-    pub const OWNED_EXTERNAL: Self = Self(1 << 1);
-    pub const BORROWED: Self = Self(1 << 2);
+    /// The address points into the VM heap; the stored word is an offset into
+    /// `owner` and must be resolved through [`CPointer::address`].
     pub const VM_BACKED: Self = Self(1 << 3);
+    pub const BORROWED: Self = Self(1 << 2);
     pub const LIBRARY: Self = Self(1 << 4);
     pub const NUL_TERMINATED: Self = Self(1 << 5);
     /// A library handle for the current process; it is never closed.
@@ -52,10 +55,14 @@ impl CPointerFlags {
 
 pub struct CPointerInit<'a> {
     pub type_id: TypeId,
+    /// An absolute address, or an offset into `owner` for `VM_BACKED`
+    /// pointers.
     pub address: usize,
     pub flags: CPointerFlags,
     /// Owning library, or `None`.
     pub library: Option<Tagged<'a, ForeignLibrary>>,
+    /// VM-owned storage for `VM_BACKED` pointers, or `None`.
+    pub owner: Option<Handle<'a, FixedByteArray>>,
 }
 
 #[repr(C)]
@@ -70,6 +77,9 @@ pub struct CPointer {
     pub flags: GcSlot<Smi>,
     /// Strong reference to the owning library.
     pub library: OptionGcSlot<ForeignLibrary>,
+    /// Strong reference to the VM-owned byte array behind a `VM_BACKED`
+    /// pointer.
+    pub owner: OptionGcSlot<FixedByteArray>,
 }
 
 impl CPointer {
@@ -82,16 +92,35 @@ impl CPointer {
         self.library.set(heap, self.tagged(heap), library);
     }
 
+    /// The VM-owned storage backing a `VM_BACKED` pointer.
+    pub fn owner<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedByteArray>> {
+        self.owner.get(heap)
+    }
+
     pub fn c_type(&self) -> TypeId {
         TypeId::from_i64(self.type_id.to_smi_unchecked().value())
     }
 
-    pub fn address(&self) -> usize {
+    /// The stored word: an absolute address, or an offset for `VM_BACKED`.
+    pub fn raw_address(&self) -> usize {
         self.address.load() as usize
     }
 
-    pub fn set_address(&self, address: usize) {
+    pub fn set_raw_address(&self, address: usize) {
         self.address.store_raw(address as u64);
+    }
+
+    /// The effective address. `VM_BACKED` pointers resolve their offset
+    /// against the current location of the owning byte array.
+    pub fn address(&self, heap: &Heap) -> usize {
+        let stored = self.raw_address();
+        if !self.flags().contains(CPointerFlags::VM_BACKED) {
+            return stored;
+        }
+        match self.owner(heap) {
+            Some(storage) => storage.as_ptr() as usize + stored,
+            None => 0,
+        }
     }
 
     pub fn flags(&self) -> CPointerFlags {
@@ -103,8 +132,8 @@ impl CPointer {
         self.flags.set(heap, host, Smi::new(flags.bits() as i64));
     }
 
-    pub fn is_null(&self) -> bool {
-        self.address() == 0
+    pub fn is_null(&self, heap: &Heap) -> bool {
+        self.address(heap) == 0
     }
 
     pub fn is_dead(&self) -> bool {
@@ -145,6 +174,12 @@ impl HeapObject for CPointer {
             Some(library) => self.library.set(heap, self.tagged(heap), library),
             None => self.library.clear(heap),
         }
+        match config.owner {
+            Some(owner) => self
+                .owner
+                .set(heap, self.tagged(heap), owner.as_tagged(heap)),
+            None => self.owner.clear(heap),
+        }
     }
 
     fn header(&self) -> &Header {
@@ -162,5 +197,6 @@ impl EdgeVisitable for CPointer {
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
         visitor.visit(self.library.as_raw());
+        visitor.visit(self.owner.as_raw());
     }
 }

@@ -1,15 +1,20 @@
 //! Storage for C aggregate values (structs, unions, arrays).
+//!
+//! The data lives in a VM-owned byte array, so the value has an ordinary GC
+//! lifetime: no external allocation, no manual free. `VM_BACKED` pointers
+//! derived from a buffer store an offset and resolve it against the byte
+//! array's current location.
 
 use crate::ffi::TypeId;
 use crate::{
-    CPointer, EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, ObjectKind, Smi,
-    Tagged, Value, Visitor,
+    EdgeVisitable, FixedArray, FixedByteArray, GcSlot, Handle, Header, Heap, HeapObject,
+    ObjectKind, Smi, Tagged, Value, Visitor,
 };
 use core::alloc::Layout;
 
 pub struct CBufferInit<'a> {
     pub type_id: TypeId,
-    pub storage: Handle<'a, CPointer>,
+    pub data: Handle<'a, FixedByteArray>,
     pub count: usize,
 }
 
@@ -21,8 +26,8 @@ pub struct CBuffer {
     pub length: GcSlot<Smi>,
 
     pub type_id: GcSlot<Smi>,
-    /// Owned external storage (`CPointer` with `OWNED_EXTERNAL`).
-    pub storage: GcSlot<CPointer>,
+    /// VM-owned byte storage for this aggregate value.
+    pub data: GcSlot<FixedByteArray>,
     /// Element count for array views; unused for structs.
     pub count: GcSlot<Smi>,
 }
@@ -32,8 +37,8 @@ impl CBuffer {
         TypeId::from_i64(self.type_id.to_smi_unchecked().value())
     }
 
-    pub fn storage<'a>(&self, heap: &'a Heap) -> Tagged<'a, CPointer> {
-        self.storage.get(heap)
+    pub fn data<'a>(&self, heap: &'a Heap) -> Tagged<'a, FixedByteArray> {
+        self.data.get(heap)
     }
 
     pub fn count(&self) -> usize {
@@ -57,7 +62,7 @@ impl HeapObject for CBuffer {
         self.length.init_tagged(Smi::new(0).into());
         self.type_id
             .init_tagged(Smi::new(config.type_id.as_i64()).into());
-        self.storage.init_tagged(config.storage.as_tagged(heap));
+        self.data.init_tagged(config.data.as_tagged(heap));
         self.count.init_tagged(Smi::new(config.count as i64).into());
     }
 
@@ -75,6 +80,6 @@ impl EdgeVisitable for CBuffer {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
-        visitor.visit(self.storage.as_raw());
+        visitor.visit(self.data.as_raw());
     }
 }

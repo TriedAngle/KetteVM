@@ -58,14 +58,11 @@ fn open_process_lookup_and_close() {
         let heap = thread.heap();
         let p = symbol.as_tagged(heap);
         assert!(p.check_live(heap).is_ok());
-        assert!(!p.is_null());
+        assert!(!p.is_null(heap));
         assert!(p.flags().contains(CPointerFlags::LIBRARY));
         assert!(p.flags().contains(CPointerFlags::BORROWED));
         assert!(p.library(heap).is_some());
         assert_eq!(ffi.library_path(heap, &library), Some(String::new()));
-
-        // symbol addresses are owned by the library, never by the VM
-        assert_eq!(p.free_external(heap), Err(FfiError::NotOwned));
 
         ffi.close_library(heap, &library).unwrap();
         assert!(!library.as_tagged(heap).is_live(heap));
@@ -154,7 +151,7 @@ fn raylib_symbol_when_available() {
         let library = open(&vm, thread.heap(), &scope, Some(path));
         let symbol = symbol(&vm, thread.heap(), &scope, &library, "GetScreenWidth");
         let heap = thread.heap();
-        assert!(!symbol.as_tagged(heap).is_null());
+        assert!(!symbol.as_tagged(heap).is_null(heap));
         assert_eq!(ffi.library_path(heap, &library), Some(path.to_string()));
         ffi.close_library(heap, &library).unwrap();
         assert_eq!(

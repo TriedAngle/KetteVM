@@ -10,11 +10,13 @@ pub struct FixedByteArray {
 
 impl FixedByteArray {
     pub fn layout_for(len: usize) -> Layout {
-        let values_layout = Layout::array::<u8>(len).expect("values layout");
-        Layout::new::<Self>()
+        // The payload is 16-byte aligned so VM-owned C data can store any
+        // supported C aggregate directly in a byte array.
+        let values_layout = Layout::from_size_align(len, 16).expect("values layout");
+        let (layout, _) = Layout::new::<Self>()
             .extend(values_layout)
-            .expect("bytearray layout")
-            .0
+            .expect("bytearray layout");
+        layout.pad_to_align()
     }
 
     #[inline(always)]

@@ -2,10 +2,219 @@
 
 use crate::ffi::{Abi, CType, FfiError, TypeId};
 use crate::{
-    Args, CBuffer, CFunction, CallInfo, DenseString, Errors, ForeignLibrary, Handle, HandleScope,
-    HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object, PropertyDescriptor, SetupError, Smi,
-    Tagged, ThreadState, VM, Value, VmCore, VmError,
+    Args, CBuffer, CFunction, CPointer, CPointerFlags, CPointerInit, CallInfo, DenseString, Errors,
+    ForeignLibrary, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
+    PropertyDescriptor, SetupError, Smi, Tagged, ThreadState, VM, Value, VmCore, VmError,
 };
+
+/// Install the `FFI` namespace and register the FFI natives.
+pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
+    state.ffi_call = vm.register_native(ffi_trampoline);
+    let library = vm.register_native(ffi_library);
+    let cstring = vm.register_native(ffi_cstring);
+    let function = vm.register_native(ffi_fn);
+    let pointer = vm.register_native(ffi_pointer);
+    let lib_fn = vm.register_native(library_fn);
+    let lib_symbol = vm.register_native(library_symbol);
+    let lib_close = vm.register_native(library_close);
+    let lib_path = vm.register_native(library_path);
+    let struct_type = vm.register_native(ffi_struct);
+    let type_new = vm.register_native(c_type_new);
+    let type_size = vm.register_native(c_type_size);
+    let type_align = vm.register_native(c_type_align);
+    let buffer_get = vm.register_native(c_buffer_get);
+    let buffer_set = vm.register_native(c_buffer_set);
+    let buffer_pointer = vm.register_native(c_buffer_pointer);
+    let pointer_cast = vm.register_native(c_pointer_cast);
+    let array_type = vm.register_native(ffi_array);
+    let pointer_add = vm.register_native(c_pointer_add);
+    let pointer_get = vm.register_native(c_pointer_get);
+    let pointer_set = vm.register_native(c_pointer_set);
+
+    let mut thread = vm.attach();
+    thread.handle_scope(|thread, scope| {
+        let object_prototype = {
+            let heap = thread.heap();
+            heap.known()
+                .object_prototype
+                .get_handle(heap, &scope)
+                .erase()
+        };
+
+        let prototype_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.clone(),
+            },
+            &scope,
+        );
+        let library_prototype = scope.handle(thread.heap().new_object(
+            &scope,
+            prototype_map,
+            HandleSlice::EMPTY,
+        ));
+        Object::install_method(thread, &scope, library_prototype, "fn", lib_fn, 2);
+        Object::install_method(thread, &scope, library_prototype, "symbol", lib_symbol, 2);
+        Object::install_method(thread, &scope, library_prototype, "close", lib_close, 0);
+        Object::install_method(thread, &scope, library_prototype, "path", lib_path, 0);
+        {
+            let heap = thread.heap();
+            let map = heap.known().foreign_library_map.get(heap);
+            map.prototype
+                .set(heap, map.erase(), library_prototype.as_tagged(heap).erase());
+        }
+
+        let type_prototype_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.clone(),
+            },
+            &scope,
+        );
+        let type_prototype = scope.handle(thread.heap().new_object(
+            &scope,
+            type_prototype_map,
+            HandleSlice::EMPTY,
+        ));
+        Object::install_method(thread, &scope, type_prototype, "new", type_new, 0);
+        Object::install_method(thread, &scope, type_prototype, "size", type_size, 0);
+        Object::install_method(thread, &scope, type_prototype, "align", type_align, 0);
+        {
+            let heap = thread.heap();
+            let map = heap.known().c_type_map.get(heap);
+            map.prototype
+                .set(heap, map.erase(), type_prototype.as_tagged(heap).erase());
+        }
+
+        let buffer_prototype_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.clone(),
+            },
+            &scope,
+        );
+        let buffer_prototype = scope.handle(thread.heap().new_object(
+            &scope,
+            buffer_prototype_map,
+            HandleSlice::EMPTY,
+        ));
+        Object::install_method(thread, &scope, buffer_prototype, "get", buffer_get, 1);
+        Object::install_method(thread, &scope, buffer_prototype, "set", buffer_set, 2);
+        Object::install_method(
+            thread,
+            &scope,
+            buffer_prototype,
+            "pointer",
+            buffer_pointer,
+            0,
+        );
+        {
+            let heap = thread.heap();
+            let map = heap.known().c_buffer_map.get(heap);
+            map.prototype
+                .set(heap, map.erase(), buffer_prototype.as_tagged(heap).erase());
+        }
+
+        let pointer_prototype_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.clone(),
+            },
+            &scope,
+        );
+        let pointer_prototype = scope.handle(thread.heap().new_object(
+            &scope,
+            pointer_prototype_map,
+            HandleSlice::EMPTY,
+        ));
+        Object::install_method(thread, &scope, pointer_prototype, "cast", pointer_cast, 1);
+        Object::install_method(thread, &scope, pointer_prototype, "add", pointer_add, 1);
+        Object::install_method(thread, &scope, pointer_prototype, "get", pointer_get, 1);
+        Object::install_method(thread, &scope, pointer_prototype, "set", pointer_set, 2);
+        {
+            let heap = thread.heap();
+            let map = heap.known().c_pointer_map.get(heap);
+            map.prototype
+                .set(heap, map.erase(), pointer_prototype.as_tagged(heap).erase());
+        }
+
+        let namespace_map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.clone(),
+            },
+            &scope,
+        );
+        let namespace = scope.handle(thread.heap().new_object(
+            &scope,
+            namespace_map,
+            HandleSlice::EMPTY,
+        ));
+        Object::install_method(thread, &scope, namespace, "library", library, 1);
+        Object::install_method(thread, &scope, namespace, "cstring", cstring, 1);
+        Object::install_method(thread, &scope, namespace, "fn", function, 2);
+        Object::install_method(thread, &scope, namespace, "pointer", pointer, 1);
+        Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
+        Object::install_method(thread, &scope, namespace, "array", array_type, 2);
+
+        for (name, type_id) in [
+            ("void", TypeId::VOID),
+            ("bool", TypeId::BOOL),
+            ("char", TypeId::CHAR),
+            ("i8", TypeId::I8),
+            ("u8", TypeId::U8),
+            ("i16", TypeId::I16),
+            ("u16", TypeId::U16),
+            ("i32", TypeId::I32),
+            ("u32", TypeId::U32),
+            ("i64", TypeId::I64),
+            ("u64", TypeId::U64),
+            ("f32", TypeId::F32),
+            ("f64", TypeId::F64),
+        ] {
+            let object = type_object(thread.heap(), &scope, type_id);
+            let value = scope.handle(object.as_tagged(thread.heap()).erase());
+            let key = thread.intern(&scope, name);
+            let key = scope.handle(key.as_tagged(thread.heap()).erase().as_name());
+            Object::define_own_property_ordinary(
+                thread.heap(),
+                &scope,
+                namespace,
+                key,
+                PropertyDescriptor::data(value),
+            )
+            .expect("install FFI type constant");
+        }
+
+        let global = thread
+            .heap()
+            .known()
+            .global_object
+            .get_handle(thread.heap(), &scope);
+        let value = scope.handle(namespace.as_tagged(thread.heap()).erase());
+        let name = thread.intern(&scope, "FFI");
+        let name = scope.handle(name.as_tagged(thread.heap()).erase().as_name());
+        Object::define_own_property_ordinary(
+            thread.heap(),
+            &scope,
+            global,
+            name,
+            PropertyDescriptor::data(value),
+        )
+        .expect("install FFI global");
+    });
+    Ok(())
+}
 
 /// A guest-visible C type descriptor: an `Object` whose first slot is the
 /// `TypeId` as a Smi.
@@ -495,27 +704,6 @@ fn c_buffer_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<
     })
 }
 
-/// `buffer.free()`.
-fn c_buffer_free<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
-    let Some(buffer) = buffer_receiver(heap, &call) else {
-        return raise_ffi(
-            vm,
-            heap,
-            state,
-            FfiError::InvalidArgument("expected a C buffer"),
-        );
-    };
-    ffi.untrack(buffer.storage(heap).address());
-    match buffer.storage(heap).free_external(heap) {
-        Ok(()) => heap.known().undefined.get(heap).erase(),
-        Err(error) => raise_ffi(vm, heap, state, error),
-    }
-}
-
 /// `FFI.array(type, count)` -> array `CType`.
 fn ffi_array<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
@@ -563,11 +751,7 @@ fn c_pointer_add<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged
         );
     };
     state.handle_scope(|scope| {
-        let Some(pointer) = call
-            .receiver
-            .as_tagged(heap)
-            .get_as::<crate::CPointer>(heap)
-        else {
+        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
             return raise_ffi(
                 vm,
                 heap,
@@ -599,11 +783,7 @@ fn c_pointer_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged
                 FfiError::InvalidArgument("expected an integer index"),
             );
         };
-        let Some(pointer) = call
-            .receiver
-            .as_tagged(heap)
-            .get_as::<crate::CPointer>(heap)
-        else {
+        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
             return raise_ffi(
                 vm,
                 heap,
@@ -636,11 +816,7 @@ fn c_pointer_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged
                 FfiError::InvalidArgument("expected an integer index"),
             );
         };
-        let Some(pointer) = call
-            .receiver
-            .as_tagged(heap)
-            .get_as::<crate::CPointer>(heap)
-        else {
+        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
             return raise_ffi(
                 vm,
                 heap,
@@ -655,20 +831,6 @@ fn c_pointer_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged
             Err(error) => raise_ffi(vm, heap, state, error),
         }
     })
-}
-
-/// `FFI.scope_begin()` - open a manual allocation scope.
-fn ffi_scope_begin<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, .. } = ctx;
-    vm.runtime::<VmCore>().ffi.scope_begin();
-    heap.known().undefined.get(heap).erase()
-}
-
-/// `FFI.scope_end()` - free everything allocated since `scope_begin`.
-fn ffi_scope_end<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, .. } = ctx;
-    vm.runtime::<VmCore>().ffi.scope_end();
-    heap.known().undefined.get(heap).erase()
 }
 
 /// `buffer.pointer` -> `CPointer` to the buffer's storage.
@@ -687,7 +849,6 @@ fn c_buffer_pointer<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Ta
             );
         };
         let ty = buffer.c_type();
-        let storage = scope.handle(buffer.storage(heap));
         // An array decays to a pointer to its first element, like C.
         let element = match ffi.types().get(ty) {
             CType::Array(array) => Some(array.element),
@@ -697,10 +858,18 @@ fn c_buffer_pointer<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Ta
             Some(element) => ffi.types_mut().pointer_to(element),
             None => ffi.types_mut().pointer_to(ty),
         };
-        match ffi.cast_pointer(heap, &scope, &storage, pointer_type) {
-            Ok(pointer) => pointer.as_tagged(heap).erase(),
-            Err(error) => raise_ffi(vm, heap, state, error),
-        }
+        let data = scope.handle(buffer.data(heap));
+        let pointer = heap.allocate_handle::<CPointer>(
+            CPointerInit {
+                type_id: pointer_type,
+                address: 0,
+                flags: CPointerFlags::VM_BACKED.union(CPointerFlags::BORROWED),
+                library: None,
+                owner: Some(data),
+            },
+            &scope,
+        );
+        pointer.as_tagged(heap).erase()
     })
 }
 
@@ -714,11 +883,7 @@ fn c_pointer_cast<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
         return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
     };
     state.handle_scope(|scope| {
-        let Some(pointer) = call
-            .receiver
-            .as_tagged(heap)
-            .get_as::<crate::CPointer>(heap)
-        else {
+        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
             return raise_ffi(
                 vm,
                 heap,
@@ -756,219 +921,4 @@ fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
         };
         ffi.read_raw(heap, &scope, &raw, library.as_ref())
     })
-}
-
-/// Install the `FFI` namespace and register the FFI natives.
-pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
-    state.ffi_call = vm.register_native(ffi_trampoline);
-    let library = vm.register_native(ffi_library);
-    let cstring = vm.register_native(ffi_cstring);
-    let function = vm.register_native(ffi_fn);
-    let pointer = vm.register_native(ffi_pointer);
-    let lib_fn = vm.register_native(library_fn);
-    let lib_symbol = vm.register_native(library_symbol);
-    let lib_close = vm.register_native(library_close);
-    let lib_path = vm.register_native(library_path);
-    let struct_type = vm.register_native(ffi_struct);
-    let type_new = vm.register_native(c_type_new);
-    let type_size = vm.register_native(c_type_size);
-    let type_align = vm.register_native(c_type_align);
-    let buffer_get = vm.register_native(c_buffer_get);
-    let buffer_set = vm.register_native(c_buffer_set);
-    let buffer_free = vm.register_native(c_buffer_free);
-    let buffer_pointer = vm.register_native(c_buffer_pointer);
-    let pointer_cast = vm.register_native(c_pointer_cast);
-    let scope_begin = vm.register_native(ffi_scope_begin);
-    let scope_end = vm.register_native(ffi_scope_end);
-    let array_type = vm.register_native(ffi_array);
-    let pointer_add = vm.register_native(c_pointer_add);
-    let pointer_get = vm.register_native(c_pointer_get);
-    let pointer_set = vm.register_native(c_pointer_set);
-
-    let mut thread = vm.attach();
-    thread.handle_scope(|thread, scope| {
-        let object_prototype = {
-            let heap = thread.heap();
-            heap.known()
-                .object_prototype
-                .get_handle(heap, &scope)
-                .erase()
-        };
-
-        let prototype_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let library_prototype = scope.handle(thread.heap().new_object(
-            &scope,
-            prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, library_prototype, "fn", lib_fn, 2);
-        Object::install_method(thread, &scope, library_prototype, "symbol", lib_symbol, 2);
-        Object::install_method(thread, &scope, library_prototype, "close", lib_close, 0);
-        Object::install_method(thread, &scope, library_prototype, "path", lib_path, 0);
-        {
-            let heap = thread.heap();
-            let map = heap.known().foreign_library_map.get(heap);
-            map.prototype
-                .set(heap, map.erase(), library_prototype.as_tagged(heap).erase());
-        }
-
-        let type_prototype_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let type_prototype = scope.handle(thread.heap().new_object(
-            &scope,
-            type_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, type_prototype, "new", type_new, 0);
-        Object::install_method(thread, &scope, type_prototype, "size", type_size, 0);
-        Object::install_method(thread, &scope, type_prototype, "align", type_align, 0);
-        {
-            let heap = thread.heap();
-            let map = heap.known().c_type_map.get(heap);
-            map.prototype
-                .set(heap, map.erase(), type_prototype.as_tagged(heap).erase());
-        }
-
-        let buffer_prototype_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let buffer_prototype = scope.handle(thread.heap().new_object(
-            &scope,
-            buffer_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, buffer_prototype, "get", buffer_get, 1);
-        Object::install_method(thread, &scope, buffer_prototype, "set", buffer_set, 2);
-        Object::install_method(thread, &scope, buffer_prototype, "free", buffer_free, 0);
-        Object::install_method(
-            thread,
-            &scope,
-            buffer_prototype,
-            "pointer",
-            buffer_pointer,
-            0,
-        );
-        {
-            let heap = thread.heap();
-            let map = heap.known().c_buffer_map.get(heap);
-            map.prototype
-                .set(heap, map.erase(), buffer_prototype.as_tagged(heap).erase());
-        }
-
-        let pointer_prototype_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let pointer_prototype = scope.handle(thread.heap().new_object(
-            &scope,
-            pointer_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, pointer_prototype, "cast", pointer_cast, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "add", pointer_add, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "get", pointer_get, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "set", pointer_set, 2);
-        {
-            let heap = thread.heap();
-            let map = heap.known().c_pointer_map.get(heap);
-            map.prototype
-                .set(heap, map.erase(), pointer_prototype.as_tagged(heap).erase());
-        }
-
-        let namespace_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let namespace = scope.handle(thread.heap().new_object(
-            &scope,
-            namespace_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, namespace, "library", library, 1);
-        Object::install_method(thread, &scope, namespace, "cstring", cstring, 1);
-        Object::install_method(thread, &scope, namespace, "fn", function, 2);
-        Object::install_method(thread, &scope, namespace, "pointer", pointer, 1);
-        Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
-        Object::install_method(thread, &scope, namespace, "array", array_type, 2);
-        Object::install_method(thread, &scope, namespace, "scope_begin", scope_begin, 0);
-        Object::install_method(thread, &scope, namespace, "scope_end", scope_end, 0);
-
-        for (name, type_id) in [
-            ("void", TypeId::VOID),
-            ("bool", TypeId::BOOL),
-            ("char", TypeId::CHAR),
-            ("i8", TypeId::I8),
-            ("u8", TypeId::U8),
-            ("i16", TypeId::I16),
-            ("u16", TypeId::U16),
-            ("i32", TypeId::I32),
-            ("u32", TypeId::U32),
-            ("i64", TypeId::I64),
-            ("u64", TypeId::U64),
-            ("f32", TypeId::F32),
-            ("f64", TypeId::F64),
-        ] {
-            let object = type_object(thread.heap(), &scope, type_id);
-            let value = scope.handle(object.as_tagged(thread.heap()).erase());
-            let key = thread.intern(&scope, name);
-            let key = scope.handle(key.as_tagged(thread.heap()).erase().as_name());
-            Object::define_own_property_ordinary(
-                thread.heap(),
-                &scope,
-                namespace,
-                key,
-                PropertyDescriptor::data(value),
-            )
-            .expect("install FFI type constant");
-        }
-
-        let global = thread
-            .heap()
-            .known()
-            .global_object
-            .get_handle(thread.heap(), &scope);
-        let value = scope.handle(namespace.as_tagged(thread.heap()).erase());
-        let name = thread.intern(&scope, "FFI");
-        let name = scope.handle(name.as_tagged(thread.heap()).erase().as_name());
-        Object::define_own_property_ordinary(
-            thread.heap(),
-            &scope,
-            global,
-            name,
-            PropertyDescriptor::data(value),
-        )
-        .expect("install FFI global");
-    });
-    Ok(())
 }

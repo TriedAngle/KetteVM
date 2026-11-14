@@ -67,6 +67,8 @@ pub enum FfiError {
         size: usize,
         align: usize,
     },
+    /// A C type alignment exceeds what byte-array storage guarantees.
+    UnsupportedAlignment(usize),
     /// A C type is not a complete object type (e.g. a function type).
     NotAnObject(TypeId),
     Type(TypeError),
@@ -124,6 +126,9 @@ impl fmt::Display for FfiError {
             FfiError::NotAnArray(id) => write!(f, "C type {id:?} is not an array"),
             FfiError::OutOfMemory { size, align } => {
                 write!(f, "C allocation failed ({size} bytes, align {align})")
+            }
+            FfiError::UnsupportedAlignment(align) => {
+                write!(f, "C type alignment {align} exceeds VM-backed storage")
             }
             FfiError::NotAnObject(id) => write!(f, "C type {id:?} is not an object type"),
             FfiError::Type(error) => write!(f, "{error}"),

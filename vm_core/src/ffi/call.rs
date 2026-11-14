@@ -79,7 +79,7 @@ impl FfiState {
                 .ok_or(FfiError::NotCallable)?;
             let target = function.target(heap);
             target.check_live(heap)?;
-            (function.signature(), target.address())
+            (function.signature(), target.address(heap))
         };
 
         let plan = self.plan_for(signature)?;
@@ -166,6 +166,7 @@ impl FfiState {
                         address,
                         flags: CPointerFlags::BORROWED,
                         library: None,
+                        owner: None,
                     },
                     scope,
                 );
@@ -181,8 +182,8 @@ impl FfiState {
                 let buffer = self
                     .buffer(heap, scope, type_id)
                     .expect("C FFI aggregate result allocation");
-                let storage = buffer.as_tagged(heap).storage(heap);
-                memory::copy_in(storage.address(), &bytes[..size]);
+                let storage = buffer.as_tagged(heap).data(heap);
+                memory::copy_in(storage.as_ptr() as usize, &bytes[..size]);
                 buffer.as_tagged(heap).erase()
             }
             CType::Function(_) => heap.known().undefined.get(heap).erase(),
@@ -242,10 +243,13 @@ impl FfiState {
         let types = self.types();
         let (field_ty, offset) = field_of(&types, buffer.as_tagged(heap).c_type(), name)?;
         let size = layout_size(&types, field_ty);
-        let storage = buffer.as_tagged(heap).storage(heap);
-        storage.check_live(heap)?;
+        let storage = buffer.as_tagged(heap).data(heap);
         let mut slot = CallSlot::new(size.max(8));
-        memory::copy_out_at(storage.address(), offset, &mut slot.bytes_mut()[..size]);
+        memory::copy_out_at(
+            storage.as_ptr() as usize,
+            offset,
+            &mut slot.bytes_mut()[..size],
+        );
         Ok(RawValue {
             slot,
             type_id: field_ty,
@@ -269,7 +273,7 @@ impl FfiState {
         let size = layout_size(&types, pointee);
         let address = pointer
             .as_tagged(heap)
-            .address()
+            .address(heap)
             .checked_add(
                 index
                     .checked_mul(size.max(1))
@@ -302,7 +306,7 @@ impl FfiState {
         let size = layout_size(&types, pointee);
         let address = pointer
             .as_tagged(heap)
-            .address()
+            .address(heap)
             .checked_add(
                 index
                     .checked_mul(size.max(1))
@@ -325,10 +329,13 @@ impl FfiState {
         let types = self.types();
         let (element, offset) = element_of(&types, buffer.as_tagged(heap).c_type(), index)?;
         let size = layout_size(&types, element);
-        let storage = buffer.as_tagged(heap).storage(heap);
-        storage.check_live(heap)?;
+        let storage = buffer.as_tagged(heap).data(heap);
         let mut slot = CallSlot::new(size.max(8));
-        memory::copy_out_at(storage.address(), offset, &mut slot.bytes_mut()[..size]);
+        memory::copy_out_at(
+            storage.as_ptr() as usize,
+            offset,
+            &mut slot.bytes_mut()[..size],
+        );
         Ok(RawValue {
             slot,
             type_id: element,
@@ -346,11 +353,10 @@ impl FfiState {
         let types = self.types();
         let (element, offset) = element_of(&types, buffer.as_tagged(heap).c_type(), index)?;
         let size = layout_size(&types, element);
-        let storage = buffer.as_tagged(heap).storage(heap);
-        storage.check_live(heap)?;
+        let storage = buffer.as_tagged(heap).data(heap);
         let mut slot = CallSlot::new(size.max(8));
         convert_arg(&types, element, value, heap, &mut slot)?;
-        memory::copy_in_at(storage.address(), offset, &slot.bytes()[..size]);
+        memory::copy_in_at(storage.as_ptr() as usize, offset, &slot.bytes()[..size]);
         Ok(())
     }
 
@@ -365,11 +371,10 @@ impl FfiState {
         let types = self.types();
         let (field_ty, offset) = field_of(&types, buffer.as_tagged(heap).c_type(), name)?;
         let size = layout_size(&types, field_ty);
-        let storage = buffer.as_tagged(heap).storage(heap);
-        storage.check_live(heap)?;
+        let storage = buffer.as_tagged(heap).data(heap);
         let mut slot = CallSlot::new(size.max(8));
         convert_arg(&types, field_ty, value, heap, &mut slot)?;
-        memory::copy_in_at(storage.address(), offset, &slot.bytes()[..size]);
+        memory::copy_in_at(storage.as_ptr() as usize, offset, &slot.bytes()[..size]);
         Ok(())
     }
 }
@@ -457,10 +462,9 @@ fn convert_arg(
                     found,
                 });
             }
-            let storage = buffer.storage(heap);
-            storage.check_live(heap)?;
+            let storage = buffer.data(heap);
             let size = layout_size(types, ty);
-            memory::copy_out(storage.address(), &mut slot.bytes_mut()[..size]);
+            memory::copy_out(storage.as_ptr() as usize, &mut slot.bytes_mut()[..size]);
         }
         CType::Void | CType::Function(_) => return Err(FfiError::UnsupportedType(ty)),
     }
@@ -532,7 +536,7 @@ fn pointer_from(
             found: actual,
         });
     }
-    Ok(pointer.address())
+    Ok(pointer.address(heap))
 }
 
 fn smi_value(value: i64) -> Tagged<'static, Value> {

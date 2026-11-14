@@ -2,6 +2,9 @@
 //!
 //! FFI is a core VM subsystem owned by [`crate::VmCore`]; it is always
 //! compiled in and has no runtime id of its own.
+//!
+//! VM-owned C data lives in VM byte arrays; there is no external allocation
+//! arena. Only library handles and memory owned by C live outside the heap.
 
 pub mod bindings;
 mod call;
@@ -22,7 +25,7 @@ pub use ty::{
 };
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// FFI state owned by `VmCore`.
 ///
@@ -32,9 +35,6 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub struct FfiState {
     types: RwLock<TypeTable>,
     plans: RwLock<HashMap<TypeId, Arc<CallPlan>>>,
-    /// Stack of manual allocation scopes; each holds freed-at-scope-end
-    /// external addresses. Single-threaded use is assumed.
-    arena: Mutex<Vec<Vec<usize>>>,
 }
 
 impl FfiState {
@@ -53,45 +53,6 @@ impl FfiState {
     pub fn plans_mut(&self) -> RwLockWriteGuard<'_, HashMap<TypeId, Arc<CallPlan>>> {
         self.plans.write().expect("ffi plan cache poisoned")
     }
-
-    /// Record an external allocation in the innermost scope, if one is open.
-    pub(super) fn track(&self, address: usize) {
-        let mut arena = self.arena.lock().expect("ffi arena poisoned");
-        if let Some(scope) = arena.last_mut() {
-            scope.push(address);
-        }
-    }
-
-    /// Forget a tracked allocation (it is being freed explicitly).
-    pub(super) fn untrack(&self, address: usize) {
-        let mut arena = self.arena.lock().expect("ffi arena poisoned");
-        for scope in arena.iter_mut().rev() {
-            if let Some(index) = scope.iter().position(|tracked| *tracked == address) {
-                scope.swap_remove(index);
-                return;
-            }
-        }
-    }
-
-    pub fn scope_begin(&self) {
-        self.arena
-            .lock()
-            .expect("ffi arena poisoned")
-            .push(Vec::new());
-    }
-
-    /// Free everything allocated since the matching `scope_begin`.
-    pub fn scope_end(&self) {
-        let scope = self
-            .arena
-            .lock()
-            .expect("ffi arena poisoned")
-            .pop()
-            .expect("ffi scope_end without scope_begin");
-        for address in scope {
-            crate::ffi::memory::free_external(address);
-        }
-    }
 }
 
 impl Default for FfiState {
@@ -99,7 +60,6 @@ impl Default for FfiState {
         Self {
             types: RwLock::new(TypeTable::new()),
             plans: RwLock::new(HashMap::new()),
-            arena: Mutex::new(Vec::new()),
         }
     }
 }

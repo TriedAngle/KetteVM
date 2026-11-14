@@ -1211,7 +1211,6 @@ fn op_dec_loc(frame: Frame) {
             frame.set_acc(v);
             next!()
         }
-        // acc keeps the old value; park it before the allocating tail
         frame.set_acc(v);
         if let Some(t) = frame.ctx().heap_mut().try_new_float(new) {
             frame.regs().set(r, t);
@@ -1220,8 +1219,6 @@ fn op_dec_loc(frame: Frame) {
     }
     tail!(slow_dec_loc)
 }
-
-// --- control flow ---
 
 #[handler(Jump)]
 fn op_jump(frame: Frame) {
@@ -1297,7 +1294,6 @@ fn op_call_native(frame: Frame) {
     frame.set_acc(v);
     reenter!(pc)
 }
-// --- literals ---
 
 #[handler(CreateClosure)]
 fn op_create_closure(frame: Frame) {

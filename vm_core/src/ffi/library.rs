@@ -28,6 +28,7 @@ impl FfiState {
                 address,
                 flags,
                 library: None,
+                owner: None,
             },
             scope,
         );
@@ -44,7 +45,7 @@ impl FfiState {
             return Ok(());
         }
         if !handle.flags().contains(CPointerFlags::PROCESS) {
-            platform::close(handle.address())?;
+            platform::close(handle.address(heap))?;
         }
         handle.kill(heap);
         Ok(())
@@ -70,7 +71,7 @@ impl FfiState {
             if !library.is_live(heap) {
                 return Err(FfiError::LibraryClosed);
             }
-            library.handle(heap).address()
+            library.handle(heap).address(heap)
         };
         let address = platform::symbol(lookup, name)?;
         let pointer = heap.allocate_handle::<CPointer>(
@@ -79,6 +80,7 @@ impl FfiState {
                 address,
                 flags: CPointerFlags::LIBRARY.union(CPointerFlags::BORROWED),
                 library: None,
+                owner: None,
             },
             scope,
         );

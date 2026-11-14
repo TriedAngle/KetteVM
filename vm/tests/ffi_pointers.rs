@@ -38,13 +38,14 @@ fn raw_pointer<'s>(
             address,
             flags,
             library: None,
+            owner: None,
         },
         scope,
     )
 }
 
 #[test]
-fn allocation_is_zeroed_and_owned() {
+fn allocation_is_zeroed_and_vm_backed() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
@@ -53,8 +54,8 @@ fn allocation_is_zeroed_and_owned() {
         let p = pointer.as_tagged(heap);
         assert_eq!(p.c_type(), TypeId::U64);
         assert!(p.is_live());
-        assert!(!p.is_null());
-        assert!(p.flags().contains(CPointerFlags::OWNED_EXTERNAL));
+        assert!(!p.is_null(heap));
+        assert!(p.flags().contains(CPointerFlags::VM_BACKED));
         assert_eq!(p.read_u64(heap), Ok(0));
     });
 }
@@ -112,14 +113,20 @@ fn unaligned_access_works() {
             .array_of(TypeId::U8, 32)
             .unwrap();
         let base = allocate(thread.heap(), &scope, &vm, bytes);
-        let address = base.as_tagged(thread.heap()).address();
-        let unaligned = raw_pointer(
-            thread.heap(),
+        let owner = thread
+            .heap()
+            .allocate_handle::<vm::FixedByteArray>(&[0u8; 32], &scope);
+        let unaligned = thread.heap().allocate_handle::<CPointer>(
+            CPointerInit {
+                type_id: TypeId::U64,
+                address: 1,
+                flags: CPointerFlags::VM_BACKED,
+                library: None,
+                owner: Some(owner),
+            },
             &scope,
-            TypeId::U64,
-            address + 1,
-            CPointerFlags::BORROWED,
         );
+        drop(base);
 
         let heap = thread.heap();
         let p = unaligned.as_tagged(heap);
@@ -154,40 +161,14 @@ fn null_and_dead_are_distinct_errors() {
 
         let heap = thread.heap();
         let p = null.as_tagged(heap);
-        assert!(p.is_null());
+        assert!(p.is_null(heap));
         assert!(p.is_live());
         assert_eq!(p.read_u64(heap), Err(FfiError::NullPointer));
 
         let p = dead.as_tagged(heap);
         assert!(p.is_dead());
-        assert!(!p.is_null());
+        assert!(!p.is_null(heap));
         assert_eq!(p.read_u64(heap), Err(FfiError::DeadPointer));
-    });
-}
-
-#[test]
-fn free_is_idempotent_and_rejects_borrowed() {
-    let vm = test_vm();
-    let mut thread = vm.attach();
-    thread.handle_scope(|thread, scope| {
-        let pointer = allocate(thread.heap(), &scope, &vm, TypeId::U32);
-        let borrowed = raw_pointer(
-            thread.heap(),
-            &scope,
-            TypeId::U32,
-            0x1000,
-            CPointerFlags::BORROWED,
-        );
-
-        let heap = thread.heap();
-        let p = pointer.as_tagged(heap);
-        p.free_external(heap).unwrap();
-        assert!(p.is_dead());
-        // second free is a no-op
-        p.free_external(heap).unwrap();
-
-        let b = borrowed.as_tagged(heap);
-        assert_eq!(b.free_external(heap), Err(FfiError::NotOwned));
     });
 }
 
@@ -214,7 +195,7 @@ fn payload_is_never_visited_as_a_gc_edge() {
         // Safety: `object` is a live heap object of this VM.
         unsafe { visit_object(object, &mut visited) };
 
-        assert_eq!(visited.0.len(), 4, "map, slots, elements, library");
+        assert_eq!(visited.0.len(), 5, "map, slots, elements, library, owner");
         assert!(!visited.0.contains(&address_cell));
     });
 }
@@ -245,14 +226,21 @@ fn array_elements_and_pointer_arithmetic() {
             Some(FfiError::IndexOutOfBounds)
         );
 
-        let storage = {
-            let heap = thread.heap();
-            scope.handle(buffer.as_tagged(heap).storage(heap))
-        };
         let element_pointer = ffi.types_mut().pointer_to(TypeId::I32);
-        let storage = ffi
-            .cast_pointer(thread.heap(), &scope, &storage, element_pointer)
-            .unwrap();
+        let data = {
+            let heap = thread.heap();
+            scope.handle(buffer.as_tagged(heap).data(heap))
+        };
+        let storage = thread.heap().allocate_handle::<CPointer>(
+            CPointerInit {
+                type_id: element_pointer,
+                address: 0,
+                flags: CPointerFlags::VM_BACKED,
+                library: None,
+                owner: Some(data),
+            },
+            &scope,
+        );
         let second = ffi
             .pointer_offset(thread.heap(), &scope, &storage, 1)
             .unwrap();
@@ -267,13 +255,12 @@ fn array_elements_and_pointer_arithmetic() {
 }
 
 #[test]
-fn address_survives_collection() {
+fn vm_backed_data_survives_collection() {
     let vm = test_vm();
     vm.arm_gc_stress();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
         let pointer = allocate(thread.heap(), &scope, &vm, TypeId::U64);
-        let address = pointer.as_tagged(thread.heap()).address();
         {
             let heap = thread.heap();
             pointer
@@ -290,7 +277,8 @@ fn address_survives_collection() {
 
         let heap = thread.heap();
         let p = pointer.as_tagged(heap);
-        assert_eq!(p.address(), address);
+        // the offset is stable; the address is resolved against the owner
+        assert_eq!(p.raw_address(), 0);
         assert_eq!(p.read_u64(heap), Ok(0x0102_0304_0506_0708));
     });
 }

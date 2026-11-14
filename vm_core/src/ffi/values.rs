@@ -1,15 +1,14 @@
 //! Constructors shared by the natives and by Rust callers.
 
-use crate::ffi::memory;
 use crate::ffi::{CType, FfiError, FfiResult, FfiState, TypeId};
 use crate::{
     CBuffer, CBufferInit, CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit,
-    CallableInfoInit, CallableInfoObject, ForeignLibrary, FunctionKind, Handle, HandleScope, Heap,
-    NativeIndex, mode_from_strict,
+    CallableInfoInit, CallableInfoObject, FixedByteArray, ForeignLibrary, FunctionKind, Handle,
+    HandleScope, Heap, NativeIndex, mode_from_strict,
 };
 
 impl FfiState {
-    /// Owned NUL-terminated UTF-8 C string.
+    /// VM-owned NUL-terminated UTF-8 C string.
     pub fn cstring<'s>(
         &self,
         heap: &mut Heap,
@@ -20,22 +19,23 @@ impl FfiState {
             return Err(FfiError::EmbeddedNul);
         }
         let ty = self.types_mut().pointer_to(TypeId::CHAR);
-        let bytes = text.as_bytes();
-        let address = memory::allocate_zeroed(bytes.len() + 1, 1)?;
-        self.track(address);
-        memory::copy_in(address, bytes);
+        let mut bytes = Vec::with_capacity(text.len() + 1);
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+        let data = heap.allocate_handle::<FixedByteArray>(&bytes, scope);
         Ok(heap.allocate_handle::<CPointer>(
             CPointerInit {
                 type_id: ty,
-                address,
-                flags: CPointerFlags::OWNED_EXTERNAL.union(CPointerFlags::NUL_TERMINATED),
+                address: 0,
+                flags: CPointerFlags::VM_BACKED.union(CPointerFlags::NUL_TERMINATED),
                 library: None,
+                owner: Some(data),
             },
             scope,
         ))
     }
 
-    /// Allocate zeroed external storage for an aggregate type.
+    /// Allocate zeroed VM-owned storage for an aggregate type.
     pub fn buffer<'s>(
         &self,
         heap: &mut Heap,
@@ -46,29 +46,22 @@ impl FfiState {
             .types()
             .layout(type_id)
             .ok_or(FfiError::NotAnObject(type_id))?;
-        let address = memory::allocate_zeroed(layout.size().max(1), layout.align())?;
-        self.track(address);
-        let pointer_type = self.types_mut().pointer_to(type_id);
-        let storage = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                type_id: pointer_type,
-                address,
-                flags: CPointerFlags::OWNED_EXTERNAL,
-                library: None,
-            },
-            scope,
-        );
+        if layout.align() > 16 {
+            return Err(FfiError::UnsupportedAlignment(layout.align()));
+        }
+        let size = layout.size().max(1);
+        let data = heap.allocate_handle::<FixedByteArray>(&vec![0u8; size], scope);
         Ok(heap.allocate_handle::<CBuffer>(
             CBufferInit {
                 type_id,
-                storage,
+                data,
                 count: 0,
             },
             scope,
         ))
     }
 
-    /// A pointer with the same address and ownership, retyped to another
+    /// A pointer with the same storage and ownership, retyped to another
     /// pointer type.
     pub fn cast_pointer<'s>(
         &self,
@@ -80,9 +73,14 @@ impl FfiState {
         if !matches!(self.types().get(ty), CType::Pointer(_)) {
             return Err(FfiError::NotAPointer(ty));
         }
-        let (address, flags) = {
+        let (address, flags, owner, library) = {
             let source = pointer.as_tagged(heap);
-            (source.address(), source.flags())
+            (
+                source.raw_address(),
+                source.flags(),
+                source.owner(heap).map(|owner| scope.handle(owner)),
+                source.library(heap).map(|library| scope.handle(library)),
+            )
         };
         let out = heap.allocate_handle::<CPointer>(
             CPointerInit {
@@ -90,11 +88,13 @@ impl FfiState {
                 address,
                 flags,
                 library: None,
+                owner,
             },
             scope,
         );
-        if let Some(library) = pointer.as_tagged(heap).library(heap) {
-            out.as_tagged(heap).set_library(heap, library);
+        if let Some(library) = library {
+            out.as_tagged(heap)
+                .set_library(heap, library.as_tagged(heap));
         }
         Ok(out)
     }
@@ -119,9 +119,14 @@ impl FfiState {
         let delta = elements
             .checked_mul(element_size)
             .ok_or(FfiError::AddressOverflow)?;
-        let (address, flags) = {
+        let (address, flags, owner, library) = {
             let source = pointer.as_tagged(heap);
-            (source.address(), source.flags())
+            (
+                source.raw_address(),
+                source.flags(),
+                source.owner(heap).map(|owner| scope.handle(owner)),
+                source.library(heap).map(|library| scope.handle(library)),
+            )
         };
         let address = address
             .checked_add_signed(delta as isize)
@@ -132,11 +137,13 @@ impl FfiState {
                 address,
                 flags,
                 library: None,
+                owner,
             },
             scope,
         );
-        if let Some(library) = pointer.as_tagged(heap).library(heap) {
-            out.as_tagged(heap).set_library(heap, library);
+        if let Some(library) = library {
+            out.as_tagged(heap)
+                .set_library(heap, library.as_tagged(heap));
         }
         Ok(out)
     }

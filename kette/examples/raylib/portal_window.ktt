@@ -10,14 +10,9 @@
 //   - `sinf`/`cosf` come from libc
 //   - text literals are wrapped once with `FFI.cstring`
 //
-// Aggregates returned by C (Vector3, Color, ...) live in externally allocated
-// `CBuffer`s. There is no finalizer, so the frame loop opens a manual
-// allocation scope and frees everything created inside it:
-//
-//     FFI.scope_begin() ... FFI.scope_end()
-//
-// Values created before the loop (camera, render texture, colours, strings)
-// live outside any scope and stay allocated.
+// Aggregates returned by C (Vector3, Color, ...) and values created with
+// `Type.new(...)` are VM-owned: their bytes live in a byte array on the VM
+// heap, so the GC collects them and there is nothing to free.
 
 let raylib = FFI.library("/opt/homebrew/lib/libraylib.dylib")
 let libc = FFI.library(null)
@@ -166,7 +161,6 @@ let archWall = Vector3.new(0, 2, -0.05)
 let zero = Vector3.new(0, 0, 0)
 
 while !WindowShouldClose() {
-    FFI.scope_begin()
     UpdateCamera(camera.pointer(), CAMERA_FREE)
     let time = GetTime()
 
@@ -234,7 +228,6 @@ while !WindowShouldClose() {
     DrawText(labelLine2, 28, 80, 20, GRAY)
 
     EndDrawing()
-    FFI.scope_end()
 }
 
 UnloadRenderTexture(rtPortalView)
