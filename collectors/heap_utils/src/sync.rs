@@ -6,6 +6,10 @@ use std::{
 const PARKED: u8 = 0b01;
 const REQUESTED: u8 = 0b10;
 const CANCEL: u8 = 0b100;
+/// The node is blocked in a host wait and cannot touch the heap. Like
+/// `PARKED`, it is safepoint-safe; unlike `PARKED` it is waiting on its own
+/// condition, not on the safepoint barrier.
+const BLOCKED: u8 = 0b1000;
 
 /// a node is:
 /// - `PARKED` while its thread sleeps inside the barrier
@@ -151,6 +155,35 @@ impl Safepoint {
         }
     }
 
+    /// Mark `node` safepoint-safe for a host wait. Returns `true` when a
+    /// cancellation was already pending: callers should check their
+    /// shutdown predicate before actually waiting.
+    pub fn block(&self, node: &LocalNode) -> bool {
+        loop {
+            {
+                let _list = self.list.lock().unwrap();
+                let barrier = self.barrier.lock().unwrap();
+                if !barrier.armed {
+                    let prev = node.state.fetch_or(BLOCKED, Ordering::AcqRel);
+                    if prev & REQUESTED == 0 {
+                        return prev & CANCEL != 0;
+                    }
+                    node.state.fetch_and(!BLOCKED, Ordering::AcqRel);
+                }
+            }
+            let _ = self.park_for_collection(node);
+        }
+    }
+
+    /// Leave the blocked state. If a collection armed while the node was
+    /// blocked, wait for it before the mutator touches the heap again.
+    pub fn unblock(&self, node: &LocalNode) {
+        let prev = node.state.fetch_and(!BLOCKED, Ordering::AcqRel);
+        if prev & REQUESTED != 0 {
+            self.park_for_collection(node);
+        }
+    }
+
     pub fn detach(&self, node: &LocalNode) {
         loop {
             if node.pending() {
@@ -233,7 +266,7 @@ impl Safepoint {
                         let n = unsafe { &*node };
                         if ptr::from_ref(n) != req {
                             let old = n.state.fetch_or(REQUESTED, Ordering::AcqRel);
-                            if old & PARKED == 0 {
+                            if old & (PARKED | BLOCKED) == 0 {
                                 barrier.target += 1;
                             }
                             debug_assert_eq!(old & REQUESTED, 0);
@@ -302,7 +335,7 @@ impl Safepoint {
                     let n = unsafe { &*node };
                     if Some(ptr::from_ref(n)) != req {
                         let old = n.state.fetch_or(REQUESTED, Ordering::AcqRel);
-                        if old & PARKED == 0 {
+                        if old & (PARKED | BLOCKED) == 0 {
                             barrier.target += 1;
                         }
                         debug_assert_eq!(old & REQUESTED, 0);

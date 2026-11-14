@@ -963,6 +963,14 @@ impl LocalHeap for MarkSweepLocal {
         self.node.take_cancel()
     }
 
+    fn block(&self) -> bool {
+        self.state.safepoint.block(&self.node)
+    }
+
+    fn unblock(&self) {
+        self.state.safepoint.unblock(&self.node);
+    }
+
     fn cancel_executions(&self, protocol: &dyn Fn()) {
         self.state.safepoint.cancel_executions(&self.node, protocol);
     }

@@ -107,6 +107,10 @@ pub trait LocalHeap: Send {
     fn collection_requested(&self) -> bool;
     fn park_for_collection(&self) -> bool;
     fn take_cancel(&self) -> bool;
+    /// Publish a host-blocked state: safepoint-safe, no heap access until
+    /// [`Self::unblock`]. Returns whether a cancellation was pending.
+    fn block(&self) -> bool;
+    fn unblock(&self);
     fn cancel_executions(&self, protocol: &dyn Fn());
     fn force_collect(&self);
     fn collect_minor(&self);

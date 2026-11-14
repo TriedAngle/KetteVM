@@ -135,6 +135,12 @@ impl LocalHeap for DummyLocalHeap {
         false
     }
 
+    fn block(&self) -> bool {
+        false
+    }
+
+    fn unblock(&self) {}
+
     /// The dummy heap has no safepoint barrier: shutdown only terminates
     /// the calling thread's execution itself.
     fn cancel_executions(&self, _protocol: &dyn Fn()) {}

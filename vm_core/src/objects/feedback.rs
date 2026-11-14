@@ -11,6 +11,12 @@ use core::alloc::Layout;
 /// - weak `Map` — monomorphic; the extra slot holds the handler
 /// - strong `WeakFixedArray` — polymorphic; flat `[weak map, handler, ...]`
 /// - megamorphic symbol — always take the slow path
+///
+// TODO: ASAP: these slots are shared by every closure of a function and
+// written by inline-cache updates without synchronization. Two mutators
+// executing the same function race on the state/handler pairs and on
+// polymorphic arrays. Pick one: atomic CAS/RCU publishing of coherent
+// state+handler pairs, or per-thread feedback vectors.
 #[repr(C)]
 pub struct FeedbackVector {
     pub header: Header,

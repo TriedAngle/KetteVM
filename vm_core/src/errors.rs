@@ -122,6 +122,8 @@ vm_errors! {
     UninitializedVariable => Reference, "cannot access variable before initialization";
     NotDefined => Reference, "'%' is not defined";
     InvalidDeclaration => Syntax, "invalid or conflicting declaration";
+    ThreadAlreadyStarted => Type, "thread has already been started";
+    AtomicNonInteger => Type, "atomic operations require integer operands";
     ProxyBadTargetOrHandler => Type, "cannot create proxy with a non-object target or handler";
     ProxyConstructNotObject => Type, "proxy construct trap must return an object";
     ProxyDefineIncompatible => Type, "proxy defineProperty trap returned an incompatible descriptor";

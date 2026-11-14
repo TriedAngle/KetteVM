@@ -1464,6 +1464,9 @@ fn apply_transition(
     true
 }
 
+// TODO: ASAP: this writes the shared feedback vector from any mutator. See
+// `FeedbackVector`; concurrent calls to the same function race until the
+// publish protocol or per-thread vectors land.
 fn update_site(
     heap: &mut Heap,
     scope: &HandleScope<'_>,
@@ -1554,6 +1557,8 @@ fn promote_from_mono(
     }
 }
 
+// TODO: ASAP: in-place handler writes and replacement arrays race with
+// other mutators on the shared feedback vector.
 fn update_poly(
     heap: &mut Heap,
     scope: &HandleScope<'_>,

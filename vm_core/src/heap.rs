@@ -466,6 +466,10 @@ impl<T> AtomicGcSlot<T> {
         )
     }
 
+    pub fn as_raw(&self) -> &RawCell {
+        self.slot.as_raw()
+    }
+
     pub fn load<'a>(&self, heap: &'a Heap) -> Tagged<'a, T> {
         // Safety: the GC keeps slots current; anchored by the borrow.
         unsafe { Tagged::from_value_unchecked(Value::from_bits(self.load_word(heap))) }
@@ -522,8 +526,41 @@ unsafe impl<T> Send for AtomicOptionGcSlot<T> {}
 unsafe impl<T> Sync for AtomicOptionGcSlot<T> {}
 
 impl<T> AtomicOptionGcSlot<T> {
+    /// Build a root cell initialised to `hole` or a strong word.
+    ///
+    /// # Safety
+    /// `v` must be the hole, the cleared sentinel, or a strong heap pointer
+    /// whose referent stays alive while this slot is a GC root.
+    pub unsafe fn from_value(v: Value) -> Self {
+        Self {
+            slot: unsafe { OptionGcSlot::from_value(v) },
+        }
+    }
+
     pub fn clear(&self, heap: &Heap) {
         self.slot.clear(heap);
+    }
+
+    pub fn store<'x, U>(&self, value: Tagged<'x, U>) {
+        self.store_word(value.raw().to_bits());
+    }
+
+    /// Atomic word store without a write barrier. Root slots are always
+    /// scanned, so roots do not need the generational barrier.
+    pub fn store_word(&self, word: Word) {
+        let raw = self.slot.slot.as_raw();
+        let mut current = raw.load_atomic(core::sync::atomic::Ordering::Relaxed);
+        loop {
+            match raw.compare_exchange(
+                current,
+                word,
+                core::sync::atomic::Ordering::Release,
+                core::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn load_word(&self, _heap: &Heap) -> Word {
@@ -699,6 +736,27 @@ impl Heap {
     #[inline]
     pub fn take_cancel(&self) -> bool {
         self.local.take_cancel()
+    }
+
+    /// Run a host wait without blocking a collection: the mutator becomes
+    /// safepoint-safe for the duration, so the GC does not wait for it.
+    /// The closure must not touch the heap; only rooted handles, atomics,
+    /// and host state may cross the wait.
+    pub fn block_on<R>(&mut self, f: impl FnOnce() -> R) -> R {
+        struct Unblock<'a>(&'a dyn LocalHeap);
+
+        impl Drop for Unblock<'_> {
+            fn drop(&mut self) {
+                self.0.unblock();
+            }
+        }
+
+        self.tlab.invalidate();
+        let _cancelled = self.local.block();
+        let guard = Unblock(self.local.as_ref());
+        let result = f();
+        drop(guard);
+        result
     }
 
     pub fn cancel_executions(&mut self, protocol: &dyn Fn()) {

@@ -9,7 +9,7 @@ use crate::{
     INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind, NativeIndex, Object,
     PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SetupError, SlotFlags, Smi, Tagged,
     VM, Value, Visitor, VmError, frame_context_value, info_is_lexical, info_mode, lookup::Hit,
-    lookup::Lookup, mode_from_strict, raise, rt_try, tools::KetteTools,
+    lookup::Lookup, mode_from_strict, raise, rt_try, threading, tools::KetteTools,
 };
 
 // ---- array `length` ----
@@ -116,6 +116,7 @@ impl Runtime for VmCore {
 
     fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
         bindings::install(vm, state)?;
+        threading::install(vm)?;
         let call_index = vm.register_native(function_prototype_call);
         let throw_index = vm.register_native(throw_type_error);
         let getter = vm.register_native(array_length_get);

@@ -1,4 +1,5 @@
 pub mod array;
+pub mod atomic;
 pub mod byte_array;
 pub mod callable;
 pub mod cell;
@@ -19,8 +20,10 @@ pub mod proxy;
 pub mod script_context;
 pub mod string;
 pub mod symbol;
+pub mod thread;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
+pub use atomic::{AtomicI64, AtomicI64Init};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
@@ -59,6 +62,7 @@ pub use string::{
     Utf8String, decode_wtf8, flatten, string_content_hash, string_content_hash_units,
 };
 pub use symbol::Symbol;
+pub use thread::{NEW, RUNNABLE, TERMINATED, ThreadObject, ThreadObjectInit};
 
 use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
@@ -178,6 +182,10 @@ pub enum ObjectKind {
     Utf8String = 33,
     /// A string whose payload lives in host memory, kept alive by `owner`.
     ExternalString = 34,
+    /// A guest `Thread` object; host execution state lives in `VmCore`.
+    ThreadObject = 35,
+    /// A shared cell with an atomically accessed `Value` payload.
+    AtomicI64 = 36,
 }
 
 impl ObjectKind {
@@ -198,6 +206,7 @@ impl ObjectKind {
                 | ObjectKind::CFunction
                 | ObjectKind::CValue
                 | ObjectKind::TypeInfo
+                | ObjectKind::ThreadObject
         )
     }
 }
@@ -247,6 +256,8 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).layout(),
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
+            ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
+            ObjectKind::AtomicI64 => (*addr.cast::<AtomicI64>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -317,6 +328,10 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).visit_edges(visitor),
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).visit_edges(visitor),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).visit_edges(visitor),
+            ObjectKind::ThreadObject => {
+                (*addr.cast::<ThreadObject>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::AtomicI64 => (*addr.cast::<AtomicI64>().as_ptr()).visit_edges(visitor),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
