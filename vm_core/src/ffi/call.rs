@@ -1,10 +1,9 @@
-//! Calling a prepared C function through libffi.
-
 use crate::ffi::memory;
 use crate::ffi::{FfiError, FfiResult, FfiState, TypeId, TypeKind};
 use crate::{
-    Args, CFunction, CPointer, CPointerFlags, CPointerInit, CValue, Errors, Float, ForeignLibrary,
-    Handle, HandleScope, Heap, Smi, Tagged, ThreadState, TypeInfo, Value, VmError,
+    Args, CFunction, CPointer, CPointerFlags, CPointerInit, CValue, Convert, DenseString,
+    FixedByteArray, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, StringData, StringRef,
+    Tagged, TypeInfo, Utf8String, Value,
 };
 use libffi::middle::{Arg, CodePtr, Ret};
 
@@ -40,10 +39,29 @@ impl CallSlot {
     }
 }
 
+/// Scratch storage for transcoded string arguments.
+#[derive(Default)]
+struct CallScratch {
+    utf8: Vec<Box<[u8]>>,
+    utf16: Vec<Box<[u16]>>,
+}
+
+impl CallScratch {
+    fn push_utf8(&mut self, bytes: Vec<u8>) -> usize {
+        self.utf8.push(bytes.into_boxed_slice());
+        self.utf8.last().expect("just pushed").as_ptr() as usize
+    }
+
+    fn push_utf16(&mut self, units: Vec<u16>) -> usize {
+        self.utf16.push(units.into_boxed_slice());
+        self.utf16.last().expect("just pushed").as_ptr() as usize
+    }
+}
+
 /// A raw C value (call result or field read) plus its boxed type.
 pub struct RawValue<'s> {
-    pub(super) slot: CallSlot,
-    pub(super) ty: Handle<'s, TypeInfo>,
+    pub slot: CallSlot,
+    pub ty: Handle<'s, TypeInfo>,
 }
 
 /// A C value read: a scalar waiting to be boxed, or an aggregate view.
@@ -68,7 +86,7 @@ impl FfiState {
                 .ok_or(FfiError::NotCallable)?;
             let target = function.target(heap);
             target.check_live(heap)?;
-            (function.signature(heap), target.address(heap))
+            (function.signature(heap), target.address())
         };
         let plan = signature.plan();
         let params = signature
@@ -86,10 +104,11 @@ impl FfiState {
             let param = param_at(heap, params, index)?;
             slots.push(CallSlot::new(param.size().max(8)));
         }
+        let mut scratch = CallScratch::default();
         for (index, slot) in slots.iter_mut().enumerate() {
             let param = param_at(heap, params, index)?;
             let value = args.get_handle(heap, index).as_tagged(heap);
-            convert_arg(param, value, heap, slot)?;
+            convert_arg(param, value, heap, slot, Some(&mut scratch))?;
         }
 
         // `bytes()` is a slice; take a thin reference to its first byte so the
@@ -102,7 +121,7 @@ impl FfiState {
             .result(heap)
             .ok_or(FfiError::NotAFunction(signature.id()))?;
         let mut result = CallSlot::new(result_ty.size().max(16));
-        let code = CodePtr(address as *mut core::ffi::c_void);
+        let code = CodePtr(address.cast());
         // libffi writes the result into the pointed-to bytes, so point it at
         // the slot's data, not at the `CallSlot` header.
         let ret_bytes = &mut result.bytes_mut()[0];
@@ -138,56 +157,74 @@ impl FfiState {
         };
         match kind {
             TypeKind::Void => heap.known().undefined.get(heap).erase(),
-            TypeKind::Bool => bool_object(heap, bytes[0] != 0),
-            TypeKind::I8 => smi_value(bytes[0] as i8 as i64),
-            TypeKind::U8 | TypeKind::Char => smi_value(bytes[0] as i64),
-            TypeKind::I16 => smi_value(i16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64),
-            TypeKind::U16 => smi_value(u16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64),
-            TypeKind::I32 => smi_value(i32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64),
-            TypeKind::U32 => smi_value(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64),
-            TypeKind::I64 => smi_value(i64::from_ne_bytes(bytes[..8].try_into().unwrap())),
-            TypeKind::U64 => smi_value(u64::from_ne_bytes(bytes[..8].try_into().unwrap()) as i64),
+            TypeKind::Bool => Convert::boolean(heap, bytes[0] != 0),
+            TypeKind::I8 => Smi::new(bytes[0] as i8 as i64).into_tagged(),
+            TypeKind::U8 | TypeKind::Char => Smi::new(bytes[0] as i64).into_tagged(),
+            TypeKind::I16 => {
+                Smi::new(i16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64).into_tagged()
+            }
+            TypeKind::U16 | TypeKind::Char16 => {
+                Smi::new(u16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64).into_tagged()
+            }
+            TypeKind::I32 => {
+                Smi::new(i32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64).into_tagged()
+            }
+            TypeKind::U32 => {
+                Smi::new(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64).into_tagged()
+            }
+            TypeKind::I64 => {
+                Smi::new(i64::from_ne_bytes(bytes[..8].try_into().unwrap())).into_tagged()
+            }
+            TypeKind::U64 => {
+                Smi::new(u64::from_ne_bytes(bytes[..8].try_into().unwrap()) as i64).into_tagged()
+            }
             TypeKind::F32 => {
-                let value = f32::from_ne_bytes(bytes[..4].try_into().unwrap());
-                float_object(heap, scope, value as f64)
+                let value = f32::from_ne_bytes(bytes[..4].try_into().unwrap()) as f64;
+                heap.allocate_handle::<Float>(value, scope)
+                    .as_tagged(heap)
+                    .erase()
             }
             TypeKind::F64 => {
                 let value = f64::from_ne_bytes(bytes[..8].try_into().unwrap());
-                float_object(heap, scope, value)
+                heap.allocate_handle::<Float>(value, scope)
+                    .as_tagged(heap)
+                    .erase()
             }
             TypeKind::Pointer => {
                 let width = core::mem::size_of::<usize>();
-                let address = usize::from_ne_bytes(bytes[..width].try_into().unwrap());
+                let address = usize::from_ne_bytes(bytes[..width].try_into().unwrap()) as *mut u8;
                 let pointee = {
                     let ty = ty.as_tagged(heap);
                     ty.pointee(heap).expect("pointer type without pointee")
                 };
-                let pointee = scope.handle(pointee);
-                let pointer = heap.allocate_handle::<CPointer>(
-                    CPointerInit {
-                        pointee,
-                        address,
-                        flags: CPointerFlags::BORROWED,
-                        library: None,
-                        owner: None,
-                    },
-                    scope,
-                );
-                if let Some(library) = library {
-                    pointer
-                        .as_tagged(heap)
-                        .set_library(heap, library.as_tagged(heap));
+                if pointee.kind() == TypeKind::Char {
+                    decode_utf8(heap, scope, address.cast())
+                } else if pointee.kind() == TypeKind::Char16 {
+                    decode_utf16(heap, scope, address.cast())
+                } else {
+                    let pointee = scope.handle(pointee);
+                    let pointer = heap.allocate_handle::<CPointer>(
+                        CPointerInit {
+                            pointee,
+                            address,
+                            flags: CPointerFlags::NONE,
+                            library: None,
+                        },
+                        scope,
+                    );
+                    if let Some(library) = library {
+                        pointer
+                            .as_tagged(heap)
+                            .set_library(heap, library.as_tagged(heap));
+                    }
+                    pointer.as_tagged(heap).erase()
                 }
-                pointer.as_tagged(heap).erase()
             }
             TypeKind::Struct | TypeKind::Union | TypeKind::Array => {
                 let value = self
                     .value(heap, scope, ty)
                     .expect("C FFI aggregate result allocation");
-                let base = value
-                    .as_tagged(heap)
-                    .base(heap)
-                    .expect("C value without storage");
+                let base = value.as_tagged(heap).base(heap).expect("C value backing");
                 memory::copy_in(base, &bytes[..size]);
                 value.as_tagged(heap).erase()
             }
@@ -195,7 +232,6 @@ impl FfiState {
         }
     }
 
-    /// Box a raw value as a guest value.
     pub fn read_raw<'a>(
         &self,
         heap: &'a mut Heap,
@@ -205,86 +241,55 @@ impl FfiState {
     ) -> Tagged<'a, Value> {
         self.read_value(heap, scope, &raw.ty, raw.slot.bytes(), library)
     }
-
-    /// `call_raw` + `read_raw`, with errors materialized as guest errors.
-    pub fn call<'a>(
-        &self,
-        vm: &'a crate::VM,
-        heap: &'a mut Heap,
-        state: &'a ThreadState,
-        callee: &Handle<'_, Value>,
-        args: Args,
-    ) -> crate::Result<Tagged<'a, Value>> {
-        Ok(state.handle_scope(|scope| {
-            let library = {
-                let function = callee.as_tagged(heap).get_as::<CFunction>(heap);
-                function
-                    .and_then(|function| function.library(heap))
-                    .map(|library| scope.handle(library))
-            };
-            let raw = match self.call_raw(heap, &scope, callee, args) {
-                Ok(raw) => raw,
-                Err(error) => {
-                    Errors::throw_with(vm, heap, state, VmError::FfiError, &error.to_string());
-                    return Err(crate::Thrown);
-                }
-            };
-            Ok(self.read_raw(heap, &scope, &raw, library.as_ref()))
-        })?)
-    }
 }
 
 impl FfiState {
-    /// Read `value.field` as a guest value. Aggregate fields are views.
     pub fn value_get_field<'s>(
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
-        value: &Handle<CValue>,
+        value: Handle<CValue>,
         name: &str,
     ) -> FfiResult<ValueRead<'s>> {
         let ty = value.as_tagged(heap).c_type(heap);
         let (field_ty, offset) = field_of(heap, ty, name)?;
         let field_ty = scope.handle(field_ty);
-        self.value_read(heap, scope, value, &field_ty, offset)
+        self.value_read(heap, scope, value, field_ty, offset)
     }
 
-    /// Read `value[index]` as a guest value. Aggregate elements are views.
     pub fn value_get_index<'s>(
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
-        value: &Handle<CValue>,
+        value: Handle<CValue>,
         index: usize,
     ) -> FfiResult<ValueRead<'s>> {
         let ty = value.as_tagged(heap).c_type(heap);
         let (element, offset) = element_of(heap, ty, index)?;
         let element = scope.handle(element);
-        self.value_read(heap, scope, value, &element, offset)
+        self.value_read(heap, scope, value, element, offset)
     }
 
-    /// Write `value.field` from a guest value.
     pub fn value_set_field(
         &self,
         heap: &Heap,
-        value: &Handle<CValue>,
+        value: Tagged<CValue>,
         name: &str,
         guest: Tagged<Value>,
     ) -> FfiResult<()> {
-        let ty = value.as_tagged(heap).c_type(heap);
+        let ty = value.c_type(heap);
         let (field_ty, offset) = field_of(heap, ty, name)?;
         self.value_write(heap, value, field_ty, offset, guest)
     }
 
-    /// Write `value[index]` from a guest value.
     pub fn value_set_index(
         &self,
         heap: &Heap,
-        value: &Handle<CValue>,
+        value: Tagged<CValue>,
         index: usize,
         guest: Tagged<Value>,
     ) -> FfiResult<()> {
-        let ty = value.as_tagged(heap).c_type(heap);
+        let ty = value.c_type(heap);
         let (element, offset) = element_of(heap, ty, index)?;
         self.value_write(heap, value, element, offset, guest)
     }
@@ -293,8 +298,8 @@ impl FfiState {
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
-        value: &Handle<CValue>,
-        ty: &Handle<'s, TypeInfo>,
+        value: Handle<CValue>,
+        ty: Handle<'s, TypeInfo>,
         offset: usize,
     ) -> FfiResult<ValueRead<'s>> {
         let (kind, size) = {
@@ -305,33 +310,24 @@ impl FfiState {
             let view = self.view(heap, scope, value, ty, offset);
             return Ok(ValueRead::View(view));
         }
-        let base = value
-            .as_tagged(heap)
-            .base(heap)
-            .ok_or(FfiError::InvalidArgument("C value has no storage"))?;
+        let base = value.as_tagged(heap).base(heap)?;
         let mut slot = CallSlot::new(size.max(8));
         memory::copy_out_at(base, offset, &mut slot.bytes_mut()[..size]);
-        Ok(ValueRead::Raw(RawValue {
-            slot,
-            ty: ty.clone(),
-        }))
+        Ok(ValueRead::Raw(RawValue { slot, ty }))
     }
 
     pub fn value_write(
         &self,
         heap: &Heap,
-        value: &Handle<CValue>,
+        value: Tagged<CValue>,
         ty: Tagged<TypeInfo>,
         offset: usize,
         guest: Tagged<Value>,
     ) -> FfiResult<()> {
-        let base = value
-            .as_tagged(heap)
-            .base(heap)
-            .ok_or(FfiError::InvalidArgument("C value has no storage"))?;
+        let base = value.base(heap)?;
         let size = ty.size();
         let mut slot = CallSlot::new(size.max(8));
-        convert_arg(ty, guest, heap, &mut slot)?;
+        convert_arg(ty, guest, heap, &mut slot, None)?;
         memory::copy_in_at(base, offset, &slot.bytes()[..size]);
         Ok(())
     }
@@ -360,15 +356,13 @@ impl FfiState {
         let pointee = pointer.as_tagged(heap).pointee(heap);
         pointer.as_tagged(heap).check_live(heap)?;
         let size = pointee.size();
-        let address = pointer
-            .as_tagged(heap)
-            .address(heap)
+        let address = (pointer.as_tagged(heap).address() as usize)
             .checked_add(
                 index
                     .checked_mul(size.max(1))
                     .ok_or(FfiError::AddressOverflow)?,
             )
-            .ok_or(FfiError::AddressOverflow)?;
+            .ok_or(FfiError::AddressOverflow)? as *const u8;
         let mut slot = CallSlot::new(size.max(8));
         memory::copy_out_at(address, 0, &mut slot.bytes_mut()[..size]);
         Ok(RawValue {
@@ -388,17 +382,15 @@ impl FfiState {
         let pointee = pointer.as_tagged(heap).pointee(heap);
         pointer.as_tagged(heap).check_live(heap)?;
         let size = pointee.size();
-        let address = pointer
-            .as_tagged(heap)
-            .address(heap)
+        let address = (pointer.as_tagged(heap).address() as usize)
             .checked_add(
                 index
                     .checked_mul(size.max(1))
                     .ok_or(FfiError::AddressOverflow)?,
             )
-            .ok_or(FfiError::AddressOverflow)?;
+            .ok_or(FfiError::AddressOverflow)? as *mut u8;
         let mut slot = CallSlot::new(size.max(8));
-        convert_arg(pointee, value, heap, &mut slot)?;
+        convert_arg(pointee, value, heap, &mut slot, None)?;
         memory::copy_in_at(address, 0, &slot.bytes()[..size]);
         Ok(())
     }
@@ -462,6 +454,7 @@ fn convert_arg(
     value: Tagged<Value>,
     heap: &Heap,
     slot: &mut CallSlot,
+    scratch: Option<&mut CallScratch>,
 ) -> FfiResult<()> {
     match ty.kind() {
         TypeKind::Bool => {
@@ -473,7 +466,9 @@ fn convert_arg(
             slot.put(&u8::try_from(int_from(heap, value)?)?.to_ne_bytes())
         }
         TypeKind::I16 => slot.put(&i16::try_from(int_from(heap, value)?)?.to_ne_bytes()),
-        TypeKind::U16 => slot.put(&u16::try_from(int_from(heap, value)?)?.to_ne_bytes()),
+        TypeKind::U16 | TypeKind::Char16 => {
+            slot.put(&u16::try_from(int_from(heap, value)?)?.to_ne_bytes())
+        }
         TypeKind::I32 => slot.put(&i32::try_from(int_from(heap, value)?)?.to_ne_bytes()),
         TypeKind::U32 => slot.put(&u32::try_from(int_from(heap, value)?)?.to_ne_bytes()),
         TypeKind::I64 => slot.put(&int_from(heap, value)?.to_ne_bytes()),
@@ -481,8 +476,14 @@ fn convert_arg(
         TypeKind::F32 => slot.put(&(float_from(heap, value)? as f32).to_ne_bytes()),
         TypeKind::F64 => slot.put(&float_from(heap, value)?.to_ne_bytes()),
         TypeKind::Pointer => {
-            let address = pointer_from(ty, value, heap)?;
-            slot.put(&address.to_ne_bytes());
+            let address = match scratch {
+                Some(scratch) => match string_pointer_from(ty, value, heap, scratch)? {
+                    Some(address) => address,
+                    None => pointer_from(ty, value, heap)?,
+                },
+                None => pointer_from(ty, value, heap)?,
+            };
+            slot.put(&(address as usize).to_ne_bytes());
         }
         TypeKind::Struct | TypeKind::Union | TypeKind::Array => {
             let buffer = value
@@ -495,15 +496,166 @@ fn convert_arg(
                     found: found.id(),
                 });
             }
-            let base = buffer
-                .base(heap)
-                .ok_or(FfiError::InvalidArgument("C value has no storage"))?;
+            let base = buffer.base(heap)?;
             let size = ty.size();
             memory::copy_out(base, &mut slot.bytes_mut()[..size]);
         }
         TypeKind::Void | TypeKind::Function => return Err(FfiError::UnsupportedType(ty.id())),
     }
     Ok(())
+}
+
+fn decode_utf8<'a>(
+    heap: &'a mut Heap,
+    scope: &HandleScope<'_>,
+    address: *const u8,
+) -> Tagged<'a, Value> {
+    if address.is_null() {
+        return heap.known().null.get(heap).erase();
+    }
+    let len = memory::c_str_len(address);
+    let mut bytes = vec![0u8; len];
+    memory::copy_out(address, &mut bytes);
+    match Utf8String::from_bytes(heap, scope, &bytes) {
+        Some(value) => value.as_tagged(heap).erase(),
+        None => {
+            let text = String::from_utf8_lossy(&bytes);
+            Utf8String::from_str(heap, scope, &text)
+                .as_tagged(heap)
+                .erase()
+        }
+    }
+}
+
+fn decode_utf16<'a>(
+    heap: &'a mut Heap,
+    scope: &HandleScope<'_>,
+    address: *const u8,
+) -> Tagged<'a, Value> {
+    if address.is_null() {
+        return heap.known().null.get(heap).erase();
+    }
+    let len = memory::c_wstr_len(address);
+    let mut units = vec![0u16; len];
+    for (index, unit) in units.iter_mut().enumerate() {
+        let mut bytes = [0u8; 2];
+        memory::copy_out_at(address, index * 2, &mut bytes);
+        *unit = u16::from_ne_bytes(bytes);
+    }
+    DenseString::from_units(heap, scope, &units)
+        .as_tagged(heap)
+        .erase()
+}
+
+fn string_pointer_from(
+    ty: Tagged<TypeInfo>,
+    value: Tagged<Value>,
+    heap: &Heap,
+    scratch: &mut CallScratch,
+) -> FfiResult<Option<*mut u8>> {
+    let expected = ty
+        .pointee(heap)
+        .ok_or(FfiError::InvalidArgument("pointer type without pointee"))?;
+    match expected.kind() {
+        TypeKind::Char => {
+            if let Some(text) = StringRef::try_from(heap, value) {
+                return utf8_argument(text, heap, scratch).map(Some);
+            }
+            if let Some(bytes) = value.get_as::<FixedByteArray>(heap) {
+                return byte_array_argument(bytes.as_ref(), scratch).map(Some);
+            }
+            if let Some(pointer) = value.get_as::<CPointer>(heap) {
+                return compatible_char_pointer(pointer.as_ref(), heap, expected).map(Some);
+            }
+            Ok(None)
+        }
+        TypeKind::Char16 => {
+            if let Some(text) = StringRef::try_from(heap, value) {
+                return utf16_argument(text, heap, scratch).map(Some);
+            }
+            if let Some(pointer) = value.get_as::<CPointer>(heap) {
+                return compatible_char_pointer(pointer.as_ref(), heap, expected).map(Some);
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn compatible_char_pointer(
+    pointer: &CPointer,
+    heap: &Heap,
+    expected: Tagged<TypeInfo>,
+) -> FfiResult<*mut u8> {
+    pointer.check_live(heap)?;
+    let actual = pointer.pointee(heap);
+    let compatible = actual.ptr_eq(expected)
+        || actual.kind() == TypeKind::Void
+        || (expected.kind() == TypeKind::Char
+            && matches!(actual.kind(), TypeKind::U8 | TypeKind::I8))
+        || (expected.kind() == TypeKind::Char16 && actual.kind() == TypeKind::U16);
+    if !compatible {
+        return Err(FfiError::MismatchedType {
+            expected: expected.id(),
+            found: actual.id(),
+        });
+    }
+    Ok(pointer.address())
+}
+
+fn byte_array_argument(bytes: &FixedByteArray, scratch: &mut CallScratch) -> FfiResult<*mut u8> {
+    let slice = bytes.as_slice();
+    if slice.last() == Some(&0) {
+        return Ok(bytes.as_ptr() as *mut u8);
+    }
+    let mut copy = slice.to_vec();
+    copy.push(0);
+    Ok(scratch.push_utf8(copy) as *mut u8)
+}
+
+fn utf8_argument(
+    string: StringRef<'_>,
+    heap: &Heap,
+    scratch: &mut CallScratch,
+) -> FfiResult<*mut u8> {
+    if let Some(bytes) = string.utf8_bytes(heap) {
+        if bytes.contains(&0) {
+            return Err(FfiError::EmbeddedNul);
+        }
+        if bytes.is_empty() {
+            return Ok(scratch.push_utf8(vec![0]) as *mut u8);
+        }
+        return Ok(bytes.as_ptr() as *mut u8);
+    }
+    let units = string.to_units(heap);
+    if units.contains(&0) {
+        return Err(FfiError::EmbeddedNul);
+    }
+    let mut bytes = String::from_utf16_lossy(&units).into_bytes();
+    bytes.push(0);
+    Ok(scratch.push_utf8(bytes) as *mut u8)
+}
+
+fn utf16_argument(
+    string: StringRef<'_>,
+    heap: &Heap,
+    scratch: &mut CallScratch,
+) -> FfiResult<*mut u8> {
+    if let Some(StringData::Utf16(units)) = string.data(heap) {
+        if units.contains(&0) {
+            return Err(FfiError::EmbeddedNul);
+        }
+        if units.is_empty() {
+            return Ok(scratch.push_utf16(vec![0]) as *mut u8);
+        }
+        return Ok(units.as_ptr() as *mut u8);
+    }
+    let mut units = string.to_units(heap);
+    if units.contains(&0) {
+        return Err(FfiError::EmbeddedNul);
+    }
+    units.push(0);
+    Ok(scratch.push_utf16(units) as *mut u8)
 }
 
 fn int_from(heap: &Heap, value: Tagged<Value>) -> FfiResult<i64> {
@@ -547,15 +699,24 @@ fn bool_from(heap: &Heap, value: Tagged<Value>) -> FfiResult<bool> {
     }
 }
 
-fn pointer_from(ty: Tagged<TypeInfo>, value: Tagged<Value>, heap: &Heap) -> FfiResult<usize> {
+fn pointer_from(ty: Tagged<TypeInfo>, value: Tagged<Value>, heap: &Heap) -> FfiResult<*mut u8> {
     if value.ptr_eq(heap.known().null.get(heap).erase())
         || value.ptr_eq(heap.known().undefined.get(heap).erase())
     {
-        return Ok(0);
+        return Ok(core::ptr::null_mut());
     }
     let expected = ty
         .pointee(heap)
         .ok_or(FfiError::InvalidArgument("pointer type without pointee"))?;
+    if let Some(bytes) = value.get_as::<FixedByteArray>(heap) {
+        if matches!(
+            expected.kind(),
+            TypeKind::Void | TypeKind::U8 | TypeKind::I8
+        ) {
+            return Ok(bytes.as_ref().as_ptr() as *mut u8);
+        }
+        return Err(FfiError::InvalidArgument("expected a C pointer"));
+    }
     if let Some(c_value) = value.get_as::<CValue>(heap) {
         let actual = c_value.c_type(heap);
         let actual = if actual.kind() == TypeKind::Array {
@@ -571,9 +732,7 @@ fn pointer_from(ty: Tagged<TypeInfo>, value: Tagged<Value>, heap: &Heap) -> FfiR
                 found: actual.id(),
             });
         }
-        return c_value
-            .base(heap)
-            .ok_or(FfiError::InvalidArgument("C value has no storage"));
+        return c_value.base(heap);
     }
     let pointer = value
         .get_as::<CPointer>(heap)
@@ -586,23 +745,5 @@ fn pointer_from(ty: Tagged<TypeInfo>, value: Tagged<Value>, heap: &Heap) -> FfiR
             found: actual.id(),
         });
     }
-    Ok(pointer.address(heap))
-}
-
-fn smi_value(value: i64) -> Tagged<'static, Value> {
-    Smi::new(value).into_tagged()
-}
-
-fn bool_object<'a>(heap: &'a Heap, value: bool) -> Tagged<'a, Value> {
-    let object = if value {
-        heap.known().true_object.get(heap)
-    } else {
-        heap.known().false_object.get(heap)
-    };
-    object.erase()
-}
-
-fn float_object<'a>(heap: &'a mut Heap, scope: &HandleScope<'_>, value: f64) -> Tagged<'a, Value> {
-    let float = heap.allocate_handle::<Float>(value, scope);
-    float.as_tagged(heap).erase()
+    Ok(pointer.address())
 }

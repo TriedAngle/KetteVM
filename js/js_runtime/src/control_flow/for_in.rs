@@ -2,7 +2,7 @@ use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
     Args, CallInfo, DenseString, FixedArray, Handle, HandleScope, Heap, HostCtx, Object, Result,
-    Smi, Symbol, Tagged, ThreadState, VM, Value, VmError, proxy::Proxy, raise, rt_try,
+    Smi, StringRef, Symbol, Tagged, ThreadState, VM, Value, VmError, proxy::Proxy, raise, rt_try,
 };
 
 crate::register_natives! {
@@ -62,7 +62,7 @@ fn for_in_initial_level<'a>(
     heap: &'a Heap,
     subject: Tagged<'a, Value>,
 ) -> Option<Tagged<'a, Value>> {
-    if DenseString::from_receiver(heap, subject).is_some() {
+    if StringRef::from_receiver(heap, subject).is_some() {
         return Some(subject);
     }
     if subject.is_primitive(heap) {

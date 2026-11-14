@@ -1,9 +1,3 @@
-//! Dynamic loader abstraction.
-//!
-//! `open`, `symbol`, and `close` are the only places that touch the platform's
-//! dynamic loader. Handles are plain addresses; ownership lives in the
-//! `ForeignLibrary` object.
-
 use crate::ffi::FfiError;
 #[cfg(unix)]
 use core::ffi::CStr;
@@ -52,6 +46,9 @@ fn c_name(text: &str) -> Result<std::ffi::CString, FfiError> {
 
 /// Load a shared library, or the current process when `path` is `None`.
 pub fn open(path: Option<&str>) -> Result<usize, FfiError> {
+    if path == Some("") {
+        return Err(FfiError::LoadFailed("empty library path".to_string()));
+    }
     #[cfg(unix)]
     {
         let name = match path {
@@ -122,7 +119,7 @@ pub fn symbol(handle: usize, name: &str) -> Result<usize, FfiError> {
     }
 }
 
-/// Release a handle from [`open`]. Process handles are never released.
+/// Release a handle from [`open`].
 pub fn close(handle: usize) -> Result<(), FfiError> {
     #[cfg(unix)]
     {

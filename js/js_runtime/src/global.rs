@@ -3,7 +3,7 @@ use crate::JSRuntime;
 use vm_core::{
     Args, CallInfo, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope,
     HandleSlice, Heap, HostCtx, Object, Result, Runtime, SCOPE_DECLARATION, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown,
+    ScopeInfo, ScopeInfoInit, Smi, StringRef, Tagged, ThreadState, VM, Value, VmError, WellKnown,
     materialize::Materialize, raise, raise_runtime, rt_try,
 };
 
@@ -24,15 +24,12 @@ fn eval_runtime<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
         vm, heap, state, ..
     } = ctx;
     let source = args.get_handle(heap, 0);
-    if source.as_tagged(heap).get_as::<DenseString>(heap).is_none() {
+    let Some(text) =
+        StringRef::try_from(heap, source.as_tagged(heap)).map(|s| s.to_rust_string(heap))
+    else {
         return source.as_tagged(heap).erase();
-    }
+    };
     state.handle_scope(|scope| {
-        let text = source
-            .as_tagged(heap)
-            .get_as::<DenseString>(heap)
-            .map(|s| s.to_rust_string(heap))
-            .expect("checked string source");
         let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal, ids) {
             Ok(program) => program,
             Err(_) => {

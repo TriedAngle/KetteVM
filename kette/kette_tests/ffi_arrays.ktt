@@ -10,13 +10,12 @@ Test.assert(values.get(0), 7)
 Test.assert(values.get(1), 0)
 Test.assert(values.get(3), 9)
 
-// An array buffer decays to a pointer to its first element.
-let p = values.pointer()
-Test.assert(p.get(3), 9)
-p.set(1, 42)
+// A value view can be offset like a pointer.
+Test.assert(values.get(3), 9)
+values.set(1, 42)
 Test.assert(values.get(1), 42)
 
-let advanced = p.add(2)
+let advanced = values.add(2)
 Test.assert(advanced.get(0), 0)
 Test.assert(advanced.get(1), 9)
 
@@ -42,8 +41,6 @@ Test.assert(point.y, 5)
 point.x = 11
 Test.assert(point.x, 11)
 Test.assert(point.get("x"), 11)
-let point_pointer = point.pointer()
-Test.assert(point_pointer.get(0).get("y"), 5)
 point.set("x", 8)
 Test.assert(point.get("x"), 8)
 
@@ -57,12 +54,6 @@ Test.assert(rect.origin.x, 7)
 Test.assert(rect.size.y, 9)
 Test.assert(rect.get("origin").x, 7)
 
-// type.wrap(pointer) is a view over borrowed memory
-let wrapped = Point.wrap(point.pointer())
-Test.assert(wrapped.x, 8)
-wrapped.y = 21
-Test.assert(point.y, 21)
-
 // copy detaches
 let detached = point.copy()
 detached.x = 99
@@ -72,6 +63,20 @@ Test.assert(detached.x, 99)
 // pointer to pointer
 let I32p = FFI.pointer(FFI.i32)
 let slot = FFI.array(I32p, 1).new()
-slot.set(0, values.pointer())
+slot.set(0, values)
 let back = slot.get(0)
 Test.assert(back.get(0), 7)
+
+// UTF-16 C strings and explicit string readers
+let wtext = FFI.wstring("h€")
+Test.assert(FFI.wstring_at(wtext), "h€")
+
+let ascii = FFI.cstring("hello")
+Test.assert(FFI.string_at(ascii), "hello")
+
+// guest strings marshal directly to char* parameters
+let libc = FFI.library(null)
+let strlen = libc.fn("strlen", [FFI.CString], FFI.u64)
+Test.assert(strlen("hello"), 5)
+Test.assert(strlen("héllo"), 6)
+Test.assert(strlen(ascii), 5)

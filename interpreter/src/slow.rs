@@ -7,9 +7,9 @@ use handler_derive::handler_match as handler;
 use vm_core::{
     AccessorPair, CallInfo, Compare, ContextInit, ContextObject, Convert, DenseString, Errors,
     FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
-    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise,
-    raise_runtime, rt_try,
+    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, StringRef, Tagged,
+    ThreadState, VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind,
+    proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -40,8 +40,8 @@ pub fn add_body<'a>(
             Ok(v) => scope.handle(v),
             Err(e) => return raise_runtime(heap, e),
         };
-        if lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
-            || rhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
+        if StringRef::try_from(heap, lhs.as_tagged(heap)).is_some()
+            || StringRef::try_from(heap, rhs.as_tagged(heap)).is_some()
         {
             let a = scope.handle(rt_try!(
                 heap,
@@ -805,7 +805,7 @@ fn load_keyed_body<'a>(
                 i,
             );
             let name = scope.handle(key.as_tagged(heap).erase().as_name());
-            if let Some(unit) = DenseString::index_element(heap, scope, recv, name) {
+            if let Some(unit) = StringRef::index_element(heap, scope, recv, name) {
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }

@@ -1,7 +1,5 @@
-//! Loading libraries and resolving their symbols.
-
 use crate::ffi::platform;
-use crate::ffi::{FfiError, FfiResult, FfiState, TypeKind};
+use crate::ffi::{FfiError, FfiResult, FfiState, TypeId};
 use crate::{
     CPointer, CPointerFlags, CPointerInit, ForeignLibrary, ForeignLibraryInit, Handle, HandleScope,
     Heap, TypeInfo, VM,
@@ -16,19 +14,20 @@ impl FfiState {
         scope: &'s HandleScope<'_>,
         path: Option<&str>,
     ) -> FfiResult<Handle<'s, ForeignLibrary>> {
-        let address = platform::open(path)?;
-        let void = scope.handle(self.builtin(heap, TypeKind::Void));
-        let mut flags = CPointerFlags::LIBRARY.union(CPointerFlags::BORROWED);
-        if path.is_none() {
-            flags = flags.union(CPointerFlags::PROCESS);
-        }
+        let address = platform::open(path)? as *mut u8;
+        let void = heap
+            .known()
+            .ffi_types
+            .get(heap, TypeId::VOID)
+            .expect("C FFI builtins are installed during VM setup");
+        let void = scope.handle(void);
+        let flags = CPointerFlags::NONE;
         let handle = heap.allocate_handle::<CPointer>(
             CPointerInit {
                 pointee: void,
                 address,
                 flags,
                 library: None,
-                owner: None,
             },
             scope,
         );
@@ -36,17 +35,14 @@ impl FfiState {
         Ok(heap.allocate_handle::<ForeignLibrary>(ForeignLibraryInit { handle, path }, scope))
     }
 
-    /// Unload a library. Idempotent; process handles are marked dead but never
-    /// unloaded.
+    /// Unload a library. Idempotent.
     pub fn close_library(&self, heap: &Heap, library: &Handle<ForeignLibrary>) -> FfiResult<()> {
         let library = library.as_tagged(heap);
         let handle = library.handle(heap);
         if handle.is_dead() {
             return Ok(());
         }
-        if !handle.flags().contains(CPointerFlags::PROCESS) {
-            platform::close(handle.address(heap))?;
-        }
+        platform::close(handle.address() as usize)?;
         handle.kill(heap);
         Ok(())
     }
@@ -68,16 +64,15 @@ impl FfiState {
             if !library.is_live(heap) {
                 return Err(FfiError::LibraryClosed);
             }
-            library.handle(heap).address(heap)
+            library.handle(heap).address() as usize
         };
-        let address = platform::symbol(lookup, name)?;
+        let address = platform::symbol(lookup, name)? as *mut u8;
         let pointer = heap.allocate_handle::<CPointer>(
             CPointerInit {
                 pointee: ty.clone(),
                 address,
-                flags: CPointerFlags::LIBRARY.union(CPointerFlags::BORROWED),
+                flags: CPointerFlags::NONE,
                 library: None,
-                owner: None,
             },
             scope,
         );

@@ -1,14 +1,7 @@
-//! C type identity, layout, and interning.
-//!
-//! A type is a heap object (`TypeInfo`) and its identity is object identity. A
-//! `TypeId` is a stable integer handle into the registry, used only for
-//! interning keys and diagnostics; hot paths never touch the registry.
-
-use crate::bootstrap::smi_slot;
-use crate::ffi::plan::CallPlan;
+use crate::ffi::CallPlan;
 use crate::ffi::{FfiError, FfiResult};
 use crate::{
-    EdgeVisitable, FixedArray, GcSlot, Handle, HandleScope, Heap, Smi, Tagged, TypeInfo,
+    EdgeVisitable, FixedArray, Handle, HandleScope, Heap, MaybeWeakGcSlot, Smi, Tagged, TypeInfo,
     TypeInfoInit, VM, Value, Visitor,
 };
 use core::alloc::Layout;
@@ -40,6 +33,9 @@ impl TypeId {
     /// C `char`: one byte, platform-dependent signedness.
     pub const CHAR: Self = Self(12);
 
+    /// C `char16_t`: a 16-bit UTF-16 code unit.
+    pub const CHAR16: Self = Self(13);
+
     /// C `long`: 8 bytes on LP64, 4 bytes on Windows and 32-bit targets.
     pub const C_LONG: Self = if cfg!(windows) || cfg!(target_pointer_width = "32") {
         Self::I32
@@ -68,10 +64,14 @@ impl TypeId {
         Self::I64
     };
 
-    /// C `wchar_t`: 4 bytes signed on the targets KetteVM builds for.
-    pub const WCHAR: Self = Self::I32;
+    /// C `wchar_t`: 16-bit on Windows, 32-bit signed elsewhere.
+    pub const WCHAR: Self = if cfg!(windows) {
+        Self::CHAR16
+    } else {
+        Self::I32
+    };
 
-    pub const BUILTIN_COUNT: u32 = 13;
+    pub const BUILTIN_COUNT: u32 = TypeKind::BUILTIN_COUNT as u32;
 
     pub const fn index(self) -> usize {
         self.0 as usize
@@ -83,14 +83,6 @@ impl TypeId {
 
     pub const fn from_i64(bits: i64) -> Self {
         Self(bits as u32)
-    }
-
-    pub const fn builtin(kind: TypeKind) -> Option<Self> {
-        if (kind as usize) < TypeKind::BUILTIN_COUNT {
-            Some(Self(kind as u32))
-        } else {
-            None
-        }
     }
 }
 
@@ -111,6 +103,7 @@ pub enum TypeKind {
     F32,
     F64,
     Char,
+    Char16,
     Pointer,
     Struct,
     Union,
@@ -119,7 +112,7 @@ pub enum TypeKind {
 }
 
 impl TypeKind {
-    pub const BUILTIN_COUNT: usize = 13;
+    pub const BUILTIN_COUNT: usize = 14;
 
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -136,11 +129,12 @@ impl TypeKind {
             10 => Self::F32,
             11 => Self::F64,
             12 => Self::Char,
-            13 => Self::Pointer,
-            14 => Self::Struct,
-            15 => Self::Union,
-            16 => Self::Array,
-            17 => Self::Function,
+            13 => Self::Char16,
+            14 => Self::Pointer,
+            15 => Self::Struct,
+            16 => Self::Union,
+            17 => Self::Array,
+            18 => Self::Function,
             _ => panic!("invalid C type kind"),
         }
     }
@@ -160,6 +154,7 @@ impl TypeKind {
             Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Char => "char",
+            Self::Char16 => "char16",
             Self::Pointer => "pointer",
             Self::Struct => "struct",
             Self::Union => "union",
@@ -173,7 +168,7 @@ impl TypeKind {
         match self {
             Self::Void => (0, 1),
             Self::Bool | Self::I8 | Self::U8 | Self::Char => (1, 1),
-            Self::I16 | Self::U16 => (2, 2),
+            Self::I16 | Self::U16 | Self::Char16 => (2, 2),
             Self::I32 | Self::U32 | Self::F32 => (4, 4),
             // 8 on the 64-bit targets KetteVM builds for. i386 SysV aligns
             // `long long` and `double` to 4.
@@ -243,14 +238,13 @@ enum TypeKey {
 }
 
 struct RegistryInner {
-    types: HashMap<TypeId, GcSlot<TypeInfo>>,
+    types: HashMap<TypeId, MaybeWeakGcSlot<TypeInfo>>,
     interned: HashMap<TypeKey, TypeId>,
 }
 
 /// Owns every C type and interns the structural ones.
 ///
-/// Only type creation takes the lock; call, field, pointer and conversion
-/// paths read `GcSlot<TypeInfo>`/`TypeInfo` directly.
+/// Type creation locks; call and access paths read the type directly.
 pub struct TypeRegistry {
     next_id: AtomicU32,
     inner: Mutex<RegistryInner>,
@@ -279,21 +273,15 @@ impl TypeRegistry {
         self.len() == 0
     }
 
-    /// Register a type under an explicit id. Used for built-ins at install.
-    pub fn register(&self, id: TypeId, ty: Tagged<TypeInfo>) {
-        let slot = smi_slot::<TypeInfo>();
-        slot.init_tagged(ty);
-        self.inner
-            .lock()
-            .expect("ffi type registry poisoned")
-            .types
-            .insert(id, slot);
-    }
-
-    /// Resolve a type id. Diagnostic paths only.
     pub fn get<'a>(&self, heap: &'a Heap, id: TypeId) -> Option<Tagged<'a, TypeInfo>> {
+        if id.index() < TypeKind::BUILTIN_COUNT {
+            return heap.known().ffi_types.get(heap, id);
+        }
         let inner = self.inner.lock().expect("ffi type registry poisoned");
-        inner.types.get(&id).map(|slot| slot.get(heap))
+        inner
+            .types
+            .get(&id)
+            .and_then(|slot| slot.get(heap).as_strong())
     }
 
     fn reserve_id(&self) -> TypeId {
@@ -306,10 +294,16 @@ impl TypeRegistry {
         scope: &'s HandleScope<'_>,
         key: &TypeKey,
     ) -> Option<Handle<'s, TypeInfo>> {
-        let inner = self.inner.lock().expect("ffi type registry poisoned");
+        let mut inner = self.inner.lock().expect("ffi type registry poisoned");
         let id = *inner.interned.get(key)?;
-        let slot = inner.types.get(&id)?;
-        Some(slot.get(heap).as_handle(scope))
+        if let Some(slot) = inner.types.get(&id)
+            && let Some(ty) = slot.get(heap).as_strong()
+        {
+            return Some(ty.as_handle(scope));
+        }
+        inner.interned.remove(key);
+        inner.types.remove(&id);
+        None
     }
 
     /// Insert `ty` under `key`; returns the existing type if another thread
@@ -323,16 +317,18 @@ impl TypeRegistry {
         ty: &Handle<'s, TypeInfo>,
     ) -> Option<Handle<'s, TypeInfo>> {
         let mut inner = self.inner.lock().expect("ffi type registry poisoned");
-        if let Some(existing) = inner.interned.get(&key) {
-            let slot = inner
-                .types
-                .get(existing)
-                .expect("interned type id without a type");
-            return Some(slot.get(heap).as_handle(scope));
+        if let Some(existing) = inner.interned.get(&key).copied() {
+            if let Some(slot) = inner.types.get(&existing)
+                && let Some(found) = slot.get(heap).as_strong()
+            {
+                return Some(found.as_handle(scope));
+            }
+            inner.interned.remove(&key);
+            inner.types.remove(&existing);
         }
-        let slot = smi_slot::<TypeInfo>();
-        slot.init_tagged(ty.as_tagged(heap));
-        inner.types.insert(id, slot);
+        inner
+            .types
+            .insert(id, MaybeWeakGcSlot::new_weak(ty.as_tagged(heap)));
         inner.interned.insert(key, id);
         None
     }
@@ -459,7 +455,7 @@ impl TypeRegistry {
                 size: 0,
                 align: 1,
                 flags: if variadic {
-                    crate::objects::type_info::FLAG_VARIADIC
+                    crate::objects::ffi_objects::FLAG_VARIADIC
                 } else {
                     0
                 },
@@ -657,20 +653,18 @@ fn layout_fields(
             max_size = max_size.max(field_layout.size());
             continue;
         }
-        offset = align_up(offset, field_layout.align()).ok_or(TypeError::SizeOverflow)?;
+        offset = offset
+            .checked_next_multiple_of(field_layout.align())
+            .ok_or(TypeError::SizeOverflow)?;
         out.push((name, offset));
         offset = offset
             .checked_add(field_layout.size())
             .ok_or(TypeError::SizeOverflow)?;
     }
-    let size = align_up(max_size.max(offset), align).ok_or(TypeError::SizeOverflow)?;
+    let size = max_size
+        .max(offset)
+        .checked_next_multiple_of(align)
+        .ok_or(TypeError::SizeOverflow)?;
     let layout = Layout::from_size_align(size, align).map_err(|_| TypeError::SizeOverflow)?;
     Ok((out, layout))
-}
-
-fn align_up(value: usize, align: usize) -> Option<usize> {
-    debug_assert!(align.is_power_of_two());
-    value
-        .checked_add(align - 1)
-        .map(|value| value & !(align - 1))
 }

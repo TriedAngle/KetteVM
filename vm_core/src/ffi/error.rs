@@ -1,9 +1,3 @@
-//! FFI operation errors.
-//!
-//! These are host-side errors from the pointer and call layers. The native
-//! layer converts them into guest exceptions; keeping them separate lets the
-//! FFI be tested without a VM.
-
 use crate::ffi::{TypeError, TypeId};
 use core::fmt;
 
@@ -52,6 +46,7 @@ pub enum FfiError {
     IntegerOutOfRange,
     /// A string passed to C contains an interior NUL byte.
     EmbeddedNul,
+    InvalidUtf8,
     /// A value is not a guest C type descriptor.
     NotATypeObject,
     /// A struct, union, or array has no such field.
@@ -119,6 +114,7 @@ impl fmt::Display for FfiError {
                 write!(f, "C integer result does not fit the guest range")
             }
             FfiError::EmbeddedNul => write!(f, "string contains an interior NUL byte"),
+            FfiError::InvalidUtf8 => write!(f, "C string is not valid UTF-8"),
             FfiError::NotATypeObject => write!(f, "value is not a C type"),
             FfiError::UnknownField(name) => write!(f, "unknown C field '{name}'"),
             FfiError::IndexOutOfBounds => write!(f, "C array index out of bounds"),

@@ -2,8 +2,8 @@
 //! and the ToUint32/ToNumber pair ArraySetLength needs.
 
 use crate::{
-    Convert, DenseString, Handle, HandleScope, Heap, Object, PartialDescriptor, ProxyObject,
-    Result, ShouldThrow, Smi, Tagged, ThreadState, VM, Value, VmError, bail,
+    Convert, Handle, HandleScope, Heap, Object, PartialDescriptor, ProxyObject, Result,
+    ShouldThrow, Smi, StringRef, Tagged, ThreadState, VM, Value, VmError, bail,
 };
 
 impl Object {
@@ -49,7 +49,7 @@ impl Object {
         {
             return Ok(o.as_ref().length() as u64);
         }
-        if let Some(s) = DenseString::from_receiver(heap, obj.as_tagged(heap)) {
+        if let Some(s) = StringRef::from_receiver(heap, obj.as_tagged(heap)) {
             return Ok(s.len() as u64);
         }
         // TODO: typed-array fast path once [[TypedArrayName]] exists.

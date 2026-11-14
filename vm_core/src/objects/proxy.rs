@@ -1,9 +1,8 @@
 use crate::{
-    Args, Compare, Convert, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
-    HeapObject, HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty,
-    PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName,
-    Smi, StoreSemantics, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor, VmError,
-    bail,
+    Args, Compare, Convert, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject,
+    HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty, PartialDescriptor,
+    PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName, Smi, StoreSemantics,
+    StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor, VmError, bail,
 };
 use core::alloc::Layout;
 
@@ -232,7 +231,7 @@ fn trap_result_keys<'s>(
             key.erase(),
             false,
         )?);
-        if value.as_tagged(heap).get_as::<DenseString>(heap).is_none()
+        if !StringRef::try_from(heap, value.as_tagged(heap)).is_some()
             && value.as_tagged(heap).get_as::<Symbol>(heap).is_none()
         {
             bail!(vm, heap, state, VmError::ProxyOwnKeysInvalidKey);

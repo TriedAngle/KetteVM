@@ -14,3 +14,6 @@ rgb[1] = 32
 Test.assert(rgb.label, "crimson")
 Test.assert(rgb[1], 32)
 Test.assert(rgb[0] + rgb[1], 287)
+
+// host info: `os.name` is the OS string used to pick library paths
+Test.assert(os.name.length > 0, true)

@@ -1,8 +1,5 @@
 pub mod array;
 pub mod byte_array;
-pub mod c_function;
-pub mod c_pointer;
-pub mod c_value;
 pub mod callable;
 pub mod cell;
 pub mod code;
@@ -11,8 +8,8 @@ pub mod data_handler;
 pub mod descriptor;
 pub mod dictionary;
 pub mod feedback;
+pub mod ffi_objects;
 pub mod float;
-pub mod foreign_library;
 mod helpers;
 pub mod js_array;
 pub mod map;
@@ -22,13 +19,9 @@ pub mod proxy;
 pub mod script_context;
 pub mod string;
 pub mod symbol;
-pub mod type_info;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
 pub use byte_array::FixedByteArray;
-pub use c_function::{CFunction, CFunctionInit};
-pub use c_pointer::{CPointer, CPointerFlags, CPointerInit};
-pub use c_value::{CValue, CValueInit};
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
 pub use code::{Code, CodeInit};
@@ -44,8 +37,11 @@ pub use dictionary::{
     NumberDictionary, NumberDictionaryInit,
 };
 pub use feedback::{FeedbackVector, FeedbackVectorInit};
+pub use ffi_objects::{
+    CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue, CValueInit,
+    FLAG_VARIADIC, ForeignLibrary, ForeignLibraryInit, TypeInfo, TypeInfoInit,
+};
 pub use float::Float;
-pub use foreign_library::{ForeignLibrary, ForeignLibraryInit};
 pub use helpers::WrapperKind;
 pub use map::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ElementsKind, Key, Map, MapInit, MapKind,
@@ -58,9 +54,11 @@ pub use script_context::{
     GlobalLexicalBinding, NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable,
     ScriptContextTableInit,
 };
-pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
+pub use string::{
+    DenseString, Encoding, ExternalString, ExternalStringInit, StringData, StringOwn, StringRef,
+    Utf8String, decode_wtf8, flatten, string_content_hash, string_content_hash_units,
+};
 pub use symbol::Symbol;
-pub use type_info::{TypeInfo, TypeInfoInit};
 
 use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
@@ -176,6 +174,10 @@ pub enum ObjectKind {
     CValue = 31,
     /// A C type descriptor: kind, layout, related types, call plan.
     TypeInfo = 32,
+    /// A Valid UTF-8 string with inline bytes (non-ECma representation).
+    Utf8String = 33,
+    /// A string whose payload lives in host memory, kept alive by `owner`.
+    ExternalString = 34,
 }
 
 impl ObjectKind {
@@ -218,6 +220,8 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::FixedArray => (*addr.cast::<FixedArray>().as_ptr()).layout(),
             ObjectKind::FixedByteArray => (*addr.cast::<FixedByteArray>().as_ptr()).layout(),
             ObjectKind::DenseString => (*addr.cast::<DenseString>().as_ptr()).layout(),
+            ObjectKind::Utf8String => (*addr.cast::<Utf8String>().as_ptr()).layout(),
+            ObjectKind::ExternalString => (*addr.cast::<ExternalString>().as_ptr()).layout(),
             ObjectKind::AccessorPair => (*addr.cast::<AccessorPair>().as_ptr()).layout(),
             ObjectKind::CallableInfo => (*addr.cast::<CallableInfoObject>().as_ptr()).layout(),
             ObjectKind::Float => (*addr.cast::<Float>().as_ptr()).layout(),
@@ -266,6 +270,10 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
                 (*addr.cast::<FixedByteArray>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::DenseString => (*addr.cast::<DenseString>().as_ptr()).visit_edges(visitor),
+            ObjectKind::Utf8String => (*addr.cast::<Utf8String>().as_ptr()).visit_edges(visitor),
+            ObjectKind::ExternalString => {
+                (*addr.cast::<ExternalString>().as_ptr()).visit_edges(visitor)
+            }
             ObjectKind::AccessorPair => {
                 (*addr.cast::<AccessorPair>().as_ptr()).visit_edges(visitor)
             }

@@ -1,7 +1,7 @@
 use crate::{
     AccessorInfo, AccessorPair, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE,
-    DETAILS_WRITABLE, DenseString, FixedArray, Handle, HandleScope, Heap, Key, Object, SlotFlags,
-    SlotName, StringOwn, Tagged, Value, proxy::Proxy,
+    DETAILS_WRITABLE, FixedArray, Handle, HandleScope, Heap, Key, Object, SlotFlags, SlotName,
+    StringOwn, StringRef, Tagged, Value, proxy::Proxy,
 };
 
 /// One resolved position of the walk: where the property lives and
@@ -140,7 +140,7 @@ impl<'s> Lookup<'s> {
                 self.advance_past(heap, scope, at);
                 return Hit::Proxy(at);
             }
-            if let Some(s) = DenseString::from_receiver(heap, at)
+            if let Some(s) = StringRef::from_receiver(heap, at)
                 && let Some(own) = s.own_key(heap, self.name(heap))
             {
                 self.advance_past(heap, scope, at);

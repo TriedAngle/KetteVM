@@ -1,71 +1,65 @@
-//! Raw C memory access.
-//!
-//! This is the only module that dereferences foreign addresses. Every public
-//! operation here is a plain memory primitive; the caller is responsible for
-//! checking pointer liveness before calling. `CPointer` does that in its
-//! accessors.
-//!
-//! Accesses are byte copies or borrowed byte views, so unaligned C pointers
-//! (packed structs, `char*` arithmetic) are handled without alignment
-//! requirements.
-
 use core::ptr;
 
-/// Copy `out.len()` bytes from `address` into `out`.
-pub fn copy_out(address: usize, out: &mut [u8]) {
+pub fn copy_out(address: *const u8, out: &mut [u8]) {
     if out.is_empty() {
         return;
     }
     // Safety: the caller checked the pointer is live and `out.len()` matches
     // the C object's size.
-    unsafe { ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len()) };
+    unsafe { ptr::copy_nonoverlapping(address, out.as_mut_ptr(), out.len()) };
 }
 
-/// Copy `bytes` into `address`.
-pub fn copy_in(address: usize, bytes: &[u8]) {
+pub fn copy_in(address: *mut u8, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     // Safety: the caller checked the pointer is live and writable for
     // `bytes.len()` bytes.
-    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len()) };
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address, bytes.len()) };
 }
 
-/// Copy `len` bytes from `src` to `dst`.
-pub fn copy_bytes(src: usize, dst: usize, len: usize) {
+pub fn copy_bytes(src: *const u8, dst: *mut u8, len: usize) {
     if len == 0 {
         return;
     }
     // Safety: the caller checked both regions are live and non-overlapping.
-    unsafe { ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len) };
+    unsafe { ptr::copy_nonoverlapping(src, dst, len) };
 }
 
-/// Copy `out.len()` bytes from `offset` bytes past `address` into `out`.
-pub fn copy_out_at(address: usize, offset: usize, out: &mut [u8]) {
+pub fn c_str_len(address: *const u8) -> usize {
+    let mut len = 0;
+    // Safety: the caller guarantees `address` is live for the scan.
+    while unsafe { *address.wrapping_add(len) } != 0 {
+        len += 1;
+    }
+    len
+}
+
+pub fn c_wstr_len(address: *const u8) -> usize {
+    let mut len = 0;
+    while len < usize::MAX / 2 {
+        let mut bytes = [0u8; 2];
+        copy_out_at(address, len * 2, &mut bytes);
+        if u16::from_ne_bytes(bytes) == 0 {
+            return len;
+        }
+        len += 1;
+    }
+    len
+}
+
+pub fn copy_out_at(address: *const u8, offset: usize, out: &mut [u8]) {
     if out.is_empty() {
         return;
     }
     // Safety: the caller checked the base pointer is live for `offset + len`.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            (address as *const u8).add(offset),
-            out.as_mut_ptr(),
-            out.len(),
-        )
-    };
+    unsafe { ptr::copy_nonoverlapping(address.wrapping_add(offset), out.as_mut_ptr(), out.len()) };
 }
 
-/// Copy `bytes` to `offset` bytes past `address`.
-pub fn copy_in_at(address: usize, offset: usize, bytes: &[u8]) {
+pub fn copy_in_at(address: *mut u8, offset: usize, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     // Safety: the caller checked the base pointer is live for `offset + len`.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            (address as *mut u8).add(offset),
-            bytes.len(),
-        )
-    };
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address.wrapping_add(offset), bytes.len()) };
 }

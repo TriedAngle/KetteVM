@@ -1,19 +1,27 @@
 // Kette + raylib: open a window, draw a few frames, close.
 // Run: cargo run -q -p vm -- kette/examples/raylib/window_demo.ktt
 
-let raylib = FFI.library("/opt/homebrew/lib/libraylib.dylib")
-let CString = FFI.pointer(FFI.char)
+// macOS does not search Homebrew's lib dir for bare library names.
+let path = if os.name == "macos" {
+        "/opt/homebrew/lib/libraylib.dylib"
+    } else if os.name == "windows" {
+        "raylib.dll"
+    } else {
+        "libraylib.so"
+    }
 
-let InitWindow = raylib.fn("InitWindow", FFI.fn([FFI.i32, FFI.i32, CString], FFI.void))
-let CloseWindow = raylib.fn("CloseWindow", FFI.fn([], FFI.void))
-let SetTargetFPS = raylib.fn("SetTargetFPS", FFI.fn([FFI.i32], FFI.void))
-let BeginDrawing = raylib.fn("BeginDrawing", FFI.fn([], FFI.void))
-let EndDrawing = raylib.fn("EndDrawing", FFI.fn([], FFI.void))
-let ClearBuffers = raylib.fn("rlClearScreenBuffers", FFI.fn([], FFI.void))
-let GetScreenWidth = raylib.fn("GetScreenWidth", FFI.fn([], FFI.i32))
-let GetFrameTime = raylib.fn("GetFrameTime", FFI.fn([], FFI.f32))
+let raylib = FFI.library(path)
 
-InitWindow(800, 450, FFI.cstring("kette + raylib"))
+let InitWindow = raylib.fn("InitWindow", [FFI.i32, FFI.i32, FFI.CString], FFI.void)
+let CloseWindow = raylib.fn("CloseWindow", [], FFI.void)
+let SetTargetFPS = raylib.fn("SetTargetFPS", [FFI.i32], FFI.void)
+let BeginDrawing = raylib.fn("BeginDrawing", [], FFI.void)
+let EndDrawing = raylib.fn("EndDrawing", [], FFI.void)
+let ClearBuffers = raylib.fn("rlClearScreenBuffers", [], FFI.void)
+let GetScreenWidth = raylib.fn("GetScreenWidth", [], FFI.i32)
+let GetFrameTime = raylib.fn("GetFrameTime", [], FFI.f32)
+
+InitWindow(800, 450, "kette + raylib")
 SetTargetFPS(60)
 print(GetScreenWidth())
 

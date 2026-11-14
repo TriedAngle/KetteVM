@@ -1,5 +1,5 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{FfiError, TypeKind, ValueRead};
+use vm::ffi::{TypeId, TypeKind, ValueRead};
 use vm::{
     CFunction, DefaultInterpreter, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, TypeInfo,
     VM, VmCore,
@@ -13,12 +13,13 @@ fn test_vm() -> VM {
 }
 
 fn builtin<'s>(
-    vm: &VM,
+    _vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     kind: TypeKind,
 ) -> Handle<'s, TypeInfo> {
-    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+    let id = TypeId::from_i64(kind as i64);
+    scope.handle(heap.known().ffi_types.get(heap, id).expect("builtin"))
 }
 
 fn struct_type<'s>(
@@ -100,8 +101,14 @@ fn struct_by_value_argument() {
         );
         let buffer = ffi.value(thread.heap(), &scope, &color).unwrap();
         for (name, value) in [("r", 255), ("g", 0), ("b", 0), ("a", 128)] {
-            ffi.value_set_field(thread.heap(), &buffer, name, Smi::new(value).into_tagged())
-                .unwrap();
+            let heap = thread.heap();
+            ffi.value_set_field(
+                heap,
+                buffer.as_tagged(heap),
+                name,
+                Smi::new(value).into_tagged(),
+            )
+            .unwrap();
         }
 
         let callee = scope.handle(function.as_tagged(thread.heap()).erase());
@@ -145,10 +152,21 @@ fn hfa_struct_arguments_and_return() {
         let left = ffi.value(thread.heap(), &scope, &vector2).unwrap();
         let right = ffi.value(thread.heap(), &scope, &vector2).unwrap();
         for (buffer, values) in [(&left, (1, 2)), (&right, (3, 4))] {
-            ffi.value_set_field(thread.heap(), buffer, "x", Smi::new(values.0).into_tagged())
-                .unwrap();
-            ffi.value_set_field(thread.heap(), buffer, "y", Smi::new(values.1).into_tagged())
-                .unwrap();
+            let heap = thread.heap();
+            ffi.value_set_field(
+                heap,
+                buffer.as_tagged(heap),
+                "x",
+                Smi::new(values.0).into_tagged(),
+            )
+            .unwrap();
+            ffi.value_set_field(
+                heap,
+                buffer.as_tagged(heap),
+                "y",
+                Smi::new(values.1).into_tagged(),
+            )
+            .unwrap();
         }
 
         let callee = scope.handle(function.as_tagged(thread.heap()).erase());
@@ -167,7 +185,7 @@ fn hfa_struct_arguments_and_return() {
         let result = scope.handle(result);
         let x = {
             let read = ffi
-                .value_get_field(thread.heap(), &scope, &result, "x")
+                .value_get_field(thread.heap(), &scope, result.clone(), "x")
                 .expect("x");
             match read {
                 ValueRead::View(view) => scope.handle(view.as_tagged(thread.heap()).erase()),
@@ -178,7 +196,7 @@ fn hfa_struct_arguments_and_return() {
         };
         let y = {
             let read = ffi
-                .value_get_field(thread.heap(), &scope, &result, "y")
+                .value_get_field(thread.heap(), &scope, result.clone(), "y")
                 .expect("y");
             match read {
                 ValueRead::View(view) => scope.handle(view.as_tagged(thread.heap()).erase()),
@@ -191,5 +209,36 @@ fn hfa_struct_arguments_and_return() {
         let x = x.as_tagged(heap).get_as::<Float>(heap).unwrap().value.get();
         let y = y.as_tagged(heap).get_as::<Float>(heap).unwrap().value.get();
         assert_eq!((x, y), (4.0, 6.0));
+    });
+}
+
+#[test]
+fn collected_types_drop_out_of_the_registry() {
+    let vm = test_vm();
+    let mut thread = vm.attach();
+
+    let first = thread.handle_scope(|thread, scope| {
+        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ty = ffi
+            .define_struct(&vm, thread.heap(), &scope, Some("Transient"), &[])
+            .expect("struct");
+        ty.as_tagged(thread.heap()).id()
+    });
+
+    thread.heap().collect();
+    assert!(
+        vm.runtime::<VmCore>()
+            .ffi
+            .types()
+            .get(thread.heap(), first)
+            .is_none()
+    );
+
+    thread.handle_scope(|thread, scope| {
+        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ty = ffi
+            .define_struct(&vm, thread.heap(), &scope, Some("Transient"), &[])
+            .expect("struct");
+        assert_ne!(ty.as_tagged(thread.heap()).id(), first);
     });
 }

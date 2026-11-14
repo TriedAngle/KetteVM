@@ -1,7 +1,7 @@
 use crate::{
     CallableInfoInit, CallableInfoObject, DenseString, Float, FunctionKind, Handle, HandleScope,
     HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex, Object, PropertyDescriptor, Prototype,
-    Result, SlotFlags, SlotName, Smi, Tagged, Thread, ThreadState, VM, Value, WellKnown,
+    Result, SlotFlags, SlotName, Smi, StringRef, Tagged, Thread, ThreadState, VM, Value, WellKnown,
     mode_from_strict,
 };
 
@@ -17,7 +17,7 @@ impl WrapperKind {
     pub fn classify(heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> Option<WrapperKind> {
         if v.is_smi() || v.get_as::<Float>(heap).is_some() {
             Some(WrapperKind::Number)
-        } else if v.get_as::<DenseString>(heap).is_some() {
+        } else if StringRef::try_from(heap, v).is_some() {
             Some(WrapperKind::String)
         } else if v == roots.true_object.get(heap) || v == roots.false_object.get(heap) {
             Some(WrapperKind::Boolean)

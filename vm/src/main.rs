@@ -1,8 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::{io::Write, path::Path};
 use vm::{
-    Compiler, DefaultInterpreter, DenseString, Float, Heap, JSRuntime, JavascriptCompiler,
-    KetteCompiler, KetteRuntime, ScriptError, SlotName, Smi, Tagged, Thread, VM, Value, VmCore,
+    Compiler, DefaultInterpreter, Float, Heap, JSRuntime, JavascriptCompiler, KetteCompiler,
+    KetteRuntime, ScriptError, SlotName, Smi, Tagged, Thread, VM, Value, VmCore,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,7 +213,7 @@ fn show_value(thread: &mut Thread, v: Value) -> String {
         if let Some(f) = tagged.get_as::<Float>(heap) {
             return f.value.get().to_string();
         }
-        if let Some(s) = tagged.get_as::<DenseString>(heap) {
+        if let Some(s) = vm::StringRef::try_from(heap, tagged) {
             return s.to_rust_string(heap);
         }
         if let Some(text) = error_text(heap, &scope, tagged) {
@@ -245,7 +245,5 @@ fn error_property<'a>(
     // error formatting must not run getters or traps
     let value =
         vm::Object::get_data_property(heap, scope, scope.handle(v), scope.handle(name.erase()));
-    value
-        .get_as::<DenseString>(heap)
-        .map(|s| s.to_rust_string(heap))
+    vm::StringRef::try_from(heap, value).map(|s| s.to_rust_string(heap))
 }

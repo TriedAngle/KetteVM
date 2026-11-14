@@ -1,8 +1,7 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ffi::{FfiError, TypeKind};
+use vm::ffi::{FfiError, TypeId, TypeKind};
 use vm::{
-    CPointer, CPointerFlags, DefaultInterpreter, ForeignLibrary, Handle, HandleScope, Heap,
-    TypeInfo, VM, VmCore,
+    CPointer, DefaultInterpreter, ForeignLibrary, Handle, HandleScope, Heap, TypeInfo, VM, VmCore,
 };
 
 fn test_vm() -> VM {
@@ -13,12 +12,13 @@ fn test_vm() -> VM {
 }
 
 fn builtin<'s>(
-    vm: &VM,
+    _vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     kind: TypeKind,
 ) -> Handle<'s, TypeInfo> {
-    scope.handle(vm.runtime::<VmCore>().ffi.builtin(heap, kind))
+    let id = TypeId::from_i64(kind as i64);
+    scope.handle(heap.known().ffi_types.get(heap, id).expect("builtin"))
 }
 
 /// The pointer type used for a library function symbol.
@@ -72,9 +72,7 @@ fn open_process_lookup_and_close() {
         let heap = thread.heap();
         let p = symbol.as_tagged(heap);
         assert!(p.check_live(heap).is_ok());
-        assert!(!p.is_null(heap));
-        assert!(p.flags().contains(CPointerFlags::LIBRARY));
-        assert!(p.flags().contains(CPointerFlags::BORROWED));
+        assert!(!p.is_null());
         assert!(p.library(heap).is_some());
         assert_eq!(ffi.library_path(heap, &library), Some(String::new()));
 
@@ -153,12 +151,23 @@ fn raylib_symbol_when_available() {
         let library = open(&vm, thread.heap(), &scope, Some(path));
         let symbol = symbol(&vm, thread.heap(), &scope, &library, "GetScreenWidth");
         let heap = thread.heap();
-        assert!(!symbol.as_tagged(heap).is_null(heap));
+        assert!(!symbol.as_tagged(heap).is_null());
         assert_eq!(ffi.library_path(heap, &library), Some(path.to_string()));
         ffi.close_library(heap, &library).unwrap();
         assert_eq!(
             symbol.as_tagged(heap).check_live(heap),
             Err(FfiError::LibraryClosed)
         );
+    });
+}
+
+#[test]
+fn empty_library_path_is_rejected() {
+    let vm = test_vm();
+    let mut thread = vm.attach();
+    thread.handle_scope(|thread, scope| {
+        let ffi = &vm.runtime::<VmCore>().ffi;
+        let result = ffi.open_library(&vm, thread.heap(), &scope, Some(""));
+        assert!(matches!(result, Err(FfiError::LoadFailed(_))));
     });
 }

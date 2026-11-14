@@ -237,6 +237,17 @@ unsafe impl<T> Send for MaybeWeakGcSlot<T> {}
 unsafe impl<T> Sync for MaybeWeakGcSlot<T> {}
 
 impl<T: HeapObject> MaybeWeakGcSlot<T> {
+    /// A standalone weak cell. Root cells are scanned on every collection, so
+    /// no write barrier is taken.
+    pub fn new_weak(value: Tagged<'_, T>) -> Self {
+        let weak = Value::from_bits(value.raw().to_bits() | WEAK_PTR);
+        Self {
+            // Safety: constructing the storage word of a fresh cell.
+            cell: unsafe { RawCell::from_word(weak.to_bits()) },
+            _phantom: PhantomData,
+        }
+    }
+
     /// A standalone cell holding a strong reference: the GC treats it as
     /// reachable until the entry is weakened.
     pub fn new_strong(value: Tagged<'_, T>) -> Self {

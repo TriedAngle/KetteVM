@@ -4,8 +4,8 @@ use crate::{
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
     NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
-    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
-    VmError, WrapperKind, bail, errors::Errors, raise_runtime,
+    SiblingChange, SlotName, Smi, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value,
+    Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
 };
 use core::alloc::Layout;
 
@@ -1475,7 +1475,7 @@ impl Object {
             s.undefined.get(heap)
         } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
             s.boolean.get(heap)
-        } else if v.get_as::<DenseString>(heap).is_some() {
+        } else if StringRef::try_from(heap, v).is_some() {
             s.string.get(heap)
         } else if v.get_as::<Symbol>(heap).is_some() {
             s.symbol.get(heap)

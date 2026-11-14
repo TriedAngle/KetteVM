@@ -2,8 +2,8 @@ use crate::{
     AccessorInfo, Args, CallInfo, Change, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE, DenseString,
     FixedArray, Handle, HandleScope, Heap, HostCtx, Key, LanguageMode, NativeIndex, Object,
     PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, SlotFlags, SlotName, Smi,
-    StringOwn, Symbol, Tagged, ThreadState, Thrown, VM, Value, VmError, bail, lookup::Hit,
-    lookup::Lookup, proxy::Proxy, transition::Transition,
+    StringOwn, StringRef, Symbol, Tagged, ThreadState, Thrown, VM, Value, VmError, bail,
+    lookup::Hit, lookup::Lookup, proxy::Proxy, transition::Transition,
 };
 
 /// Store semantics:
@@ -115,7 +115,7 @@ impl Object {
                     let value = match own {
                         StringOwn::Length(len) => scope.handle(Smi::new(len as i64).into_tagged()),
                         StringOwn::Index(i) => {
-                            let s = DenseString::from_receiver(heap, holder)
+                            let s = StringRef::from_receiver(heap, holder)
                                 .expect("string own key from a string receiver");
                             let unit = s.code_unit(heap, i);
                             let unit = DenseString::from_units(heap, &scope, &[unit]);
@@ -391,7 +391,7 @@ impl Object {
             // non-configurable, for primitives and String wrappers alike
             // (ES 10.4.3.1, 10.4.3.5); every other primitive property
             // deletes as absent.
-            if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
+            if let Some(s) = StringRef::from_receiver(heap, target.as_tagged(heap))
                 && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
             {
                 return Ok(false);
@@ -459,7 +459,7 @@ impl Object {
         // Other primitives have no own properties; String primitives have
         // the virtual code-unit/length properties.
         if obj.as_tagged(heap).is_primitive(heap)
-            && DenseString::from_receiver(heap, obj.as_tagged(heap)).is_none()
+            && StringRef::from_receiver(heap, obj.as_tagged(heap)).is_none()
         {
             return Ok(None);
         }
@@ -482,7 +482,7 @@ impl Object {
             return Proxy::own_keys(vm, heap, state, scope, target);
         }
         let mut keys: Vec<Handle<'s, Value>> = Vec::new();
-        if let Some(string) = DenseString::from_receiver(heap, target.as_tagged(heap)) {
+        if let Some(string) = StringRef::from_receiver(heap, target.as_tagged(heap)) {
             let length = string.len();
             for index in 0..length {
                 keys.push(scope.handle(Smi::new(index as i64).into_tagged()));
@@ -602,7 +602,7 @@ impl Object {
                 location: Some(OwnPropertyLocation::Parent(slot)),
             }),
             Hit::StringOwn { .. } => {
-                DenseString::own_descriptor(heap, scope, receiver, key).map(|desc| OwnProperty {
+                StringRef::own_descriptor(heap, scope, receiver, key).map(|desc| OwnProperty {
                     desc,
                     location: None,
                 })
@@ -673,7 +673,7 @@ impl Object {
                 .expect("array checked above");
             return Self::array_set_length(vm, heap, state, scope, array, partial, should_throw);
         }
-        if let Some(current) = DenseString::own_descriptor(heap, scope, obj, name) {
+        if let Some(current) = StringRef::own_descriptor(heap, scope, obj, name) {
             let current = PartialDescriptor::from(&current);
             let receiver = scope
                 .cast::<Object>(heap, obj.as_tagged(heap))
@@ -1283,7 +1283,7 @@ pub fn own_property_enumerable(
     let key = key.classify_key(heap)?;
     // String virtual keys win when present; wrappers may also have
     // ordinary own properties.
-    if let Some(s) = DenseString::from_receiver(heap, receiver) {
+    if let Some(s) = StringRef::from_receiver(heap, receiver) {
         let virtual_key = match key {
             Key::Element(i) if (i as u64) < s.len() as u64 => Some(true),
             Key::Name(name) => s

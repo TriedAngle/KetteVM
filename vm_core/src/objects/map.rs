@@ -1,7 +1,7 @@
 use crate::{
     AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
     HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
-    Smi, Symbol, Tagged, Value, Visitor, WeakFixedArray,
+    Smi, StringRef, Symbol, Tagged, Value, Visitor, WeakFixedArray,
 };
 use core::alloc::Layout;
 
@@ -398,6 +398,7 @@ impl MapKind {
     /// Arguments exotic object: slots[0] is `[[ParameterMap]]`.
     pub const ARGUMENTS: MapKind = MapKind(1 << 29);
 
+    pub const UTF8: MapKind = MapKind(1 << 11);
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
 
@@ -410,6 +411,8 @@ impl MapKind {
     pub const FIXED_ARRAY: MapKind = MapKind(ObjectKind::FixedArray as u64);
     pub const FIXED_BYTE_ARRAY: MapKind = MapKind(ObjectKind::FixedByteArray as u64);
     pub const DENSE_STRING: MapKind = MapKind(ObjectKind::DenseString as u64);
+    pub const UTF8_STRING: MapKind = MapKind(ObjectKind::Utf8String as u64);
+    pub const EXTERNAL_STRING: MapKind = MapKind(ObjectKind::ExternalString as u64);
     pub const ACCESSOR_PAIR: MapKind = MapKind(ObjectKind::AccessorPair as u64);
     pub const ACCESSOR_INFO: MapKind = MapKind(ObjectKind::AccessorInfo as u64);
     pub const CALLABLE_INFO: MapKind = MapKind(ObjectKind::CallableInfo as u64);
@@ -462,6 +465,8 @@ impl MapKind {
             Self::FIXED_ARRAY => ObjectKind::FixedArray,
             Self::FIXED_BYTE_ARRAY => ObjectKind::FixedByteArray,
             Self::DENSE_STRING => ObjectKind::DenseString,
+            Self::UTF8_STRING => ObjectKind::Utf8String,
+            Self::EXTERNAL_STRING => ObjectKind::ExternalString,
             Self::ACCESSOR_PAIR => ObjectKind::AccessorPair,
             Self::ACCESSOR_INFO => ObjectKind::AccessorInfo,
             Self::CALLABLE_INFO => ObjectKind::CallableInfo,
@@ -700,13 +705,13 @@ impl<'a> Tagged<'a, Value> {
             }
             return None;
         }
-        if let Some(s) = self.get_as::<DenseString>(heap) {
-            if let Some(i) = s.data(heap).canonical_index()
+        if let Some(s) = StringRef::try_from(heap, self) {
+            if let Some(i) = s.canonical_index(heap)
                 && i < u32::MAX as usize
             {
                 return Some(Key::Element(i));
             }
-            return Some(Key::Name(s.into()));
+            return s.flat().map(|flat| Key::Name(flat.into()));
         }
         if let Some(s) = self.get_as::<Symbol>(heap) {
             return Some(Key::Name(s.into()));
