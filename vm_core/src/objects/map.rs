@@ -441,7 +441,7 @@ impl MapKind {
     pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
     pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
     pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
-    pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64 as u64);
+    pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -497,7 +497,7 @@ impl MapKind {
             Self::C_VALUE => ObjectKind::CValue,
             Self::C_TYPE => ObjectKind::TypeInfo,
             Self::THREAD_OBJECT => ObjectKind::ThreadObject,
-            Self::ATOMIC_I64 => ObjectKind::AtomicI64,
+            Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
             _ => panic!("invalid object kind"),
         }
     }
@@ -524,11 +524,8 @@ impl MapKind {
             || k == ObjectKind::ByteArray as u64
             || k == ObjectKind::String as u64
             || k == ObjectKind::Oddball as u64
-            || k == ObjectKind::CPointer as u64
-            || k == ObjectKind::ForeignLibrary as u64
-            || k == ObjectKind::CFunction as u64
             || k == ObjectKind::CValue as u64
-            || k == ObjectKind::TypeInfo as u64
+            || k == ObjectKind::ThreadObject as u64
     }
 
     /// Whether this map is a Proxy.

@@ -526,6 +526,13 @@ unsafe impl<T> Send for AtomicOptionGcSlot<T> {}
 unsafe impl<T> Sync for AtomicOptionGcSlot<T> {}
 
 impl<T> AtomicOptionGcSlot<T> {
+    /// An empty root slot. `load` reports `None` until the first `store`.
+    pub fn uninit() -> Self {
+        // Safety: a Smi placeholder is a valid visited word; `load` rejects
+        // it before it can be interpreted as a typed pointer.
+        unsafe { Self::from_value(Smi::new(0).encode()) }
+    }
+
     /// Build a root cell initialised to `hole` or a strong word.
     ///
     /// # Safety

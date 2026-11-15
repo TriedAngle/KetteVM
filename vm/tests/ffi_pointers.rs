@@ -198,11 +198,7 @@ fn address_is_visited_as_a_gc_edge() {
         // Safety: `object` is a live heap object of this VM.
         unsafe { visit_object(object, &mut visited) };
 
-        assert_eq!(
-            visited.0.len(),
-            6,
-            "map, slots, elements, type, address, library"
-        );
+        assert_eq!(visited.0.len(), 4, "map, pointee, address, library");
         assert!(visited.0.contains(&address_cell));
     });
 }

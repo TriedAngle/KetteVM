@@ -4,6 +4,10 @@
 
 let counter = AtomicI64.new(0)
 
+Test.assert(Thread.name(), "main")
+Test.assert(Thread.isAlive(), true)
+Test.assert(Thread.current(), Thread)
+
 let worker = { ||
     let i = 0
     while i < 1000 {
@@ -12,7 +16,9 @@ let worker = { ||
     }
 }
 
-let t = Thread(worker, "worker")
+let t = Thread.new(worker, "worker")
+t.note = 42
+Test.assert(t.note, 42)
 Test.assert(t.name(), "worker")
 Test.assert(t.isAlive(), false)
 

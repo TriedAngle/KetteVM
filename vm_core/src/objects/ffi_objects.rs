@@ -17,12 +17,7 @@ pub struct CFunctionInit<'a> {
 #[repr(C)]
 pub struct CFunction {
     pub header: Header,
-    pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<Value>,
-    pub length: GcSlot<Smi>,
-
     pub info: GcSlot<CallableInfoObject>,
-    /// The function type this pointer was declared with.
     pub signature: GcSlot<TypeInfo>,
     pub target: GcSlot<CPointer>,
     pub library: OptionGcSlot<ForeignLibrary>,
@@ -56,10 +51,6 @@ impl HeapObject for CFunction {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.header.map.init(heap.known().c_function_map.get(heap));
-        let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init(empty);
-        self.elements.init(empty.erase());
-        self.length.init_tagged(Smi::new(0).into());
         self.info.init_tagged(config.info.as_tagged(heap));
         self.signature.init_tagged(config.signature.as_tagged(heap));
         self.target.init_tagged(config.target.as_tagged(heap));
@@ -83,8 +74,6 @@ impl HeapObject for CFunction {
 impl EdgeVisitable for CFunction {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.slots.as_raw());
-        visitor.visit(self.elements.as_raw());
         visitor.visit(self.info.as_raw());
         visitor.visit(self.signature.as_raw());
         visitor.visit(self.target.as_raw());
@@ -119,24 +108,18 @@ impl CPointerFlags {
 pub struct CPointerInit<'a> {
     /// The type this pointer points at.
     pub pointee: Handle<'a, TypeInfo>,
-    /// An absolute address.
     pub address: *mut u8,
     pub flags: CPointerFlags,
-    /// Owning library, or `None`.
     pub library: Option<Tagged<'a, ForeignLibrary>>,
 }
 
 #[repr(C)]
 pub struct CPointer {
     pub header: Header,
-    pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<Value>,
-    pub length: GcSlot<Smi>,
-
     pub pointee: GcSlot<TypeInfo>,
     pub address: GcSlot<Smi>,
+    // TODO: this can be put into the header probably
     pub flags: GcSlot<Smi>,
-    /// Strong reference to the owning library.
     pub library: OptionGcSlot<ForeignLibrary>,
 }
 
@@ -201,10 +184,6 @@ impl HeapObject for CPointer {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.header.map.init(heap.known().c_pointer_map.get(heap));
-        let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init(empty);
-        self.elements.init(empty.erase());
-        self.length.init_tagged(Smi::new(0).into());
         self.pointee.init_tagged(config.pointee.as_tagged(heap));
         self.flags
             .init_tagged(Smi::new(config.flags.bits() as i64).into());
@@ -228,8 +207,6 @@ impl HeapObject for CPointer {
 impl EdgeVisitable for CPointer {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.slots.as_raw());
-        visitor.visit(self.elements.as_raw());
         visitor.visit(self.pointee.as_raw());
         visitor.visit(self.address.as_raw());
         visitor.visit(self.library.as_raw());
@@ -279,7 +256,6 @@ impl CValue {
         self.offset.to_smi_unchecked().value() as usize
     }
 
-    /// The effective address, rejecting unusable external storage.
     pub fn base(&self, heap: &Heap) -> FfiResult<*mut u8> {
         let backing = self.backing(heap);
         if let Some(pointer) = backing.get_as::<CPointer>(heap) {
@@ -343,10 +319,6 @@ pub struct ForeignLibraryInit<'a> {
 #[repr(C)]
 pub struct ForeignLibrary {
     pub header: Header,
-    pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<Value>,
-    pub length: GcSlot<Smi>,
-
     pub handle: GcSlot<CPointer>,
     pub path: GcSlot<DenseString>,
 }
@@ -377,10 +349,6 @@ impl HeapObject for ForeignLibrary {
         self.header
             .map
             .init(heap.known().foreign_library_map.get(heap));
-        let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init(empty);
-        self.elements.init(empty.erase());
-        self.length.init_tagged(Smi::new(0).into());
         self.handle.init_tagged(config.handle.as_tagged(heap));
         self.path.init_tagged(config.path.as_tagged(heap));
     }
@@ -397,8 +365,6 @@ impl HeapObject for ForeignLibrary {
 impl EdgeVisitable for ForeignLibrary {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.slots.as_raw());
-        visitor.visit(self.elements.as_raw());
         visitor.visit(self.handle.as_raw());
         visitor.visit(self.path.as_raw());
     }
@@ -427,10 +393,6 @@ pub struct TypeInfoInit<'a> {
 #[repr(C)]
 pub struct TypeInfo {
     pub header: Header,
-    pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<Value>,
-    pub length: GcSlot<Smi>,
-
     pub kind: GcSlot<Smi>,
     pub id: GcSlot<Smi>,
     pub size: GcSlot<Smi>,
@@ -591,10 +553,6 @@ impl HeapObject for TypeInfo {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.header.map.init(heap.known().c_type_map.get(heap));
-        let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init(empty);
-        self.elements.init(empty.erase());
-        self.length.init_tagged(Smi::new(0).into());
 
         let host = self.tagged(heap);
         self.kind.init_tagged(Smi::new(config.kind as i64).into());
@@ -644,8 +602,6 @@ impl HeapObject for TypeInfo {
 impl EdgeVisitable for TypeInfo {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.slots.as_raw());
-        visitor.visit(self.elements.as_raw());
         visitor.visit(self.name.as_raw());
         visitor.visit(self.pointee.as_raw());
         visitor.visit(self.element.as_raw());

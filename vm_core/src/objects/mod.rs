@@ -23,7 +23,7 @@ pub mod symbol;
 pub mod thread;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
-pub use atomic::{AtomicI64, AtomicI64Init};
+pub use atomic::{AtomicI64Object, AtomicI64ObjectInit};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
@@ -185,7 +185,7 @@ pub enum ObjectKind {
     /// A guest `Thread` object; host execution state lives in `VmCore`.
     ThreadObject = 35,
     /// A shared cell with an atomically accessed `Value` payload.
-    AtomicI64 = 36,
+    AtomicI64Object = 36,
 }
 
 impl ObjectKind {
@@ -201,11 +201,7 @@ impl ObjectKind {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Proxy
-                | ObjectKind::CPointer
-                | ObjectKind::ForeignLibrary
-                | ObjectKind::CFunction
                 | ObjectKind::CValue
-                | ObjectKind::TypeInfo
                 | ObjectKind::ThreadObject
         )
     }
@@ -257,7 +253,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
             ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
-            ObjectKind::AtomicI64 => (*addr.cast::<AtomicI64>().as_ptr()).layout(),
+            ObjectKind::AtomicI64Object => (*addr.cast::<AtomicI64Object>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -331,7 +327,9 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::ThreadObject => {
                 (*addr.cast::<ThreadObject>().as_ptr()).visit_edges(visitor)
             }
-            ObjectKind::AtomicI64 => (*addr.cast::<AtomicI64>().as_ptr()).visit_edges(visitor),
+            ObjectKind::AtomicI64Object => {
+                (*addr.cast::<AtomicI64Object>().as_ptr()).visit_edges(visitor)
+            }
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray

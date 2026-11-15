@@ -80,12 +80,12 @@ pub use native::{
     CallInfo, HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, AtomicI64, AtomicI64Init,
-    CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue, CValueInit,
-    CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit,
-    ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE,
-    DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding,
-    ExternalString, ExternalStringInit, FeedbackVector, FeedbackVectorInit, FixedArray,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, AtomicI64Object,
+    AtomicI64ObjectInit, CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue,
+    CValueInit, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit,
+    ContextInit, ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA,
+    DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind,
+    Encoding, ExternalString, ExternalStringInit, FeedbackVector, FeedbackVectorInit, FixedArray,
     FixedByteArray, Float, ForeignLibrary, ForeignLibraryInit, FunctionKind, GlobalLexicalBinding,
     HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
     INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,

@@ -23,8 +23,8 @@ rounds = 200000
 atomic_counter.store(0)
 racy_counter.store(0)
 
-let a = Thread(worker, "a")
-let b = Thread(worker, "b")
+let a = Thread.new(worker, "a")
+let b = Thread.new(worker, "b")
 
 a.start()
 b.start()

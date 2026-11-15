@@ -1,6 +1,6 @@
 use crate::{
-    Args, AtomicI64, AtomicI64Init, AtomicOptionGcSlot, CallInfo, Convert, DenseString, Float,
-    Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
+    Args, AtomicI64Object, AtomicI64ObjectInit, AtomicOptionGcSlot, CallInfo, Convert, DenseString,
+    Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
     PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, Termination, Thread, ThreadObject,
     ThreadObjectInit, ThreadState, VM, Value, Visitor, VmError, extend_lifetime,
     objects::thread::{NEW, RUNNABLE, TERMINATED},
@@ -16,7 +16,7 @@ use std::{
 
 /// Install the `Thread` and `Atomic` globals.
 pub fn install(vm: &mut VM) -> Result<(), SetupError> {
-    let thread_constructor_index = vm.register_native(thread_constructor);
+    let thread_new_index = vm.register_native(thread_new);
     let thread_start_index = vm.register_native(thread_start);
     let thread_join_index = vm.register_native(thread_join);
     let thread_is_alive_index = vm.register_native(thread_is_alive);
@@ -147,32 +147,41 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             );
         }
 
-        let thread_function =
-            Object::native_function(thread.heap(), &scope, thread_constructor_index, 1);
+        let main_name = thread.intern(&scope, "main");
+        let main = {
+            let heap = thread.heap();
+            let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
+            heap.allocate_handle::<ThreadObject>(
+                ThreadObjectInit {
+                    target: hole,
+                    name: main_name.erase(),
+                    state: RUNNABLE,
+                    slot: -1,
+                },
+                &scope,
+            )
+        };
+        let main_object = {
+            let heap = thread.heap();
+            scope
+                .cast::<Object>(heap, main.as_tagged(heap).erase())
+                .expect("main thread object")
+        };
+        Object::install_method(thread, &scope, main_object, "new", thread_new_index, 1);
         Object::install_method(
             thread,
             &scope,
-            thread_function,
+            main_object,
             "current",
             thread_current_index,
             0,
         );
-        Object::install_method(
-            thread,
-            &scope,
-            thread_function,
-            "sleep",
-            thread_sleep_index,
-            1,
-        );
-        Object::install_method(
-            thread,
-            &scope,
-            thread_function,
-            "yield",
-            thread_yield_index,
-            0,
-        );
+        Object::install_method(thread, &scope, main_object, "sleep", thread_sleep_index, 1);
+        Object::install_method(thread, &scope, main_object, "yield", thread_yield_index, 0);
+        {
+            let heap = thread.heap();
+            vm.threads().set_main(main.as_tagged(heap));
+        }
         let atomic_namespace = make_prototype(thread);
         Object::install_method(
             thread,
@@ -186,7 +195,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             let heap = thread.heap();
             heap.known().global_object.get_handle(heap, &scope)
         };
-        let thread_value = thread_function.erase();
+        let thread_value = main_object.erase();
         let atomic_value = atomic_namespace.erase();
         for (name, value) in [("Thread", thread_value), ("AtomicI64", atomic_value)] {
             let name = thread.intern(&scope, name);
@@ -225,10 +234,20 @@ impl ThreadSlot {
     }
 }
 
-#[derive(Default)]
 pub struct ThreadRegistry {
     threads: Mutex<Vec<Arc<ThreadSlot>>>,
     next_name: AtomicUsize,
+    main: AtomicOptionGcSlot<ThreadObject>,
+}
+
+impl Default for ThreadRegistry {
+    fn default() -> Self {
+        Self {
+            threads: Mutex::new(Vec::new()),
+            next_name: AtomicUsize::new(0),
+            main: AtomicOptionGcSlot::uninit(),
+        }
+    }
 }
 
 impl ThreadRegistry {
@@ -247,7 +266,16 @@ impl ThreadRegistry {
         self.next_name.fetch_add(1, Ordering::Relaxed)
     }
 
+    fn set_main(&self, main: Tagged<'_, ThreadObject>) {
+        self.main.store(main);
+    }
+
+    fn main<'a>(&self, heap: &'a Heap) -> Tagged<'a, ThreadObject> {
+        self.main.load(heap).expect("main thread not installed")
+    }
+
     pub fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        visitor.visit(self.main.as_raw());
         for slot in self.threads.lock().unwrap().iter() {
             visitor.visit(slot.object.as_raw());
             visitor.visit(slot.target.as_raw());
@@ -257,7 +285,7 @@ impl ThreadRegistry {
 }
 
 // Creates a not-yet-started thread for `target`.
-fn thread_constructor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+fn thread_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -463,21 +491,9 @@ fn thread_current<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tag
     if let Some(object) = state.thread_object(heap) {
         return extend_lifetime!(heap, object.erase());
     }
-    state.handle_scope(|scope| {
-        let name = vm.interner().intern_str(heap, &scope, "main");
-        let hole = scope.handle(vm.known().the_hole.get(heap).erase());
-        let object = heap.allocate_handle::<ThreadObject>(
-            ThreadObjectInit {
-                target: hole,
-                name: name.erase(),
-                state: RUNNABLE,
-                slot: -1,
-            },
-            &scope,
-        );
-        state.set_thread_object(object.as_tagged(heap));
-        object.as_tagged(heap).erase()
-    })
+    let main = vm.threads().main(heap);
+    state.set_thread_object(main);
+    extend_lifetime!(heap, main.erase())
 }
 
 fn thread_sleep<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
@@ -545,7 +561,7 @@ fn atomic_i64_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagg
         let Some(value) = number_to_i64(args.get(heap, 0), heap) else {
             raise!(ctx.vm, heap, state, VmError::AtomicNonInteger);
         };
-        let cell = heap.allocate_handle::<AtomicI64>(AtomicI64Init { value }, &scope);
+        let cell = heap.allocate_handle::<AtomicI64Object>(AtomicI64ObjectInit { value }, &scope);
         cell.as_tagged(heap).erase()
     })
 }
@@ -554,7 +570,11 @@ fn atomic_i64_load<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tag
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(cell) = call.receiver.as_tagged(heap).get_as::<AtomicI64>(heap) else {
+    let Some(cell) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicI64Object>(heap)
+    else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let value = cell.as_ref().value();
@@ -565,16 +585,18 @@ fn atomic_i64_store<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tag
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(cell) = call.receiver.as_tagged(heap).get_as::<AtomicI64>(heap) else {
+    let Some(cell) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicI64Object>(heap)
+    else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let value = args.get_handle(heap, 0);
     let Some(value) = number_to_i64(value.as_tagged(heap), heap) else {
         raise!(vm, heap, state, VmError::AtomicNonInteger);
     };
-    cell.as_ref()
-        .value
-        .store(value as u64, core::sync::atomic::Ordering::SeqCst);
+    cell.as_ref().value.store(value, Ordering::SeqCst);
     state.handle_scope(|scope| i64_to_value(heap, &scope, value).as_tagged(heap).erase())
 }
 
@@ -582,16 +604,17 @@ fn atomic_i64_swap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagg
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(cell) = call.receiver.as_tagged(heap).get_as::<AtomicI64>(heap) else {
+    let Some(cell) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicI64Object>(heap)
+    else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let Some(value) = number_to_i64(args.get(heap, 0), heap) else {
         raise!(vm, heap, state, VmError::AtomicNonInteger);
     };
-    let old = cell
-        .as_ref()
-        .value
-        .swap(value as u64, core::sync::atomic::Ordering::SeqCst) as i64;
+    let old = cell.as_ref().value.swap(value, Ordering::SeqCst);
     state.handle_scope(|scope| i64_to_value(heap, &scope, old).as_tagged(heap).erase())
 }
 
@@ -603,7 +626,11 @@ fn atomic_i64_compare_exchange<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(cell) = call.receiver.as_tagged(heap).get_as::<AtomicI64>(heap) else {
+    let Some(cell) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicI64Object>(heap)
+    else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let Some(expected) = number_to_i64(args.get(heap, 0), heap) else {
@@ -613,12 +640,12 @@ fn atomic_i64_compare_exchange<'a>(
         raise!(vm, heap, state, VmError::AtomicNonInteger);
     };
     let observed = match cell.as_ref().value.compare_exchange(
-        expected as u64,
-        new as u64,
-        core::sync::atomic::Ordering::SeqCst,
-        core::sync::atomic::Ordering::SeqCst,
+        expected,
+        new,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
     ) {
-        Ok(old) | Err(old) => old as i64,
+        Ok(old) | Err(old) => old,
     };
     state.handle_scope(|scope| i64_to_value(heap, &scope, observed).as_tagged(heap).erase())
 }
@@ -627,16 +654,17 @@ fn atomic_i64_add<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let Some(cell) = call.receiver.as_tagged(heap).get_as::<AtomicI64>(heap) else {
+    let Some(cell) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicI64Object>(heap)
+    else {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     let Some(delta) = number_to_i64(args.get(heap, 0), heap) else {
         raise!(vm, heap, state, VmError::AtomicNonInteger);
     };
-    let old = cell
-        .as_ref()
-        .value
-        .fetch_add(delta as u64, core::sync::atomic::Ordering::SeqCst) as i64;
+    let old = cell.as_ref().value.fetch_add(delta, Ordering::SeqCst);
     let new = old.wrapping_add(delta);
     state.handle_scope(|scope| i64_to_value(heap, &scope, new).as_tagged(heap).erase())
 }

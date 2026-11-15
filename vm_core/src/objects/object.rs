@@ -1028,11 +1028,8 @@ impl HeapObject for Object {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Oddball
-                | ObjectKind::CPointer
-                | ObjectKind::ForeignLibrary
-                | ObjectKind::CFunction
                 | ObjectKind::CValue
-                | ObjectKind::TypeInfo
+                | ObjectKind::ThreadObject
         )
     }
     type Init<'a> = ObjectInit<'a>;
