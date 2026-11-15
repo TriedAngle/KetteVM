@@ -182,22 +182,26 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             let heap = thread.heap();
             vm.threads().set_main(main.as_tagged(heap));
         }
+        let atomic_i64 = make_prototype(thread);
+        Object::install_method(thread, &scope, atomic_i64, "new", atomic_i64_new_index, 1);
         let atomic_namespace = make_prototype(thread);
-        Object::install_method(
-            thread,
+        let atomic_i64_name = thread.intern(&scope, "AtomicI64");
+        let atomic_i64_name = scope.handle(atomic_i64_name.as_tagged(thread.heap()));
+        Object::define_own_property_ordinary(
+            thread.heap(),
             &scope,
             atomic_namespace,
-            "new",
-            atomic_i64_new_index,
-            1,
-        );
+            atomic_i64_name,
+            PropertyDescriptor::data(atomic_i64.erase()),
+        )
+        .expect("install atomic.AtomicI64");
         let global = {
             let heap = thread.heap();
             heap.known().global_object.get_handle(heap, &scope)
         };
         let thread_value = main_object.erase();
         let atomic_value = atomic_namespace.erase();
-        for (name, value) in [("Thread", thread_value), ("AtomicI64", atomic_value)] {
+        for (name, value) in [("Thread", thread_value), ("atomic", atomic_value)] {
             let name = thread.intern(&scope, name);
             let name = scope.handle(name.as_tagged(thread.heap()));
             Object::define_own_property_ordinary(

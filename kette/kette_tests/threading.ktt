@@ -2,13 +2,14 @@
 // Run: cargo run -q -p vm -- kette/kette_tests/threading.ktt
 // Check: kette/kette_tests/check.py
 
+let AtomicI64 = atomic.AtomicI64
 let counter = AtomicI64.new(0)
 
 Test.assert(Thread.name(), "main")
 Test.assert(Thread.isAlive(), true)
 Test.assert(Thread.current(), Thread)
 
-let worker = { ||
+let worker = {
     let i = 0
     while i < 1000 {
         counter.add(1)

@@ -1,12 +1,13 @@
-// Two threads increment the same counters: one atomically, one with two
-// separate loads/stores (a lost-update race).
+// parallelism and atomic example
 // Run: cargo run -q -p vm -- kette/examples/threads.ktt
+
+let AtomicI64 = atomic.AtomicI64
 
 let rounds = 1
 let atomic_counter = AtomicI64.new(0)
 let racy_counter = AtomicI64.new(0)
 
-let worker = { ||
+let worker = {
     let i = 0
     while i < rounds {
         atomic_counter.add(1)
@@ -15,13 +16,7 @@ let worker = { ||
     }
 }
 
-// Warm the inline caches while still single-threaded. Concurrent cold
-// caches are not safe yet (TODO: ASAP in FeedbackVector), and this keeps
-// the demo about the counter race rather than the IC race.
-worker()
 rounds = 200000
-atomic_counter.store(0)
-racy_counter.store(0)
 
 let a = Thread.new(worker, "a")
 let b = Thread.new(worker, "b")
@@ -31,7 +26,7 @@ b.start()
 a.join()
 b.join()
 
-print("atomic")                  // exactly 2 * rounds
+print("atomic")
 print(atomic_counter.load())
-print("racy")                    // lower: both threads overwrite each other
+print("racy")
 print(racy_counter.load())
