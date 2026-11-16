@@ -208,27 +208,37 @@ def run_test(file, path, check=False):
         return sh(*m, "--lib", "--", path, "--exact", check=check)
     return sh(*m, "--test", r[1][1], "--", path, "--exact", check=check)
 
-def run_target(file, check=False):
+def run_target(file, mine=None, check=False):
     """Run the file's WHOLE test target unfiltered and return the set
     of FAILED test names (libtest prints 'test NAME ... FAILED').
 
     One run per target replaces per-test --exact invocations, and the
     failed set is what makes the old-tests-stay-green rule possible:
-    the fault must be caught ONLY by the PR's own tests."""
+    the fault must be caught ONLY by the PR's own tests.
+
+    An ABORTED binary (SIGABRT/SIGSEGV - the natural failure mode of
+    FFI faults) prints no FAILED line for the crashing test, so a
+    nonzero exit with no parsable result line triggers a per-test
+    rerun (with --exact) over `mine` to attribute the crash."""
     r = runner_of(file)
     if r is None or r[0] == "regression":
         return None
     m = ["cargo", "test", "--locked", "--manifest-path", r[1][0] + "/Cargo.toml"]
-    if r[0] == "unit":
-        r = sh(*m, "--lib", check=check)
-    else:
-        r = sh(*m, "--test", r[1][1], check=check)
+    args = m + (["--lib"] if r[0] == "unit" else ["--test", r[1][1]])
+    run = sh(*args, check=check)
     failed = set()
     ansi = re.compile(r"\x1b\[[0-9;]*m")
-    for line in (r.stdout or "").splitlines():
+    for line in (run.stdout or "").splitlines():
         line = ansi.sub("", line).strip()
         if line.startswith("test ") and line.endswith("FAILED"):
             failed.add(line[len("test "):-len(" ... FAILED")].strip())
+    aborted = run.returncode != 0 and "test result:" not in (run.stdout or "")
+    if aborted and mine:
+        print("    (target aborted - attributing by per-test rerun)")
+        for path in sorted(mine):
+            one = run_test(file, path, check=check)
+            if one is not None and one.returncode != 0:
+                failed.add(path)
     return failed
 
 files = sorted({f for f, _ in need})
@@ -253,8 +263,8 @@ for f in sorted({f for (f, _p) in need}):
             if ff == f:
                 print(f"  self-control {f} :: {p}: last-touch commit does not build — no proof")
         continue
-    failed = run_target(f, check=False)
     mine = {p for (ff, p) in need if ff == f}
+    failed = run_target(f, mine=mine, check=False)
     for name in sorted(failed - mine):
         print(f"REJECT: self-control {f}: existing test {name} already fails in the RED commit — "
               "the fault was covered before this PR; inject one the old tests miss")
@@ -289,8 +299,8 @@ for ref, sha in sorted(fetched.items()):
         broken.append(ref)
         continue
     for f in sorted({f for (f, _p) in need_b}):
-        failed = run_target(f, check=False)
         mine = {p for (ff, p) in need_b if ff == f}
+        failed = run_target(f, mine=mine, check=False)
         for name in sorted(failed - mine):
             already.append((ref, f, name))
         for (ff, p) in sorted(need_b):
