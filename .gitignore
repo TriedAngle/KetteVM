@@ -12,3 +12,5 @@ benchmarks/BENCHMARKS.md
 .DS_Store
 no/
 off/__pycache__/
+ci/github/__pycache__/
+*.pyc

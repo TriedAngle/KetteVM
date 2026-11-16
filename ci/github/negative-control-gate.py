@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """The negative-control gate's runner (invoked by the workflow).
 
+KetteVM's local copy of the servyi/lints reusable gate (same rules,
+plus the tests/regression whole-file mapping below).
+
 A FILE (not a heredoc): running a script puts its own directory first
 on sys.path, so `import region_diff` resolves regardless of cwd or
-GITHUB_WORKSPACE quirks. Env: BRANCHES COSMETIC BASE_SHA HEAD_SHA.
+GITHUB_WORKSPACE quirks. Env: BRANCHES COSMETIC BASE_SHA HEAD_SHA
+SPANS_BIN (optional).
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -25,7 +30,10 @@ def spans_for(file, text):
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
         f.write(text); tmp = f.name
-    out = sh("cargo", "run", "-q", "-p", "test-spans", "--", tmp, check=False)
+    if os.environ.get("SPANS_BIN"):
+        out = sh(os.environ["SPANS_BIN"], tmp, check=False)
+    else:
+        out = sh("cargo", "run", "-q", "-p", "test-spans", "--", tmp, check=False)
     os.unlink(tmp)
     if out.returncode != 0:
         return None  # unparseable: treat as no spans (whole file rules)
@@ -118,47 +126,99 @@ else:
 
 # ── The RUNNER: how a test file/target executes. ──
 def runner_of(file):
+    # KetteVM regression scripts: whole-file checks run through the
+    # vm example; exit-code semantics, no per-test attribution.
     if file.startswith("tests/regression/") and file.endswith(".js"):
         return ("regression", file)
     parts = file.split("/tests/")
     if len(parts) == 2 and parts[0] and parts[1].endswith(".rs"):
-        return ("cargo", (parts[0].split("/")[-1], parts[1][:-3]))
+        return ("cargo", (manifest_dir(file), parts[1][:-3]))
     # Inline #[cfg(test)] tests inside a crate's own sources run via
     # the lib target; the span path is already module-qualified
     # (e.g. "tests::inline_add_works") and fits --exact directly.
     parts = file.split("/src/")
     if len(parts) == 2 and parts[0] and parts[1] in ("lib.rs", "main.rs"):
-        return ("unit", (parts[0].split("/")[-1],))
+        return ("unit", (manifest_dir(file),))
     return None
 
-def run_file(file, check=False):
+def manifest_dir(file, sha="HEAD"):
+    """Directory of the Cargo.toml that OWNS the file (nearest one up
+    the tree, resolved in git so branch checkouts are honored).  Cargo
+    is driven by --manifest-path from there: package-name guessing
+    breaks when the directory is not a workspace member (a standalone
+    tools/ crate) or the dir name differs from the package name."""
+    parts = file.split("/")
+    for i in range(len(parts) - 1, 0, -1):
+        cand = "/".join(parts[:i] + ["Cargo.toml"])
+        if sh("git", "cat-file", "-e", f"{sha}:{cand}", check=False).returncode == 0:
+            return "/".join(parts[:i])
+    return None
+
+def build_cmd(file):
+    """The COMPILE-ONLY command for the targets a file's tests run in.
+
+    Per-target on purpose: a whole-workspace --all-targets build is
+    neither needed nor universally possible (e.g. rustc-driver-linked
+    lint crates do not compile as lib-test targets) - the gate only
+    owes proof that THESE tests can build and run.
+    """
     r = runner_of(file)
     if r is None:
         return None
     if r[0] == "regression":
-        return sh("cargo", "run", "--locked", "-p", "vm", "--example", "regression", "--", r[1], check=check)
-    pkg, stem = r[1]
-    return sh("cargo", "test", "--locked", "-p", pkg, "--test", stem, check=check)
+        return ["cargo", "build", "--locked", "-p", "vm", "--example", "regression"]
+    m = ["cargo", "test", "--locked", "--manifest-path", r[1][0] + "/Cargo.toml"]
+    if r[0] == "unit":
+        return m + ["--lib", "--no-run"]
+    return m + ["--test", r[1][1], "--no-run"]
+
+def builds(file):
+    """Does this file's test target COMPILE?  False + stderr tail on
+    failure (a broken build proves nothing, and the reason matters)."""
+    cmd = build_cmd(file)
+    if cmd is None:
+        return True  # nothing to compile for this mapping
+    r = sh(*cmd, check=False)
+    if r.returncode != 0:
+        tail = "\n".join((r.stderr or r.stdout or "").strip().splitlines()[-12:])
+        print("    build failed ({}):\n{}".format(" ".join(cmd[2:]), tail))
+    return r.returncode == 0
 
 def run_test(file, path, check=False):
+    """Exit-code run (whole-file checks, or filtered single tests)."""
     r = runner_of(file)
     if r is None:
         return None
     if r[0] == "regression":
-        return run_file(file, check=check)
+        return sh("cargo", "run", "--locked", "-p", "vm", "--example",
+                  "regression", "--", r[1], check=check)
+    m = ["cargo", "test", "--locked", "--manifest-path", r[1][0] + "/Cargo.toml"]
     if r[0] == "unit":
-        (pkg,) = r[1]
-        return sh("cargo", "test", "--locked", "-p", pkg, "--lib", "--",
-                  path, "--exact", check=check)
-    pkg, stem = r[1]
-    # The filter and --exact must be SEPARATE argv elements — a single
-    # "path --exact" string matches no test and passes vacuously (the
-    # C7/C10/C15 matrix rounds failed exactly there).
-    return sh("cargo", "test", "--locked", "-p", pkg, "--test", stem, "--",
-              path, "--exact", check=check)
+        return sh(*m, "--lib", "--", path, "--exact", check=check)
+    return sh(*m, "--test", r[1][1], "--", path, "--exact", check=check)
 
-def build(check=False):
-    return sh("cargo", "build", "--locked", "--workspace", "--all-targets", check=check)
+def run_target(file, check=False):
+    """Run the file's WHOLE test target unfiltered and return the set
+    of FAILED test names (libtest prints 'test NAME ... FAILED').
+
+    One run per target replaces per-test --exact invocations, and the
+    failed set is what makes the old-tests-stay-green rule possible:
+    the fault must be caught ONLY by the PR's own tests."""
+    r = runner_of(file)
+    if r is None or r[0] == "regression":
+        return None
+    m = ["cargo", "test", "--locked", "--manifest-path", r[1][0] + "/Cargo.toml"]
+    if r[0] == "unit":
+        r = sh(*m, "--lib", check=check)
+    else:
+        r = sh(*m, "--test", r[1][1], check=check)
+    failed = set()
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    for line in (r.stdout or "").splitlines():
+        line = ansi.sub("", line).strip()
+        if line.startswith("test ") and line.endswith("FAILED"):
+            failed.add(line[len("test "):-len(" ... FAILED")].strip())
+    return failed
 
 files = sorted({f for f, _ in need})
 runnables = [(f, runner_of(f)) for f in files]
@@ -168,19 +228,28 @@ if not runnables:
     sys.exit(0)
 
 # ── Self-control: the LAST commit touching the FILE, the  ──
-# ── specific test must FAIL there.                        ──
+# ── specific test must FAIL there — and NOTHING ELSE may. ──
 self_caught = set()
-for (f, p), kind in sorted(need.items()):
+for f in sorted({f for (f, _p) in need}):
     out = sh("git", "rev-list", base + ".." + head, "--", f).stdout
     shas = out.split()
     if not shas:
         continue
     sha = shas[0]
     sh("git", "checkout", "-q", "--detach", sha)
-    if build(check=False).returncode != 0:
-        print(f"  self-control {f} :: {p}: last-touch commit does not build — no proof")
+    if not builds(f):
+        for (ff, p) in sorted(need):
+            if ff == f:
+                print(f"  self-control {f} :: {p}: last-touch commit does not build — no proof")
         continue
-    if run_test(f, p, check=False).returncode != 0:
+    failed = run_target(f, check=False)
+    mine = {p for (ff, p) in need if ff == f}
+    for name in sorted(failed - mine):
+        print(f"REJECT: self-control {f}: existing test {name} already fails in the RED commit — "
+              "the fault was covered before this PR; inject one the old tests miss")
+    if failed - mine:
+        sys.exit(1)
+    for p in sorted(mine & failed):
         print(f"  self-control {f} :: {p}: FAILS in its own last-touch commit")
         self_caught.add((f, p))
 sh("git", "checkout", "-q", head)
@@ -200,20 +269,31 @@ if not branches:
 # every broken one reported, so one CI round lists everything.
 results = {k: False for k in need_b}
 broken = []
+already = []  # (branch, file, old test name) — faults pre-covered
 for ref, sha in sorted(fetched.items()):
     sh("git", "checkout", "-q", "--detach", sha)
-    print(f"=== {ref}: building")
-    if build(check=False).returncode != 0:
+    ok = all(builds(f) for (f, _) in sorted(need_b))
+    print(f"=== {ref}: {'building' if ok else 'BROKEN'}")
+    if not ok:
         broken.append(ref)
         continue
-    for (f, p) in sorted(need_b):
-        failed = run_test(f, p, check=False).returncode != 0
-        print(f"  {f} :: {p}: {'FAIL (caught)' if failed else 'pass'}")
-        if failed:
-            results[(f, p)] = True
+    for f in sorted({f for (f, _p) in need_b}):
+        failed = run_target(f, check=False)
+        mine = {p for (ff, p) in need_b if ff == f}
+        for name in sorted(failed - mine):
+            already.append((ref, f, name))
+        for (ff, p) in sorted(need_b):
+            if ff == f:
+                caught = p in failed
+                print(f"  {f} :: {p}: {'FAIL (caught)' if caught else 'pass'}")
+                if caught:
+                    results[(f, p)] = True
 
+for ref, f, name in already:
+    print(f"REJECT: branch {ref} — the fault is already caught by existing test {name} ({f}); "
+          "inject a fault the OLD tests miss")
 missed = [k for k, caught in results.items() if not caught]
-rejected = False
+rejected = bool(already)
 if missed:
     print("REJECT: tests that pass on EVERY negative-control branch:")
     for (f, p) in sorted(missed):
