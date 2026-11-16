@@ -99,11 +99,17 @@ if not need:
 # ── NOT-opted-out test region must be cosmetic-equal.  ──
 # Every violation is collected and reported — one round of fixing.
 missing, fetched, violations = [], {}, []
+# Fault branches may live on the PR author's FORK (base-repo pushes
+# are not always available): try origin first, then the head repo.
+head_repo = os.environ.get("HEAD_REPO") or ""
+head_url = f"https://github.com/{head_repo}" if head_repo else ""
 for b in branches:
     ref = b[1:] if b.startswith("/") else b
     if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-        missing.append(ref)
-        continue
+        if not head_repo or head_repo == os.environ.get("GITHUB_REPOSITORY") \
+                or sh("git", "fetch", "--depth=1", head_url, ref, check=False).returncode != 0:
+            missing.append(ref)
+            continue
     sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
     fetched[ref] = sha
     for f in head_texts:

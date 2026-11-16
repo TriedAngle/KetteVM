@@ -129,6 +129,7 @@ jobs:
           COSMETIC: ${{ steps.parse.outputs.cosmetic }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -eu
           python3 ci/github/negative-control-gate.py
