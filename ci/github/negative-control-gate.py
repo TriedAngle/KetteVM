@@ -110,12 +110,13 @@ for b in branches:
     # through FETCH_HEAD in both cases.
     if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode == 0:
         fetched[ref] = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
-        continue
-    if not head_repo or head_repo == os.environ.get("GITHUB_REPOSITORY") \
+    elif not head_repo or head_repo == os.environ.get("GITHUB_REPOSITORY") \
             or sh("git", "fetch", "--depth=1", head_url, ref, check=False).returncode != 0:
         missing.append(ref)
-        continue
-    fetched[ref] = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
+    else:
+        fetched[ref] = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
+
+for ref, sha in sorted(fetched.items()):
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []
