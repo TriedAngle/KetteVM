@@ -105,13 +105,17 @@ head_repo = os.environ.get("HEAD_REPO") or ""
 head_url = f"https://github.com/{head_repo}" if head_repo else ""
 for b in branches:
     ref = b[1:] if b.startswith("/") else b
-    if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-        if not head_repo or head_repo == os.environ.get("GITHUB_REPOSITORY") \
-                or sh("git", "fetch", "--depth=1", head_url, ref, check=False).returncode != 0:
-            missing.append(ref)
-            continue
-    sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
-    fetched[ref] = sha
+    # A URL fetch (the fork fallback) leaves the ref in FETCH_HEAD
+    # only - refs/remotes/origin/<ref> is not written - so resolve
+    # through FETCH_HEAD in both cases.
+    if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode == 0:
+        fetched[ref] = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
+        continue
+    if not head_repo or head_repo == os.environ.get("GITHUB_REPOSITORY") \
+            or sh("git", "fetch", "--depth=1", head_url, ref, check=False).returncode != 0:
+        missing.append(ref)
+        continue
+    fetched[ref] = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []
