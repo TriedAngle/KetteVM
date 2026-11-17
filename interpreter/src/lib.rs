@@ -4,7 +4,6 @@
 )]
 #![allow(incomplete_features)]
 #![allow(unused_imports, unused_macros, unused_unsafe, unused_variables)]
-#![allow(dead_code)]
 
 use bytecode::Opcode;
 use core::hint::black_box;
@@ -90,7 +89,7 @@ impl core::ops::Deref for RootsArg<'_> {
     }
 }
 
-#[cfg(feature = "star_fusion")]
+#[cfg(all(feature = "star_fusion", feature = "fast"))]
 const fn star_lookahead(op: Opcode) -> bool {
     matches!(
         op,

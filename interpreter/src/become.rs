@@ -150,7 +150,6 @@ macro_rules! call_enter {
     ($op:ident, $result:expr, $pc:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr) => {{
         let (acc, value) = match $result {
             Ok(StagedCall::Frame) => ($acc, false),
-            Ok(StagedCall::Value(v)) => (Acc::set(v), true),
             Ok(StagedCall::Native {
                 rt,
                 callee_reg,

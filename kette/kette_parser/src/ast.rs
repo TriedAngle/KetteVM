@@ -164,17 +164,6 @@ pub enum Node {
     },
 }
 
-impl Node {
-    /// The statement list of an object body, if it is one.
-    pub fn body_stmts<'a>(&self, ast: &'a Ast) -> &'a [NodeId] {
-        match self {
-            Node::Object(parts) => ast.object_body_stmts(parts),
-            Node::StmtList { stmts } => ast.list_items(*stmts),
-            _ => &[],
-        }
-    }
-}
-
 pub struct Ast {
     nodes: Vec<Node>,
     spans: Vec<ByteSpan>,
@@ -268,10 +257,6 @@ impl Ast {
 
     pub fn symbol(&self, sym: Symbol) -> &[u8] {
         self.strings.get(sym)
-    }
-
-    pub fn symbol_count(&self) -> usize {
-        self.strings.len()
     }
 
     pub fn set_symbol_table(&mut self, strings: SymbolTable) {

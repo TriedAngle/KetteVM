@@ -181,10 +181,6 @@ impl MarkSweepState {
         self.collect_internal(None);
     }
 
-    pub fn collect_minor_now(&self) {
-        self.collect_minor_internal(None);
-    }
-
     pub fn minor_cycles(&self) -> usize {
         self.minor_cycles.load(Ordering::Relaxed)
     }

@@ -358,10 +358,6 @@ impl Stack {
         self.slot_unchecked(Self::slot_of(base, i)).get(_heap)
     }
 
-    pub fn set_reg<'x, T: 'x>(&self, base: usize, i: i32, v: Tagged<'x, T>) {
-        self.slot_unchecked(Self::slot_of(base, i)).store(v);
-    }
-
     /// A contiguous operand window in ascending slot order: element 0 is
     /// the lowest-addressed register. Construct windows hold the arguments
     /// (no receiver); call windows go through [`Stack::window`].

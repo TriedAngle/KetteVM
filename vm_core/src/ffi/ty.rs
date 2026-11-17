@@ -36,34 +36,6 @@ impl TypeId {
     /// C `char16_t`: a 16-bit UTF-16 code unit.
     pub const CHAR16: Self = Self(13);
 
-    /// C `long`: 8 bytes on LP64, 4 bytes on Windows and 32-bit targets.
-    pub const C_LONG: Self = if cfg!(windows) || cfg!(target_pointer_width = "32") {
-        Self::I32
-    } else {
-        Self::I64
-    };
-
-    /// C `unsigned long`.
-    pub const C_ULONG: Self = if cfg!(windows) || cfg!(target_pointer_width = "32") {
-        Self::U32
-    } else {
-        Self::U64
-    };
-
-    /// C `size_t` / `uintptr_t`.
-    pub const SIZE: Self = if cfg!(target_pointer_width = "32") {
-        Self::U32
-    } else {
-        Self::U64
-    };
-
-    /// C `ptrdiff_t` / `intptr_t`.
-    pub const PTRDIFF: Self = if cfg!(target_pointer_width = "32") {
-        Self::I32
-    } else {
-        Self::I64
-    };
-
     /// C `wchar_t`: 16-bit on Windows, 32-bit signed elsewhere.
     pub const WCHAR: Self = if cfg!(windows) {
         Self::CHAR16

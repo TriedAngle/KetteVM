@@ -699,13 +699,6 @@ impl Register {
         unsafe { Tagged::from_value_unchecked(Value::from_bits(self.0.load())) }
     }
 
-    #[inline(always)]
-    pub fn read_smi_unchecked(&self) -> Smi {
-        let raw = self.0.load() as i64;
-        debug_assert!(raw & 1 == 0, "register does not hold a Smi");
-        Smi::new(raw >> 1)
-    }
-
     #[inline]
     pub fn read_smi(&self) -> Smi {
         Smi::decode(Value::from_bits(self.0.load())).expect("register holds a Smi")

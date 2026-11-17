@@ -48,17 +48,6 @@ impl Object {
             .get_as::<CallableInfoObject>(heap)
     }
 
-    pub fn closure_context<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ContextObject>> {
-        let kind = self.map(heap).kind();
-        if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
-            return None;
-        }
-        self.slots
-            .get(heap)
-            .at(heap, 1)
-            .get_as::<ContextObject>(heap)
-    }
-
     /// The `idx`-th entry of the callable's constant pool, as a slot name.
     pub fn constant_slot_name<'a>(&self, heap: &'a Heap, idx: usize) -> Tagged<'a, SlotName> {
         self.callable_info(heap)

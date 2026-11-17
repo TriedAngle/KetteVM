@@ -64,10 +64,6 @@ impl Resolved {
     pub fn scope(&self, id: ScopeId) -> &ScopeInfo {
         &self.scopes[id.0 as usize]
     }
-
-    pub fn scope_count(&self) -> usize {
-        self.scopes.len()
-    }
 }
 
 pub fn resolve(ast: &Ast) -> Resolved {

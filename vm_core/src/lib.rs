@@ -91,12 +91,12 @@ pub use objects::{
     INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,
     MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
     NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
-    PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SiteRead, SlotDescriptor,
-    SlotFlags, SlotName, StringData, StringOwn, StringRef, Symbol, ThreadObject, ThreadObjectInit,
-    TypeInfo, TypeInfoInit, Utf8String, WeakFixedArray, WeakFixedArrayInit, WrapperKind,
-    decode_wtf8, flatten, info_is_immutable, info_is_lexical, info_mode, object_kind,
-    object_layout, string_content_hash, string_content_hash_units, visit_object,
+    ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
+    ScriptContextTable, ScriptContextTableInit, SiteRead, SlotDescriptor, SlotFlags, SlotName,
+    StringData, StringOwn, StringRef, Symbol, ThreadObject, ThreadObjectInit, TypeInfo,
+    TypeInfoInit, Utf8String, WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8,
+    flatten, info_is_immutable, info_is_lexical, info_mode, object_kind, object_layout,
+    string_content_hash, string_content_hash_units, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};

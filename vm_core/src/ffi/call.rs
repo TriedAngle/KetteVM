@@ -143,7 +143,7 @@ impl FfiState {
         })
     }
 
-    fn read_value<'a>(
+    pub fn read_value<'a>(
         &self,
         heap: &'a mut Heap,
         scope: &HandleScope<'_>,
@@ -173,10 +173,28 @@ impl FfiState {
                 Smi::new(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64).into_tagged()
             }
             TypeKind::I64 => {
-                Smi::new(i64::from_ne_bytes(bytes[..8].try_into().unwrap())).into_tagged()
+                // TODO: the full i64 range needs BigInt; beyond 2^53 the Float
+                // fallback loses precision.
+                let value = i64::from_ne_bytes(bytes[..8].try_into().unwrap());
+                if Smi::in_range(value) {
+                    Smi::new(value).into_tagged()
+                } else {
+                    heap.allocate_handle::<Float>(value as f64, scope)
+                        .as_tagged(heap)
+                        .erase()
+                }
             }
             TypeKind::U64 => {
-                Smi::new(u64::from_ne_bytes(bytes[..8].try_into().unwrap()) as i64).into_tagged()
+                // TODO: the full u64 range needs BigInt; beyond 2^53 the Float
+                // fallback loses precision.
+                let value = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+                if value <= Smi::MAX as u64 {
+                    Smi::new(value as i64).into_tagged()
+                } else {
+                    heap.allocate_handle::<Float>(value as f64, scope)
+                        .as_tagged(heap)
+                        .erase()
+                }
             }
             TypeKind::F32 => {
                 let value = f32::from_ne_bytes(bytes[..4].try_into().unwrap()) as f64;
@@ -314,6 +332,21 @@ impl FfiState {
         let mut slot = CallSlot::new(size.max(8));
         memory::copy_out_at(base, offset, &mut slot.bytes_mut()[..size]);
         Ok(ValueRead::Raw(RawValue { slot, ty }))
+    }
+
+    /// Encode `guest` as `ty` into `out`.
+    pub fn write_typed(
+        &self,
+        heap: &Heap,
+        ty: Tagged<TypeInfo>,
+        guest: Tagged<Value>,
+        out: &mut [u8],
+    ) -> FfiResult<()> {
+        let size = ty.size();
+        let mut slot = CallSlot::new(size.max(8));
+        convert_arg(ty, guest, heap, &mut slot, None)?;
+        out[..size].copy_from_slice(&slot.bytes()[..size]);
+        Ok(())
     }
 
     pub fn value_write(

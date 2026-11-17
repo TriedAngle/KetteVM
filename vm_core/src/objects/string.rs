@@ -911,10 +911,6 @@ impl ExternalString {
         self.address.load() as usize
     }
 
-    pub fn set_address(&self, address: usize) {
-        self.address.store_raw(address as u64);
-    }
-
     pub fn owner<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         self.owner.get(heap)
     }

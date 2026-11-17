@@ -12,7 +12,7 @@ pub mod feedback;
 pub mod ffi_objects;
 pub mod float;
 mod helpers;
-pub mod js_array;
+mod js_array;
 pub mod map;
 pub mod object;
 pub mod prototype_info;
@@ -51,7 +51,7 @@ pub use map::{
     SlotDescriptor, SlotFlags, SlotName,
 };
 pub use object::{ArgumentsCreate, CallTarget, Object, ObjectInit, ObjectSlotsInit};
-pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
+pub use prototype_info::PrototypeInfo;
 pub use proxy::{ProxyInit, ProxyObject};
 pub use script_context::{
     GlobalLexicalBinding, NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable,

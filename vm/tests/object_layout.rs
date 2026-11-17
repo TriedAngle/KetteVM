@@ -8,11 +8,10 @@ use vm::{
     FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float, ForeignLibrary,
     ForeignLibraryInit, Handle, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit,
     HeapPtr, Map, MapInit, MapKind, MaybeWeak, NameToIndexHashTable, NameToIndexHashTableInit,
-    NativeIndex, NumberDictionary, NumberDictionaryInit, PrototypeInfo, PrototypeInfoInit,
-    ProxyInit, ProxyObject, RawCell, RuntimeId, ScopeInfo, ScopeInfoInit, ScriptContextTable,
-    ScriptContextTableInit, Smi, Symbol, Tagged, ThreadObject, ThreadObjectInit, TypeInfo,
-    TypeInfoInit, Utf8String, VM, Value, Visitor, VmCore, WEAK_PTR, WeakFixedArray,
-    WeakFixedArrayInit, object_layout, visit_object,
+    NativeIndex, NumberDictionary, NumberDictionaryInit, PrototypeInfo, ProxyInit, ProxyObject,
+    RawCell, RuntimeId, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, Smi,
+    Symbol, Tagged, ThreadObject, ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String, VM, Value,
+    Visitor, VmCore, WEAK_PTR, WeakFixedArray, WeakFixedArrayInit, object_layout, visit_object,
 };
 
 struct Visited(Vec<usize>);
@@ -260,14 +259,18 @@ fn every_object_kind_visits_its_entire_layout() {
             assert_edges!("AccessorInfo", raw, [raw.header.map, raw.data]);
         }
 
-        let prototype_info =
-            heap.allocate_handle::<PrototypeInfo>(PrototypeInfoInit { registry_slot: 7 }, &scope);
+        let prototype_info = heap.allocate_handle::<PrototypeInfo>((), &scope);
         {
             let raw = prototype_info.as_tagged(heap).as_ref();
             assert_edges!(
                 "PrototypeInfo",
                 raw,
-                [raw.header.map, raw.prototype_users, raw.registry_slot,]
+                [
+                    raw.header.map,
+                    raw.prototype_users,
+                    raw.users_len,
+                    raw.registry_slot,
+                ]
             );
         }
 

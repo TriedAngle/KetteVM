@@ -739,13 +739,6 @@ impl<'a> Tagged<'a, SlotName> {
     }
 }
 
-impl SlotName {
-    /// The erased name word.
-    pub fn into_value(self) -> Value {
-        self.0
-    }
-}
-
 impl<'a> From<Tagged<'a, DenseString>> for Tagged<'a, SlotName> {
     fn from(string: Tagged<'a, DenseString>) -> Self {
         // Safety: type-level narrowing

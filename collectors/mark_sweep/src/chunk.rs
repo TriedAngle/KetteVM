@@ -255,10 +255,6 @@ impl Chunk {
         }
     }
 
-    pub fn base_addr(&self) -> usize {
-        self.base.addr()
-    }
-
     pub fn base(&self) -> HeapPtr<u8> {
         self.base
     }

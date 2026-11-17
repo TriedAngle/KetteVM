@@ -141,11 +141,6 @@ impl CPointer {
         self.address.to_smi_unchecked().value() as usize as *mut u8
     }
 
-    pub fn set_address(&self, heap: &Heap, address: *mut u8) {
-        self.address
-            .set(heap, self.tagged(heap), Smi::new(address as usize as i64));
-    }
-
     pub fn flags(&self) -> CPointerFlags {
         CPointerFlags::from_bits(self.flags.to_smi_unchecked().value() as u8)
     }
@@ -244,16 +239,16 @@ impl CValue {
         self.backing.get(heap)
     }
 
-    pub fn inline_data<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedByteArray>> {
-        self.backing(heap).get_as::<FixedByteArray>(heap)
-    }
-
-    pub fn external_pointer<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, CPointer>> {
-        self.backing(heap).get_as::<CPointer>(heap)
-    }
-
     pub fn offset(&self) -> usize {
         self.offset.to_smi_unchecked().value() as usize
+    }
+
+    /// Bytes available from [`Self::base`].
+    pub fn remaining(&self, heap: &Heap) -> usize {
+        match self.backing(heap).get_as::<FixedByteArray>(heap) {
+            Some(inline) => inline.len().saturating_sub(self.offset()),
+            None => usize::MAX,
+        }
     }
 
     pub fn base(&self, heap: &Heap) -> FfiResult<*mut u8> {
@@ -430,10 +425,6 @@ impl TypeInfo {
 
     pub fn flags(&self) -> u32 {
         self.flags.to_smi_unchecked().value() as u32
-    }
-
-    pub fn is_variadic(&self) -> bool {
-        self.flags() & FLAG_VARIADIC != 0
     }
 
     /// Complete object layout; `None` for function types.
@@ -633,26 +624,6 @@ impl CPointer {
     pub fn read_bytes(&self, heap: &Heap, out: &mut [u8]) -> FfiResult<()> {
         self.check_live(heap)?;
         copy_out(self.address(), out);
-        Ok(())
-    }
-
-    pub fn write_bytes(&self, heap: &Heap, bytes: &[u8]) -> FfiResult<()> {
-        self.check_live(heap)?;
-        copy_in(self.address(), bytes);
-        Ok(())
-    }
-
-    /// Pointer-width access, for fields of pointer type in C structs.
-    pub fn read_pointer(&self, heap: &Heap) -> FfiResult<usize> {
-        self.check_live(heap)?;
-        let mut bytes = [0u8; core::mem::size_of::<usize>()];
-        copy_out(self.address(), &mut bytes);
-        Ok(usize::from_ne_bytes(bytes))
-    }
-
-    pub fn write_pointer(&self, heap: &Heap, value: usize) -> FfiResult<()> {
-        self.check_live(heap)?;
-        copy_in(self.address(), &value.to_ne_bytes());
         Ok(())
     }
 }

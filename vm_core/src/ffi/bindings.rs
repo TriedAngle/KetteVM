@@ -1,8 +1,9 @@
-use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead};
+use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, memory};
 use crate::{
     AccessorInfo, Args, CFunction, CPointer, CValue, CallInfo, Errors, FixedArray, ForeignLibrary,
-    Handle, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object, PropertyDescriptor,
-    SetupError, Smi, StringRef, Tagged, ThreadState, TypeInfo, VM, Value, VmCore, VmError,
+    Handle, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
+    PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, TypeInfo, VM, Value,
+    VmCore, VmError,
 };
 
 /// Install the `FFI` namespace and register the FFI natives.
@@ -35,6 +36,13 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
     let pointer_add = vm.register_native(c_pointer_add);
     let pointer_get = vm.register_native(c_pointer_get);
     let pointer_set = vm.register_native(c_pointer_set);
+    let buffer = vm.register_native(ffi_buffer);
+    let read_bytes = vm.register_native(c_read_bytes);
+    let write_bytes = vm.register_native(c_write_bytes);
+    let scalars: Vec<(&'static str, _, _)> = SCALAR_METHODS
+        .iter()
+        .map(|&(name, read, write)| (name, vm.register_native(read), vm.register_native(write)))
+        .collect();
 
     let ffi = &state.ffi;
     let mut thread = vm.attach();
@@ -118,6 +126,22 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, buffer_prototype, "set", buffer_set, 2);
         Object::install_method(thread, &scope, buffer_prototype, "add", value_add, 1);
         Object::install_method(thread, &scope, buffer_prototype, "cast", value_cast, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            buffer_prototype,
+            "read_bytes",
+            read_bytes,
+            2,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            buffer_prototype,
+            "write_bytes",
+            write_bytes,
+            1,
+        );
         {
             let heap = thread.heap();
             let map = heap.known().c_value_map.get(heap);
@@ -143,6 +167,30 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, pointer_prototype, "add", pointer_add, 1);
         Object::install_method(thread, &scope, pointer_prototype, "get", pointer_get, 1);
         Object::install_method(thread, &scope, pointer_prototype, "set", pointer_set, 2);
+        Object::install_method(
+            thread,
+            &scope,
+            pointer_prototype,
+            "read_bytes",
+            read_bytes,
+            2,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            pointer_prototype,
+            "write_bytes",
+            write_bytes,
+            1,
+        );
+        for &(name, read, write) in &scalars {
+            let read_name = format!("read_{name}");
+            let write_name = format!("write_{name}");
+            for prototype in [buffer_prototype, pointer_prototype] {
+                Object::install_method(thread, &scope, prototype, &read_name, read, 1);
+                Object::install_method(thread, &scope, prototype, &write_name, write, 2);
+            }
+        }
 
         let heap: &mut Heap = thread.heap();
         let map = heap.known().c_pointer_map.get(heap);
@@ -171,6 +219,7 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, namespace, "pointer", pointer, 1);
         Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
         Object::install_method(thread, &scope, namespace, "array", array_type, 2);
+        Object::install_method(thread, &scope, namespace, "buffer", buffer, 1);
 
         for (name, id) in [
             ("void", TypeId::VOID),
@@ -1192,5 +1241,267 @@ fn c_type_wrap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
             Ok(value) => value.as_tagged(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
+    })
+}
+
+/// Base address and available bytes of a C value or C pointer receiver.
+fn receiver_window(heap: &Heap, receiver: Tagged<Value>) -> FfiResult<(*mut u8, usize)> {
+    if let Some(value) = receiver.get_as::<CValue>(heap) {
+        return Ok((value.base(heap)?, value.remaining(heap)));
+    }
+    if let Some(pointer) = receiver.get_as::<CPointer>(heap) {
+        pointer.check_live(heap)?;
+        return Ok((pointer.address(), usize::MAX));
+    }
+    Err(FfiError::InvalidArgument("expected a C value or C pointer"))
+}
+
+/// `base + offset`, checked against the receiver's remaining bytes.
+fn checked_span(window: (*mut u8, usize), offset: usize, len: usize) -> FfiResult<*mut u8> {
+    let end = offset.checked_add(len).ok_or(FfiError::AddressOverflow)?;
+    if end > window.1 {
+        return Err(FfiError::InvalidArgument("access out of bounds"));
+    }
+    // Safety: the caller keeps the receiver alive across the access.
+    Ok(unsafe { window.0.add(offset) })
+}
+
+fn builtin_type(heap: &Heap, id: TypeId) -> Tagged<'_, TypeInfo> {
+    heap.known()
+        .ffi_types
+        .get(heap, id)
+        .expect("C FFI builtins are installed during VM setup")
+}
+
+fn byte_offset(heap: &Heap, args: Args, index: usize) -> Option<usize> {
+    args.get_handle(heap, index)
+        .as_tagged(heap)
+        .to_i64()
+        .and_then(|offset| usize::try_from(offset).ok())
+}
+
+/// `receiver.read_<t>(byteOffset)`.
+fn scalar_read<'a>(
+    ctx: HostCtx<'a>,
+    call: CallInfo<'_>,
+    args: Args,
+    id: TypeId,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let Some(offset) = byte_offset(heap, args, 0) else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a byte offset"),
+            );
+        };
+        let ty = {
+            let ty = builtin_type(heap, id);
+            scope.handle(ty)
+        };
+        let size = ty.as_tagged(heap).size();
+        let window = match receiver_window(heap, call.receiver.as_tagged(heap)) {
+            Ok(window) => window,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let at = match checked_span(window, offset, size) {
+            Ok(at) => at,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let mut bytes = [0u8; 8];
+        memory::copy_out(at, &mut bytes[..size]);
+        ffi.read_value(heap, &scope, &ty, &bytes[..size], None)
+    })
+}
+
+/// `receiver.write_<t>(byteOffset, value)`.
+fn scalar_write<'a>(
+    ctx: HostCtx<'a>,
+    call: CallInfo<'_>,
+    args: Args,
+    id: TypeId,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|_scope| {
+        let Some(offset) = byte_offset(heap, args, 0) else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a byte offset"),
+            );
+        };
+        let guest = args.get_handle(heap, 1).as_tagged(heap);
+        let ty = builtin_type(heap, id);
+        let size = ty.size();
+        let window = match receiver_window(heap, call.receiver.as_tagged(heap)) {
+            Ok(window) => window,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let at = match checked_span(window, offset, size) {
+            Ok(at) => at,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let mut bytes = [0u8; 8];
+        if let Err(error) = ffi.write_typed(heap, ty, guest, &mut bytes[..size]) {
+            return raise_ffi(vm, heap, state, error);
+        }
+        memory::copy_in(at, &bytes[..size]);
+        heap.known().undefined.get(heap).erase()
+    })
+}
+
+macro_rules! scalar_methods {
+    ($($read:ident, $write:ident, $id:ident, $name:literal;)*) => {
+        $(
+            fn $read<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+                scalar_read(ctx, call, args, TypeId::$id)
+            }
+
+            fn $write<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+                scalar_write(ctx, call, args, TypeId::$id)
+            }
+        )*
+
+        const SCALAR_METHODS: &[(&str, NativeFn, NativeFn)] = &[
+            $(($name, $read, $write),)*
+        ];
+    };
+}
+
+scalar_methods! {
+    read_i8, write_i8, I8, "i8";
+    read_u8, write_u8, U8, "u8";
+    read_i16, write_i16, I16, "i16";
+    read_u16, write_u16, U16, "u16";
+    read_i32, write_i32, I32, "i32";
+    read_u32, write_u32, U32, "u32";
+    read_i64, write_i64, I64, "i64";
+    read_u64, write_u64, U64, "u64";
+    read_f32, write_f32, F32, "f32";
+    read_f64, write_f64, F64, "f64";
+}
+
+/// `FFI.buffer(size)` -> zeroed `u8[size]` buffer.
+fn ffi_buffer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let Some(len) = byte_offset(heap, args, 0) else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a byte length"),
+            );
+        };
+        let element = {
+            let ty = builtin_type(heap, TypeId::U8);
+            scope.handle(ty)
+        };
+        let ty = match ffi.types.array_of(heap, &scope, &element, len) {
+            Ok(ty) => ty,
+            Err(error) => return raise_ffi(vm, heap, state, error.into()),
+        };
+        match ffi.value(heap, &scope, &ty) {
+            Ok(value) => value.as_tagged(heap).erase(),
+            Err(error) => raise_ffi(vm, heap, state, error),
+        }
+    })
+}
+
+/// `receiver.read_bytes(byteOffset, len)` -> new `u8[len]` buffer.
+fn c_read_bytes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let (Some(offset), Some(len)) = (byte_offset(heap, args, 0), byte_offset(heap, args, 1))
+        else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a byte offset and length"),
+            );
+        };
+        let element = {
+            let ty = builtin_type(heap, TypeId::U8);
+            scope.handle(ty)
+        };
+        let ty = match ffi.types.array_of(heap, &scope, &element, len) {
+            Ok(ty) => ty,
+            Err(error) => return raise_ffi(vm, heap, state, error.into()),
+        };
+        let value = match ffi.value(heap, &scope, &ty) {
+            Ok(value) => value,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        // Re-derive the source after the allocation above.
+        let window = match receiver_window(heap, call.receiver.as_tagged(heap)) {
+            Ok(window) => window,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let at = match checked_span(window, offset, len) {
+            Ok(at) => at,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let to = match value.as_tagged(heap).base(heap) {
+            Ok(base) => base,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        memory::copy_bytes(at, to, len);
+        value.as_tagged(heap).erase()
+    })
+}
+
+/// `receiver.write_bytes(source, byteOffset)` -> copy `source`'s bytes in.
+fn c_write_bytes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|_scope| {
+        let source = match args
+            .get_handle(heap, 0)
+            .as_tagged(heap)
+            .get_as::<CValue>(heap)
+        {
+            Some(source) => source,
+            None => {
+                return raise_ffi(
+                    vm,
+                    heap,
+                    state,
+                    FfiError::InvalidArgument("expected a C buffer"),
+                );
+            }
+        };
+        let offset = byte_offset(heap, args, 1).unwrap_or(0);
+        let len = source.c_type(heap).size();
+        let from = match source.base(heap) {
+            Ok(base) => base,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let window = match receiver_window(heap, call.receiver.as_tagged(heap)) {
+            Ok(window) => window,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let at = match checked_span(window, offset, len) {
+            Ok(at) => at,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        memory::copy_bytes(from, at, len);
+        heap.known().undefined.get(heap).erase()
     })
 }

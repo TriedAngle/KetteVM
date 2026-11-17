@@ -55,11 +55,6 @@ impl FixedByteArray {
     pub fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.data_ptr(), self.len()) }
     }
-
-    #[inline(always)]
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.len()) }
-    }
 }
 
 impl HeapObject for FixedByteArray {

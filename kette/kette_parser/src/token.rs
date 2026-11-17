@@ -139,10 +139,6 @@ impl TokenKind {
         self.info().precedence
     }
 
-    pub fn is_binary_op(self) -> bool {
-        self.precedence() != 0
-    }
-
     pub fn is_keyword(self) -> bool {
         self.info().flags & TokenInfo::F_KEYWORD != 0
     }

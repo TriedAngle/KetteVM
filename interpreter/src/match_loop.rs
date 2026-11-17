@@ -525,7 +525,6 @@ macro_rules! call_enter {
     ) => {{
         match $staged {
             Err(e) => raise!($ctx, $acc, $pc, e),
-            Ok(StagedCall::Value(v)) => reenter!($ctx, $acc, $pc, $next_pc, v),
             Ok(StagedCall::Frame) => {
                 *$acc = Acc::set($roots.undefined.get($ctx.heap()).erase());
                 $ctx.code_ptr()
