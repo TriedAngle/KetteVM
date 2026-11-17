@@ -98,14 +98,76 @@ if not need:
 # ── Rule 1 (span-level): on each declared branch, every
 # ── NOT-opted-out test region must be cosmetic-equal.  ──
 # Every violation is collected and reported — one round of fixing.
+# ── Branch declarations: local (`/name`) or external (a full
+# ── branch URL: https://github.com/O/R/tree/branch) ──
+import re as _re
+_EXT = _re.compile(r"^https://github\.com/([^/]+)/([^/]+)/tree/(.+)$")
+
+def entry_of(b):
+    m = _EXT.match(b)
+    if m:
+        return ("ext", "https://github.com/%s/%s.git" % (m.group(1), m.group(2)), m.group(3))
+    return ("local", None, b[1:] if b.startswith("/") else b)
+
 missing, fetched, violations = [], {}, []
+external = {}   # ref -> (repo_url, sha)
 for b in branches:
-    ref = b[1:] if b.startswith("/") else b
-    if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-        missing.append(ref)
-        continue
-    sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+    kind, repo_url, ref = entry_of(b)
+    if kind == "local":
+        if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
+            missing.append(ref)
+            continue
+    else:
+        if sh("git", "fetch", "--depth=1", repo_url, ref, check=False).returncode != 0:
+            missing.append(b)
+            continue
+    sha = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
     fetched[ref] = sha
+    if kind == "ext":
+        external[ref] = (repo_url, sha)
+
+# ── External verification — BEFORE any external code is built or ──
+# ── run: the diff head..external must be limited to non-test Rust ──
+# ── lines in files that already exist in the PR head. ──
+def head_spans(f):
+    txt = sh("git", "show", f"{head}:{f}", check=False).stdout
+    return spans_for(f, txt) or [], txt
+
+ext_bad = []
+for ref, (repo_url, sha) in sorted(external.items()):
+    ns = sh("git", "diff", "--name-status", head, sha).stdout
+    for line in ns.splitlines():
+        parts = line.split("\t")
+        st, path = (parts[0], parts[-1]) if parts else ("", "")
+        why = None
+        if st != "M":
+            why = "not a plain modification (added/deleted/renamed file)"
+        elif not path.endswith(".rs"):
+            why = "not a Rust source"
+        elif sh("git", "cat-file", "-e", f"{head}:{path}", check=False).returncode != 0:
+            why = "file does not exist in the PR head"
+        else:
+            sp, _ = head_spans(path)
+            hunks = []
+            d = sh("git", "diff", "-U0", head, sha, "--", path).stdout
+            for h in _re.finditer(r"^@@[^+]*\+(\d+)(?:,(\d+))? @@", d, _re.M):
+                s = int(h.group(1)); e = s + int(h.group(2) or 1) - 1
+                if e >= s:
+                    hunks.append((s, e))
+            hit = [t["path"] for t in sp
+                   for (s, e) in hunks
+                   if not (e < t["start"] or s > t["end"])]
+            if hit:
+                why = "diff touches test region(s): " + ", ".join(sorted(set(hit)))
+        if why:
+            ext_bad.append((ref, path or line, why))
+for ref, path, why in ext_bad:
+    print(f"REJECT: external {ref}: {path}: {why}")
+if ext_bad:
+    sys.exit(1)
+if external:
+    print("external branches verified: diffs limited to non-test Rust lines"
+          " in pre-existing files")
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []
@@ -212,13 +274,20 @@ def run_target(file, check=False):
         r = sh(*m, "--lib", check=check)
     else:
         r = sh(*m, "--test", r[1][1], check=check)
-    failed = set()
+    failed, passed = set(), set()
     ansi = re.compile(r"\x1b\[[0-9;]*m")
     for line in (r.stdout or "").splitlines():
         line = ansi.sub("", line).strip()
         if line.startswith("test ") and line.endswith("FAILED"):
             failed.add(line[len("test "):-len(" ... FAILED")].strip())
-    return failed
+        elif line.startswith("test ") and line.endswith("ok"):
+            passed.add(line[len("test "):-len(" ... ok")].strip())
+    # a non-zero rc (a test ABORTS: SIGABRT/segv/non-unwinding panic
+    # kills the process mid-run, printing NO result line for itself
+    # or anything after) means every test without an explicit ok did
+    # not pass — callers treat those as failed. Without this, an
+    # aborting fault reads as green and the control proves nothing.
+    return failed, passed, r.returncode
 
 files = sorted({f for f, _ in need})
 runnables = [(f, runner_of(f)) for f in files]
@@ -242,14 +311,15 @@ for f in sorted({f for (f, _p) in need}):
             if ff == f:
                 print(f"  self-control {f} :: {p}: last-touch commit does not build — no proof")
         continue
-    failed = run_target(f, check=False)
+    failed, passed, rc = run_target(f, check=False)
     mine = {p for (ff, p) in need if ff == f}
-    for name in sorted(failed - mine):
+    def did_fail(name):
+        return name in failed or (rc != 0 and name not in passed)
+    for name in sorted(n for n in failed if n not in mine):
         print(f"REJECT: self-control {f}: existing test {name} already fails in the RED commit — "
               "the fault was covered before this PR; inject one the old tests miss")
-    if failed - mine:
         sys.exit(1)
-    for p in sorted(mine & failed):
+    for p in sorted(p for p in mine if did_fail(p)):
         print(f"  self-control {f} :: {p}: FAILS in its own last-touch commit")
         self_caught.add((f, p))
 sh("git", "checkout", "-q", head)
@@ -278,14 +348,18 @@ for ref, sha in sorted(fetched.items()):
         broken.append(ref)
         continue
     for f in sorted({f for (f, _p) in need_b}):
-        failed = run_target(f, check=False)
+        failed, passed, rc = run_target(f, check=False)
         mine = {p for (ff, p) in need_b if ff == f}
-        for name in sorted(failed - mine):
+        def did_fail(name):
+            return name in failed or (rc != 0 and name not in passed)
+        for name in sorted(n for n in failed if n not in mine):
             already.append((ref, f, name))
         for (ff, p) in sorted(need_b):
             if ff == f:
-                caught = p in failed
-                print(f"  {f} :: {p}: {'FAIL (caught)' if caught else 'pass'}")
+                caught = did_fail(p)
+                how = ("FAIL (caught)" if p in failed
+                       else "ABORT (caught)" if caught else "pass")
+                print(f"  {f} :: {p}: {how}")
                 if caught:
                     results[(f, p)] = True
 
