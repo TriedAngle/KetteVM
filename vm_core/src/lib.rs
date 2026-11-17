@@ -68,8 +68,8 @@ pub struct SetupError;
 /// cannot throw should return their value directly.
 pub type Result<T, E = Thrown> = core::result::Result<T, E>;
 pub use heap::{
-    AllocToken, AtomicGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot, GlobalHeap, Heap,
-    MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
+    AllocToken, AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot,
+    GlobalHeap, Heap, MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
 };
 pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
@@ -92,7 +92,7 @@ pub use objects::{
     MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
     NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
     PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotDescriptor,
+    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SiteRead, SlotDescriptor,
     SlotFlags, SlotName, StringData, StringOwn, StringRef, Symbol, ThreadObject, ThreadObjectInit,
     TypeInfo, TypeInfoInit, Utf8String, WeakFixedArray, WeakFixedArrayInit, WrapperKind,
     decode_wtf8, flatten, info_is_immutable, info_is_lexical, info_mode, object_kind,
@@ -103,7 +103,8 @@ pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
-    MaybeWeak, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value, WEAK_BIT, WEAK_PTR, Word,
+    MaybeWeak, MaybeWeakStore, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value,
+    WEAK_BIT, WEAK_PTR, Word,
 };
 
 pub use heap_api::{
@@ -336,11 +337,11 @@ impl ThreadState {
             let slot = table.element_slot(base);
             let free = entry.raw() == the_hole || (entry.raw().is_weak_ptr() && slot.is_cleared());
             if free {
-                table.set_weak(heap, base, closure.erase());
-                table.set_strong(heap, base + 1, fn_map.erase());
-                table.set_strong(heap, base + 2, proto);
-                table.set_strong(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
-                table.set_strong(heap, base + 4, initial_map.erase());
+                table.set(heap, base, closure.erase().as_weak());
+                table.set(heap, base + 1, fn_map.erase());
+                table.set(heap, base + 2, proto);
+                table.set(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
+                table.set(heap, base + 4, initial_map.erase());
                 return;
             }
             i = (i + 1) & mask;

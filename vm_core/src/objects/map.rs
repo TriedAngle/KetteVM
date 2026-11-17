@@ -92,7 +92,7 @@ impl Map {
 
     pub fn set_validity_cell(&self, heap: &Heap, cell: Tagged<'_, Cell>) {
         let host = self.tagged(heap);
-        self.prototype_validity_cell.set_strong(heap, host, cell);
+        self.prototype_validity_cell.set(heap, host, cell);
     }
 
     pub fn set_validity_cell_sentinel(&self, heap: &Heap) {
@@ -288,7 +288,7 @@ impl HeapObject for Map {
         self.pred.clear(heap);
         self.transitions.clear(heap);
         if config.kind.is_js_receiver() {
-            self.prototype_validity_cell.set_strong(
+            self.prototype_validity_cell.set(
                 heap,
                 host,
                 heap.known().invalid_prototype_validity_cell.get(heap),

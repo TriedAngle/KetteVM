@@ -39,7 +39,7 @@ pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     NumberDictionary, NumberDictionaryInit,
 };
-pub use feedback::{FeedbackVector, FeedbackVectorInit};
+pub use feedback::{FeedbackVector, FeedbackVectorInit, SiteRead};
 pub use ffi_objects::{
     CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue, CValueInit,
     FLAG_VARIADIC, ForeignLibrary, ForeignLibraryInit, TypeInfo, TypeInfoInit,

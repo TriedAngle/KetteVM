@@ -225,11 +225,8 @@ fn every_object_kind_visits_its_entire_layout() {
             heap.allocate_handle::<FeedbackVector>(FeedbackVectorInit { length: 2 }, &scope);
         {
             let raw = feedback.as_tagged(heap).as_ref();
-            assert_edges!(
-                "FeedbackVector",
-                raw,
-                [raw.header.map, raw.slot(0), raw.slot(1),]
-            );
+            let slot = |i| unsafe { &*raw.slots.as_ptr().add(i) };
+            assert_edges!("FeedbackVector", raw, [raw.header.map, slot(0), slot(1),]);
         }
 
         let handlers = heap.allocate_handle::<HandlerTable>(

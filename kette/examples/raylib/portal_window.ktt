@@ -2,7 +2,6 @@
 // https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
 // Run: cargo run -q -p vm -- kette/examples/raylib/portal_window.ktt
 
-// macOS does not search Homebrew's lib dir for bare library names.
 let path = if os.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"
     } else if os.name == "windows" {
@@ -23,7 +22,7 @@ let Texture2D = FFI.struct([
     ["mipmaps", FFI.i32],
     ["format", FFI.i32]
 ])
-// RenderTexture: framebuffer id followed by the colour and depth textures.
+
 let RenderTexture2D = FFI.struct([["id", FFI.u32], ["texture", Texture2D], ["depth", Texture2D]])
 let Camera3D = FFI.struct([
     ["position", Vector3],
@@ -32,11 +31,11 @@ let Camera3D = FFI.struct([
     ["fovy", FFI.f32],
     ["projection", FFI.i32]
 ])
-// raymath's Matrix is 16 floats; `MatrixToFloatV` flattens it for rlgl.
+
 let Matrix = FFI.array(FFI.f32, 16)
 let Float16 = FFI.array(FFI.f32, 16)
 
-// raylib enums and rlgl constants
+// enums
 let CAMERA_FREE = 1
 let CAMERA_PERSPECTIVE = 0
 let RL_QUADS = 7
@@ -78,7 +77,6 @@ let DrawRectangle = raylib.fn("DrawRectangle", [FFI.i32, FFI.i32, FFI.i32, FFI.i
 let DrawRectangleLines = raylib.fn("DrawRectangleLines", [FFI.i32, FFI.i32, FFI.i32, FFI.i32, Color], FFI.void)
 let Fade = raylib.fn("Fade", [Color, FFI.f32], Color)
 
-// 3D mode and render textures
 let BeginMode3D = raylib.fn("BeginMode3D", [Camera3D], FFI.void)
 let EndMode3D = raylib.fn("EndMode3D", [], FFI.void)
 let UpdateCamera = raylib.fn("UpdateCamera", [FFI.pointer(Camera3D), FFI.i32], FFI.void)
@@ -123,8 +121,6 @@ let rlDisableDepthTest = raylib.fn("rlDisableDepthTest", [], FFI.void)
 let sinf = libc.fn("sinf", [FFI.f32], FFI.f32)
 let cosf = libc.fn("cosf", [FFI.f32], FFI.f32)
 
-// Off-axis ("oblique frustum") projection built from the eye and three corners of
-// the portal opening, so perspective lines up from any viewer position.
 let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPlane|
     let right = Vector3Normalize(Vector3Subtract(bottomRight, bottomLeft))
     let up = Vector3Normalize(Vector3Subtract(topLeft, bottomLeft))
@@ -150,7 +146,6 @@ let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, far
         nearPlane,
         farPlane))
 
-    // Fixed to the window plane; the asymmetric frustum does the correction.
     rlMatrixMode(RL_MODELVIEW)
     rlLoadIdentity()
     let view = MatrixLookAt(eye, Vector3Subtract(eye, normal), up)

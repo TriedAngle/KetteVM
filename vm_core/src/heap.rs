@@ -1,10 +1,13 @@
 use crate::{
     AllocError, FixedArray, Float, GcHost, Handle, HandleScope, HandleSlice, HeapBackend,
-    HeapObject, HeapStats, LocalHeap, Map, MaybeWeak, Object, ObjectInit, ObjectSlotsInit,
-    PrototypeRegistry, RawCell, STRONG_PTR, SharedHeap, Smi, Tagged, Tlab, Value, Visitor,
-    WEAK_PTR, WeakFixedArray, Word, bootstrap::WellKnown,
+    HeapObject, HeapStats, LocalHeap, Map, MaybeWeak, MaybeWeakStore, Object, ObjectInit,
+    ObjectSlotsInit, PrototypeRegistry, RawCell, STRONG_PTR, SharedHeap, Smi, Tagged, Tlab, Value,
+    Visitor, WEAK_PTR, WeakFixedArray, Word, bootstrap::WellKnown,
 };
-use core::{alloc::Layout, cell::Cell, marker::PhantomData, ops::FnOnce, ptr::NonNull};
+use core::{
+    alloc::Layout, cell::Cell, marker::PhantomData, ops::FnOnce, ptr::NonNull,
+    sync::atomic::Ordering,
+};
 use std::sync::Arc;
 
 pub struct AllocToken<'heap> {
@@ -120,6 +123,7 @@ impl<T> GcSlot<T> {
     /// Re-read the slot under a heap borrow: the word is current (the GC
     /// updates slots in place) and valid for `'a` because no collection
     /// can run while the borrow lives.
+    #[inline(always)]
     pub fn get<'a>(&self, _heap: &'a Heap) -> Tagged<'a, T> {
         // Safety: see method docs.
         unsafe { Tagged::from_value_unchecked(Value::from_bits(self.cell.load())) }
@@ -127,6 +131,7 @@ impl<T> GcSlot<T> {
 
     /// The current word without an anchor. It may be moved by a later
     /// collection; only safe to use as an opaque `Value`.
+    #[inline(always)]
     pub fn raw(&self) -> Value {
         Value::from_bits(self.cell.load())
     }
@@ -271,16 +276,19 @@ impl<T> MaybeWeakGcSlot<T> {
         }
     }
 
+    #[inline(always)]
     pub fn get<'a>(&self, _heap: &'a Heap) -> Tagged<'a, MaybeWeak<T>> {
         unsafe { Tagged::from_maybe_weak_unchecked(Value::from_bits(self.cell.load())) }
     }
 
     /// The current word without an anchor. It may be moved by a later
     /// collection; only safe to use as an opaque `Value`.
+    #[inline(always)]
     pub fn raw(&self) -> Value {
         Value::from_bits(self.cell.load())
     }
 
+    #[inline(always)]
     pub fn is_cleared(&self) -> bool {
         self.raw().is_cleared()
     }
@@ -294,60 +302,21 @@ impl<T> MaybeWeakGcSlot<T> {
         self.get(heap).as_strong().map(|t| t.as_ref())
     }
 
+    #[inline(always)]
     pub fn as_raw(&self) -> &RawCell {
         &self.cell
     }
 }
 
 impl<T> MaybeWeakGcSlot<T> {
-    pub fn set_strong<'h, 'x>(
-        &self,
-        heap: &Heap,
-        host: Tagged<'h, Value>,
-        value: impl Into<Tagged<'x, T>>,
-    ) where
+    /// Stores a strong or maybe-weak word, taking the barrier for live
+    /// references.
+    pub fn set<'h, 'x, V>(&self, heap: &Heap, host: Tagged<'h, Value>, value: V)
+    where
+        V: MaybeWeakStore<'x, T>,
         T: 'x,
     {
-        let value = value.into();
-        let strong = value.raw();
-        debug_assert!(
-            !strong.is_weak_ptr(),
-            "strong store of a weak/cleared word into a weak slot"
-        );
-        if strong.is_ptr() {
-            heap.write_barrier(host, self.as_raw(), value.erase());
-        }
-        self.cell.store_raw(strong.to_bits());
-    }
-
-    pub fn set_weak<'h, 'x>(
-        &self,
-        heap: &Heap,
-        host: Tagged<'h, Value>,
-        value: impl Into<Tagged<'x, T>>,
-    ) where
-        T: 'x,
-    {
-        let value = value.into();
-        let strong = value.raw();
-        // the weak reference still participates in the generational
-        // barrier: an old slot holding a young target must be remembered
-        // so the minor collection can forward or clear it
-        if strong.is_ptr() {
-            heap.write_barrier(host, self.as_raw(), value.erase());
-        }
-        let weak = Value::from_bits(strong.to_bits() | WEAK_PTR);
-        self.cell.store_raw(weak.to_bits());
-    }
-
-    /// Store an already-encoded maybe-weak word verbatim, taking the barrier
-    /// when it points at a live heap object.
-    pub fn set<'h, 'x>(
-        &self,
-        heap: &Heap,
-        host: Tagged<'h, Value>,
-        value: Tagged<'x, MaybeWeak<T>>,
-    ) {
+        let value = value.into_stored();
         if let Some(live) = value.as_strong() {
             heap.write_barrier(host, self.as_raw(), live.erase());
         }
@@ -356,6 +325,7 @@ impl<T> MaybeWeakGcSlot<T> {
 
     /// Resolve a live reference (strong or weak) to its strong view;
     /// `None` once cleared.
+    #[inline(always)]
     pub fn get_strong<'a>(&self, _heap: &'a Heap) -> Option<Tagged<'a, T>> {
         let word = self.raw();
         if !word.is_ptr() || word.is_cleared() {
@@ -363,6 +333,103 @@ impl<T> MaybeWeakGcSlot<T> {
         }
         let strong = Value::from_bits(word.raw_addr() | STRONG_PTR);
         Some(unsafe { Tagged::from_value_unchecked(strong) })
+    }
+}
+
+/// A [`MaybeWeakGcSlot`] whose word is read and written atomically.
+///
+/// Shared mutable weak storage (feedback pairs and weak arrays) uses this;
+/// the non-atomic slot remains for GC-owned or single-threaded cells.
+#[repr(transparent)]
+pub struct AtomicMaybeWeakGcSlot<T = Value> {
+    slot: MaybeWeakGcSlot<T>,
+}
+
+unsafe impl<T> Send for AtomicMaybeWeakGcSlot<T> {}
+unsafe impl<T> Sync for AtomicMaybeWeakGcSlot<T> {}
+
+impl<T> AtomicMaybeWeakGcSlot<T> {
+    #[inline(always)]
+    pub fn load_word(&self, order: Ordering) -> Word {
+        self.slot.as_raw().load_atomic(order)
+    }
+
+    #[inline(always)]
+    pub fn store_word(&self, word: Word, order: Ordering) {
+        self.slot.as_raw().store_atomic(word, order);
+    }
+
+    /// The current word without an anchor.
+    #[inline(always)]
+    pub fn raw(&self) -> Value {
+        Value::from_bits(self.load_word(Ordering::Relaxed))
+    }
+
+    #[inline(always)]
+    pub fn is_cleared(&self) -> bool {
+        self.raw().is_cleared()
+    }
+
+    #[inline(always)]
+    pub fn get<'a>(&self, _heap: &'a Heap) -> Tagged<'a, MaybeWeak<T>> {
+        unsafe {
+            Tagged::from_maybe_weak_unchecked(Value::from_bits(self.load_word(Ordering::Relaxed)))
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_acquire<'a>(&self, _heap: &'a Heap) -> Tagged<'a, MaybeWeak<T>> {
+        unsafe {
+            Tagged::from_maybe_weak_unchecked(Value::from_bits(self.load_word(Ordering::Acquire)))
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_raw(&self) -> &RawCell {
+        self.slot.as_raw()
+    }
+
+    /// Resolve a live reference (strong or weak) to its strong view;
+    /// `None` once cleared.
+    #[inline(always)]
+    pub fn get_strong<'a>(&self, _heap: &'a Heap) -> Option<Tagged<'a, T>> {
+        let word = self.raw();
+        if !word.is_ptr() || word.is_cleared() {
+            return None;
+        }
+        let strong = Value::from_bits(word.raw_addr() | STRONG_PTR);
+        Some(unsafe { Tagged::from_value_unchecked(strong) })
+    }
+
+    fn store_maybe<'h, 'x>(
+        &self,
+        heap: &Heap,
+        host: Tagged<'h, Value>,
+        value: Tagged<'x, MaybeWeak<T>>,
+        order: Ordering,
+    ) {
+        if let Some(live) = value.as_strong() {
+            heap.write_barrier(host, self.as_raw(), live.erase());
+        }
+        self.store_word(value.raw().to_bits(), order);
+    }
+}
+
+impl<T> AtomicMaybeWeakGcSlot<T> {
+    pub fn set<'h, 'x, V>(&self, heap: &Heap, host: Tagged<'h, Value>, value: V)
+    where
+        V: MaybeWeakStore<'x, T>,
+        T: 'x,
+    {
+        self.store_maybe(heap, host, value.into_stored(), Ordering::Relaxed);
+    }
+
+    pub fn set_release<'h, 'x, V>(&self, heap: &Heap, host: Tagged<'h, Value>, value: V)
+    where
+        V: MaybeWeakStore<'x, T>,
+        T: 'x,
+    {
+        self.store_maybe(heap, host, value.into_stored(), Ordering::Release);
     }
 }
 
@@ -440,21 +507,8 @@ impl<T> AtomicGcSlot<T> {
             .load_atomic(core::sync::atomic::Ordering::Acquire)
     }
 
-    /// Atomic store via a CAS loop (`RawCell` has no atomic store).
     pub fn store_word(&self, word: Word) {
-        let raw = self.slot.as_raw();
-        let mut current = raw.load_atomic(core::sync::atomic::Ordering::Relaxed);
-        loop {
-            match raw.compare_exchange(
-                current,
-                word,
-                core::sync::atomic::Ordering::Release,
-                core::sync::atomic::Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
-        }
+        self.slot.as_raw().store_atomic(word, Ordering::Release);
     }
 
     pub fn compare_exchange_word(&self, current: Word, new: Word) -> Result<Word, Word> {
@@ -555,19 +609,7 @@ impl<T> AtomicOptionGcSlot<T> {
     /// Atomic word store without a write barrier. Root slots are always
     /// scanned, so roots do not need the generational barrier.
     pub fn store_word(&self, word: Word) {
-        let raw = self.slot.slot.as_raw();
-        let mut current = raw.load_atomic(core::sync::atomic::Ordering::Relaxed);
-        loop {
-            match raw.compare_exchange(
-                current,
-                word,
-                core::sync::atomic::Ordering::Release,
-                core::sync::atomic::Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
-        }
+        self.slot.as_raw().store_atomic(word, Ordering::Release);
     }
 
     pub fn load_word(&self, _heap: &Heap) -> Word {
@@ -886,7 +928,7 @@ impl Heap {
         obj.header.map.init(self.known().array_map.get(self));
         obj.size.set(self, host, Smi::new(len as i64));
         for i in 0..len {
-            obj.element_slot(i).as_raw().store_raw(fill);
+            obj.element_slot(i).store_word(fill, Ordering::Relaxed);
         }
         // Safety: fresh strong pointer, anchored at this borrow.
         unsafe { Tagged::from_raw_ptr(ptr) }

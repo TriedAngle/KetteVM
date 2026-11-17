@@ -35,18 +35,27 @@ impl RawCell {
         }
     }
 
+    #[inline(always)]
     pub fn load(&self) -> Word {
         unsafe { *self.raw.get() }
     }
 
+    #[inline(always)]
     pub fn store_raw(&self, w: Word) {
         unsafe { *self.raw.get() = w };
     }
 
+    #[inline(always)]
     pub fn load_atomic(&self, order: Ordering) -> Word {
         unsafe { (*self.raw.get().cast::<AtomicU64>()).load(order) }
     }
 
+    #[inline(always)]
+    pub fn store_atomic(&self, w: Word, order: Ordering) {
+        unsafe { (*self.raw.get().cast::<AtomicU64>()).store(w, order) }
+    }
+
+    #[inline]
     pub fn compare_exchange(
         &self,
         current: Word,

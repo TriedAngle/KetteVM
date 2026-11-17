@@ -1,8 +1,8 @@
 use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
-    Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SlotName, Smi,
-    Tagged, Value, WeakFixedArray, WeakFixedArrayInit, info_is_immutable,
+    Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SiteRead,
+    SlotName, Smi, Tagged, Value, WeakFixedArray, WeakFixedArrayInit, info_is_immutable,
 };
 
 /// Beyond this many live (map, handler) pairs a site goes megamorphic.
@@ -213,9 +213,9 @@ fn global_lexical_site<'a>(
     slot: usize,
 ) -> Option<(Tagged<'a, ContextObject>, usize, i64)> {
     let vector = vector?;
-    let (state, handler) = vector.site(slot)?;
-    let context = state.get(heap).as_strong()?.get_as::<ContextObject>(heap)?;
-    let (kind, payload) = decode_handler_smi(handler.get(heap))?;
+    let site = vector.read_pair(heap, slot);
+    let context = site.state.as_strong()?.get_as::<ContextObject>(heap)?;
+    let (kind, payload) = decode_handler_smi(site.handler)?;
     if kind != KIND_GLOBAL_LEXICAL {
         return None;
     }
@@ -242,20 +242,38 @@ fn ic_receiver<'a>(receiver: Tagged<'a, Value>, heap: &'a Heap) -> Option<Tagged
     Some(obj)
 }
 
+/// Snapshot a property/call site. Strong states are self-contained; only a
+/// weak mono state needs the pair snapshot.
+#[inline(always)]
+fn read_site_snapshot<'a>(
+    vector: Tagged<'_, FeedbackVector>,
+    heap: &'a Heap,
+    slot: usize,
+) -> SiteRead<'a> {
+    let state = vector.read_site(heap, slot);
+    if state.is_weak_ptr() {
+        vector.read_pair(heap, slot)
+    } else {
+        SiteRead {
+            state,
+            handler: Tagged::CLEARED,
+        }
+    }
+}
+
 /// Handler word for `map`'s monomorphic or polymorphic entry.
 #[inline(always)]
 fn probe<'a>(
     heap: &'a Heap,
-    vector: Tagged<'a, FeedbackVector>,
-    slot: usize,
+    site: SiteRead<'a>,
     map: Tagged<'a, Map>,
 ) -> Option<Tagged<'a, MaybeWeak<Value>>> {
-    let state = vector.slot(slot).get(heap);
+    let state = site.state;
     if state.is_weak_ptr() {
         if !state.ptr_eq(map) {
             return None;
         }
-        return Some(vector.slot(slot + 1).get(heap));
+        return Some(site.handler);
     }
     let pairs = state.as_strong()?.get_as::<WeakFixedArray>(heap)?;
     let len = pairs.len();
@@ -279,9 +297,10 @@ fn probe_element_smi<'a>(
     receiver: Tagged<'a, Value>,
 ) -> Option<(Tagged<'a, Object>, Tagged<'a, Map>, i64, i64)> {
     let vector = vector?;
+    let site = read_site_snapshot(vector, heap, slot);
     let obj = receiver.as_heap_object()?;
     let map = obj.map(heap);
-    let handler = probe(heap, vector, slot, map)?;
+    let handler = probe(heap, site, map)?;
     if handler.is_ptr() {
         return None;
     }
@@ -321,16 +340,6 @@ impl Handler<'_> {
             Self::WeakMap(m) => m.as_tagged(heap).erase().as_weak(),
         }
     }
-}
-
-/// Handler word into a pair-array cell.
-fn set_word_at(
-    arr: Tagged<'_, WeakFixedArray>,
-    heap: &Heap,
-    i: usize,
-    word: Tagged<'_, MaybeWeak<Value>>,
-) {
-    arr.set(heap, i, word);
 }
 
 /// Build a guarded handler. `None` when the receiver's prototype closure
@@ -872,11 +881,11 @@ impl InlineCache {
             return MonoProbe::NotReceiver;
         };
         let map = obj.map(heap);
-        let (state_slot, handler_slot) = vector.site_unchecked(slot);
-        let state = state_slot.get(heap);
+        let site = read_site_snapshot(vector, heap, slot);
+        let state = site.state;
 
         if state.is_weak_ref_to(map) {
-            return mono_result(heap, obj, handler_slot.get(heap));
+            return mono_result(heap, obj, site.handler);
         }
         if state.is_weak_ptr() {
             return MonoProbe::Miss;
@@ -946,10 +955,10 @@ impl InlineCache {
         receiver: Tagged<'a, Value>,
     ) -> Option<LoadHit<'a>> {
         let vector = vector?;
+        let site = read_site_snapshot(vector, heap, slot);
         let obj = ic_receiver(receiver, heap)?;
-        vector.site(slot)?;
         let map = obj.map(heap);
-        let handler = probe(heap, vector, slot, map)?;
+        let handler = probe(heap, site, map)?;
         apply_load_handler(heap, obj, handler)
     }
 
@@ -999,14 +1008,14 @@ impl InlineCache {
         info: i64,
     ) {
         let Some(vector) = vector else { return };
-        let Some((state, handler)) = vector.site(slot) else {
-            return;
-        };
         let host = vector.erase();
-        state.set_strong(heap, host, context.erase());
         let payload = (slot_index as i64 & GLOBAL_LEXICAL_SLOT_MASK)
             | ((info & 0xff) << GLOBAL_LEXICAL_INFO_SHIFT);
-        handler.set_strong(heap, host, kind_smi(KIND_GLOBAL_LEXICAL, payload));
+        let handler = kind_smi(KIND_GLOBAL_LEXICAL, payload);
+        vector.write_site(heap, slot, |heap, state, handler_slot| {
+            state.set_release(heap, host, context.erase());
+            handler_slot.set_release(heap, host, handler.into_tagged());
+        });
     }
 
     pub fn update_load(
@@ -1020,9 +1029,7 @@ impl InlineCache {
     ) {
         let Some(vector) = vector else { return };
         let Some(receiver) = receiver else { return };
-        if vector.as_tagged(heap).site(slot).is_none() {
-            return;
-        }
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
         let recv = receiver.as_tagged(heap);
         if ic_receiver(recv.erase(), heap).is_none() {
             return;
@@ -1131,9 +1138,7 @@ impl InlineCache {
     ) {
         let Some(vector) = vector else { return };
         let Some(receiver) = receiver else { return };
-        if vector.as_tagged(heap).site(slot).is_none() {
-            return;
-        }
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
         let recv = receiver.as_tagged(heap);
         let Some(obj) = recv.as_heap_object() else {
             return;
@@ -1203,9 +1208,7 @@ impl InlineCache {
     ) {
         let Some(vector) = vector else { return };
         let Some(receiver) = receiver else { return };
-        if vector.as_tagged(heap).site(slot).is_none() {
-            return;
-        }
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
         let recv = receiver.as_tagged(heap);
         let Some(obj) = recv.as_heap_object() else {
             return;
@@ -1251,14 +1254,12 @@ impl InlineCache {
         let Some(vector) = vector else {
             return false;
         };
+        let site = read_site_snapshot(vector, heap, slot);
         let Some(recv) = ic_receiver(receiver, heap) else {
             return false;
         };
-        if vector.site(slot).is_none() {
-            return false;
-        }
         let map = recv.map(heap);
-        let Some(handler) = probe(heap, vector, slot, map) else {
+        let Some(handler) = probe(heap, site, map) else {
             return false;
         };
         if !handler.is_ptr() {
@@ -1315,10 +1316,10 @@ impl InlineCache {
         mode: LanguageMode,
     ) -> Option<StoreHit<'a>> {
         let vector = vector?;
+        let site = read_site_snapshot(vector.as_tagged(heap), heap, slot);
         let recv = ic_receiver(receiver.as_tagged(heap).erase(), heap)?;
-        vector.as_tagged(heap).site(slot)?;
         let map = scope.handle(recv.map(heap));
-        let handler = probe(heap, vector.as_tagged(heap), slot, map.as_tagged(heap))?;
+        let handler = probe(heap, site, map.as_tagged(heap))?;
         let action = if !handler.is_ptr() {
             let (kind, payload) = decode_handler_smi(handler)?;
             match kind {
@@ -1384,9 +1385,7 @@ impl InlineCache {
         outcome: StoreOutcomeKind,
     ) {
         let Some(vector) = vector else { return };
-        if vector.as_tagged(heap).site(slot).is_none() {
-            return;
-        }
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
         let Some(recv) = ic_receiver(receiver.as_tagged(heap).erase(), heap) else {
             return;
         };
@@ -1464,9 +1463,6 @@ fn apply_transition(
     true
 }
 
-// TODO: ASAP: this writes the shared feedback vector from any mutator. See
-// `FeedbackVector`; concurrent calls to the same function race until the
-// publish protocol or per-thread vectors land.
 fn update_site(
     heap: &mut Heap,
     scope: &HandleScope<'_>,
@@ -1476,10 +1472,8 @@ fn update_site(
     handler: &Handler<'_>,
 ) {
     let vec_t = vector.as_tagged(heap);
-    let Some((state, _)) = vec_t.site(slot) else {
-        return;
-    };
-    let state = state.get(heap);
+    let site = read_site_snapshot(vec_t, heap, slot);
+    let state = site.state;
 
     if !state.is_ptr() {
         vec_t.set_mono(heap, slot, map.as_tagged(heap), handler.word(heap));
@@ -1491,11 +1485,14 @@ fn update_site(
                 // Same map but the handler missed: a chain changed behind
                 // an identical receiver map, or the payload died. A Slow
                 // handler is final.
-                let old = vec_t.site(slot).expect("checked").1.get(heap);
-                if decode_handler_smi(old).is_some_and(|(k, _)| k == KIND_SLOW) {
+                if decode_handler_smi(site.handler).is_some_and(|(k, _)| k == KIND_SLOW) {
                     return;
                 }
-                vec_t.set_handler(heap, slot, handler.word(heap));
+                if vec_t.set_handler_if_mono(heap, slot, map.as_tagged(heap), handler.word(heap)) {
+                    return;
+                }
+                // TODO: rebuild the poly array with this handler when the
+                // state raced with another writer.
                 return;
             }
             promote_from_mono(heap, scope, vector, slot, map, handler);
@@ -1528,15 +1525,18 @@ fn promote_from_mono(
         let vec_t = vector.as_tagged(heap);
         // the reservation may have collected: the cached map is weak, so
         // re-read the entry instead of trusting the pre-allocation check
-        let old_map = vec_t.slot(slot).get(heap).as_strong();
-        let Some(old_map) = old_map else {
+        let site = read_site_snapshot(vec_t, heap, slot);
+        if !site.state.is_weak_ptr() {
+            token.discard_remaining();
+            return None;
+        }
+        let Some(old_map) = site.state.as_strong() else {
             token.discard_remaining();
             return None;
         };
-        let old_handler = vec_t.slot(slot + 1).get(heap);
         let words = [
             old_map.as_weak(),
-            old_handler,
+            site.handler,
             map.as_tagged(heap).erase().as_weak(),
             handler.word(heap),
         ];
@@ -1548,7 +1548,7 @@ fn promote_from_mono(
         Some(arr) => vector
             .as_tagged(heap)
             .set_poly(heap, slot, arr.as_tagged(heap)),
-        // the stale mono entry died: install the new one
+        // the stale entry died or raced with another writer: install the new one
         None => {
             vector
                 .as_tagged(heap)
@@ -1557,8 +1557,6 @@ fn promote_from_mono(
     }
 }
 
-// TODO: ASAP: in-place handler writes and replacement arrays race with
-// other mutators on the shared feedback vector.
 fn update_poly(
     heap: &mut Heap,
     scope: &HandleScope<'_>,
@@ -1570,47 +1568,52 @@ fn update_poly(
 ) {
     let pairs_t = pairs.as_tagged(heap);
     let len = pairs_t.len();
-    let mut found_at = None;
+    let mut found = false;
     let mut live = 0usize;
     let mut i = 0;
     while i + 1 < len {
         if let Some(m) = pairs_t.get(heap, i).as_strong() {
             if m.ptr_eq(map.as_tagged(heap)) {
-                found_at = Some(i + 1);
-                break;
+                found = true;
             }
             live += 1;
         }
         i += 2;
     }
-    if let Some(index) = found_at {
-        set_word_at(pairs_t, heap, index, handler.word(heap));
-        return;
-    }
-    if live >= MAX_POLYMORPHIC_ENTRIES {
+    if !found && live >= MAX_POLYMORPHIC_ENTRIES {
         vector.as_tagged(heap).set_megamorphic(heap, slot);
         return;
     }
+    // Always republish a fresh array: published feedback arrays are immutable.
+    // The extra pair leaves room if the found map cannot be copied and must be
+    // appended instead; `discard_remaining` trims the reservation.
     let new_len = 2 * (live + 1);
     let total = WeakFixedArray::<Value>::layout_for(new_len);
     let arr = heap.allocate_token_enter_heap(total, |token, heap| {
         let pairs_t = pairs.as_tagged(heap);
         let len = pairs_t.len();
         let mut words: Vec<Tagged<'_, MaybeWeak<Value>>> = Vec::with_capacity(new_len);
+        let mut replaced = false;
         let mut i = 0;
         while i + 1 < len {
             if let Some(m) = pairs_t.get(heap, i).as_strong() {
                 words.push(m.as_weak());
-                words.push(pairs_t.get(heap, i + 1));
+                if !replaced && m.ptr_eq(map.as_tagged(heap)) {
+                    words.push(handler.word(heap));
+                    replaced = true;
+                } else {
+                    words.push(pairs_t.get(heap, i + 1));
+                }
             }
             i += 2;
         }
-        words.push(map.as_tagged(heap).erase().as_weak());
-        words.push(handler.word(heap));
+        if !replaced {
+            words.push(map.as_tagged(heap).erase().as_weak());
+            words.push(handler.word(heap));
+        }
         let arr = token.allocate::<WeakFixedArray>(WeakFixedArrayInit { values: &words });
-        // the reservation was sized from the pre-collection live count: a map
-        // whose only reference was this weak cache entry may have died here,
-        // so the array can be shorter than reserved
+        // the reservation was sized from the pre-collection live count: maps
+        // whose only reference was this weak cache entry may have died here
         token.discard_remaining();
         scope.handle(arr)
     });
@@ -1676,7 +1679,8 @@ impl InlineCache {
         let Some(vector) = vector else {
             return CallProbe::Miss;
         };
-        let state = vector.slot(fb).get(heap);
+        let site = read_site_snapshot(vector, heap, fb);
+        let state = site.state;
         if !state.is_weak_ptr() {
             if state.is_strong_ptr() && !state.ptr_eq(heap.known().the_hole.get(heap).erase()) {
                 // megamorphic site: decode the callee on every execution
@@ -1687,7 +1691,7 @@ impl InlineCache {
         if !state.ptr_eq(callee) {
             return CallProbe::Miss;
         }
-        let payload = vector.slot(fb + 1).get(heap);
+        let payload = site.handler;
         if let Some(tag) = payload.to_i64() {
             // runtime callee: index and shape come straight from the
             // payload — no object decode needed
@@ -1733,47 +1737,50 @@ impl InlineCache {
         let Some(vector) = vector else {
             return;
         };
-        let Some((state_slot, tag_slot)) = vector.site(fb) else {
-            return;
-        };
         let host = vector.erase();
-        if state_slot.is_cleared() {
-            // a collected weak entry leaves the site free to become
-            // monomorphic again
-        } else {
-            let state = state_slot.get(heap);
-            if state.is_strong_ptr() {
-                let hole = heap.known().the_hole.get(heap).erase();
-                if !state.ptr_eq(hole) {
-                    // megamorphic: leave it alone
-                    return;
-                }
-            } else if !state.ptr_eq(callee) {
-                let same_code = match (&record, state.as_strong().and_then(|c| c.as_heap_object()))
-                {
-                    (CallRecord::Bytecode(info), Some(old)) => old
-                        .callable_info(heap)
-                        .is_some_and(|old_info| old_info.ptr_eq(*info)),
-                    _ => false,
-                };
-                if !same_code {
-                    vector.set_megamorphic(heap, fb);
-                    return;
+        vector.write_site(heap, fb, |heap, state_slot, tag_slot| {
+            if state_slot.is_cleared() {
+                // a collected weak entry leaves the site free to become
+                // monomorphic again
+            } else {
+                let state = state_slot.get(heap);
+                if state.is_strong_ptr() {
+                    let hole = heap.known().the_hole.get(heap).erase();
+                    if !state.ptr_eq(hole) {
+                        // megamorphic: leave it alone
+                        return;
+                    }
+                } else if !state.ptr_eq(callee) {
+                    let same_code =
+                        match (&record, state.as_strong().and_then(|c| c.as_heap_object())) {
+                            (CallRecord::Bytecode(info), Some(old)) => old
+                                .callable_info(heap)
+                                .is_some_and(|old_info| old_info.ptr_eq(*info)),
+                            _ => false,
+                        };
+                    if !same_code {
+                        state_slot.set_release(
+                            heap,
+                            host,
+                            heap.known().megamorphic_symbol.get(heap).erase(),
+                        );
+                        return;
+                    }
                 }
             }
-        }
-        state_slot.set_weak(heap, host, callee);
-        match record {
-            // bytecode: the payload IS the resolved info
-            CallRecord::Bytecode(info) => tag_slot.set_strong(heap, host, info.erase()),
-            // runtime: index and argument shape packed into the payload
-            CallRecord::Native(rt) => tag_slot.set(
-                heap,
-                host,
-                Smi::new(encode_runtime_payload(rt))
-                    .into_tagged()
-                    .as_maybe_weak(),
-            ),
-        }
+            state_slot.set_release(heap, host, callee.as_weak());
+            match record {
+                // bytecode: the payload IS the resolved info
+                CallRecord::Bytecode(info) => tag_slot.set_release(heap, host, info.erase()),
+                // runtime: index and argument shape packed into the payload
+                CallRecord::Native(rt) => tag_slot.set_release(
+                    heap,
+                    host,
+                    Smi::new(encode_runtime_payload(rt))
+                        .into_tagged()
+                        .as_maybe_weak(),
+                ),
+            }
+        });
     }
 }

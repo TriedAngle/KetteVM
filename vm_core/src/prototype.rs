@@ -377,7 +377,7 @@ fn append_prototype_child<'s, T: 's>(
                 .prototype_users(heap)
                 .expect("planned against an existing registry");
             let next = array.element_slot(slot).get(heap).to_i64().unwrap_or(0);
-            array.set_weak(heap, slot, child.as_tagged(heap).erase());
+            array.set(heap, slot, child.as_tagged(heap).erase().as_weak());
             array.set(heap, 0, Smi::new(next).into_tagged().as_maybe_weak());
             slot as i64
         }

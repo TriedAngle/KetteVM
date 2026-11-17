@@ -1,6 +1,6 @@
 use crate::{
-    EdgeVisitable, GcSlot, HandleSlice, Header, Heap, HeapObject, MaybeWeak, MaybeWeakGcSlot,
-    ObjectKind, Smi, Tagged, Value, Visitor,
+    AtomicMaybeWeakGcSlot, EdgeVisitable, GcSlot, HandleSlice, Header, Heap, HeapObject, MaybeWeak,
+    MaybeWeakStore, ObjectKind, Smi, Tagged, Value, Visitor,
 };
 use core::alloc::Layout;
 
@@ -95,7 +95,7 @@ impl<T: 'static> EdgeVisitable for FixedArray<T> {
 pub struct WeakFixedArray<T = Value> {
     pub header: Header,
     pub size: GcSlot<Smi>,
-    pub values: [MaybeWeakGcSlot<T>; 0],
+    pub values: [AtomicMaybeWeakGcSlot<T>; 0],
 }
 
 pub struct WeakFixedArrayInit<'a, T = Value> {
@@ -104,7 +104,7 @@ pub struct WeakFixedArrayInit<'a, T = Value> {
 
 impl<T: 'static> WeakFixedArray<T> {
     pub fn layout_for(len: usize) -> Layout {
-        let values_layout = Layout::array::<MaybeWeakGcSlot<T>>(len).expect("values layout");
+        let values_layout = Layout::array::<AtomicMaybeWeakGcSlot<T>>(len).expect("values layout");
         Layout::new::<Self>()
             .extend(values_layout)
             .expect("weak array layout")
@@ -119,40 +119,35 @@ impl<T: 'static> WeakFixedArray<T> {
         self.len() == 0
     }
 
-    pub fn data_ptr(&self) -> *mut MaybeWeakGcSlot<T> {
-        self.values.as_ptr() as *mut MaybeWeakGcSlot<T>
+    #[inline(always)]
+    pub fn data_ptr(&self) -> *mut AtomicMaybeWeakGcSlot<T> {
+        self.values.as_ptr() as *mut AtomicMaybeWeakGcSlot<T>
     }
 
-    pub fn as_slice(&self) -> &[MaybeWeakGcSlot<T>] {
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[AtomicMaybeWeakGcSlot<T>] {
         unsafe { core::slice::from_raw_parts(self.data_ptr(), self.len()) }
     }
 
-    pub fn element_slot(&self, i: usize) -> &MaybeWeakGcSlot<T> {
+    #[inline(always)]
+    pub fn element_slot(&self, i: usize) -> &AtomicMaybeWeakGcSlot<T> {
         debug_assert!(i < self.len());
         unsafe { &*self.values.as_ptr().add(i) }
     }
 
+    #[inline(always)]
     pub fn get<'a>(&self, heap: &'a Heap, i: usize) -> Tagged<'a, MaybeWeak<T>> {
         self.element_slot(i).get(heap)
     }
 
-    pub fn set_strong<'a>(&self, heap: &Heap, i: usize, v: impl Into<Tagged<'a, T>>)
+    /// Stores a strong or maybe-weak word, taking the barrier for live
+    /// references.
+    #[inline]
+    pub fn set<'a, V>(&self, heap: &Heap, i: usize, v: V)
     where
+        V: MaybeWeakStore<'a, T>,
         T: 'a,
     {
-        self.element_slot(i).set_strong(heap, self.tagged(heap), v);
-    }
-
-    pub fn set_weak<'a>(&self, heap: &Heap, i: usize, v: impl Into<Tagged<'a, T>>)
-    where
-        T: 'a,
-    {
-        self.element_slot(i).set_weak(heap, self.tagged(heap), v);
-    }
-
-    /// Store an already-encoded maybe-weak word verbatim (strong, weak, Smi
-    /// or cleared), taking the write barrier for live references.
-    pub fn set<'a>(&self, heap: &Heap, i: usize, v: Tagged<'a, MaybeWeak<T>>) {
         self.element_slot(i).set(heap, self.tagged(heap), v);
     }
 }

@@ -8,6 +8,7 @@ libffi = "5"
 libc = { workspace = true }
 heap_api = { path = "../collectors/heap_api" }
 bytecode = { path = "../bytecode" }
+structures = { path = "../structures" }
 trace = { path = "../trace" }
 
 [features]
