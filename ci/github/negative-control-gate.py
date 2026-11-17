@@ -98,33 +98,27 @@ if not need:
 # ── Rule 1 (span-level): on each declared branch, every
 # ── NOT-opted-out test region must be cosmetic-equal.  ──
 # Every violation is collected and reported — one round of fixing.
-# ── Branch declarations: local (`/name`) or external (a full
-# ── branch URL: https://github.com/O/R/tree/branch) ──
-import re as _re
-_EXT = _re.compile(r"^https://github\.com/([^/]+)/([^/]+)/tree/(.+)$")
-
-def entry_of(b):
-    m = _EXT.match(b)
-    if m:
-        return ("ext", "https://github.com/%s/%s.git" % (m.group(1), m.group(2)), m.group(3))
-    return ("local", None, b[1:] if b.startswith("/") else b)
-
+# ── Branch resolution: origin first, then — and only then — the
+# ── PR's own head repository (NC_HEAD_REPO; a fork for fork PRs,
+# ── identical to origin for same-repo PRs). Declarations are plain
+# ── `/name` entries; no arbitrary external repositories.
 missing, fetched, violations = [], {}, []
-external = {}   # ref -> (repo_url, sha)
+external = {}   # ref -> (repo_url, sha) — fetched from the HEAD repo
+head_repo = os.environ.get("NC_HEAD_REPO", "")
 for b in branches:
-    kind, repo_url, ref = entry_of(b)
-    if kind == "local":
-        if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-            missing.append(ref)
-            continue
-    else:
-        if sh("git", "fetch", "--depth=1", repo_url, ref, check=False).returncode != 0:
-            missing.append(b)
-            continue
+    ref = b[1:] if b.startswith("/") else b
+    source = None
+    if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode == 0:
+        source = "origin"
+    elif head_repo and sh("git", "fetch", "--depth=1", head_repo, ref, check=False).returncode == 0:
+        source = head_repo
+    if source is None:
+        missing.append(ref)
+        continue
     sha = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
     fetched[ref] = sha
-    if kind == "ext":
-        external[ref] = (repo_url, sha)
+    if source != "origin":
+        external[ref] = (source, sha)
 
 # ── External verification — BEFORE any external code is built or ──
 # ── run: the diff head..external must be limited to non-test Rust ──
@@ -134,7 +128,7 @@ def head_spans(f):
     return spans_for(f, txt) or [], txt
 
 ext_bad = []
-for ref, (repo_url, sha) in sorted(external.items()):
+for ref, (repo_url, sha) in sorted(external.items()):  # head-repo branches only
     ns = sh("git", "diff", "--name-status", head, sha).stdout
     for line in ns.splitlines():
         parts = line.split("\t")
@@ -150,7 +144,7 @@ for ref, (repo_url, sha) in sorted(external.items()):
             sp, _ = head_spans(path)
             hunks = []
             d = sh("git", "diff", "-U0", head, sha, "--", path).stdout
-            for h in _re.finditer(r"^@@[^+]*\+(\d+)(?:,(\d+))? @@", d, _re.M):
+            for h in re.finditer(r"^@@[^+]*\+(\d+)(?:,(\d+))? @@", d, re.M):
                 s = int(h.group(1)); e = s + int(h.group(2) or 1) - 1
                 if e >= s:
                     hunks.append((s, e))
@@ -166,8 +160,8 @@ for ref, path, why in ext_bad:
 if ext_bad:
     sys.exit(1)
 if external:
-    print("external branches verified: diffs limited to non-test Rust lines"
-          " in pre-existing files")
+    print("head-repo branches verified: diffs limited to non-test Rust"
+          " lines in pre-existing files")
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []

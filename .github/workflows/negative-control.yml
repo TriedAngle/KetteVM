@@ -121,7 +121,7 @@ jobs:
               if stripped.startswith("```"):
                   in_block = not in_block
                   continue
-              if in_block and which == "nc" and (stripped.startswith("/") or stripped.startswith("http")):
+              if in_block and which == "nc" and stripped.startswith("/"):
                   branches.append(stripped)
               if in_block and which == "cosmetic" and stripped:
                   cosmetic.append(stripped)
@@ -139,6 +139,10 @@ jobs:
           COSMETIC: ${{ steps.parse.outputs.cosmetic }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # the ONLY fallback source: the PR's own head repository
+          # (a fork's branches for fork PRs; identical to origin for
+          # same-repo PRs). No arbitrary external repositories.
+          NC_HEAD_REPO: ${{ github.event.pull_request.head.repo.clone_url }}
         run: |
           set -eu
           python3 ci/github/negative-control-gate.py
