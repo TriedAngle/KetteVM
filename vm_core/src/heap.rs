@@ -548,6 +548,28 @@ impl<T> AtomicGcSlot<T> {
 }
 
 impl AtomicGcSlot<Smi> {
+    /// The packed Smi payload without a heap borrow.
+    #[inline(always)]
+    pub fn load_smi_relaxed(&self) -> Smi {
+        let raw = self.slot.as_raw().load_atomic(Ordering::Relaxed);
+        debug_assert!(
+            Value::from_bits(raw).is_smi(),
+            "AtomicGcSlot<Smi> invariant violated"
+        );
+        Smi::new((raw as i64) >> 1)
+    }
+
+    /// The packed Smi payload without a heap borrow, with acquire ordering.
+    #[inline(always)]
+    pub fn load_smi_acquire(&self) -> Smi {
+        let raw = self.slot.as_raw().load_atomic(Ordering::Acquire);
+        debug_assert!(
+            Value::from_bits(raw).is_smi(),
+            "AtomicGcSlot<Smi> invariant violated"
+        );
+        Smi::new((raw as i64) >> 1)
+    }
+
     /// The packed Smi payload (used for bit-field counters).
     pub fn load_smi(&self, heap: &Heap) -> Smi {
         Smi::decode(Value::from_bits(self.load_word(heap)))

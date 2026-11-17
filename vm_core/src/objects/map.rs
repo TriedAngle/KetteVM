@@ -1,7 +1,7 @@
 use crate::{
-    AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
-    HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
-    Smi, StringRef, Symbol, Tagged, Value, Visitor, WeakFixedArray,
+    AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, Cell, Compare, DenseString,
+    EdgeVisitable, GcSlot, Handle, Header, Heap, HeapObject, MaybeWeak, NativeIndex, ObjectKind,
+    OptionGcSlot, PrototypeInfo, Smi, StringRef, Symbol, Tagged, Value, Visitor, WeakFixedArray,
 };
 use core::alloc::Layout;
 
@@ -10,8 +10,8 @@ pub struct Map {
     pub header: Header,
     pub value_slot_count: GcSlot<Smi>,
     pub descriptor_count: GcSlot<Smi>,
-    /// Object kind tag (low byte) and capability flags (second byte).
-    pub kind: GcSlot<Smi>,
+    /// Object kind tag, capability flags, and atomic dynamic flags.
+    pub flags: AtomicGcSlot<Smi>,
     /// The prototype(s) for property lookup:
     /// - an object: single parent (JS `[[Prototype]]`)
     /// - a `FixedArray` of objects: multiple parents in priority order (Self-style `parent*`)
@@ -23,7 +23,7 @@ pub struct Map {
     /// publication, inserts race-publish a grown copy with a CAS.
     pub transitions: AtomicOptionGcSlot<WeakFixedArray>,
     pub prototype_info: AtomicOptionGcSlot<PrototypeInfo>,
-    pub prototype_validity_cell: MaybeWeakGcSlot<Cell>,
+    pub prototype_validity_cell: AtomicMaybeWeakGcSlot<Cell>,
     pub descriptors: [SlotDescriptor; 0],
 }
 
@@ -54,25 +54,29 @@ impl Map {
         self.pred.get(heap)
     }
 
+    #[inline(always)]
     pub fn kind(&self) -> MapKind {
-        MapKind::new(self.kind.to_smi_unchecked().value() as u64)
+        MapKind::new(self.flags.load_smi_relaxed().value() as u64)
     }
 
+    #[inline(always)]
     pub fn is_prototype(&self) -> bool {
-        self.kind().is_prototype()
+        MapKind::new(self.flags.load_smi_acquire().value() as u64).is_prototype()
     }
 
-    pub fn mark_prototype(&self, heap: &Heap) {
-        let kind = self.kind();
-        if kind.contains(MapKind::PROTOTYPE) {
-            return;
+    pub fn mark_prototype(&self, _heap: &Heap) {
+        let mut flags = self.flags.load_smi_relaxed();
+        loop {
+            let kind = MapKind::new(flags.value() as u64);
+            if kind.contains(MapKind::PROTOTYPE) {
+                return;
+            }
+            let new = Smi::new(kind.union(MapKind::PROTOTYPE).bits() as i64);
+            match self.flags.compare_exchange_smi(flags, new) {
+                Ok(_) => return,
+                Err(observed) => flags = observed,
+            }
         }
-        let host = self.tagged(heap);
-        self.kind.set(
-            heap,
-            host,
-            Smi::new(kind.union(MapKind::PROTOTYPE).bits() as i64),
-        );
     }
 
     pub fn try_get_prototype_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, PrototypeInfo>> {
@@ -80,7 +84,7 @@ impl Map {
     }
 
     pub fn published_validity_cell<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Cell>> {
-        self.prototype_validity_cell.get(heap).as_strong()
+        self.prototype_validity_cell.get_acquire(heap).as_strong()
     }
 
     pub fn is_prototype_validity_cell_valid(&self, heap: &Heap) -> bool {
@@ -92,7 +96,7 @@ impl Map {
 
     pub fn set_validity_cell(&self, heap: &Heap, cell: Tagged<'_, Cell>) {
         let host = self.tagged(heap);
-        self.prototype_validity_cell.set(heap, host, cell);
+        self.prototype_validity_cell.set_release(heap, host, cell);
     }
 
     pub fn set_validity_cell_sentinel(&self, heap: &Heap) {
@@ -281,8 +285,7 @@ impl HeapObject for Map {
             .set(heap, host, Smi::new(config.value_slot_count as i64));
         self.descriptor_count
             .set(heap, host, Smi::new(config.descriptors.len() as i64));
-        self.kind
-            .set(heap, host, Smi::new(config.kind.bits() as i64));
+        self.flags.store_smi(Smi::new(config.kind.bits() as i64));
         self.prototype
             .set(heap, host, config.prototype.as_tagged(heap));
         self.pred.clear(heap);
