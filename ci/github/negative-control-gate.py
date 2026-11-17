@@ -274,13 +274,20 @@ def run_target(file, check=False):
         r = sh(*m, "--lib", check=check)
     else:
         r = sh(*m, "--test", r[1][1], check=check)
-    failed = set()
+    failed, passed = set(), set()
     ansi = re.compile(r"\x1b\[[0-9;]*m")
     for line in (r.stdout or "").splitlines():
         line = ansi.sub("", line).strip()
         if line.startswith("test ") and line.endswith("FAILED"):
             failed.add(line[len("test "):-len(" ... FAILED")].strip())
-    return failed
+        elif line.startswith("test ") and line.endswith("ok"):
+            passed.add(line[len("test "):-len(" ... ok")].strip())
+    # a non-zero rc (a test ABORTS: SIGABRT/segv/non-unwinding panic
+    # kills the process mid-run, printing NO result line for itself
+    # or anything after) means every test without an explicit ok did
+    # not pass — callers treat those as failed. Without this, an
+    # aborting fault reads as green and the control proves nothing.
+    return failed, passed, r.returncode
 
 files = sorted({f for f, _ in need})
 runnables = [(f, runner_of(f)) for f in files]
@@ -304,14 +311,15 @@ for f in sorted({f for (f, _p) in need}):
             if ff == f:
                 print(f"  self-control {f} :: {p}: last-touch commit does not build — no proof")
         continue
-    failed = run_target(f, check=False)
+    failed, passed, rc = run_target(f, check=False)
     mine = {p for (ff, p) in need if ff == f}
-    for name in sorted(failed - mine):
+    def did_fail(name):
+        return name in failed or (rc != 0 and name not in passed)
+    for name in sorted(n for n in failed if n not in mine):
         print(f"REJECT: self-control {f}: existing test {name} already fails in the RED commit — "
               "the fault was covered before this PR; inject one the old tests miss")
-    if failed - mine:
         sys.exit(1)
-    for p in sorted(mine & failed):
+    for p in sorted(p for p in mine if did_fail(p)):
         print(f"  self-control {f} :: {p}: FAILS in its own last-touch commit")
         self_caught.add((f, p))
 sh("git", "checkout", "-q", head)
@@ -340,14 +348,18 @@ for ref, sha in sorted(fetched.items()):
         broken.append(ref)
         continue
     for f in sorted({f for (f, _p) in need_b}):
-        failed = run_target(f, check=False)
+        failed, passed, rc = run_target(f, check=False)
         mine = {p for (ff, p) in need_b if ff == f}
-        for name in sorted(failed - mine):
+        def did_fail(name):
+            return name in failed or (rc != 0 and name not in passed)
+        for name in sorted(n for n in failed if n not in mine):
             already.append((ref, f, name))
         for (ff, p) in sorted(need_b):
             if ff == f:
-                caught = p in failed
-                print(f"  {f} :: {p}: {'FAIL (caught)' if caught else 'pass'}")
+                caught = did_fail(p)
+                how = ("FAIL (caught)" if p in failed
+                       else "ABORT (caught)" if caught else "pass")
+                print(f"  {f} :: {p}: {how}")
                 if caught:
                     results[(f, p)] = True
 
