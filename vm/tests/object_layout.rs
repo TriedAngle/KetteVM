@@ -1,17 +1,17 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::ffi::{TypeId, TypeKind};
 use vm::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, AtomicI64Object, AtomicI64ObjectInit, CFunction,
-    CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue, CValueInit, CallableInfoInit,
-    CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject, DataHandler,
-    DataHandlerInit, DefaultInterpreter, DenseString, Encoding, ExternalString, ExternalStringInit,
-    FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float, ForeignLibrary,
-    ForeignLibraryInit, Handle, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit,
-    HeapPtr, Map, MapInit, MapKind, MaybeWeak, NameToIndexHashTable, NameToIndexHashTableInit,
-    NativeIndex, NumberDictionary, NumberDictionaryInit, PrototypeInfo, ProxyInit, ProxyObject,
-    RawCell, RuntimeId, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, Smi,
-    Symbol, Tagged, ThreadObject, ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String, VM, Value,
-    Visitor, VmCore, WEAK_PTR, WeakFixedArray, WeakFixedArrayInit, object_layout, visit_object,
+    AccessorInfo, AccessorInfoInit, AccessorPair, AtomicI64Object, AtomicI64ObjectInit, CValue,
+    CValueInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit,
+    ContextObject, DataHandler, DataHandlerInit, DefaultInterpreter, DenseString, Encoding,
+    ExternalString, ExternalStringInit, FeedbackVector, FeedbackVectorInit, FixedArray,
+    FixedByteArray, Float, ForeignLibrary, ForeignLibraryInit, Handle, HandleSlice,
+    HandlerEntryInit, HandlerTable, HandlerTableInit, HeapPtr, Map, MapInit, MapKind, MaybeWeak,
+    NameToIndexHashTable, NameToIndexHashTableInit, NativeIndex, NumberDictionary,
+    NumberDictionaryInit, PrototypeInfo, ProxyInit, ProxyObject, RawCell, RuntimeId, ScopeInfo,
+    ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, Smi, Symbol, Tagged, ThreadObject,
+    ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String, VM, Value, Visitor, VmCore, WEAK_PTR,
+    WeakFixedArray, WeakFixedArrayInit, object_layout, visit_object,
 };
 
 struct Visited(Vec<usize>);
@@ -575,28 +575,22 @@ fn every_object_kind_visits_its_entire_layout() {
             );
         }
 
-        let pointer = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                pointee: type_info.clone(),
-                address: 0x1000 as *mut u8,
-                flags: CPointerFlags::NONE,
+        let cvalue = heap.allocate_handle::<CValue>(
+            CValueInit {
+                ty: type_info.clone(),
+                map: None,
+                address: bytes.as_tagged(heap).as_ptr() as *mut u8,
+                flags: vm::CValueFlags::NONE,
+                storage: Some(bytes.clone()),
                 library: None,
+                callable: None,
             },
             &scope,
         );
-        {
-            let raw = pointer.as_tagged(heap).as_ref();
-            assert_edges!(
-                "CPointer",
-                raw,
-                [raw.header.map, raw.pointee, raw.address, raw.library,]
-            );
-        }
-
         let library_path = DenseString::from_utf8(heap, &scope, "");
         let library = heap.allocate_handle::<ForeignLibrary>(
             ForeignLibraryInit {
-                handle: pointer.clone(),
+                handle: cvalue.clone(),
                 path: library_path,
             },
             &scope,
@@ -610,45 +604,22 @@ fn every_object_kind_visits_its_entire_layout() {
             );
         }
 
-        let function = heap.allocate_handle::<CFunction>(
-            CFunctionInit {
-                info: callable_info.clone(),
-                signature: type_info.clone(),
-                target: pointer.clone(),
-                library: Some(library.clone()),
-            },
-            &scope,
-        );
-        {
-            let raw = function.as_tagged(heap).as_ref();
-            assert_edges!(
-                "CFunction",
-                raw,
-                [
-                    raw.header.map,
-                    raw.info,
-                    raw.signature,
-                    raw.target,
-                    raw.library,
-                ]
-            );
-        }
-
-        let cvalue = heap.allocate_handle::<CValue>(
-            CValueInit {
-                ty: type_info,
-                map: None,
-                backing: scope.handle(bytes.as_tagged(heap).erase()),
-                offset: 0,
-            },
-            &scope,
-        );
         {
             let raw = cvalue.as_tagged(heap).as_ref();
             assert_edges!(
                 "CValue",
                 raw,
-                [raw.header.map, raw.slots, raw.elements, raw.ty, raw.backing,]
+                [
+                    raw.header.map,
+                    raw.slots,
+                    raw.elements,
+                    raw.ty,
+                    raw.address,
+                    raw.flags,
+                    raw.storage,
+                    raw.library,
+                    raw.callable,
+                ]
             );
         }
 

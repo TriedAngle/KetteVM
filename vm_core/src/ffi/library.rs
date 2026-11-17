@@ -1,8 +1,8 @@
 use crate::ffi::platform;
 use crate::ffi::{FfiError, FfiResult, FfiState, TypeId};
 use crate::{
-    CPointer, CPointerFlags, CPointerInit, ForeignLibrary, ForeignLibraryInit, Handle, HandleScope,
-    Heap, TypeInfo, VM,
+    CValue, CValueFlags, CValueInit, ForeignLibrary, ForeignLibraryInit, Handle, HandleScope, Heap,
+    TypeInfo, VM,
 };
 
 impl FfiState {
@@ -21,13 +21,15 @@ impl FfiState {
             .get(heap, TypeId::VOID)
             .expect("C FFI builtins are installed during VM setup");
         let void = scope.handle(void);
-        let flags = CPointerFlags::NONE;
-        let handle = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                pointee: void,
+        let handle = heap.allocate_handle::<CValue>(
+            CValueInit {
+                ty: void,
+                map: None,
                 address,
-                flags,
+                flags: CValueFlags::NONE,
+                storage: None,
                 library: None,
+                callable: None,
             },
             scope,
         );
@@ -58,7 +60,7 @@ impl FfiState {
         library: &Handle<ForeignLibrary>,
         name: &str,
         ty: &Handle<TypeInfo>,
-    ) -> FfiResult<Handle<'s, CPointer>> {
+    ) -> FfiResult<Handle<'s, CValue>> {
         let lookup = {
             let library = library.as_tagged(heap);
             if !library.is_live(heap) {
@@ -67,19 +69,32 @@ impl FfiState {
             library.handle(heap).address() as usize
         };
         let address = platform::symbol(lookup, name)? as *mut u8;
-        let pointer = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                pointee: ty.clone(),
+        // `ty` describes the pointer; the value is what it points at.
+        let pointee = ty.as_tagged(heap).pointee(heap);
+        let ty = match pointee {
+            Some(pointee) => scope.handle(pointee),
+            None => ty.clone(),
+        };
+        let map = ty
+            .as_tagged(heap)
+            .value_map(heap)
+            .map(|map| scope.handle(map));
+        let value = heap.allocate_handle::<CValue>(
+            CValueInit {
+                ty: ty.clone(),
+                map,
                 address,
-                flags: CPointerFlags::NONE,
+                flags: CValueFlags::POINTER,
+                storage: None,
                 library: None,
+                callable: None,
             },
             scope,
         );
-        pointer
+        value
             .as_tagged(heap)
             .set_library(heap, library.as_tagged(heap));
-        Ok(pointer)
+        Ok(value)
     }
 
     /// The path a library was opened from; `""` for the current process.

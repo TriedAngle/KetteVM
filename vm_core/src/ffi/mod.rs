@@ -269,6 +269,16 @@ impl CallPlan {
 }
 
 fn lower(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<Type> {
+    // libffi cannot represent a zero-size aggregate, and C gives zero-size
+    // objects no by-value ABI: a zero-length array is only usable as a struct
+    // field, where it contributes no bytes and is not part of the ABI shape.
+    if matches!(
+        ty.kind(),
+        TypeKind::Struct | TypeKind::Union | TypeKind::Array
+    ) && ty.size() == 0
+    {
+        return Err(FfiError::UnsupportedType(ty.id()));
+    }
     Ok(match ty.kind() {
         TypeKind::Bool | TypeKind::U8 | TypeKind::Char => Type::u8(),
         TypeKind::I8 => Type::i8(),
@@ -290,20 +300,21 @@ fn lower(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<Type> {
                     .at(heap, index + 1)
                     .get_as::<TypeInfo>(heap)
                     .ok_or(FfiError::UnsupportedType(ty.id()))?;
-                elements.push(lower(heap, field)?);
+                if field.size() > 0 {
+                    elements.push(lower(heap, field)?);
+                }
                 index += 3;
             }
             Type::structure(elements)
         }
         // libffi has no array node: a fixed array is a struct of elements.
-        TypeKind::Array if ty.len() > 0 => {
+        TypeKind::Array => {
             let element = ty.element(heap).ok_or(FfiError::UnsupportedType(ty.id()))?;
             let lowered = lower(heap, element)?;
-            let elements = (0..ty.len()).map(|_| lowered.clone()).collect::<Vec<_>>();
-            Type::structure(elements)
+            Type::structure((0..ty.len()).map(|_| lowered.clone()))
         }
-        // libffi has no union node, and a zero-length array has no layout.
-        TypeKind::Void | TypeKind::Union | TypeKind::Array | TypeKind::Function => {
+        // libffi has no union node.
+        TypeKind::Void | TypeKind::Union | TypeKind::Function => {
             return Err(FfiError::UnsupportedType(ty.id()));
         }
     })

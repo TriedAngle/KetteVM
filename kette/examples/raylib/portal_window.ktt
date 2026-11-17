@@ -1,6 +1,11 @@
 // Kette port of raylib's `textures_portal_window.c` example.
 // https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
 // Run: cargo run -q -p vm -- kette/examples/raylib/portal_window.ktt
+//
+// C values own external storage: every `Type.new()` and every foreign call
+// that returns a struct allocates memory that must be released with `.free()`.
+// Values created once during setup are left to the process exit; the frame
+// loop releases everything it allocates.
 
 let path = if os.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"
@@ -121,10 +126,22 @@ let rlDisableDepthTest = raylib.fn("rlDisableDepthTest", [], FFI.void)
 let sinf = libc.fn("sinf", [FFI.f32], FFI.f32)
 let cosf = libc.fn("cosf", [FFI.f32], FFI.f32)
 
+// Release the external storage of a group of C values.
+let freeAll = { |values|
+    let i = 0
+    while i < values.length {
+        values[i].free()
+        i = i + 1
+    }
+}
+
 let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPlane|
-    let right = Vector3Normalize(Vector3Subtract(bottomRight, bottomLeft))
-    let up = Vector3Normalize(Vector3Subtract(topLeft, bottomLeft))
-    let normal = Vector3Normalize(Vector3CrossProduct(right, up))
+    let bottomEdge = Vector3Subtract(bottomRight, bottomLeft)
+    let right = Vector3Normalize(bottomEdge)
+    let leftEdge = Vector3Subtract(topLeft, bottomLeft)
+    let up = Vector3Normalize(leftEdge)
+    let cross = Vector3CrossProduct(right, up)
+    let normal = Vector3Normalize(cross)
 
     let toBL = Vector3Subtract(bottomLeft, eye)
     let toBR = Vector3Subtract(bottomRight, eye)
@@ -138,21 +155,28 @@ let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, far
 
     rlMatrixMode(RL_PROJECTION)
     rlPushMatrix()
-    rlSetMatrixProjection(MatrixFrustum(
+    let frustum = MatrixFrustum(
         Vector3DotProduct(right, toBL) * scale,
         Vector3DotProduct(right, toBR) * scale,
         Vector3DotProduct(up, toBL) * scale,
         Vector3DotProduct(up, toTL) * scale,
         nearPlane,
-        farPlane))
+        farPlane)
+    rlSetMatrixProjection(frustum)
 
     rlMatrixMode(RL_MODELVIEW)
     rlLoadIdentity()
-    let view = MatrixLookAt(eye, Vector3Subtract(eye, normal), up)
+    let target = Vector3Subtract(eye, normal)
+    let view = MatrixLookAt(eye, target, up)
     let flat = MatrixToFloatV(view)
     rlMultMatrixf(flat)
 
     rlEnableDepthTest()
+
+    freeAll([
+        bottomEdge, right, leftEdge, up, cross, normal, toBL, toBR, toTL,
+        frustum, target, view, flat
+    ])
 }
 
 let endPortalMode3D = { ||
@@ -209,22 +233,27 @@ while !WindowShouldClose() {
     BeginTextureMode(rtPortalView)
     ClearBackground(portalBackground)
     beginPortalMode3D(eyeInB, blInB, brInB, tlInB, 0.05, 100)
+    freeAll([eyeInB, blInB, brInB, tlInB])
 
     DrawGrid(30, 0.8)
 
-    let corePos = Vector3Add(portalB, Vector3.new(0, 2 + sinf(time * 2.5) * 0.4, -4))
+    let coreOffset = Vector3.new(0, 2 + sinf(time * 2.5) * 0.4, -4)
+    let corePos = Vector3Add(portalB, coreOffset)
     DrawSphere(corePos, 1.2, PURPLE)
     DrawSphereWires(corePos, 1.25, 16, 16, MAGENTA)
+    freeAll([coreOffset, corePos])
 
     let i = 0
     while i < 4 {
         let angle = time * 1.5 + i * (PI / 2)
-        let pos = Vector3Add(portalB, Vector3.new(
+        let posOffset = Vector3.new(
             sinf(angle) * 2.5,
             2 + cosf(time * 3 + i) * 0.5,
-            -4 + cosf(angle) * 2.5))
+            -4 + cosf(angle) * 2.5)
+        let pos = Vector3Add(portalB, posOffset)
         DrawCube(pos, 0.5, 0.5, 0.5, LIME)
         DrawCubeWires(pos, 0.52, 0.52, 0.52, DARKGREEN)
+        freeAll([posOffset, pos])
         i = i + 1
     }
 
@@ -272,5 +301,6 @@ while !WindowShouldClose() {
 }
 
 UnloadRenderTexture(rtPortalView)
+freeAll([rtPortalView, camera])
 CloseWindow()
 print("done")

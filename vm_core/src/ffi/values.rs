@@ -1,9 +1,9 @@
 use crate::ffi::memory;
 use crate::ffi::{FfiError, FfiResult, FfiState, TypeId, TypeKind};
 use crate::{
-    CFunction, CFunctionInit, CPointer, CPointerInit, CValue, CValueInit, CallableInfoInit,
-    CallableInfoObject, DenseString, FixedByteArray, ForeignLibrary, FunctionKind, Handle,
-    HandleScope, Heap, NativeIndex, TypeInfo, Utf8String, mode_from_strict,
+    CValue, CValueFlags, CValueInit, CallableInfoInit, CallableInfoObject, DenseString,
+    FixedByteArray, ForeignLibrary, FunctionKind, Handle, HandleScope, Heap, NativeIndex, TypeInfo,
+    Utf8String, mode_from_strict,
 };
 
 impl FfiState {
@@ -95,7 +95,7 @@ impl FfiState {
         Ok(DenseString::from_units(heap, scope, &units))
     }
 
-    /// Allocate zeroed VM-owned storage for an aggregate type.
+    /// Allocate zeroed external storage for a C object.
     pub fn value<'s>(
         &self,
         heap: &mut Heap,
@@ -110,21 +110,26 @@ impl FfiState {
         if layout.align() > 16 {
             return Err(FfiError::UnsupportedAlignment(layout.align()));
         }
-        let size = layout.size().max(1);
+        let address = memory::alloc_zeroed(layout.size(), layout.align())?;
         let map = map.map(|map| scope.handle(map));
-        let inline = heap.allocate_handle::<FixedByteArray>(&vec![0u8; size], scope);
         Ok(heap.allocate_handle::<CValue>(
             CValueInit {
                 ty: ty.clone(),
                 map,
-                backing: inline.erase(),
-                offset: 0,
+                address,
+                flags: CValueFlags::OWNED,
+                storage: None,
+                library: None,
+                callable: None,
             },
             scope,
         ))
     }
 
-    /// A view `delta` bytes into an existing value, sharing its backing.
+    /// A view `delta` bytes into `value`, typed as `ty`.
+    ///
+    /// The view borrows the storage: heap storage stays alive through the
+    /// value, external storage stays valid as long as the owner does.
     pub fn view<'s>(
         &self,
         heap: &mut Heap,
@@ -133,126 +138,31 @@ impl FfiState {
         ty: Handle<TypeInfo>,
         delta: usize,
     ) -> Handle<'s, CValue> {
-        let (backing, offset, map) = {
+        let (address, flags, storage, library, map) = {
             let source = value.as_tagged(heap);
             (
-                scope.handle(source.backing(heap)),
-                source.offset(),
-                ty.as_tagged(heap)
-                    .value_map(heap)
-                    .map(|map| scope.handle(map)),
+                (source.address() as usize).wrapping_add(delta) as *mut u8,
+                source.flags().without(CValueFlags::OWNED),
+                source.storage(heap),
+                source.library(heap),
+                ty.as_tagged(heap).value_map(heap),
             )
         };
+        let storage = storage.map(|storage| scope.handle(storage));
+        let library = library.map(|library| scope.handle(library));
+        let map = map.map(|map| scope.handle(map));
         heap.allocate_handle::<CValue>(
             CValueInit {
                 ty: ty.clone(),
                 map,
-                backing,
-                offset: offset + delta,
+                address,
+                flags,
+                storage,
+                library,
+                callable: None,
             },
             scope,
         )
-    }
-
-    /// A view `delta` bytes into memory addressed by a pointer.
-    pub fn view_pointer<'s>(
-        &self,
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        pointer: &Handle<CPointer>,
-        ty: &Handle<TypeInfo>,
-        delta: usize,
-    ) -> FfiResult<Handle<'s, CValue>> {
-        pointer.as_tagged(heap).check_live(heap)?;
-        let map = ty
-            .as_tagged(heap)
-            .value_map(heap)
-            .map(|map| scope.handle(map));
-        Ok(heap.allocate_handle::<CValue>(
-            CValueInit {
-                ty: ty.clone(),
-                map,
-                backing: pointer.clone().erase(),
-                offset: delta,
-            },
-            scope,
-        ))
-    }
-
-    /// A pointer with the same storage and ownership, retyped.
-    pub fn cast_pointer<'s>(
-        &self,
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        pointer: &Handle<CPointer>,
-        ty: &Handle<TypeInfo>,
-    ) -> FfiResult<Handle<'s, CPointer>> {
-        let (address, flags, library) = {
-            let source = pointer.as_tagged(heap);
-            (
-                source.address(),
-                source.flags(),
-                source.library(heap).map(|library| scope.handle(library)),
-            )
-        };
-        let out = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                pointee: ty.clone(),
-                address,
-                flags,
-                library: None,
-            },
-            scope,
-        );
-        if let Some(library) = library {
-            out.as_tagged(heap)
-                .set_library(heap, library.as_tagged(heap));
-        }
-        Ok(out)
-    }
-
-    /// `pointer + elements`, scaled by the pointee size (C semantics).
-    pub fn pointer_offset<'s>(
-        &self,
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        pointer: &Handle<CPointer>,
-        elements: i64,
-    ) -> FfiResult<Handle<'s, CPointer>> {
-        let (pointee, element_size) = {
-            let source = pointer.as_tagged(heap);
-            let pointee = source.pointee(heap);
-            (pointee, pointee.size().max(1))
-        };
-        let delta = elements
-            .checked_mul(element_size as i64)
-            .ok_or(FfiError::AddressOverflow)?;
-        let (address, flags, library) = {
-            let source = pointer.as_tagged(heap);
-            (
-                source.address(),
-                source.flags(),
-                source.library(heap).map(|library| scope.handle(library)),
-            )
-        };
-        let address = (address as usize)
-            .checked_add_signed(delta as isize)
-            .ok_or(FfiError::AddressOverflow)? as *mut u8;
-        let ty = scope.handle(pointee);
-        let out = heap.allocate_handle::<CPointer>(
-            CPointerInit {
-                pointee: ty,
-                address,
-                flags,
-                library: None,
-            },
-            scope,
-        );
-        if let Some(library) = library {
-            out.as_tagged(heap)
-                .set_library(heap, library.as_tagged(heap));
-        }
-        Ok(out)
     }
 
     pub fn value_add<'s>(
@@ -267,15 +177,15 @@ impl FfiState {
         }
         let (ty, stride) = {
             let info = value.as_tagged(heap).c_type(heap);
-            let info = info.as_ref();
-            let stride = if info.kind() == TypeKind::Array {
-                info.element(heap)
+            let stride = if info.as_ref().kind() == TypeKind::Array {
+                info.as_ref()
+                    .element(heap)
                     .map(|element| element.size())
                     .unwrap_or(1)
             } else {
-                info.size()
+                info.as_ref().size()
             };
-            (value.as_tagged(heap).c_type(heap), stride.max(1))
+            (info, stride.max(1))
         };
         let delta = (elements as usize)
             .checked_mul(stride)
@@ -294,13 +204,18 @@ impl FfiState {
         self.view(heap, scope, value, ty, 0)
     }
 
-    /// A detached copy of a value, with its own inline storage.
+    /// A detached copy of a value, with its own external storage.
     pub fn copy_value<'s>(
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         value: &Handle<CValue>,
     ) -> FfiResult<Handle<'s, CValue>> {
+        if value.as_tagged(heap).is_pointer() {
+            return Err(FfiError::InvalidArgument(
+                "cannot copy a C pointer; read through it first",
+            ));
+        }
         let ty = {
             let ty = value.as_tagged(heap).c_type(heap);
             scope.handle(ty)
@@ -315,45 +230,89 @@ impl FfiState {
         Ok(copy)
     }
 
-    /// A view over `pointer`, typed as `ty`.
+    /// A borrowed view over `value`, typed as `ty`.
     pub fn wrap_value<'s>(
         &self,
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         ty: &Handle<TypeInfo>,
-        pointer: &Handle<CPointer>,
+        value: &Handle<CValue>,
     ) -> FfiResult<Handle<'s, CValue>> {
-        let (expected, actual, map) = {
-            let info = ty.as_tagged(heap);
-            let pointee = pointer.as_tagged(heap).pointee(heap);
-            (info.id(), pointee.id(), info.value_map(heap))
+        let (expected, actual) = {
+            let source = value.as_tagged(heap);
+            (ty.as_tagged(heap).id(), source.c_type(heap).id())
         };
-        let same = {
-            let info = ty.as_tagged(heap);
-            pointer.as_tagged(heap).pointee(heap).ptr_eq(info)
-        };
-        let void = {
-            let info = ty.as_tagged(heap);
-            let _ = info;
-            pointer.as_tagged(heap).pointee(heap).kind() == TypeKind::Void
-        };
+        let same = value
+            .as_tagged(heap)
+            .c_type(heap)
+            .ptr_eq(ty.as_tagged(heap));
+        let void = value.as_tagged(heap).c_type(heap).kind() == TypeKind::Void;
         if !same && !void {
             return Err(FfiError::MismatchedType {
                 expected,
                 found: actual,
             });
         }
-        pointer.as_tagged(heap).check_live(heap)?;
-        let map = map.map(|map| scope.handle(map));
+        value.as_tagged(heap).check_live(heap)?;
+        let map = ty
+            .as_tagged(heap)
+            .value_map(heap)
+            .map(|map| scope.handle(map));
+        let storage = value.as_tagged(heap).storage(heap).map(|s| scope.handle(s));
+        let library = value.as_tagged(heap).library(heap).map(|l| scope.handle(l));
         Ok(heap.allocate_handle::<CValue>(
             CValueInit {
                 ty: ty.clone(),
                 map,
-                backing: pointer.clone().erase(),
-                offset: 0,
+                address: value.as_tagged(heap).address(),
+                flags: CValueFlags::NONE,
+                storage,
+                library,
+                callable: None,
             },
             scope,
         ))
+    }
+
+    /// A borrowed view over VM-owned bytes, typed as `ty`.
+    pub fn wrap_bytes<'s>(
+        &self,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        ty: &Handle<TypeInfo>,
+        bytes: &Handle<FixedByteArray>,
+    ) -> Handle<'s, CValue> {
+        let address = bytes.as_tagged(heap).as_ptr() as *mut u8;
+        let map = ty
+            .as_tagged(heap)
+            .value_map(heap)
+            .map(|map| scope.handle(map));
+        heap.allocate_handle::<CValue>(
+            CValueInit {
+                ty: ty.clone(),
+                map,
+                address,
+                flags: CValueFlags::NONE,
+                storage: Some(bytes.clone()),
+                library: None,
+                callable: None,
+            },
+            scope,
+        )
+    }
+
+    /// Release external storage owned by `value`; idempotent.
+    pub fn free_value(&self, heap: &Heap, value: &Handle<CValue>) -> FfiResult<()> {
+        let value = value.as_tagged(heap);
+        if value.is_dead() {
+            return Ok(());
+        }
+        if !value.is_owned() {
+            return Err(FfiError::NotOwned);
+        }
+        memory::free(value.address());
+        value.kill(heap);
+        Ok(())
     }
 
     /// A callable C function object for an already-resolved target.
@@ -363,9 +322,9 @@ impl FfiState {
         scope: &'s HandleScope<'_>,
         trampoline: NativeIndex,
         signature: &Handle<TypeInfo>,
-        target: &Handle<CPointer>,
+        target: &Handle<CValue>,
         library: &Handle<ForeignLibrary>,
-    ) -> FfiResult<Handle<'s, CFunction>> {
+    ) -> FfiResult<Handle<'s, CValue>> {
         let info = signature.as_tagged(heap);
         if info.kind() != TypeKind::Function {
             return Err(FfiError::NotAFunction(info.id()));
@@ -382,12 +341,20 @@ impl FfiState {
         callable
             .as_tagged(heap)
             .set_metadata_full(heap, None, arity, arity, FunctionKind::Normal);
-        Ok(heap.allocate_handle::<CFunction>(
-            CFunctionInit {
-                info: callable,
-                signature: signature.clone(),
-                target: target.clone(),
+        let map = heap.known().c_function_map.get_handle(heap, scope);
+        let storage = target
+            .as_tagged(heap)
+            .storage(heap)
+            .map(|s| scope.handle(s));
+        Ok(heap.allocate_handle::<CValue>(
+            CValueInit {
+                ty: signature.clone(),
+                map: Some(map),
+                address: target.as_tagged(heap).address(),
+                flags: CValueFlags::NONE,
+                storage,
                 library: Some(library.clone()),
+                callable: Some(callable),
             },
             scope,
         ))

@@ -7,86 +7,17 @@ use crate::{
 };
 use core::alloc::Layout;
 
-pub struct CFunctionInit<'a> {
-    pub info: Handle<'a, CallableInfoObject>,
-    pub signature: Handle<'a, TypeInfo>,
-    pub target: Handle<'a, CPointer>,
-    pub library: Option<Handle<'a, ForeignLibrary>>,
-}
-
-#[repr(C)]
-pub struct CFunction {
-    pub header: Header,
-    pub info: GcSlot<CallableInfoObject>,
-    pub signature: GcSlot<TypeInfo>,
-    pub target: GcSlot<CPointer>,
-    pub library: OptionGcSlot<ForeignLibrary>,
-}
-
-impl CFunction {
-    pub fn info<'a>(&self, heap: &'a Heap) -> Tagged<'a, CallableInfoObject> {
-        self.info.get(heap)
-    }
-
-    pub fn signature<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
-        self.signature.get(heap)
-    }
-
-    pub fn target<'a>(&self, heap: &'a Heap) -> Tagged<'a, CPointer> {
-        self.target.get(heap)
-    }
-
-    pub fn library<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ForeignLibrary>> {
-        self.library.get(heap)
-    }
-}
-
-impl HeapObject for CFunction {
-    const KIND: ObjectKind = ObjectKind::CFunction;
-    type Init<'a> = CFunctionInit<'a>;
-
-    fn layout_for(_config: &Self::Init<'_>) -> Layout {
-        Layout::new::<Self>()
-    }
-
-    fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        self.header.map.init(heap.known().c_function_map.get(heap));
-        self.info.init_tagged(config.info.as_tagged(heap));
-        self.signature.init_tagged(config.signature.as_tagged(heap));
-        self.target.init_tagged(config.target.as_tagged(heap));
-        match &config.library {
-            Some(library) => self
-                .library
-                .set(heap, self.tagged(heap), library.as_tagged(heap)),
-            None => self.library.clear(heap),
-        }
-    }
-
-    fn header(&self) -> &Header {
-        &self.header
-    }
-
-    fn layout(&self) -> Layout {
-        Layout::new::<Self>()
-    }
-}
-
-impl EdgeVisitable for CFunction {
-    fn visit_edges(&self, visitor: &mut dyn Visitor) {
-        visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.info.as_raw());
-        visitor.visit(self.signature.as_raw());
-        visitor.visit(self.target.as_raw());
-        visitor.visit(self.library.as_raw());
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CPointerFlags(u8);
+pub struct CValueFlags(u8);
 
-impl CPointerFlags {
+impl CValueFlags {
     pub const NONE: Self = Self(0);
-    pub const DEAD: Self = Self(1);
+    /// The value owns its external storage and must be freed.
+    pub const OWNED: Self = Self(1);
+    /// The value was freed.
+    pub const DEAD: Self = Self(2);
+    /// The value came from a pointer-typed expression, not from storage.
+    pub const POINTER: Self = Self(4);
 
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits)
@@ -100,52 +31,64 @@ impl CPointerFlags {
         Self(self.0 | other.0)
     }
 
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 }
 
-pub struct CPointerInit<'a> {
-    /// The type this pointer points at.
-    pub pointee: Handle<'a, TypeInfo>,
+pub struct CValueInit<'a> {
+    /// The C type of the bytes this value points at.
+    pub ty: Handle<'a, TypeInfo>,
+    /// Field accessor map; `None` uses the base `CValue` map.
+    pub map: Option<Handle<'a, Map>>,
     pub address: *mut u8,
-    pub flags: CPointerFlags,
-    pub library: Option<Tagged<'a, ForeignLibrary>>,
+    pub flags: CValueFlags,
+    /// Heap storage that owns the bytes (`FixedByteArray`), when it exists.
+    pub storage: Option<Handle<'a, FixedByteArray>>,
+    /// The library the address belongs to, when it came from one.
+    pub library: Option<Handle<'a, ForeignLibrary>>,
+    /// Callable metadata; only function values have it.
+    pub callable: Option<Handle<'a, CallableInfoObject>>,
 }
 
+/// A typed view over C memory.
+///
+/// `address` is the absolute address of this view, so `base` needs no
+/// offsetting. Bytes are either external (`malloc`'d by the VM or owned by the
+/// C side) or owned by the VM heap, in which case `storage` keeps them alive.
 #[repr(C)]
-pub struct CPointer {
+pub struct CValue {
     pub header: Header,
-    pub pointee: GcSlot<TypeInfo>,
+    pub slots: GcSlot<FixedArray>,
+    pub elements: GcSlot<Value>,
+    pub length: GcSlot<Smi>,
+
+    pub ty: GcSlot<TypeInfo>,
     pub address: GcSlot<Smi>,
-    // TODO: this can be put into the header probably
     pub flags: GcSlot<Smi>,
+    pub storage: OptionGcSlot<FixedByteArray>,
     pub library: OptionGcSlot<ForeignLibrary>,
+    pub callable: OptionGcSlot<CallableInfoObject>,
 }
 
-impl CPointer {
-    /// The owning library, if this pointer came from a loaded library.
-    pub fn library<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ForeignLibrary>> {
-        self.library.get(heap)
-    }
-
-    pub fn set_library(&self, heap: &Heap, library: Tagged<'_, ForeignLibrary>) {
-        self.library.set(heap, self.tagged(heap), library);
-    }
-
-    pub fn pointee<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
-        self.pointee.get(heap)
+impl CValue {
+    pub fn c_type<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
+        self.ty.get(heap)
     }
 
     pub fn address(&self) -> *mut u8 {
         self.address.to_smi_unchecked().value() as usize as *mut u8
     }
 
-    pub fn flags(&self) -> CPointerFlags {
-        CPointerFlags::from_bits(self.flags.to_smi_unchecked().value() as u8)
+    pub fn flags(&self) -> CValueFlags {
+        CValueFlags::from_bits(self.flags.to_smi_unchecked().value() as u8)
     }
 
-    pub fn set_flags(&self, heap: &Heap, flags: CPointerFlags) {
+    pub fn set_flags(&self, heap: &Heap, flags: CValueFlags) {
         let host = self.tagged(heap);
         self.flags.set(heap, host, Smi::new(flags.bits() as i64));
     }
@@ -155,112 +98,58 @@ impl CPointer {
     }
 
     pub fn is_dead(&self) -> bool {
-        self.flags().contains(CPointerFlags::DEAD)
+        self.flags().contains(CValueFlags::DEAD)
     }
 
     pub fn is_live(&self) -> bool {
         !self.is_dead()
     }
 
-    /// Mark the pointer dead; its address is no longer usable.
+    pub fn is_owned(&self) -> bool {
+        self.flags().contains(CValueFlags::OWNED)
+    }
+
+    /// Whether the value came from a pointer-typed expression.
+    pub fn is_pointer(&self) -> bool {
+        self.flags().contains(CValueFlags::POINTER)
+    }
+
+    /// Mark the value dead; its address is no longer usable.
     pub fn kill(&self, heap: &Heap) {
-        let flags = self.flags().union(CPointerFlags::DEAD);
+        let flags = self.flags().union(CValueFlags::DEAD);
         self.set_flags(heap, flags);
     }
-}
 
-impl HeapObject for CPointer {
-    const KIND: ObjectKind = ObjectKind::CPointer;
-    type Init<'a> = CPointerInit<'a>;
-
-    fn layout_for(_config: &Self::Init<'_>) -> Layout {
-        Layout::new::<Self>()
+    pub fn storage<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedByteArray>> {
+        self.storage.get(heap)
     }
 
-    fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        self.header.map.init(heap.known().c_pointer_map.get(heap));
-        self.pointee.init_tagged(config.pointee.as_tagged(heap));
-        self.flags
-            .init_tagged(Smi::new(config.flags.bits() as i64).into());
-        self.address
-            .init_tagged(Smi::new(config.address as usize as i64).into());
-        match config.library {
-            Some(library) => self.library.set(heap, self.tagged(heap), library),
-            None => self.library.clear(heap),
-        }
+    pub fn library<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ForeignLibrary>> {
+        self.library.get(heap)
     }
 
-    fn header(&self) -> &Header {
-        &self.header
+    pub fn set_library(&self, heap: &Heap, library: Tagged<'_, ForeignLibrary>) {
+        self.library.set(heap, self.tagged(heap), library);
     }
 
-    fn layout(&self) -> Layout {
-        Layout::new::<Self>()
-    }
-}
-
-impl EdgeVisitable for CPointer {
-    fn visit_edges(&self, visitor: &mut dyn Visitor) {
-        visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.pointee.as_raw());
-        visitor.visit(self.address.as_raw());
-        visitor.visit(self.library.as_raw());
-    }
-}
-
-pub struct CValueInit<'a> {
-    pub ty: Handle<'a, TypeInfo>,
-    /// Field accessor map; `None` uses the base `CValue` map
-    pub map: Option<Handle<'a, Map>>,
-    /// VM-owned bytes (`FixedByteArray`) or an external pointer (`CPointer`).
-    pub backing: Handle<'a, Value>,
-    pub offset: usize,
-}
-
-#[repr(C)]
-pub struct CValue {
-    pub header: Header,
-    pub slots: GcSlot<FixedArray>,
-    pub elements: GcSlot<Value>,
-    pub length: GcSlot<Smi>,
-
-    pub ty: GcSlot<TypeInfo>,
-    /// VM-owned bytes (`FixedByteArray`) or an external pointer (`CPointer`).
-    pub backing: GcSlot<Value>,
-    pub offset: GcSlot<Smi>,
-}
-
-impl CValue {
-    pub fn c_type<'a>(&self, heap: &'a Heap) -> Tagged<'a, TypeInfo> {
-        self.ty.get(heap)
+    /// Callable metadata; only function values have it.
+    pub fn callable<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, CallableInfoObject>> {
+        self.callable.get(heap)
     }
 
-    pub fn backing<'a>(&self, heap: &'a Heap) -> Tagged<'a, Value> {
-        self.backing.get(heap)
-    }
-
-    pub fn offset(&self) -> usize {
-        self.offset.to_smi_unchecked().value() as usize
-    }
-
-    /// Bytes available from [`Self::base`].
+    /// Bytes available from [`Self::base`]; unbounded without heap storage.
     pub fn remaining(&self, heap: &Heap) -> usize {
-        match self.backing(heap).get_as::<FixedByteArray>(heap) {
-            Some(inline) => inline.len().saturating_sub(self.offset()),
+        match self.storage(heap) {
+            Some(storage) => storage.len().saturating_sub(
+                (self.address() as usize).saturating_sub(storage.as_ptr() as usize),
+            ),
             None => usize::MAX,
         }
     }
 
     pub fn base(&self, heap: &Heap) -> FfiResult<*mut u8> {
-        let backing = self.backing(heap);
-        if let Some(pointer) = backing.get_as::<CPointer>(heap) {
-            pointer.check_live(heap)?;
-            return Ok(pointer.address().wrapping_add(self.offset()));
-        }
-        let inline = backing
-            .get_as::<FixedByteArray>(heap)
-            .expect("C value backing");
-        Ok(inline.as_ptr().wrapping_add(self.offset()) as *mut u8)
+        self.check_live(heap)?;
+        Ok(self.address())
     }
 }
 
@@ -282,9 +171,23 @@ impl HeapObject for CValue {
         self.elements.init(empty.erase());
         self.length.init_tagged(Smi::new(0).into());
         self.ty.init_tagged(config.ty.as_tagged(heap));
-        self.offset
-            .init_tagged(Smi::new(config.offset as i64).into());
-        self.backing.init_tagged(config.backing.as_tagged(heap));
+        self.address
+            .init_tagged(Smi::new(config.address as usize as i64).into());
+        self.flags
+            .init_tagged(Smi::new(config.flags.bits() as i64).into());
+        let host = self.tagged(heap);
+        match config.storage {
+            Some(storage) => self.storage.set(heap, host, storage.as_tagged(heap)),
+            None => self.storage.clear(heap),
+        }
+        match config.library {
+            Some(library) => self.library.set(heap, host, library.as_tagged(heap)),
+            None => self.library.clear(heap),
+        }
+        match config.callable {
+            Some(callable) => self.callable.set(heap, host, callable.as_tagged(heap)),
+            None => self.callable.clear(heap),
+        }
     }
 
     fn header(&self) -> &Header {
@@ -302,24 +205,28 @@ impl EdgeVisitable for CValue {
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
         visitor.visit(self.ty.as_raw());
-        visitor.visit(self.backing.as_raw());
+        visitor.visit(self.address.as_raw());
+        visitor.visit(self.flags.as_raw());
+        visitor.visit(self.storage.as_raw());
+        visitor.visit(self.library.as_raw());
+        visitor.visit(self.callable.as_raw());
     }
 }
 
 pub struct ForeignLibraryInit<'a> {
-    pub handle: Handle<'a, CPointer>,
+    pub handle: Handle<'a, CValue>,
     pub path: Handle<'a, DenseString>,
 }
 
 #[repr(C)]
 pub struct ForeignLibrary {
     pub header: Header,
-    pub handle: GcSlot<CPointer>,
+    pub handle: GcSlot<CValue>,
     pub path: GcSlot<DenseString>,
 }
 
 impl ForeignLibrary {
-    pub fn handle<'a>(&self, heap: &'a Heap) -> Tagged<'a, CPointer> {
+    pub fn handle<'a>(&self, heap: &'a Heap) -> Tagged<'a, CValue> {
         self.handle.get(heap)
     }
 
@@ -603,9 +510,9 @@ impl EdgeVisitable for TypeInfo {
     }
 }
 
-impl CPointer {
-    /// A dead pointer is never usable; a live null pointer is not
-    /// dereferenceable; a pointer whose library was closed is dead.
+impl CValue {
+    /// A dead value is never usable; a live null value is not
+    /// dereferenceable; a value whose library was closed is dead.
     pub fn check_live(&self, heap: &Heap) -> FfiResult<()> {
         if self.is_dead() {
             return Err(FfiError::DeadPointer);
@@ -630,7 +537,7 @@ impl CPointer {
 
 macro_rules! scalar_accessors {
     ($($read:ident, $write:ident: $ty:ty, $size:literal;)*) => {
-        impl CPointer {
+        impl CValue {
             $(
                 pub fn $read(&self, heap: &Heap) -> FfiResult<$ty> {
                     self.check_live(heap)?;

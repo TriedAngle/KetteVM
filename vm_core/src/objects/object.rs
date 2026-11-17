@@ -1,5 +1,5 @@
 use crate::{
-    AccessorPair, CFunction, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
+    AccessorPair, CValue, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
@@ -37,10 +37,10 @@ impl Object {
         if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
             return None;
         }
-        if kind.is_c_function() {
+        if kind.kind() == ObjectKind::CValue {
             // Safety: the map kind is the type witness.
-            let function = unsafe { self.tagged(heap).cast::<CFunction>() };
-            return Some(function.info.get(heap));
+            let value = unsafe { self.tagged(heap).cast::<CValue>() };
+            return value.callable(heap);
         }
         // every non-exotic callable is laid out as [info, context]
         self.slots(heap)
@@ -366,13 +366,12 @@ impl<'a> Tagged<'a, Value> {
         if !kind.is_callable() {
             return None;
         }
-        if kind.is_c_function() {
+        if kind.kind() == ObjectKind::CValue {
             // Safety: the map kind is the type witness.
-            let function = unsafe { obj.cast::<CFunction>() };
-            return function
-                .info
-                .get(heap)
-                .native_index(heap)
+            let value = unsafe { obj.cast::<CValue>() };
+            return value
+                .callable(heap)
+                .and_then(|info| info.native_index(heap))
                 .map(CallTarget::Native);
         }
         // every non-runtime callable object is laid out with

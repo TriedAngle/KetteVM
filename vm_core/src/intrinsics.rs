@@ -84,7 +84,7 @@ pub fn array_length_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) ->
 #[derive(Default)]
 pub struct VmCore {
     pub ffi: FfiState,
-    /// The native every `CFunction` maps to.
+    /// The native every C function value maps to.
     pub ffi_call: NativeIndex,
 }
 

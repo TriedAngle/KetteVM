@@ -438,9 +438,7 @@ impl MapKind {
     pub const CODE: MapKind = MapKind(ObjectKind::Code as u64);
     pub const SCRIPT_CONTEXT_TABLE: MapKind = MapKind(ObjectKind::ScriptContextTable as u64);
     pub const NAME_INDEX_TABLE: MapKind = MapKind(ObjectKind::NameToIndexHashTable as u64);
-    pub const C_POINTER: MapKind = MapKind(ObjectKind::CPointer as u64);
     pub const FOREIGN_LIBRARY: MapKind = MapKind(ObjectKind::ForeignLibrary as u64);
-    pub const C_FUNCTION: MapKind = MapKind(ObjectKind::CFunction as u64);
     pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
     pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
     pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
@@ -494,9 +492,7 @@ impl MapKind {
             Self::CODE => ObjectKind::Code,
             Self::SCRIPT_CONTEXT_TABLE => ObjectKind::ScriptContextTable,
             Self::NAME_INDEX_TABLE => ObjectKind::NameToIndexHashTable,
-            Self::C_POINTER => ObjectKind::CPointer,
             Self::FOREIGN_LIBRARY => ObjectKind::ForeignLibrary,
-            Self::C_FUNCTION => ObjectKind::CFunction,
             Self::C_VALUE => ObjectKind::CValue,
             Self::C_TYPE => ObjectKind::TypeInfo,
             Self::THREAD_OBJECT => ObjectKind::ThreadObject,
@@ -587,11 +583,6 @@ impl MapKind {
     #[inline(always)]
     pub const fn is_callable(self) -> bool {
         self.0 & Self::CALLABLE.0 != 0
-    }
-
-    #[inline(always)]
-    pub const fn is_c_function(self) -> bool {
-        self.0 & Self::KIND_MASK == ObjectKind::CFunction as u64
     }
 
     #[inline(always)]

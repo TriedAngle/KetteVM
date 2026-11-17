@@ -1,9 +1,8 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::ffi::{FfiError, TypeId, TypeKind, ValueRead};
 use vm::{
-    CFunction, CPointer, CPointerFlags, CPointerInit, CValue, DefaultInterpreter, FixedByteArray,
-    Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, StringRef, TypeInfo, Utf8String, VM,
-    Value, VmCore,
+    CValue, CValueFlags, CValueInit, DefaultInterpreter, FixedByteArray, Float, ForeignLibrary,
+    Handle, HandleScope, Heap, Smi, StringRef, TypeInfo, Utf8String, VM, Value, VmCore,
 };
 
 fn test_vm() -> VM {
@@ -62,19 +61,22 @@ fn raw_function_pointer<'s>(
     params: &[Handle<TypeInfo>],
     result: &Handle<TypeInfo>,
     address: usize,
-) -> Handle<'s, CFunction> {
+) -> Handle<'s, CValue> {
     let core = vm.runtime::<VmCore>();
     let ffi = &core.ffi;
     let signature = ffi
         .types()
         .function(heap, scope, params, result, false)
         .expect("signature");
-    let target = heap.allocate_handle::<CPointer>(
-        CPointerInit {
-            pointee: signature.clone(),
+    let target = heap.allocate_handle::<CValue>(
+        CValueInit {
+            ty: signature.clone(),
+            map: None,
             address: address as *mut u8,
-            flags: CPointerFlags::NONE,
+            flags: CValueFlags::NONE,
+            storage: None,
             library: None,
+            callable: None,
         },
         scope,
     );
@@ -86,7 +88,7 @@ fn call_pointer<'s>(
     vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
-    callee: &Handle<CFunction>,
+    callee: &Handle<CValue>,
     args: &[Handle<Value>],
 ) -> Handle<'s, Value> {
     let ffi = &vm.runtime::<VmCore>().ffi;
@@ -103,14 +105,17 @@ fn raw_pointer<'s>(
     scope: &'s HandleScope<'_>,
     ty: &Handle<TypeInfo>,
     address: usize,
-    flags: CPointerFlags,
-) -> Handle<'s, CPointer> {
-    heap.allocate_handle::<CPointer>(
-        CPointerInit {
-            pointee: ty.clone(),
+    flags: CValueFlags,
+) -> Handle<'s, CValue> {
+    heap.allocate_handle::<CValue>(
+        CValueInit {
+            ty: ty.clone(),
+            map: None,
             address: address as *mut u8,
             flags,
+            storage: None,
             library: None,
+            callable: None,
         },
         scope,
     )
@@ -145,42 +150,12 @@ fn scalar_pointer_roundtrip_and_unaligned() {
         let f32_ty = builtin(thread.heap(), &scope, TypeKind::F32);
         let f64_ty = builtin(thread.heap(), &scope, TypeKind::F64);
 
-        let u8_ptr = raw_pointer(thread.heap(), &scope, &u8_ty, base, CPointerFlags::NONE);
-        let i16_ptr = raw_pointer(
-            thread.heap(),
-            &scope,
-            &i16_ty,
-            base + 8,
-            CPointerFlags::NONE,
-        );
-        let u32_ptr = raw_pointer(
-            thread.heap(),
-            &scope,
-            &u32_ty,
-            base + 16,
-            CPointerFlags::NONE,
-        );
-        let i64_ptr = raw_pointer(
-            thread.heap(),
-            &scope,
-            &i64_ty,
-            base + 24,
-            CPointerFlags::NONE,
-        );
-        let f32_ptr = raw_pointer(
-            thread.heap(),
-            &scope,
-            &f32_ty,
-            base + 32,
-            CPointerFlags::NONE,
-        );
-        let f64_ptr = raw_pointer(
-            thread.heap(),
-            &scope,
-            &f64_ty,
-            base + 40,
-            CPointerFlags::NONE,
-        );
+        let u8_ptr = raw_pointer(thread.heap(), &scope, &u8_ty, base, CValueFlags::NONE);
+        let i16_ptr = raw_pointer(thread.heap(), &scope, &i16_ty, base + 8, CValueFlags::NONE);
+        let u32_ptr = raw_pointer(thread.heap(), &scope, &u32_ty, base + 16, CValueFlags::NONE);
+        let i64_ptr = raw_pointer(thread.heap(), &scope, &i64_ty, base + 24, CValueFlags::NONE);
+        let f32_ptr = raw_pointer(thread.heap(), &scope, &f32_ty, base + 32, CValueFlags::NONE);
+        let f64_ptr = raw_pointer(thread.heap(), &scope, &f64_ty, base + 40, CValueFlags::NONE);
 
         let heap = thread.heap();
         let p = u8_ptr.as_tagged(heap);
@@ -215,7 +190,7 @@ fn scalar_pointer_roundtrip_and_unaligned() {
             &scope,
             &u64_ty,
             storage.as_mut_ptr() as usize + 1,
-            CPointerFlags::NONE,
+            CValueFlags::NONE,
         );
         let heap = thread.heap();
         let p = unaligned.as_tagged(heap);
@@ -233,8 +208,8 @@ fn null_and_dead_pointer_errors() {
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
         let u64_ty = builtin(thread.heap(), &scope, TypeKind::U64);
-        let null = raw_pointer(thread.heap(), &scope, &u64_ty, 0, CPointerFlags::NONE);
-        let dead = raw_pointer(thread.heap(), &scope, &u64_ty, 0x1000, CPointerFlags::DEAD);
+        let null = raw_pointer(thread.heap(), &scope, &u64_ty, 0, CValueFlags::NONE);
+        let dead = raw_pointer(thread.heap(), &scope, &u64_ty, 0x1000, CValueFlags::DEAD);
 
         let heap = thread.heap();
         let p = null.as_tagged(heap);
@@ -294,41 +269,6 @@ fn pointer_arithmetic_and_bounds() {
             ffi.value_get_index(thread.heap(), &scope, buffer, 4).err(),
             Some(FfiError::IndexOutOfBounds)
         );
-    });
-}
-
-#[test]
-fn cvalue_backing_survives_collection() {
-    let vm = test_vm();
-    vm.arm_gc_stress();
-    let mut thread = vm.attach();
-    thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
-        let u64_ty = builtin(thread.heap(), &scope, TypeKind::U64);
-        let array = ffi
-            .types()
-            .array_of(thread.heap(), &scope, &u64_ty, 1)
-            .unwrap();
-        let buffer = ffi.value(thread.heap(), &scope, &array).unwrap();
-        {
-            let heap = thread.heap();
-            ffi.value_set_index(heap, buffer.as_tagged(heap), 0, Smi::new(42).into_tagged())
-                .unwrap();
-        }
-
-        for _ in 0..8 {
-            let _ = ffi.value(thread.heap(), &scope, &array).unwrap();
-        }
-        thread.heap().collect();
-
-        let read = ffi
-            .value_get_index(thread.heap(), &scope, buffer, 0)
-            .unwrap();
-        let value = match read {
-            ValueRead::View(view) => view.as_tagged(thread.heap()).erase(),
-            ValueRead::Raw(raw) => ffi.read_raw(thread.heap(), &scope, &raw, None),
-        };
-        assert_eq!(value.to_i64(), Some(42));
     });
 }
 

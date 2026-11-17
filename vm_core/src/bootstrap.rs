@@ -41,11 +41,9 @@ pub struct WellKnown {
     pub scope_info_map: GcSlot<Map>,
     pub script_context_table_map: GcSlot<Map>,
     pub name_index_table_map: GcSlot<Map>,
-    /// A C pointer handle (FFI); sealed type id, raw address, flags.
-    pub c_pointer_map: GcSlot<Map>,
     /// A loaded foreign library object; `[handle, path]` internal slots.
     pub foreign_library_map: GcSlot<Map>,
-    /// A callable C function pointer.
+    /// A callable C value (a foreign function).
     pub c_function_map: GcSlot<Map>,
     /// A guest-visible C type descriptor: one internal `TypeId` slot.
     pub c_type_map: GcSlot<Map>,
@@ -291,7 +289,6 @@ impl WellKnown {
             scope_info_map: smi_slot::<Map>(),
             script_context_table_map: smi_slot::<Map>(),
             name_index_table_map: smi_slot::<Map>(),
-            c_pointer_map: smi_slot::<Map>(),
             foreign_library_map: smi_slot::<Map>(),
             c_function_map: smi_slot::<Map>(),
             c_type_map: smi_slot::<Map>(),
@@ -389,7 +386,6 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.scope_info_map.as_raw());
         visitor.visit(self.script_context_table_map.as_raw());
         visitor.visit(self.name_index_table_map.as_raw());
-        visitor.visit(self.c_pointer_map.as_raw());
         visitor.visit(self.foreign_library_map.as_raw());
         visitor.visit(self.c_function_map.as_raw());
         visitor.visit(self.c_type_map.as_raw());
@@ -638,8 +634,6 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     // exist before any other object is created (incl. interned strings)
     let smi_map = alloc_map(heap, &scope, MapKind::OBJECT);
     let float_map = alloc_map(heap, &scope, MapKind::FLOAT);
-    let c_pointer_map = alloc_map(heap, &scope, MapKind::C_POINTER);
-    known.c_pointer_map.init(c_pointer_map.as_tagged(heap));
     let foreign_library_map = alloc_map(
         heap,
         &scope,
@@ -648,17 +642,11 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .foreign_library_map
         .init(foreign_library_map.as_tagged(heap));
-    let c_function_map = alloc_map(
-        heap,
-        &scope,
-        MapKind::C_FUNCTION
-            .union(MapKind::CALLABLE)
-            .union(MapKind::EXTENDABLE),
-    );
+    let c_function_map = alloc_map(heap, &scope, MapKind::C_VALUE.union(MapKind::CALLABLE));
     known.c_function_map.init(c_function_map.as_tagged(heap));
     let c_type_map = alloc_map(heap, &scope, MapKind::C_TYPE);
     known.c_type_map.init(c_type_map.as_tagged(heap));
-    let c_value_map = alloc_map(heap, &scope, MapKind::C_VALUE.union(MapKind::EXTENDABLE));
+    let c_value_map = alloc_map(heap, &scope, MapKind::C_VALUE);
     known.c_value_map.init(c_value_map.as_tagged(heap));
     let thread_object_map = alloc_map(
         heap,

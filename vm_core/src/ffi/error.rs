@@ -86,7 +86,7 @@ impl fmt::Display for FfiError {
         match self {
             FfiError::NullPointer => write!(f, "null C pointer"),
             FfiError::DeadPointer => write!(f, "dead C pointer"),
-            FfiError::NotOwned => write!(f, "C pointer storage is not owned by the VM"),
+            FfiError::NotOwned => write!(f, "C value does not own its storage"),
             FfiError::LibraryClosed => write!(f, "the owning C library was closed"),
             FfiError::InvalidLibrary => write!(f, "object is not a foreign library"),
             FfiError::LoadFailed(message) => write!(f, "failed to load library: {message}"),

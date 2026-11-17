@@ -41,8 +41,8 @@ pub use dictionary::{
 };
 pub use feedback::{FeedbackVector, FeedbackVectorInit, SiteRead};
 pub use ffi_objects::{
-    CFunction, CFunctionInit, CPointer, CPointerFlags, CPointerInit, CValue, CValueInit,
-    FLAG_VARIADIC, ForeignLibrary, ForeignLibraryInit, TypeInfo, TypeInfoInit,
+    CValue, CValueFlags, CValueInit, FLAG_VARIADIC, ForeignLibrary, ForeignLibraryInit, TypeInfo,
+    TypeInfoInit,
 };
 pub use float::Float;
 pub use helpers::WrapperKind;
@@ -167,13 +167,8 @@ pub enum ObjectKind {
     ScriptContextTable = 26,
     /// Internal name -> script-context-index hash table.
     NameToIndexHashTable = 27,
-    /// A C pointer handle: type id, raw address, flags. Shares the `Object`
-    /// prefix so ordinary property/prototype machinery works on it.
-    CPointer = 28,
     /// A loaded foreign library: dynamic-loader handle and path.
     ForeignLibrary = 29,
-    /// A callable C function pointer plus its signature and library.
-    CFunction = 30,
     /// Storage for a C aggregate value (struct, union, array).
     CValue = 31,
     /// A C type descriptor: kind, layout, related types, call plan.
@@ -247,9 +242,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).layout()
             }
-            ObjectKind::CPointer => (*addr.cast::<CPointer>().as_ptr()).layout(),
             ObjectKind::ForeignLibrary => (*addr.cast::<ForeignLibrary>().as_ptr()).layout(),
-            ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).layout(),
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
             ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
@@ -317,11 +310,9 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).visit_edges(visitor)
             }
-            ObjectKind::CPointer => (*addr.cast::<CPointer>().as_ptr()).visit_edges(visitor),
             ObjectKind::ForeignLibrary => {
                 (*addr.cast::<ForeignLibrary>().as_ptr()).visit_edges(visitor)
             }
-            ObjectKind::CFunction => (*addr.cast::<CFunction>().as_ptr()).visit_edges(visitor),
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).visit_edges(visitor),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).visit_edges(visitor),
             ObjectKind::ThreadObject => {

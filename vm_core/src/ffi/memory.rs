@@ -1,4 +1,29 @@
+use crate::ffi::{FfiError, FfiResult};
 use core::ptr;
+
+/// Allocate `size` zeroed bytes with at least `align` alignment.
+///
+/// The block is released with [`free`], which is the process allocator C code
+/// uses, so ownership can be handed across the FFI boundary.
+pub fn alloc_zeroed(size: usize, align: usize) -> FfiResult<*mut u8> {
+    let size = size.max(1);
+    // Safety: `calloc` either allocates a zeroed block or returns null.
+    // Callers reject alignments above 16, which is what the allocator
+    // guarantees.
+    let address = unsafe { libc::calloc(1, size) } as *mut u8;
+    if address.is_null() {
+        return Err(FfiError::OutOfMemory { size, align });
+    }
+    Ok(address)
+}
+
+pub fn free(address: *mut u8) {
+    if address.is_null() {
+        return;
+    }
+    // Safety: `address` came from `alloc_zeroed` and was not freed yet.
+    unsafe { libc::free(address.cast()) };
+}
 
 pub fn copy_out(address: *const u8, out: &mut [u8]) {
     if out.is_empty() {

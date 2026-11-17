@@ -1,6 +1,6 @@
 use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, memory};
 use crate::{
-    AccessorInfo, Args, CFunction, CPointer, CValue, CallInfo, Errors, FixedArray, ForeignLibrary,
+    AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
     PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, TypeInfo, VM, Value,
     VmCore, VmError,
@@ -25,17 +25,14 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
     let type_align = vm.register_native(c_type_align);
     let buffer_get = vm.register_native(c_value_get);
     let buffer_set = vm.register_native(c_value_set);
-    let pointer_cast = vm.register_native(c_pointer_cast);
     let array_type = vm.register_native(ffi_array);
     let field_get = vm.register_native(c_value_field_get);
     let field_set = vm.register_native(c_value_field_set);
     let value_copy = vm.register_native(c_value_copy);
     let value_add = vm.register_native(c_value_add);
     let value_cast = vm.register_native(c_value_cast);
+    let value_free = vm.register_native(c_value_free);
     let type_wrap = vm.register_native(c_type_wrap);
-    let pointer_add = vm.register_native(c_pointer_add);
-    let pointer_get = vm.register_native(c_pointer_get);
-    let pointer_set = vm.register_native(c_pointer_set);
     let buffer = vm.register_native(ffi_buffer);
     let read_bytes = vm.register_native(c_read_bytes);
     let write_bytes = vm.register_native(c_write_bytes);
@@ -126,6 +123,7 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, buffer_prototype, "set", buffer_set, 2);
         Object::install_method(thread, &scope, buffer_prototype, "add", value_add, 1);
         Object::install_method(thread, &scope, buffer_prototype, "cast", value_cast, 1);
+        Object::install_method(thread, &scope, buffer_prototype, "free", value_free, 0);
         Object::install_method(
             thread,
             &scope,
@@ -149,53 +147,12 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
                 .set(heap, map.erase(), buffer_prototype.as_tagged(heap).erase());
         }
 
-        let pointer_prototype_map = thread.heap().allocate_handle::<Map>(
-            MapInit {
-                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                value_slot_count: 0,
-                descriptors: &[],
-                prototype: object_prototype.clone(),
-            },
-            &scope,
-        );
-        let pointer_prototype = scope.handle(thread.heap().new_object(
-            &scope,
-            pointer_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, pointer_prototype, "cast", pointer_cast, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "add", pointer_add, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "get", pointer_get, 1);
-        Object::install_method(thread, &scope, pointer_prototype, "set", pointer_set, 2);
-        Object::install_method(
-            thread,
-            &scope,
-            pointer_prototype,
-            "read_bytes",
-            read_bytes,
-            2,
-        );
-        Object::install_method(
-            thread,
-            &scope,
-            pointer_prototype,
-            "write_bytes",
-            write_bytes,
-            1,
-        );
         for &(name, read, write) in &scalars {
             let read_name = format!("read_{name}");
             let write_name = format!("write_{name}");
-            for prototype in [buffer_prototype, pointer_prototype] {
-                Object::install_method(thread, &scope, prototype, &read_name, read, 1);
-                Object::install_method(thread, &scope, prototype, &write_name, write, 2);
-            }
+            Object::install_method(thread, &scope, buffer_prototype, &read_name, read, 1);
+            Object::install_method(thread, &scope, buffer_prototype, &write_name, write, 2);
         }
-
-        let heap: &mut Heap = thread.heap();
-        let map = heap.known().c_pointer_map.get(heap);
-        map.prototype
-            .set(heap, map.erase(), pointer_prototype.as_tagged(heap).erase());
 
         let namespace_map = thread.heap().allocate_handle::<Map>(
             MapInit {
@@ -345,7 +302,7 @@ fn ffi_library<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     )
 }
 
-/// `FFI.cstring(text)` -> VM-owned NUL-terminated `CPointer`.
+/// `FFI.cstring(text)` -> owned NUL-terminated C string value.
 fn ffi_cstring<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -394,14 +351,10 @@ fn ffi_wstring<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
 }
 
 fn value_address(heap: &Heap, value: Tagged<Value>) -> FfiResult<*mut u8> {
-    if let Some(c_value) = value.get_as::<CValue>(heap) {
-        return c_value.base(heap);
-    }
-    let pointer = value
-        .get_as::<CPointer>(heap)
-        .ok_or(FfiError::InvalidArgument("expected a C pointer"))?;
-    pointer.check_live(heap)?;
-    Ok(pointer.address())
+    let value = value
+        .get_as::<CValue>(heap)
+        .ok_or(FfiError::InvalidArgument("expected a C value"))?;
+    value.base(heap)
 }
 
 fn ffi_string_at<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
@@ -460,7 +413,7 @@ fn ffi_pointer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     })
 }
 
-/// `library.fn(name, [params], result)` -> `CFunction`.
+/// `library.fn(name, [params], result)` -> callable C value.
 fn library_fn<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -540,7 +493,7 @@ fn library_fn<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a
     })
 }
 
-/// `library.symbol(name, pointer type)` -> `CPointer`.
+/// `library.symbol(name, type)` -> C value for the resolved symbol.
 fn library_symbol<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -735,6 +688,7 @@ fn c_type_new<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a
 }
 
 /// `value.get("field")`.
+/// `value.get(index | field)` -> array element or struct field.
 fn c_value_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -742,7 +696,7 @@ fn c_value_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     let ffi = &vm.runtime::<VmCore>().ffi;
     state.handle_scope(|scope| {
         let key = args.get_handle(heap, 0).as_tagged(heap);
-        let index = key.to_i64();
+        let index = key.to_i64().and_then(|index| usize::try_from(index).ok());
         let name = if index.is_none() {
             StringRef::try_from(heap, key).map(|name| name.to_rust_string(heap))
         } else {
@@ -758,7 +712,13 @@ fn c_value_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
         };
         let value = scope.handle(value);
         let read = if let Some(index) = index {
-            ffi.value_get_index(heap, &scope, value, index as usize)
+            let is_array = value.as_tagged(heap).c_type(heap).as_ref().kind() == TypeKind::Array;
+            if is_array {
+                ffi.value_get_index(heap, &scope, value, index)
+            } else {
+                ffi.element_read_raw(heap, &scope, &value, index)
+                    .map(ValueRead::Raw)
+            }
         } else if let Some(name) = name {
             ffi.value_get_field(heap, &scope, value, &name)
         } else {
@@ -777,15 +737,15 @@ fn c_value_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     })
 }
 
-/// `value.set("field", value)`.
+/// `value.set(index | field, value)`.
 fn c_value_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let ffi = &vm.runtime::<VmCore>().ffi;
-    state.handle_scope(|_scope| {
+    state.handle_scope(|scope| {
         let key = args.get_handle(heap, 0).as_tagged(heap);
-        let index = key.to_i64();
+        let index = key.to_i64().and_then(|index| usize::try_from(index).ok());
         let name = if index.is_none() {
             StringRef::try_from(heap, key).map(|name| name.to_rust_string(heap))
         } else {
@@ -800,10 +760,16 @@ fn c_value_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
                 FfiError::InvalidArgument("expected a C value"),
             );
         };
+        let value = scope.handle(value);
         let result = if let Some(index) = index {
-            ffi.value_set_index(heap, value, index as usize, guest)
+            let is_array = value.as_tagged(heap).c_type(heap).as_ref().kind() == TypeKind::Array;
+            if is_array {
+                ffi.value_set_index(heap, value.as_tagged(heap), index, guest)
+            } else {
+                ffi.element_write(heap, &value, index, guest)
+            }
         } else if let Some(name) = name {
-            ffi.value_set_field(heap, value, &name, guest)
+            ffi.value_set_field(heap, value.as_tagged(heap), &name, guest)
         } else {
             return raise_ffi(
                 vm,
@@ -857,159 +823,7 @@ fn ffi_array<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a
     })
 }
 
-/// `pointer.add(elements)` -> pointer advanced by `elements * sizeof(pointee)`.
-fn c_pointer_add<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
-    state.handle_scope(|scope| {
-        let Some(elements) = args.get_handle(heap, 0).as_tagged(heap).to_i64() else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected an integer offset"),
-            );
-        };
-        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected a C pointer"),
-            );
-        };
-        let pointer = scope.handle(pointer);
-        match ffi.pointer_offset(heap, &scope, &pointer, elements) {
-            Ok(pointer) => pointer.as_tagged(heap).erase(),
-            Err(error) => raise_ffi(vm, heap, state, error),
-        }
-    })
-}
-
-/// `pointer.get(index)` -> value at that index, typed by the pointee.
-fn c_pointer_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
-    state.handle_scope(|scope| {
-        let Some(index) = args
-            .get_handle(heap, 0)
-            .as_tagged(heap)
-            .to_i64()
-            .and_then(|index| usize::try_from(index).ok())
-        else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected an integer index"),
-            );
-        };
-        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected a C pointer"),
-            );
-        };
-        let pointer = scope.handle(pointer);
-        let pointee = {
-            let pointee = pointer.as_tagged(heap).pointee(heap);
-            scope.handle(pointee)
-        };
-        if matches!(
-            pointee.as_tagged(heap).kind(),
-            TypeKind::Struct | TypeKind::Union | TypeKind::Array
-        ) {
-            let Some(offset) = index.checked_mul(pointee.as_tagged(heap).size().max(1)) else {
-                return raise_ffi(vm, heap, state, FfiError::AddressOverflow);
-            };
-            return match ffi.view_pointer(heap, &scope, &pointer, &pointee, offset) {
-                Ok(view) => view.as_tagged(heap).erase(),
-                Err(error) => raise_ffi(vm, heap, state, error),
-            };
-        }
-        let raw = match ffi.pointer_read_raw(heap, &scope, &pointer, index) {
-            Ok(raw) => raw,
-            Err(error) => return raise_ffi(vm, heap, state, error),
-        };
-        ffi.read_raw(heap, &scope, &raw, None)
-    })
-}
-
-/// `pointer.set(index, value)`.
-fn c_pointer_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
-    state.handle_scope(|scope| {
-        let Some(index) = args
-            .get_handle(heap, 0)
-            .as_tagged(heap)
-            .to_i64()
-            .and_then(|index| usize::try_from(index).ok())
-        else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected an integer index"),
-            );
-        };
-        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected a C pointer"),
-            );
-        };
-        let pointer = scope.handle(pointer);
-        let value = args.get_handle(heap, 1).as_tagged(heap);
-        match ffi.pointer_write(heap, &pointer, index, value) {
-            Ok(()) => heap.known().undefined.get(heap).erase(),
-            Err(error) => raise_ffi(vm, heap, state, error),
-        }
-    })
-}
-
-/// `pointer.cast(type)` -> retyped pointer.
-fn c_pointer_cast<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
-    state.handle_scope(|scope| {
-        let Some(ty) = args
-            .get_handle(heap, 0)
-            .as_tagged(heap)
-            .get_as::<TypeInfo>(heap)
-        else {
-            return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
-        };
-        let Some(pointer) = call.receiver.as_tagged(heap).get_as::<CPointer>(heap) else {
-            return raise_ffi(
-                vm,
-                heap,
-                state,
-                FfiError::InvalidArgument("expected a C pointer"),
-            );
-        };
-        let pointer = scope.handle(pointer);
-        let ty = scope.handle(ty);
-        match ffi.cast_pointer(heap, &scope, &pointer, &ty) {
-            Ok(pointer) => pointer.as_tagged(heap).erase(),
-            Err(error) => raise_ffi(vm, heap, state, error),
-        }
-    })
-}
-
-/// The trampoline every `CFunction` maps to.
+/// The trampoline every C function value maps to.
 fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -1023,12 +837,11 @@ fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
             Ok(raw) => raw,
             Err(error) => return raise_ffi(vm, heap, state, error),
         };
-        let library = {
-            let function = callee.as_tagged(heap).get_as::<CFunction>(heap);
-            function
-                .and_then(|function| function.library(heap))
-                .map(|library| scope.handle(library))
-        };
+        let library = callee
+            .as_tagged(heap)
+            .get_as::<CValue>(heap)
+            .and_then(|function| function.library(heap))
+            .map(|library| scope.handle(library));
         ffi.read_raw(heap, &scope, &raw, library.as_ref())
     })
 }
@@ -1190,7 +1003,7 @@ fn c_value_cast<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<
     })
 }
 
-/// `value.copy()` -> detached inline copy.
+/// `value.copy()` -> detached copy with its own storage.
 fn c_value_copy<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -1213,7 +1026,7 @@ fn c_value_copy<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
     })
 }
 
-/// `type.wrap(pointer)` -> a value view over the pointer.
+/// `type.wrap(value | byteArray)` -> a borrowed value view.
 fn c_type_wrap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -1223,37 +1036,58 @@ fn c_type_wrap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
         let Some(ty) = call.receiver.as_tagged(heap).get_as::<TypeInfo>(heap) else {
             return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
         };
-        let Some(pointer) = args
-            .get_handle(heap, 0)
-            .as_tagged(heap)
-            .get_as::<CPointer>(heap)
-        else {
+        let ty = scope.handle(ty);
+        let source = args.get_handle(heap, 0).as_tagged(heap);
+        if let Some(value) = source.get_as::<CValue>(heap) {
+            let value = scope.handle(value);
+            return match ffi.wrap_value(heap, &scope, &ty, &value) {
+                Ok(value) => value.as_tagged(heap).erase(),
+                Err(error) => raise_ffi(vm, heap, state, error),
+            };
+        }
+        if let Some(bytes) = source.get_as::<FixedByteArray>(heap) {
+            let bytes = scope.handle(bytes);
+            let value = ffi.wrap_bytes(heap, &scope, &ty, &bytes);
+            return value.as_tagged(heap).erase();
+        }
+        raise_ffi(
+            vm,
+            heap,
+            state,
+            FfiError::InvalidArgument("expected a C value or byte array"),
+        )
+    })
+}
+
+/// `value.free()` -> release owned external storage.
+fn c_value_free<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
             return raise_ffi(
                 vm,
                 heap,
                 state,
-                FfiError::InvalidArgument("expected a C pointer"),
+                FfiError::InvalidArgument("expected a C value"),
             );
         };
-        let ty = scope.handle(ty);
-        let pointer = scope.handle(pointer);
-        match ffi.wrap_value(heap, &scope, &ty, &pointer) {
-            Ok(value) => value.as_tagged(heap).erase(),
+        let value = scope.handle(value);
+        match ffi.free_value(heap, &value) {
+            Ok(()) => heap.known().undefined.get(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
     })
 }
 
-/// Base address and available bytes of a C value or C pointer receiver.
+/// Base address and available bytes of a C value.
 fn receiver_window(heap: &Heap, receiver: Tagged<Value>) -> FfiResult<(*mut u8, usize)> {
-    if let Some(value) = receiver.get_as::<CValue>(heap) {
-        return Ok((value.base(heap)?, value.remaining(heap)));
-    }
-    if let Some(pointer) = receiver.get_as::<CPointer>(heap) {
-        pointer.check_live(heap)?;
-        return Ok((pointer.address(), usize::MAX));
-    }
-    Err(FfiError::InvalidArgument("expected a C value or C pointer"))
+    let value = receiver
+        .get_as::<CValue>(heap)
+        .ok_or(FfiError::InvalidArgument("expected a C value"))?;
+    Ok((value.base(heap)?, value.remaining(heap)))
 }
 
 /// `base + offset`, checked against the receiver's remaining bytes.
