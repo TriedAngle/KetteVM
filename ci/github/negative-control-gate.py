@@ -98,14 +98,76 @@ if not need:
 # ── Rule 1 (span-level): on each declared branch, every
 # ── NOT-opted-out test region must be cosmetic-equal.  ──
 # Every violation is collected and reported — one round of fixing.
+# ── Branch declarations: local (`/name`) or external (a full
+# ── branch URL: https://github.com/O/R/tree/branch) ──
+import re as _re
+_EXT = _re.compile(r"^https://github\.com/([^/]+)/([^/]+)/tree/(.+)$")
+
+def entry_of(b):
+    m = _EXT.match(b)
+    if m:
+        return ("ext", "https://github.com/%s/%s.git" % (m.group(1), m.group(2)), m.group(3))
+    return ("local", None, b[1:] if b.startswith("/") else b)
+
 missing, fetched, violations = [], {}, []
+external = {}   # ref -> (repo_url, sha)
 for b in branches:
-    ref = b[1:] if b.startswith("/") else b
-    if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
-        missing.append(ref)
-        continue
-    sha = sh("git", "rev-parse", f"origin/{ref}").stdout.strip()
+    kind, repo_url, ref = entry_of(b)
+    if kind == "local":
+        if sh("git", "fetch", "--depth=1", "origin", ref, check=False).returncode != 0:
+            missing.append(ref)
+            continue
+    else:
+        if sh("git", "fetch", "--depth=1", repo_url, ref, check=False).returncode != 0:
+            missing.append(b)
+            continue
+    sha = sh("git", "rev-parse", "FETCH_HEAD").stdout.strip()
     fetched[ref] = sha
+    if kind == "ext":
+        external[ref] = (repo_url, sha)
+
+# ── External verification — BEFORE any external code is built or ──
+# ── run: the diff head..external must be limited to non-test Rust ──
+# ── lines in files that already exist in the PR head. ──
+def head_spans(f):
+    txt = sh("git", "show", f"{head}:{f}", check=False).stdout
+    return spans_for(f, txt) or [], txt
+
+ext_bad = []
+for ref, (repo_url, sha) in sorted(external.items()):
+    ns = sh("git", "diff", "--name-status", head, sha).stdout
+    for line in ns.splitlines():
+        parts = line.split("\t")
+        st, path = (parts[0], parts[-1]) if parts else ("", "")
+        why = None
+        if st != "M":
+            why = "not a plain modification (added/deleted/renamed file)"
+        elif not path.endswith(".rs"):
+            why = "not a Rust source"
+        elif sh("git", "cat-file", "-e", f"{head}:{path}", check=False).returncode != 0:
+            why = "file does not exist in the PR head"
+        else:
+            sp, _ = head_spans(path)
+            hunks = []
+            d = sh("git", "diff", "-U0", head, sha, "--", path).stdout
+            for h in _re.finditer(r"^@@[^+]*\+(\d+)(?:,(\d+))? @@", d, _re.M):
+                s = int(h.group(1)); e = s + int(h.group(2) or 1) - 1
+                if e >= s:
+                    hunks.append((s, e))
+            hit = [t["path"] for t in sp
+                   for (s, e) in hunks
+                   if not (e < t["start"] or s > t["end"])]
+            if hit:
+                why = "diff touches test region(s): " + ", ".join(sorted(set(hit)))
+        if why:
+            ext_bad.append((ref, path or line, why))
+for ref, path, why in ext_bad:
+    print(f"REJECT: external {ref}: {path}: {why}")
+if ext_bad:
+    sys.exit(1)
+if external:
+    print("external branches verified: diffs limited to non-test Rust lines"
+          " in pre-existing files")
     for f in head_texts:
         br = sh("git", "show", f"{sha}:{f}", check=False).stdout
         sp_b = spans_for(f, br) or []

@@ -12,7 +12,17 @@ name: negative-control
 #     ```
 #     /branch/A
 #     /branch/B
+#     https://github.com/OWNER/REPO/tree/branch-on-a-fork
 #     ```
+#
+#     Entries starting with `/` are branches on THIS repository; a
+#     full branch URL names a branch on an EXTERNAL repository (a
+#     fork, typically). External branches are fetched and — before
+#     any of their code is built or run — verified: the diff between
+#     the PR head and the external branch must be limited to
+#     non-test Rust lines in files that already exist in the PR head
+#     (no new/deleted/renamed files, no non-Rust files, no test
+#     regions). Anything else rejects before execution.
 #
 # Rules:
 #   1. Span-level (tools/test-spans over ra_ap_syntax): every test
@@ -111,7 +121,7 @@ jobs:
               if stripped.startswith("```"):
                   in_block = not in_block
                   continue
-              if in_block and which == "nc" and stripped.startswith("/"):
+              if in_block and which == "nc" and (stripped.startswith("/") or stripped.startswith("http")):
                   branches.append(stripped)
               if in_block and which == "cosmetic" and stripped:
                   cosmetic.append(stripped)
