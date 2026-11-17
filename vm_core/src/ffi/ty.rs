@@ -1,5 +1,6 @@
 use crate::ffi::CallPlan;
 use crate::ffi::{FfiError, FfiResult};
+use crate::objects::FLAG_VARIADIC;
 use crate::{
     EdgeVisitable, FixedArray, Handle, HandleScope, Heap, MaybeWeakGcSlot, Smi, Tagged, TypeInfo,
     TypeInfoInit, VM, Value, Visitor,
@@ -167,9 +168,6 @@ pub enum TypeError {
     FunctionField,
     SizeOverflow,
     DuplicateField(String),
-    NotAStruct(TypeId),
-    NotAnArray(TypeId),
-    UnknownField(String),
 }
 
 impl fmt::Display for TypeError {
@@ -179,9 +177,6 @@ impl fmt::Display for TypeError {
             TypeError::FunctionField => write!(f, "function type is not an object type"),
             TypeError::SizeOverflow => write!(f, "type size overflows usize"),
             TypeError::DuplicateField(name) => write!(f, "duplicate field '{name}'"),
-            TypeError::NotAStruct(id) => write!(f, "type {:?} is not a struct", id),
-            TypeError::NotAnArray(id) => write!(f, "type {:?} is not an array", id),
-            TypeError::UnknownField(name) => write!(f, "unknown field '{name}'"),
         }
     }
 }
@@ -426,11 +421,7 @@ impl TypeRegistry {
                 id,
                 size: 0,
                 align: 1,
-                flags: if variadic {
-                    crate::objects::ffi_objects::FLAG_VARIADIC
-                } else {
-                    0
-                },
+                flags: if variadic { FLAG_VARIADIC } else { 0 },
                 name: None,
                 pointee: None,
                 element: None,

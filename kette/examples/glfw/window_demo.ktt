@@ -1,0 +1,81 @@
+// GLFW window with a guest key callback.
+// Run: cargo run -q -p vm -- kette/examples/glfw/window_demo.ktt
+//
+// Requires libglfw (brew install glfw). ESC closes the window; every key press
+// is printed from inside the callback, which runs on the C stack when
+// glfwPollEvents delivers it.
+
+let glfw_path = if os.name == "macos" {
+        "/opt/homebrew/lib/libglfw.dylib"
+    } else if os.name == "windows" {
+        "glfw3.dll"
+    } else {
+        "libglfw.so.3"
+    }
+
+let gl_path = if os.name == "macos" {
+        "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+    } else if os.name == "windows" {
+        "opengl32.dll"
+    } else {
+        "libGL.so.1"
+    }
+
+let glfw = FFI.library(glfw_path)
+let gl = FFI.library(gl_path)
+
+let Window = FFI.pointer(FFI.void)
+
+let glfwInit = glfw.fn("glfwInit", [], FFI.i32)
+let glfwTerminate = glfw.fn("glfwTerminate", [], FFI.void)
+let glfwCreateWindow = glfw.fn(
+    "glfwCreateWindow",
+    [FFI.i32, FFI.i32, FFI.CString, Window, Window],
+    Window
+)
+let glfwMakeContextCurrent = glfw.fn("glfwMakeContextCurrent", [Window], FFI.void)
+let glfwWindowShouldClose = glfw.fn("glfwWindowShouldClose", [Window], FFI.i32)
+let glfwSetWindowShouldClose = glfw.fn("glfwSetWindowShouldClose", [Window, FFI.i32], FFI.void)
+let glfwSwapBuffers = glfw.fn("glfwSwapBuffers", [Window], FFI.void)
+let glfwPollEvents = glfw.fn("glfwPollEvents", [], FFI.void)
+let glfwSetKeyCallback = glfw.fn(
+    "glfwSetKeyCallback",
+    [Window, FFI.pointer(FFI.fn([Window, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void))],
+    FFI.void
+)
+
+let glClearColor = gl.fn("glClearColor", [FFI.f32, FFI.f32, FFI.f32, FFI.f32], FFI.void)
+let glClear = gl.fn("glClear", [FFI.u32], FFI.void)
+
+let GLFW_KEY_ESCAPE = 256
+let GLFW_PRESS = 1
+let GL_COLOR_BUFFER_BIT = 16384
+
+// GLFWkeyfun: void (*)(GLFWwindow *, int key, int scancode, int action, int mods)
+let onKey = FFI.callback(
+    [Window, FFI.i32, FFI.i32, FFI.i32, FFI.i32],
+    FFI.void,
+    { |window, key, scancode, action, mods|
+        if action == GLFW_PRESS {
+            print(key)
+            if key == GLFW_KEY_ESCAPE {
+                glfwSetWindowShouldClose(window, 1)
+            }
+        }
+    }
+)
+
+glfwInit()
+let window = glfwCreateWindow(640, 480, "kette + glfw", null, null)
+glfwMakeContextCurrent(window)
+glfwSetKeyCallback(window, onKey)
+
+while glfwWindowShouldClose(window) == 0 {
+    glClearColor(0.1, 0.2, 0.3, 1.0)
+    glClear(GL_COLOR_BUFFER_BIT)
+    glfwSwapBuffers(window)
+    glfwPollEvents()
+}
+
+glfwTerminate()
+print("done")

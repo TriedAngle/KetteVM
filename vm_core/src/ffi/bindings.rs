@@ -1,9 +1,9 @@
-use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, memory};
+use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, callback, memory};
 use crate::{
     AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
-    Handle, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
-    PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, TypeInfo, VM, Value,
-    VmCore, VmError,
+    Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
+    PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, Thrown, TypeInfo, VM,
+    Value, VmCore, VmError, raise_runtime,
 };
 
 /// Install the `FFI` namespace and register the FFI natives.
@@ -15,6 +15,8 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
     let string_at = vm.register_native(ffi_string_at);
     let wstring_at = vm.register_native(ffi_wstring_at);
     let pointer = vm.register_native(ffi_pointer);
+    let fn_type = vm.register_native(ffi_fn);
+    let callback = vm.register_native(ffi_callback);
     let lib_fn = vm.register_native(library_fn);
     let lib_symbol = vm.register_native(library_symbol);
     let lib_close = vm.register_native(library_close);
@@ -174,6 +176,8 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, namespace, "string_at", string_at, 1);
         Object::install_method(thread, &scope, namespace, "wstring_at", wstring_at, 1);
         Object::install_method(thread, &scope, namespace, "pointer", pointer, 1);
+        Object::install_method(thread, &scope, namespace, "fn", fn_type, 2);
+        Object::install_method(thread, &scope, namespace, "callback", callback, 3);
         Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
         Object::install_method(thread, &scope, namespace, "array", array_type, 2);
         Object::install_method(thread, &scope, namespace, "buffer", buffer, 1);
@@ -413,6 +417,104 @@ fn ffi_pointer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     })
 }
 
+/// Collect a guest array of C types into handles.
+fn param_types<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    value: Tagged<'_, Value>,
+) -> FfiResult<Vec<Handle<'s, TypeInfo>>> {
+    let mut params = Vec::new();
+    if value.is_nullish(heap) {
+        return Ok(params);
+    }
+    let array = value
+        .as_heap_object()
+        .ok_or(FfiError::InvalidArgument("expected an array of C types"))?;
+    for index in 0..array.length() {
+        let ty = array
+            .element_value(heap, index)
+            .and_then(|ty| ty.get_as::<TypeInfo>(heap))
+            .ok_or(FfiError::NotATypeObject)?;
+        params.push(scope.handle(ty));
+    }
+    Ok(params)
+}
+
+/// `FFI.fn([params], result)` -> function `CType`.
+fn ffi_fn<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let Some(result) = args
+            .get_handle(heap, 1)
+            .as_tagged(heap)
+            .get_as::<TypeInfo>(heap)
+        else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a C type as the result"),
+            );
+        };
+        let params = match param_types(heap, &scope, args.get_handle(heap, 0).as_tagged(heap)) {
+            Ok(params) => params,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let result = scope.handle(result);
+        match ffi.types().function(heap, &scope, &params, &result, false) {
+            Ok(ty) => ty.as_tagged(heap).erase(),
+            Err(error) => raise_ffi(vm, heap, state, error),
+        }
+    })
+}
+
+/// `FFI.callback([params], result, fn)` -> C function pointer that calls `fn`.
+fn ffi_callback<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = &vm.runtime::<VmCore>().ffi;
+    state.handle_scope(|scope| {
+        let params = match param_types(heap, &scope, args.get_handle(heap, 0).as_tagged(heap)) {
+            Ok(params) => params,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let Some(result) = args
+            .get_handle(heap, 1)
+            .as_tagged(heap)
+            .get_as::<TypeInfo>(heap)
+        else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a C type as the result"),
+            );
+        };
+        let guest = args.get_handle(heap, 2);
+        if !guest.as_tagged(heap).is_callable(heap) {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a callable"),
+            );
+        }
+        let result = scope.handle(result);
+        let signature = match ffi.types().function(heap, &scope, &params, &result, false) {
+            Ok(signature) => signature,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        match callback(ffi, heap, &scope, &signature, &guest) {
+            Ok(callback) => callback.as_tagged(heap).erase(),
+            Err(error) => raise_ffi(vm, heap, state, error),
+        }
+    })
+}
+
 /// `library.fn(name, [params], result)` -> callable C value.
 fn library_fn<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
@@ -450,30 +552,10 @@ fn library_fn<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a
         };
         let result = scope.handle(result);
 
-        let mut params = Vec::new();
-        {
-            let value = args.get_handle(heap, 1).as_tagged(heap);
-            if !value.is_nullish(heap) {
-                let Some(array) = value.as_heap_object() else {
-                    return raise_ffi(
-                        vm,
-                        heap,
-                        state,
-                        FfiError::InvalidArgument("expected an array of C types"),
-                    );
-                };
-                for index in 0..array.length() {
-                    let Some(element) = array.element_value(heap, index) else {
-                        return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
-                    };
-                    let Some(ty) = element.get_as::<TypeInfo>(heap) else {
-                        return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
-                    };
-                    params.push(scope.handle(ty));
-                }
-            }
-        }
-
+        let params = match param_types(heap, &scope, args.get_handle(heap, 1).as_tagged(heap)) {
+            Ok(params) => params,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
         let signature = match ffi.types().function(heap, &scope, &params, &result, false) {
             Ok(signature) => signature,
             Err(error) => return raise_ffi(vm, heap, state, error),
@@ -826,17 +908,24 @@ fn ffi_array<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a
 /// The trampoline every C function value maps to.
 fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
-        vm, heap, state, ..
+        vm,
+        runtime,
+        heap,
+        state,
+        ..
     } = ctx;
     let Some(callee) = call.callee else {
         return raise_ffi(vm, heap, state, FfiError::NotCallable);
     };
     let ffi = &vm.runtime::<VmCore>().ffi;
     state.handle_scope(|scope| {
-        let raw = match ffi.call_raw(heap, &scope, &callee, args) {
+        let raw = match ffi.call_raw(vm, runtime, heap, Some(state), &scope, &callee, args) {
             Ok(raw) => raw,
             Err(error) => return raise_ffi(vm, heap, state, error),
         };
+        if ffi.take_callback_threw() {
+            return raise_runtime(heap, Thrown);
+        }
         let library = callee
             .as_tagged(heap)
             .get_as::<CValue>(heap)

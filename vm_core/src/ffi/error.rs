@@ -22,8 +22,6 @@ pub enum FfiError {
         name: String,
         message: String,
     },
-    /// A library symbol was requested with a non-pointer type.
-    NotAPointer(TypeId),
     /// The value is not callable as a C function.
     NotCallable,
     /// A type used as a call signature is not a function type.
@@ -42,8 +40,6 @@ pub enum FfiError {
         expected: TypeId,
         found: TypeId,
     },
-    /// An integer result does not fit the guest representation.
-    IntegerOutOfRange,
     /// A string passed to C contains an interior NUL byte.
     EmbeddedNul,
     InvalidUtf8,
@@ -69,12 +65,6 @@ pub enum FfiError {
     Type(TypeError),
 }
 
-impl From<core::num::TryFromIntError> for FfiError {
-    fn from(_: core::num::TryFromIntError) -> Self {
-        Self::IntegerOutOfRange
-    }
-}
-
 impl From<TypeError> for FfiError {
     fn from(error: TypeError) -> Self {
         Self::Type(error)
@@ -93,7 +83,6 @@ impl fmt::Display for FfiError {
             FfiError::SymbolNotFound { name, message } => {
                 write!(f, "symbol '{name}' not found: {message}")
             }
-            FfiError::NotAPointer(id) => write!(f, "C type {id:?} is not a pointer type"),
             FfiError::NotCallable => write!(f, "value is not a C function"),
             FfiError::NotAFunction(id) => write!(f, "C type {id:?} is not a function type"),
             FfiError::UnsupportedType(id) => write!(f, "C type {id:?} is not supported here yet"),
@@ -109,9 +98,6 @@ impl fmt::Display for FfiError {
                     f,
                     "C pointer type mismatch: expected {expected:?}, found {found:?}"
                 )
-            }
-            FfiError::IntegerOutOfRange => {
-                write!(f, "C integer result does not fit the guest range")
             }
             FfiError::EmbeddedNul => write!(f, "string contains an interior NUL byte"),
             FfiError::InvalidUtf8 => write!(f, "C string is not valid UTF-8"),

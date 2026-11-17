@@ -95,7 +95,15 @@ fn call_pointer<'s>(
     let callee = scope.handle(callee.as_tagged(heap).erase());
     let args = scope.stage_handles(args);
     let raw = ffi
-        .call_raw(heap, scope, &callee, args.as_args())
+        .call_raw(
+            vm,
+            vm.runtime::<VmCore>(),
+            heap,
+            None,
+            scope,
+            &callee,
+            args.as_args(),
+        )
         .expect("call");
     scope.handle(ffi.read_raw(heap, scope, &raw, None))
 }
@@ -690,8 +698,17 @@ fn struct_by_value_and_hfa() {
             vector2_add as *const () as usize,
         );
         let callee = scope.handle(function.as_tagged(thread.heap()).erase());
+        let (vm_ref, heap, state) = thread.split();
         let raw = ffi
-            .call_raw(thread.heap(), &scope, &callee, args.as_args())
+            .call_raw(
+                vm_ref,
+                vm_ref.runtime::<VmCore>(),
+                heap,
+                Some(state),
+                &scope,
+                &callee,
+                args.as_args(),
+            )
             .expect("call");
         let result = scope.handle(ffi.read_raw(thread.heap(), &scope, &raw, None));
         let result = {

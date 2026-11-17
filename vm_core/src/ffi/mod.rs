@@ -1,5 +1,6 @@
 pub mod bindings;
 mod call;
+mod closure;
 mod error;
 mod library;
 pub mod memory;
@@ -8,17 +9,20 @@ mod ty;
 mod values;
 
 pub use call::{CallSlot, ValueRead};
+pub use closure::{callback, enter_call, leave_call};
 pub use error::{FfiError, FfiResult};
 pub use ty::{Abi, TypeError, TypeId, TypeKind, TypeRegistry};
 
 use crate::bootstrap::smi_slot;
+use crate::objects::FLAG_VARIADIC;
 use crate::{
     AccessorInfo, AccessorInfoInit, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
     HandleScope, Heap, Map, MapInit, MapKind, NativeIndex, SlotFlags, Smi, Tagged, TypeInfo,
-    TypeInfoInit, VM, Visitor,
+    TypeInfoInit, VM, Value, Visitor,
 };
 use libffi::middle::{Cif, Type};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct FfiTypes {
     slots: [GcSlot<TypeInfo>; TypeKind::BUILTIN_COUNT],
@@ -49,16 +53,65 @@ impl FfiTypes {
     }
 }
 
+/// A guest callback registered with C: the guarded entry libffi points at.
+pub struct ClosureEntry {
+    pub signature: GcSlot<TypeInfo>,
+    pub callback: GcSlot<Value>,
+    pub ffi: *const FfiState,
+}
+
+/// A live libffi closure plus its GC-visible entry.
+struct ClosureSlot {
+    entry: *mut ClosureEntry,
+    /// Kept alive for the process; the code pointer above points into it.
+    _closure: Box<libffi::middle::Closure<'static>>,
+}
+
+// Safety: the raw pointers are only used while the VM is alive and the FFI
+// state is shared between threads; libffi closures are immutable once created.
+unsafe impl Send for ClosureSlot {}
+unsafe impl Sync for ClosureSlot {}
+
 /// FFI state owned by `VmCore`.
 pub struct FfiState {
     types: TypeRegistry,
     /// Native getter/setter used by per-type field accessors.
     accessors: Mutex<Option<(NativeIndex, NativeIndex)>>,
+    /// Guest callbacks and the libffi closures that call them.
+    closures: Mutex<Vec<ClosureSlot>>,
+    /// A callback threw; the C call must return before it is re-raised.
+    callback_threw: AtomicBool,
 }
 
 impl FfiState {
     pub fn types(&self) -> &TypeRegistry {
         &self.types
+    }
+
+    pub fn callback_threw(&self) -> bool {
+        self.callback_threw.load(Ordering::Acquire)
+    }
+
+    pub fn set_callback_threw(&self) {
+        self.callback_threw.store(true, Ordering::Release);
+    }
+
+    pub fn take_callback_threw(&self) -> bool {
+        self.callback_threw.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn register_closure(
+        &self,
+        entry: *mut ClosureEntry,
+        closure: Box<libffi::middle::Closure<'static>>,
+    ) {
+        self.closures
+            .lock()
+            .expect("ffi closures poisoned")
+            .push(ClosureSlot {
+                entry,
+                _closure: closure,
+            });
     }
 
     /// Create the built-in types; run once during VM setup.
@@ -104,7 +157,7 @@ impl FfiState {
         scope: &'s HandleScope<'_>,
         name: Option<&str>,
         fields: &[(Option<&str>, Handle<TypeInfo>)],
-    ) -> crate::ffi::FfiResult<Handle<'s, TypeInfo>> {
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
         let ty = self.types.define_struct(vm, heap, scope, name, fields)?;
         self.ensure_value_map(heap, scope, &ty);
         Ok(ty)
@@ -117,7 +170,7 @@ impl FfiState {
         scope: &'s HandleScope<'_>,
         name: Option<&str>,
         fields: &[(Option<&str>, Handle<TypeInfo>)],
-    ) -> crate::ffi::FfiResult<Handle<'s, TypeInfo>> {
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
         let ty = self.types.define_union(vm, heap, scope, name, fields)?;
         self.ensure_value_map(heap, scope, &ty);
         Ok(ty)
@@ -213,6 +266,8 @@ impl Default for FfiState {
         Self {
             types: TypeRegistry::new(),
             accessors: Mutex::new(None),
+            closures: Mutex::new(Vec::new()),
+            callback_threw: AtomicBool::new(false),
         }
     }
 }
@@ -220,6 +275,13 @@ impl Default for FfiState {
 impl EdgeVisitable for FfiState {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         self.types.visit_edges(visitor);
+        let closures = self.closures.lock().expect("ffi closures poisoned");
+        for slot in closures.iter() {
+            // Safety: entries are boxed and live as long as the slot.
+            let entry = unsafe { &*slot.entry };
+            visitor.visit(entry.signature.as_raw());
+            visitor.visit(entry.callback.as_raw());
+        }
     }
 }
 
@@ -231,9 +293,44 @@ impl std::fmt::Debug for FfiState {
     }
 }
 
+/// How one parameter is packed for a call.
+///
+/// Scalars keep their [`TypeKind`]; the rest are the decisions the type cannot
+/// express: how a pointer is marshalled, and whether the argument is passed by
+/// address.
+#[derive(Clone, Copy, Debug)]
+pub enum ParamKind {
+    /// Passed by value: never `Pointer`, `Struct`, `Union`, `Array`, `Void` or
+    /// `Function`.
+    Scalar(TypeKind),
+    /// `char *`: accepts strings, byte arrays and matching pointers.
+    CharPointer,
+    /// `char16_t *`: accepts strings and matching pointers.
+    Char16Pointer,
+    /// Any pointer (`void *`, or a pointee the caller cannot get wrong).
+    PointerAny,
+    /// A pointer whose pointee type must match this id.
+    PointerTo(TypeId),
+    /// A struct/union/array passed by value: the argument is its address.
+    Aggregate(TypeId),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParamPlan {
+    pub kind: ParamKind,
+    /// Offset of the scalar slot in the call buffer; unused for aggregates.
+    pub offset: usize,
+}
+
 /// A prepared libffi signature.
 pub struct CallPlan {
     pub cif: Cif,
+    /// Parameter lowering, computed once when the function type is created.
+    pub params: Vec<ParamPlan>,
+    pub result_void: bool,
+    /// Bytes needed for the scalar argument slots and the result slot.
+    pub buffer_len: usize,
+    pub result_offset: usize,
 }
 
 // Safety: an `ffi_cif` is built once and is read-only during `ffi_call`;
@@ -249,23 +346,94 @@ impl CallPlan {
         variadic: bool,
     ) -> FfiResult<Self> {
         let mut lowered = Vec::with_capacity(params.len());
+        let mut plans = Vec::with_capacity(params.len());
+        let mut offset = 0;
         for param in params {
-            lowered.push(lower(heap, param.as_tagged(heap))?);
+            let ty = param.as_tagged(heap);
+            lowered.push(lower(heap, ty)?);
+            let kind = param_kind(heap, ty)?;
+            let slot = match kind {
+                ParamKind::Aggregate(_) => 0,
+                _ => {
+                    let slot = offset;
+                    offset += 8;
+                    slot
+                }
+            };
+            plans.push(ParamPlan { kind, offset: slot });
         }
         let result_ty = result.as_tagged(heap);
-        let lowered_result = if result_ty.kind() == TypeKind::Void {
-            Type::void()
+        let result_void = result_ty.kind() == TypeKind::Void;
+        let (lowered_result, result_offset, buffer_len) = if result_void {
+            (Type::void(), offset, offset)
         } else {
-            lower(heap, result_ty)?
+            let result_offset = offset.next_multiple_of(16);
+            (
+                lower(heap, result_ty)?,
+                result_offset,
+                result_offset + result_ty.size().max(16),
+            )
         };
-        let fixed = params.len();
-        let cif = if variadic {
-            Cif::new_variadic(lowered, fixed, lowered_result)
-        } else {
-            Cif::new(lowered, lowered_result)
-        };
-        Ok(Self { cif })
+        let cif = build_cif(lowered, params.len(), lowered_result, variadic);
+        Ok(Self {
+            cif,
+            params: plans,
+            result_void,
+            buffer_len,
+            result_offset,
+        })
     }
+}
+
+/// Build the cif of a function type, lowering its parameters and result.
+pub fn cif_for_signature(heap: &Heap, signature: Tagged<TypeInfo>) -> FfiResult<Cif> {
+    let params = signature
+        .params(heap)
+        .ok_or(FfiError::NotAFunction(signature.id()))?;
+    let mut lowered = Vec::with_capacity(params.len());
+    for index in 0..params.len() {
+        let param = params
+            .at(heap, index)
+            .get_as::<TypeInfo>(heap)
+            .ok_or(FfiError::NotAFunction(signature.id()))?;
+        lowered.push(lower(heap, param)?);
+    }
+    let result = signature
+        .result(heap)
+        .ok_or(FfiError::NotAFunction(signature.id()))?;
+    let lowered_result = if result.kind() == TypeKind::Void {
+        Type::void()
+    } else {
+        lower(heap, result)?
+    };
+    let variadic = signature.flags() & FLAG_VARIADIC != 0;
+    Ok(build_cif(lowered, params.len(), lowered_result, variadic))
+}
+
+/// Build the cif for a lowered signature.
+fn build_cif(lowered: Vec<Type>, fixed: usize, result: Type, variadic: bool) -> Cif {
+    if variadic {
+        Cif::new_variadic(lowered, fixed, result)
+    } else {
+        Cif::new(lowered, result)
+    }
+}
+
+pub fn param_kind(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<ParamKind> {
+    Ok(match ty.kind() {
+        TypeKind::Pointer => {
+            let pointee = ty.pointee(heap).ok_or(FfiError::UnsupportedType(ty.id()))?;
+            match pointee.kind() {
+                TypeKind::Char => ParamKind::CharPointer,
+                TypeKind::Char16 => ParamKind::Char16Pointer,
+                TypeKind::Void => ParamKind::PointerAny,
+                _ => ParamKind::PointerTo(pointee.id()),
+            }
+        }
+        TypeKind::Struct | TypeKind::Union | TypeKind::Array => ParamKind::Aggregate(ty.id()),
+        TypeKind::Void | TypeKind::Function => return Err(FfiError::UnsupportedType(ty.id())),
+        kind => ParamKind::Scalar(kind),
+    })
 }
 
 fn lower(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<Type> {
