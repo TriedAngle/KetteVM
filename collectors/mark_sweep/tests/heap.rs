@@ -49,8 +49,7 @@ impl Roots {
     }
 }
 
-/// The VM's allocation fast path in miniature: bump the window, refilling
-/// through the collector on a miss.
+/// Allocation fast path: bump the window, refill on a miss.
 fn alloc(
     local: &MarkSweepLocal,
     tlab: &mut Tlab,
@@ -66,18 +65,31 @@ fn alloc(
         .expect("allocate_slow must supply a TLAB of at least min_size"))
 }
 
+fn wait_for_sweep(local: &MarkSweepLocal) {
+    while local.state().pending_chunks() != 0 {
+        std::thread::yield_now();
+    }
+}
+
+fn wait_for_state_sweep(state: &MarkSweepState) {
+    while state.pending_chunks() != 0 {
+        std::thread::yield_now();
+    }
+}
+
 fn collect(local: &MarkSweepLocal, tlab: &mut Tlab) {
     tlab.invalidate();
     local.collect();
+    wait_for_sweep(local);
 }
 
 fn collect_minor(local: &MarkSweepLocal, tlab: &mut Tlab) {
     tlab.invalidate();
     local.collect_minor();
+    wait_for_sweep(local);
 }
 
-/// Allocates and roots; registered so the fake `layout_of` can size the
-/// object during the sweep.
+/// Allocates, registers and roots an object.
 fn rooted(
     local: &MarkSweepLocal,
     tlab: &mut Tlab,
@@ -114,11 +126,7 @@ fn host_for(roots: &Roots) -> GcHost {
     host_with(roots, visit_object)
 }
 
-/// Fixed-size nodes whose first payload word (+8) is visited as a tagged
-/// cell. `layout_of` is address-independent, so it works on originals and
-/// evacuated copies alike — the host minor collections (which move
-/// objects) need. `GcHost` carries plain fn pointers, so each size needs
-/// its own instantiation.
+/// Fake host for fixed-size nodes with a tagged link at +8.
 macro_rules! fixed_host {
     ($name:ident, $size:expr) => {
         fn $name(roots: &Roots) -> GcHost {
@@ -171,7 +179,6 @@ fn shared_heap_smoke() {
     let mut tlab = local.allocate_slow(16).unwrap();
     let ptr = tlab.try_alloc(16).unwrap();
     assert!(shared.contains(ptr.as_ptr() as Word));
-    // capacity counts the usable region: the chunk header is carved out
     let usable = 64 * 1024 - mark_sweep::chunk::HEADER_SIZE;
     assert_eq!(shared.stats().capacity, usable);
     drop(local);
@@ -186,9 +193,8 @@ fn allocations_are_aligned_and_accounted() {
     assert_eq!(a.as_ptr() as usize % 16, 0);
     assert_eq!(b.as_ptr() as usize % 16, 0);
     assert_ne!(a, b);
-    // both served from one 32KB tlab refill
+    // Both fit one 32 KiB TLAB refill.
     assert_eq!(state.stats().used, 32 * 1024);
-    // tlab bumps are sequential
     let diff = b.as_ptr() as usize - a.as_ptr() as usize;
     assert_eq!(diff, 16);
 }
@@ -205,7 +211,6 @@ fn garbage_is_reclaimed_and_coalesced() {
     collect(&local, &mut tlab);
 
     assert_eq!(state.stats().used, 0);
-    // the whole arena must be one free run again
     let big = alloc(
         &local,
         &mut tlab,
@@ -228,7 +233,6 @@ fn oom_when_live_data_exhausts_arena() {
         live.push(ptr);
     }
     assert!(state.stats().used > 0);
-    // freeing the roots lets the next allocation trigger a cycle and succeed
     roots.slots.clear();
     drop(live);
     alloc(&local, &mut tlab, layout).unwrap();
@@ -246,11 +250,8 @@ fn sweep_coalesces_dead_block_with_surrounding_free_space() {
     collect(&local, &mut tlab);
 
     assert_eq!(state.stats().used, 2 * 16 * 1024);
-    // the first free run starts where the dead tail began
     let next = alloc(&local, &mut tlab, layout).unwrap();
     assert_eq!(next.as_ptr(), tail.as_ptr());
-    // the tail merged with all trailing free space: everything but the two
-    // live objects fits in one allocation
     let big = alloc(
         &local,
         &mut tlab,
@@ -292,7 +293,6 @@ fn heap_grows_and_shrinks_by_chunks() {
         heap_size: 1024 * 1024,
     })
     .unwrap();
-    // movement-safe host: minors may fire mid-loop and relocate keepers
     let mut roots = Roots::empty().install_with(&state, fixed_host_16k_for);
     let local = MarkSweepLocal::new(Arc::clone(&state));
     let mut tlab = Tlab::empty();
@@ -302,9 +302,7 @@ fn heap_grows_and_shrinks_by_chunks() {
     for _ in 0..20 {
         roots.strong(alloc(&local, &mut tlab, layout).unwrap());
     }
-    // a full (non-moving) collection quiesces: garbage gone, live = 320KB
     collect(&local, &mut tlab);
-    // 20 x 16KB live spans two 256KB chunks
     assert_eq!(state.active_chunks(), 2);
     assert_eq!(
         state.stats().capacity,
@@ -314,12 +312,10 @@ fn heap_grows_and_shrinks_by_chunks() {
     roots.slots.clear();
     collect(&local, &mut tlab);
 
-    // every chunk emptied: decommitted back to the pool
     assert_eq!(state.active_chunks(), 0);
     assert_eq!(state.stats().capacity, 0);
     assert_eq!(state.stats().used, 0);
 
-    // allocation re-activates a pooled chunk
     rooted(&local, &mut tlab, &mut roots, layout);
     assert_eq!(state.active_chunks(), 1);
     assert_eq!(
@@ -346,14 +342,14 @@ fn sweep_clears_its_own_chunk_mark_bits() {
     let host = host_for(&Roots::empty());
     let mut objects = Vec::new();
     for _ in 0..4 {
-        let (ptr, claimed) = heap.allocate(layout, None);
+        let (ptr, claimed) = heap.allocate(layout, None, false);
         assert!(claimed.is_none());
         let ptr = ptr.unwrap();
         register(ptr, layout.size());
         objects.push(ptr.as_ptr() as usize);
     }
 
-    // simulate a mark phase: half the objects are live
+    // Mark half the objects live.
     for &addr in &objects[..2] {
         assert!(heap.chunk_of(addr).header().mark_set(addr));
     }
@@ -364,7 +360,6 @@ fn sweep_clears_its_own_chunk_mark_bits() {
         heap.publish_swept(&chunk, live_bytes);
     }
 
-    // every sweep consumed and cleared its own chunk's bits
     assert!(chunk_mark_is_clear(&heap, objects[0]));
     assert_eq!(heap.live_bytes(), 2 * 48);
 }
@@ -382,18 +377,13 @@ fn parked_mutators_assist_marking() {
     let mut tlab = Tlab::empty();
     let layout = Layout::from_size_align(16, 8).unwrap();
 
-    // every node rooted as it is allocated: a mid-build minor collection
-    // must not strand a chain held only in a Rust local
     for _ in 0..CHAINS * CHAIN_LEN {
         let node = alloc(&local, &mut tlab, layout).unwrap();
         unsafe { *(node.as_ptr() as *mut Word) = 0 };
         roots.strong(node);
     }
-    // the builder's local must not be part of upcoming cycles
     drop(local);
 
-    // mutators poll the safepoint through allocation; their allocations
-    // are unrooted garbage, dropped the moment they are made
     let running = Arc::new(AtomicBool::new(true));
     let mut threads = Vec::new();
     for _ in 0..3 {
@@ -424,6 +414,7 @@ fn parked_mutators_assist_marking() {
     assert!(state.mark_assists() > 0);
 
     state.collect_now();
+    wait_for_state_sweep(&state);
 
     assert_eq!(state.stats().used, CHAINS * CHAIN_LEN * 16);
     assert_eq!(
@@ -443,12 +434,7 @@ fn old_generation_pendings_drain_on_full_collection() {
     let mut tlab = Tlab::empty();
     let layout = Layout::from_size_align(16 * 1024, 8).unwrap();
 
-    // Minors promote survivors into old chunks, so dropping the roots leaves
-    // the old generation entirely garbage: a full collection then produces
-    // pending chunks that must all be swept (by the initiator and, when it
-    // wins the race, the background sweeper) before `collect` returns.
-    // Whether the sweeper wins a claim is scheduler timing, so the loop only
-    // asserts the observable outcome: every round drains completely.
+    // Drop the roots; every full collection must drain its pending chunks.
     for _ in 0..8 {
         for _ in 0..200 {
             roots.strong(alloc(&local, &mut tlab, layout).unwrap());

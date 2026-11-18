@@ -904,7 +904,7 @@ fn prevent_extensions_ordinary(heap: &mut Heap, scope: &HandleScope<'_>, obj: Ha
             prototype,
         });
         Prototype::shape_changed(heap, obj_ref.map(heap));
-        obj_ref.header.map.set(heap, obj_ref.erase(), new_map);
+        obj_ref.header.set_map(heap, obj_ref.erase(), new_map);
     });
 }
 

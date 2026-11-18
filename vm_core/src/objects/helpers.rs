@@ -96,7 +96,7 @@ impl Object {
         );
         let old_map = obj.as_tagged(heap).map(heap);
         Prototype::shape_changed(heap, old_map);
-        obj.as_tagged(heap).header.map.set(
+        obj.as_tagged(heap).header.set_map(
             heap,
             obj.as_tagged(heap).erase(),
             new_map.as_tagged(heap),

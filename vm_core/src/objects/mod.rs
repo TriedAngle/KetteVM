@@ -68,6 +68,7 @@ use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
 };
 use core::{alloc::Layout, ptr::NonNull};
+use std::sync::atomic::Ordering;
 
 pub trait HeapObject: 'static {
     type Init<'a>;
@@ -120,6 +121,16 @@ pub struct Header {
 impl Header {
     pub fn map<'a>(&self, heap: &'a Heap) -> Tagged<'a, Map> {
         self.map.get(heap)
+    }
+
+    /// Replace the map on a live object. The store is atomic because a
+    /// concurrent sweeper parses live objects' layouts while mutators still
+    /// run (see [`object_layout`]).
+    pub fn set_map(&self, heap: &Heap, host: Tagged<'_, Value>, map: Tagged<'_, Map>) {
+        heap.write_barrier(host, self.map.as_raw(), map.erase());
+        self.map
+            .as_raw()
+            .store_atomic(map.raw().to_bits(), Ordering::Release);
     }
 }
 
@@ -206,8 +217,10 @@ pub unsafe fn object_kind(addr: ObjectAddr) -> ObjectKind {
     let header = unsafe { &*addr.cast::<Header>().as_ptr() };
     // Safety: GC-callback context — there is no heap borrow to anchor at,
     // so the map word read from the visited header is promoted unsafely.
-    let map = header.map.raw();
-    unsafe { Tagged::<Map>::from_value_unchecked(map) }
+    // The load is atomic: mutators may still transition live objects' maps
+    // while the sweeper walks the chunk.
+    let map = header.map.as_raw().load_atomic(Ordering::Acquire);
+    unsafe { Tagged::<Map>::from_value_unchecked(Value::from_bits(map)) }
         .kind()
         .kind()
 }

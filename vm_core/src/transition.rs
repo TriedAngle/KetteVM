@@ -354,7 +354,7 @@ impl Transition {
                 .slot(heap, offset)
                 .set(heap, host, value.as_tagged(heap));
             Prototype::shape_changed(heap, receiver_ref.map(heap));
-            receiver_ref.header.map.set(heap, host, target);
+            receiver_ref.header.set_map(heap, host, target);
             return;
         }
 
@@ -380,7 +380,7 @@ impl Transition {
         let host = receiver_ref.erase();
         receiver_ref.slots.set(heap, host, slots.as_tagged(heap));
         Prototype::shape_changed(heap, receiver_ref.map(heap));
-        receiver_ref.header.map.set(heap, host, target);
+        receiver_ref.header.set_map(heap, host, target);
     }
 
     fn swap_map(
@@ -501,7 +501,7 @@ impl Transition {
                         let host = receiver.as_tagged(heap).erase();
                         obj.slots.set(heap, host, slots);
                         Prototype::shape_changed(heap, obj.map(heap));
-                        obj.header.map.set(heap, host, existing.as_tagged(heap));
+                        obj.header.set_map(heap, host, existing.as_tagged(heap));
                     },
                 );
                 return;
@@ -558,7 +558,7 @@ impl Transition {
                         let host = receiver.as_tagged(heap).erase();
                         obj.slots.set(heap, host, slots);
                         Prototype::shape_changed(heap, obj.map(heap));
-                        obj.header.map.set(heap, host, child);
+                        obj.header.set_map(heap, host, child);
                         Some(())
                     }
                     Err(_) => None,

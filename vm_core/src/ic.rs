@@ -1336,7 +1336,7 @@ impl InlineCache {
             let host = recv.erase();
             recv.slot(heap, offset).set(heap, host, value);
             Prototype::shape_changed(heap, recv.map(heap));
-            recv.header.map.set(heap, host, target);
+            recv.header.set_map(heap, host, target);
             return true;
         }
         false
@@ -1480,7 +1480,7 @@ fn apply_transition(
         recv.slot(heap, offset)
             .set(heap, host, value.as_tagged(heap));
         Prototype::shape_changed(heap, recv.map(heap));
-        recv.header.map.set(heap, host, target.as_tagged(heap));
+        recv.header.set_map(heap, host, target.as_tagged(heap));
         return true;
     }
     if new_len != old_len + 1 || offset != old_len {
@@ -1505,7 +1505,7 @@ fn apply_transition(
         let host = recv.erase();
         recv.slots.set(heap, host, new);
         Prototype::shape_changed(heap, recv.map(heap));
-        recv.header.map.set(heap, host, target.as_tagged(heap));
+        recv.header.set_map(heap, host, target.as_tagged(heap));
     }
     true
 }
