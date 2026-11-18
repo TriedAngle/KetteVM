@@ -38,6 +38,9 @@ const KIND_NATIVE_SETTER: i64 = 10;
 /// Script-context lexical binding cached on a global load/store site.
 /// Payload = slot index in the low 32 bits, binding info in the next byte.
 const KIND_GLOBAL_LEXICAL: i64 = 11;
+/// Native accessor getter: `data[0]` is the `AccessorInfo`; the load handler
+/// reads the getter index from it and calls the native directly.
+const KIND_NATIVE_GETTER: i64 = 12;
 const GLOBAL_LEXICAL_INFO_SHIFT: i64 = 32;
 const GLOBAL_LEXICAL_SLOT_MASK: i64 = 0xffff_ffff;
 
@@ -80,6 +83,8 @@ pub enum LoadHit<'a> {
     Value(Tagged<'a, Value>),
     /// invoke with the receiver as `this`
     Getter(Tagged<'a, Value>),
+    /// invoke the native accessor whose `AccessorInfo` this is
+    NativeGetter(Tagged<'a, Value>),
     NotFound,
 }
 
@@ -103,7 +108,10 @@ pub enum StoreHit<'a> {
     Done,
     /// invoke with (receiver, value)
     Setter(Tagged<'a, Value>),
-    NativeSetter(NativeIndex),
+    NativeSetter {
+        index: NativeIndex,
+        accessor: Tagged<'a, Value>,
+    },
 }
 
 /// What the slow-path store decided.
@@ -139,6 +147,7 @@ struct Plan<'s> {
     offset: usize,
     receiver_map: Handle<'s, Map>,
     pair: Option<Handle<'s, AccessorPair>>,
+    native_accessor: Option<Handle<'s, Value>>,
     holder: Option<Handle<'s, Object>>,
     /// the property is an own property of the receiver (no guarded chain)
     own: bool,
@@ -150,6 +159,7 @@ enum PlanKind {
     ArrayLength,
     Slow,
     Accessor,
+    NativeGetter,
     ParentName,
     NonExistent,
 }
@@ -158,6 +168,7 @@ struct StorePlan<'s> {
     field: Option<usize>,
     setter: Option<Handle<'s, AccessorPair>>,
     native_setter: Option<NativeIndex>,
+    native_accessor: Option<Handle<'s, Value>>,
     /// the setter is an own accessor (no guarded chain)
     setter_own: bool,
     receiver_map: Handle<'s, Map>,
@@ -167,7 +178,10 @@ enum StoreAction<'s> {
     Field(usize),
     Transition(Handle<'s, Map>),
     Setter(Handle<'s, Value>),
-    NativeSetter(NativeIndex),
+    NativeSetter {
+        index: NativeIndex,
+        accessor: Handle<'s, Value>,
+    },
     /// setter-less accessor: writes are silently ignored
     Noop,
 }
@@ -484,6 +498,13 @@ impl<'s> Plan<'s> {
             ),
             PlanKind::ArrayLength => Handler::Smi(kind_smi(KIND_ARRAY_LENGTH, 0)),
             PlanKind::Slow => Handler::Smi(kind_smi(KIND_SLOW, 0)),
+            PlanKind::NativeGetter => guarded(
+                heap,
+                scope,
+                receiver_map,
+                kind_smi(KIND_NATIVE_GETTER, 0),
+                &[self.native_accessor.expect("native getter has an accessor")],
+            ),
             // Own accessor: the whole weak pair.
             PlanKind::Accessor if self.own => {
                 let pair = self.pair.expect("accessor has a pair");
@@ -528,6 +549,7 @@ fn analyze_load<'s>(
         offset,
         receiver_map,
         pair,
+        native_accessor: None,
         holder,
         own,
     };
@@ -556,7 +578,13 @@ fn analyze_load<'s>(
         Hit::NativeAccessor { .. } if receiver.array_length(heap, name).is_some() => {
             mk(PlanKind::ArrayLength, 0, None, None, true)
         }
-        Hit::NativeAccessor { .. } => mk(PlanKind::Slow, 0, None, None, false),
+        Hit::NativeAccessor { holder, info, .. } => {
+            let holder = scope.handle(holder);
+            let own = holder.as_tagged(heap).ptr_eq(receiver);
+            let mut plan = mk(PlanKind::NativeGetter, 0, None, Some(holder), own);
+            plan.native_accessor = Some(scope.handle(info.erase()));
+            plan
+        }
         Hit::Accessor { holder, pair, .. } => {
             let holder = scope.handle(holder);
             if !cacheable(holder) {
@@ -652,6 +680,7 @@ fn apply_data_handler<'a>(heap: &'a Heap, handler: Tagged<'a, DataHandler>) -> O
                 .get_as::<AccessorPair>(heap)?;
             Some(getter_hit(heap, pair))
         }
+        KIND_NATIVE_GETTER => Some(LoadHit::NativeGetter(handler.data(heap, 0).as_strong()?)),
         KIND_PARENT => apply_parent_handler(heap, handler, payload),
         KIND_NON_EXISTENT => Some(LoadHit::NotFound),
         _ => None,
@@ -782,6 +811,7 @@ fn analyze_store<'s>(
         field: None,
         setter: None,
         native_setter: None,
+        native_accessor: None,
         setter_own: false,
         receiver_map: scope.handle(receiver.map(heap)),
     };
@@ -803,6 +833,7 @@ fn analyze_store<'s>(
         // on the receiver and stay slow.
         Hit::NativeAccessor { holder, info, .. } if holder.erase().ptr_eq(receiver.erase()) => {
             plan.native_setter = info.setter();
+            plan.native_accessor = Some(scope.handle(info.erase()));
         }
         _ => {}
     }
@@ -827,7 +858,14 @@ fn store_handler<'s>(
     }
     if let Some(setter) = plan.native_setter {
         debug_assert!(setter.0 < (1 << 55), "native handler payload overflow");
-        return Handler::Smi(kind_smi(KIND_NATIVE_SETTER, setter.0 as i64));
+        let accessor = plan.native_accessor.expect("native setter has an accessor");
+        return guarded(
+            heap,
+            scope,
+            &plan.receiver_map,
+            kind_smi(KIND_NATIVE_SETTER, setter.0 as i64),
+            &[accessor],
+        );
     }
     let Some(pair) = plan.setter else {
         return Handler::Smi(kind_smi(KIND_SLOW, 0));
@@ -1324,7 +1362,6 @@ impl InlineCache {
             let (kind, payload) = decode_handler_smi(handler)?;
             match kind {
                 KIND_FIELD => StoreAction::Field(payload as usize),
-                KIND_NATIVE_SETTER => StoreAction::NativeSetter(NativeIndex(payload as usize)),
                 _ => return None,
             }
         } else if handler.is_weak_ptr() {
@@ -1343,7 +1380,7 @@ impl InlineCache {
             if !check_prototype_validity_cell(heap, data_handler) {
                 return None;
             }
-            let (kind, _) = decode_handler_smi(data_handler.smi_handler(heap))?;
+            let (kind, payload) = decode_handler_smi(data_handler.smi_handler(heap))?;
             match kind {
                 KIND_SETTER => {
                     let pair = data_handler
@@ -1351,6 +1388,13 @@ impl InlineCache {
                         .as_strong()?
                         .get_as::<AccessorPair>(heap)?;
                     setter_action(heap, scope, pair, mode)?
+                }
+                KIND_NATIVE_SETTER => {
+                    let accessor = data_handler.data(heap, 0).as_strong()?;
+                    StoreAction::NativeSetter {
+                        index: NativeIndex(payload as usize),
+                        accessor: scope.handle(accessor),
+                    }
                 }
                 _ => return None,
             }
@@ -1368,7 +1412,10 @@ impl InlineCache {
                     .then_some(StoreHit::Done)
             }
             StoreAction::Setter(setter) => Some(StoreHit::Setter(setter.as_tagged(heap))),
-            StoreAction::NativeSetter(index) => Some(StoreHit::NativeSetter(index)),
+            StoreAction::NativeSetter { index, accessor } => Some(StoreHit::NativeSetter {
+                index,
+                accessor: accessor.as_tagged(heap),
+            }),
             StoreAction::Noop => Some(StoreHit::Done),
         }
     }

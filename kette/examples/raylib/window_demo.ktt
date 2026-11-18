@@ -2,6 +2,7 @@
 // Run: cargo run -q -p vm -- kette/examples/raylib/window_demo.ktt
 
 // macOS does not search Homebrew's lib dir for bare library names.
+let (void, i32, f32, CString) = FFI
 let path = if os.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"
     } else if os.name == "windows" {
@@ -12,14 +13,14 @@ let path = if os.name == "macos" {
 
 let raylib = FFI.library(path)
 
-let InitWindow = raylib.fn("InitWindow", [FFI.i32, FFI.i32, FFI.CString], FFI.void)
-let CloseWindow = raylib.fn("CloseWindow", [], FFI.void)
-let SetTargetFPS = raylib.fn("SetTargetFPS", [FFI.i32], FFI.void)
-let BeginDrawing = raylib.fn("BeginDrawing", [], FFI.void)
-let EndDrawing = raylib.fn("EndDrawing", [], FFI.void)
-let ClearBuffers = raylib.fn("rlClearScreenBuffers", [], FFI.void)
-let GetScreenWidth = raylib.fn("GetScreenWidth", [], FFI.i32)
-let GetFrameTime = raylib.fn("GetFrameTime", [], FFI.f32)
+let InitWindow = raylib.fn("InitWindow", [i32, i32, CString], void)
+let CloseWindow = raylib.fn("CloseWindow", [], void)
+let SetTargetFPS = raylib.fn("SetTargetFPS", [i32], void)
+let BeginDrawing = raylib.fn("BeginDrawing", [], void)
+let EndDrawing = raylib.fn("EndDrawing", [], void)
+let ClearBuffers = raylib.fn("rlClearScreenBuffers", [], void)
+let GetScreenWidth = raylib.fn("GetScreenWidth", [], i32)
+let GetFrameTime = raylib.fn("GetFrameTime", [], f32)
 
 InitWindow(800, 450, "kette + raylib")
 SetTargetFPS(60)

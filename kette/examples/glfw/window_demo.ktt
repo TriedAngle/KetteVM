@@ -5,6 +5,7 @@
 // is printed from inside the callback, which runs on the C stack when
 // glfwPollEvents delivers it.
 
+let (void, i32, u32, f32, CString) = FFI
 let glfw_path = if os.name == "macos" {
         "/opt/homebrew/lib/libglfw.dylib"
     } else if os.name == "windows" {
@@ -24,28 +25,28 @@ let gl_path = if os.name == "macos" {
 let glfw = FFI.library(glfw_path)
 let gl = FFI.library(gl_path)
 
-let Window = FFI.pointer(FFI.void)
+let Window = FFI.pointer(void)
 
-let glfwInit = glfw.fn("glfwInit", [], FFI.i32)
-let glfwTerminate = glfw.fn("glfwTerminate", [], FFI.void)
+let glfwInit = glfw.fn("glfwInit", [], i32)
+let glfwTerminate = glfw.fn("glfwTerminate", [], void)
 let glfwCreateWindow = glfw.fn(
     "glfwCreateWindow",
-    [FFI.i32, FFI.i32, FFI.CString, Window, Window],
+    [i32, i32, CString, Window, Window],
     Window
 )
-let glfwMakeContextCurrent = glfw.fn("glfwMakeContextCurrent", [Window], FFI.void)
-let glfwWindowShouldClose = glfw.fn("glfwWindowShouldClose", [Window], FFI.i32)
-let glfwSetWindowShouldClose = glfw.fn("glfwSetWindowShouldClose", [Window, FFI.i32], FFI.void)
-let glfwSwapBuffers = glfw.fn("glfwSwapBuffers", [Window], FFI.void)
-let glfwPollEvents = glfw.fn("glfwPollEvents", [], FFI.void)
+let glfwMakeContextCurrent = glfw.fn("glfwMakeContextCurrent", [Window], void)
+let glfwWindowShouldClose = glfw.fn("glfwWindowShouldClose", [Window], i32)
+let glfwSetWindowShouldClose = glfw.fn("glfwSetWindowShouldClose", [Window, i32], void)
+let glfwSwapBuffers = glfw.fn("glfwSwapBuffers", [Window], void)
+let glfwPollEvents = glfw.fn("glfwPollEvents", [], void)
 let glfwSetKeyCallback = glfw.fn(
     "glfwSetKeyCallback",
-    [Window, FFI.pointer(FFI.fn([Window, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void))],
-    FFI.void
+    [Window, FFI.pointer(FFI.fn([Window, i32, i32, i32, i32], void))],
+    void
 )
 
-let glClearColor = gl.fn("glClearColor", [FFI.f32, FFI.f32, FFI.f32, FFI.f32], FFI.void)
-let glClear = gl.fn("glClear", [FFI.u32], FFI.void)
+let glClearColor = gl.fn("glClearColor", [f32, f32, f32, f32], void)
+let glClear = gl.fn("glClear", [u32], void)
 
 let GLFW_KEY_ESCAPE = 256
 let GLFW_PRESS = 1
@@ -53,8 +54,8 @@ let GL_COLOR_BUFFER_BIT = 16384
 
 // GLFWkeyfun: void (*)(GLFWwindow *, int key, int scancode, int action, int mods)
 let onKey = FFI.callback(
-    [Window, FFI.i32, FFI.i32, FFI.i32, FFI.i32],
-    FFI.void,
+    [Window, i32, i32, i32, i32],
+    void,
     { |window, key, scancode, action, mods|
         if action == GLFW_PRESS {
             print(key)

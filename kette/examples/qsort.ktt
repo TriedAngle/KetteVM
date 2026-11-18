@@ -1,21 +1,22 @@
 // Guest callbacks into C: qsort with a Kette comparator.
 // Run: cargo run -q -p vm -- kette/examples/qsort.ktt
 
+let (void, i32, u64) = FFI
 let libc = FFI.library(null)
 
-let Comparator = FFI.fn([FFI.pointer(FFI.void), FFI.pointer(FFI.void)], FFI.i32)
+let Comparator = FFI.fn([FFI.pointer(void), FFI.pointer(void)], i32)
 let ComparatorPointer = FFI.pointer(Comparator)
 
 let qsort = libc.fn(
     "qsort",
-    [FFI.pointer(FFI.i32), FFI.u64, FFI.u64, ComparatorPointer],
-    FFI.void
+    [FFI.pointer(i32), u64, u64, ComparatorPointer],
+    void
 )
 
 // The pointers arrive as `void *`, so cast them to `i32 *` before reading.
-let compare = FFI.callback([FFI.pointer(FFI.void), FFI.pointer(FFI.void)], FFI.i32, { |left, right|
-    let a = left.cast(FFI.i32).get(0)
-    let b = right.cast(FFI.i32).get(0)
+let compare = Comparator.callback({ |left, right|
+    let a = left.cast(i32).get(0)
+    let b = right.cast(i32).get(0)
     if a < b {
         -1
     } else if a > b {
@@ -26,7 +27,7 @@ let compare = FFI.callback([FFI.pointer(FFI.void), FFI.pointer(FFI.void)], FFI.i
 })
 
 let count = 8
-let values = FFI.array(FFI.i32, count).new()
+let values = FFI.array(i32, count).new()
 let i = 0
 while i < count {
     values.set(i, (i * 37) % 17)

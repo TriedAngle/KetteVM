@@ -3,9 +3,10 @@ use crate::ffi::{
     ClosureEntry, EntryPtr, FLAG_VARIADIC, FfiError, FfiResult, FfiState, TypeKind,
     cif_for_signature,
 };
+
 use crate::{
-    CValue, CValueFlags, CValueInit, ErasedRuntimeState, GcSlot, Handle, HandleScope, Heap, Object,
-    ThreadState, TypeInfo, VM, Value,
+    CValue, CValueFlags, CValueInit, CallTarget, ErasedRuntimeState, GcSlot, Handle, HandleScope,
+    Heap, Object, ThreadState, TypeInfo, VM, Value,
 };
 use core::cell::Cell;
 use libffi::middle::Closure;
@@ -104,6 +105,16 @@ pub fn callback<'s>(
         return Err(FfiError::InvalidArgument(
             "a bound function cannot be used as a callback",
         ));
+    }
+    // parameters the signature never supplies would always be `undefined`
+    if let Some(CallTarget::Bytecode { info, .. }) = guest.as_tagged(heap).call_target(heap) {
+        let declared = info.formal_parameter_count();
+        if declared > params.len() {
+            return Err(FfiError::ArgCount {
+                expected: params.len(),
+                found: declared,
+            });
+        }
     }
     let entry: &'static ClosureEntry = Box::leak(Box::new(ClosureEntry {
         // Safety: every value is live and the entry is not shared yet, so

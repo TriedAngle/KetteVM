@@ -2,8 +2,8 @@ use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, callback, mem
 use crate::{
     AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
-    PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, Thrown, TypeInfo, VM,
-    Value, VmError, raise_runtime,
+    PropertyDescriptor, SetupError, SlotName, Smi, StringRef, Tagged, ThreadState, Thrown,
+    TypeInfo, VM, Value, VmError, raise_runtime,
 };
 
 /// Install the `FFI` namespace and register the FFI natives.
@@ -22,7 +22,9 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let lib_close = vm.register_native(library_close);
     let lib_path = vm.register_native(library_path);
     let struct_type = vm.register_native(ffi_struct);
+    let enum_type = vm.register_native(ffi_enum);
     let type_new = vm.register_native(c_type_new);
+    let type_callback = vm.register_native(type_callback);
     let type_size = vm.register_native(c_type_size);
     let type_align = vm.register_native(c_type_align);
     let buffer_get = vm.register_native(c_value_get);
@@ -100,6 +102,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, type_prototype, "size", type_size, 0);
         Object::install_method(thread, &scope, type_prototype, "align", type_align, 0);
         Object::install_method(thread, &scope, type_prototype, "wrap", type_wrap, 1);
+        Object::install_method(thread, &scope, type_prototype, "callback", type_callback, 1);
         {
             let heap = thread.heap();
             let map = heap.known().c_type_map.get(heap);
@@ -180,6 +183,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         Object::install_method(thread, &scope, namespace, "fn", fn_type, 2);
         Object::install_method(thread, &scope, namespace, "callback", callback, 3);
         Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
+        Object::install_method(thread, &scope, namespace, "enum", enum_type, 2);
         Object::install_method(thread, &scope, namespace, "array", array_type, 2);
         Object::install_method(thread, &scope, namespace, "buffer", buffer, 1);
 
@@ -649,53 +653,255 @@ fn library_path<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
     })
 }
 
-/// `FFI.struct([["name", type], ...])` -> struct `CType`.
+/// Own named data slots of a shape object, in declaration order.
+fn shape_entries<'a>(
+    heap: &'a Heap,
+    shape: Tagged<'a, Object>,
+) -> FfiResult<Vec<(Tagged<'a, SlotName>, Tagged<'a, Value>)>> {
+    let empty = heap.known().empty_fixed_array.get(heap).erase();
+    if !shape.elements(heap).ptr_eq(empty) {
+        return Err(FfiError::InvalidArgument(
+            "expected a shape object like { x: FFI.i32 }",
+        ));
+    }
+    let mut entries = Vec::new();
+    for descriptor in shape.map(heap).as_ref().descriptors() {
+        if descriptor.flags().is_accessor() {
+            return Err(FfiError::InvalidArgument(
+                "shape fields must be data properties",
+            ));
+        }
+        entries.push((
+            descriptor.name(heap),
+            shape.slots(heap).at(heap, descriptor.offset()),
+        ));
+    }
+    Ok(entries)
+}
+
+/// `FFI.struct({ name: type, ... })` -> struct `CType`.
 fn ffi_struct<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     let ffi = vm.ffi();
     state.handle_scope(|scope| {
-        let Some(fields) = args.get_handle(heap, 0).as_tagged(heap).as_heap_object() else {
+        let Some(shape) = args.get_handle(heap, 0).as_tagged(heap).as_heap_object() else {
             return raise_ffi(
                 vm,
                 heap,
                 state,
-                FfiError::InvalidArgument("expected an array of field pairs"),
+                FfiError::InvalidArgument("expected a struct shape object"),
             );
         };
-        let mut collected: Vec<(Option<&str>, Handle<TypeInfo>)> =
-            Vec::with_capacity(fields.length());
-        let mut names = Vec::with_capacity(fields.length());
-        for index in 0..fields.length() {
-            let Some(pair) = fields.element_value(heap, index) else {
-                return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
-            };
-            let Some(pair) = pair.as_heap_object() else {
+        let entries = match shape_entries(heap, shape) {
+            Ok(entries) => entries,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let mut names: Vec<String> = Vec::with_capacity(entries.len());
+        let mut types: Vec<Handle<TypeInfo>> = Vec::with_capacity(entries.len());
+        for (name, value) in entries {
+            let Some(name) = string_of(heap, name.erase()) else {
                 return raise_ffi(
                     vm,
                     heap,
                     state,
-                    FfiError::InvalidArgument("expected a [name, type] pair"),
+                    FfiError::InvalidArgument("field names must be strings"),
                 );
             };
-            let name = pair
-                .element_value(heap, 0)
-                .and_then(|value| string_of(heap, value));
-            names.push(name);
-            let Some(ty) = pair
-                .element_value(heap, 1)
-                .and_then(|value| value.get_as::<TypeInfo>(heap))
-            else {
+            let Some(ty) = value.get_as::<TypeInfo>(heap) else {
                 return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
             };
-            collected.push((None, scope.handle(ty)));
+            names.push(name);
+            types.push(scope.handle(ty));
         }
-        for (index, name) in names.iter().enumerate() {
-            collected[index].0 = name.as_deref();
-        }
-        match ffi.define_struct(vm, heap, &scope, None, &collected) {
+        let fields: Vec<(Option<&str>, Handle<TypeInfo>)> = names
+            .iter()
+            .zip(types)
+            .map(|(name, ty)| (Some(name.as_str()), ty))
+            .collect();
+        match ffi.define_struct(vm, heap, &scope, None, &fields) {
             Ok(ty) => ty.as_tagged(heap).erase(),
+            Err(error) => raise_ffi(vm, heap, state, error),
+        }
+    })
+}
+
+/// Width and signedness of an integer type usable as an enum's underlying type.
+fn enum_underlying(kind: TypeKind) -> Option<(u32, bool)> {
+    Some(match kind {
+        TypeKind::I8 => (8, true),
+        TypeKind::U8 => (8, false),
+        TypeKind::I16 => (16, true),
+        TypeKind::U16 => (16, false),
+        TypeKind::I32 => (32, true),
+        TypeKind::U32 => (32, false),
+        TypeKind::I64 => (64, true),
+        TypeKind::U64 => (64, false),
+        _ => return None,
+    })
+}
+
+fn enum_value_fits(value: i64, bits: u32, signed: bool) -> bool {
+    if signed {
+        let bound = 1i64 << (bits - 1);
+        (-bound..bound).contains(&value)
+    } else {
+        value >= 0 && (bits == 64 || (value as u64) < (1u64 << bits))
+    }
+}
+
+/// `FFI.enum([underlying,] { NAME: value, ... })` -> named constants object.
+fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let (width, variants) = if args.len() >= 2 {
+            (
+                args.get_handle(heap, 0).as_tagged(heap),
+                args.get_handle(heap, 1).as_tagged(heap),
+            )
+        } else {
+            (
+                heap.known()
+                    .ffi_types
+                    .get(heap, TypeId::I32)
+                    .expect("i32 builtin")
+                    .erase(),
+                args.get_handle(heap, 0).as_tagged(heap),
+            )
+        };
+        let Some(width_ty) = width.get_as::<TypeInfo>(heap) else {
+            return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
+        };
+        let Some((bits, signed)) = enum_underlying(width_ty.kind()) else {
+            return raise_ffi(vm, heap, state, FfiError::UnsupportedType(width_ty.id()));
+        };
+        let Some(shape) = variants.as_heap_object() else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a shape object like { RED: 0 }"),
+            );
+        };
+        let entries = match shape_entries(heap, shape) {
+            Ok(entries) => entries,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let mut constants: Vec<(String, i64)> = Vec::with_capacity(entries.len());
+        for (name, value) in entries {
+            let Some(name) = string_of(heap, name.erase()) else {
+                return raise_ffi(
+                    vm,
+                    heap,
+                    state,
+                    FfiError::InvalidArgument("enum names must be strings"),
+                );
+            };
+            let Some(value) = value.to_i64() else {
+                return raise_ffi(
+                    vm,
+                    heap,
+                    state,
+                    FfiError::InvalidArgument("enum values must be integers"),
+                );
+            };
+            if !enum_value_fits(value, bits, signed) {
+                return raise_ffi(
+                    vm,
+                    heap,
+                    state,
+                    FfiError::InvalidArgument("enum value does not fit the underlying type"),
+                );
+            }
+            constants.push((name, value));
+        }
+        let width_ty = scope.handle(width_ty);
+
+        // `type` lives on a per-enum prototype so a variant may be named `type`.
+        let object_prototype = scope.handle(heap.known().object_prototype.get(heap));
+        let wrapper_map = heap.allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: scope.handle(object_prototype.as_tagged(heap).erase()),
+            },
+            &scope,
+        );
+        let wrapper = heap
+            .new_object(&scope, wrapper_map, HandleSlice::EMPTY)
+            .as_handle(&scope);
+        let type_name = {
+            let name = vm.interner().intern_str(heap, &scope, "type");
+            scope.handle(name.as_tagged(heap).erase().as_name())
+        };
+        let width_value = scope.handle(width_ty.as_tagged(heap).erase());
+        if Object::define_own_property_ordinary(
+            heap,
+            &scope,
+            wrapper.clone(),
+            type_name,
+            PropertyDescriptor::non_enumerable(width_value),
+        )
+        .is_err()
+        {
+            return raise_runtime(heap, Thrown);
+        }
+
+        let target_map = heap.allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: scope.handle(wrapper.as_tagged(heap).erase()),
+            },
+            &scope,
+        );
+        let target = heap
+            .new_object(&scope, target_map, HandleSlice::EMPTY)
+            .as_handle(&scope);
+        for (name, value) in constants {
+            let key = {
+                let name = vm.interner().intern_str(heap, &scope, &name);
+                scope.handle(name.as_tagged(heap).erase().as_name())
+            };
+            let value = scope.handle(Smi::new(value).into_tagged());
+            if Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                target.clone(),
+                key,
+                PropertyDescriptor::data(value),
+            )
+            .is_err()
+            {
+                return raise_runtime(heap, Thrown);
+            }
+        }
+        target.as_tagged(heap).erase()
+    })
+}
+
+/// `type.callback(fn)` -> C function pointer with this function type.
+fn type_callback<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = vm.ffi();
+    state.handle_scope(|scope| {
+        let Some(ty) = call.receiver.as_tagged(heap).get_as::<TypeInfo>(heap) else {
+            return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
+        };
+        if ty.kind() != TypeKind::Function {
+            return raise_ffi(vm, heap, state, FfiError::NotAFunction(ty.id()));
+        }
+        let ty = scope.handle(ty);
+        let guest = args.get_handle(heap, 0);
+        match callback(ffi, heap, &scope, &ty, &guest) {
+            Ok(callback) => callback.as_tagged(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
     })

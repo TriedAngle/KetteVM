@@ -47,7 +47,7 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             }
         }
         Node::StmtList { stmts } => walk_stmts(ast, *stmts, out),
-        Node::Let { init, .. } => collect_objects(ast, *init, out),
+        Node::Let { init, .. } | Node::LetMulti { init, .. } => collect_objects(ast, *init, out),
         Node::ExprStmt { expr } => collect_objects(ast, *expr, out),
         Node::If { cond, then, else_ } => {
             collect_objects(ast, *cond, out);
@@ -477,6 +477,38 @@ impl<'a> FunctionGen<'a> {
                 }
                 Ok(())
             }
+            Node::LetMulti {
+                sources,
+                names,
+                init,
+            } => {
+                let temps = self.b.temp_scope();
+                self.expr(init)?;
+                let module = self.b.stage_acc(&temps);
+                let sources: Vec<NodeId> = self.ast.list_items(sources).to_vec();
+                let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
+                for (source_node, name_node) in sources.into_iter().zip(names) {
+                    let Node::Ident(source) = *self.ast.node(source_node) else {
+                        unreachable!("import sources are identifiers");
+                    };
+                    let Node::Ident(name) = *self.ast.node(name_node) else {
+                        unreachable!("import names are identifiers");
+                    };
+                    let field = self.name_constant(source);
+                    let feedback = self.b.new_feedback();
+                    self.b.load_named_property(module, field, feedback);
+                    if self.scope == self.root_scope {
+                        let binding = self.name_constant(name);
+                        let feedback = self.b.new_feedback();
+                        self.b.store_global(binding, feedback);
+                    } else {
+                        let decl = self.next_let;
+                        self.next_let += 1;
+                        self.store_decl(decl);
+                    }
+                }
+                Ok(())
+            }
             Node::ExprStmt { expr } => {
                 self.expr(expr)?;
                 // `return x` terminates mid-statement: the sink store
@@ -577,9 +609,10 @@ impl<'a> FunctionGen<'a> {
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
             Node::Slot { .. } => unreachable!("slots are only reachable through their object"),
-            Node::StmtList { .. } | Node::Let { .. } | Node::ExprStmt { .. } => {
-                self.err(node, "statement in expression position")
-            }
+            Node::StmtList { .. }
+            | Node::Let { .. }
+            | Node::LetMulti { .. }
+            | Node::ExprStmt { .. } => self.err(node, "statement in expression position"),
         }
     }
 

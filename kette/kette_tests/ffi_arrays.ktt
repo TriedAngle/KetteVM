@@ -2,7 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/kette_tests/ffi_arrays.ktt
 // Check: kette/kette_tests/check.py
 
-let I32x4 = FFI.array(FFI.i32, 4)
+let (struct, i32, u64, CString) = FFI
+let I32x4 = FFI.array(i32, 4)
 let values = I32x4.new()
 values.set(0, 7)
 values.set(3, 9)
@@ -32,7 +33,7 @@ Test.assert(text.add(3).get(0), 0)
 
 // struct fields are addressable by name; a pointer to a struct yields
 // struct values (copies) when indexed
-let Point = FFI.struct([["x", FFI.i32], ["y", FFI.i32]])
+let Point = struct({x: i32, y: i32})
 let point = Point.new(3, 5)
 Test.assert(point.get("x"), 3)
 Test.assert(point.get("y"), 5)
@@ -45,8 +46,8 @@ point.set("x", 8)
 Test.assert(point.get("x"), 8)
 
 // aggregate fields are zero-copy views: writes go through
-let Vec2 = FFI.struct([["x", FFI.i32], ["y", FFI.i32]])
-let Rect = FFI.struct([["origin", Vec2], ["size", Vec2]])
+let Vec2 = struct({x: i32, y: i32})
+let Rect = struct({origin: Vec2, size: Vec2})
 let rect = Rect.new()
 rect.origin.x = 7
 rect.size.y = 9
@@ -61,7 +62,7 @@ Test.assert(point.x, 8)
 Test.assert(detached.x, 99)
 
 // pointer to pointer
-let I32p = FFI.pointer(FFI.i32)
+let I32p = FFI.pointer(i32)
 let slot = FFI.array(I32p, 1).new()
 slot.set(0, values)
 let back = slot.get(0)
@@ -76,7 +77,18 @@ Test.assert(FFI.string_at(ascii), "hello")
 
 // guest strings marshal directly to char* parameters
 let libc = FFI.library(null)
-let strlen = libc.fn("strlen", [FFI.CString], FFI.u64)
+let strlen = libc.fn("strlen", [CString], u64)
 Test.assert(strlen("hello"), 5)
 Test.assert(strlen("héllo"), 6)
 Test.assert(strlen(ascii), 5)
+
+// enums are named constants plus an underlying integer type
+let Color = FFI.enum({ RED: 0, GREEN: 1, BLUE: 2 })
+Test.assert(Color.RED + Color.GREEN + Color.BLUE, 3)
+Test.assert(FFI.array(Color.type, 2).size(), 8)
+Test.assert(Color.type, FFI.i32)
+
+let Tiny = FFI.enum(FFI.i8, { A: 0, B: 7 })
+Test.assert(Tiny.B, 7)
+Test.assert(Tiny.type, FFI.i8)
+Test.assert(FFI.array(Tiny.type, 2).size(), 2)

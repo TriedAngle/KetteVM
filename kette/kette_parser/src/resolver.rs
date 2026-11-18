@@ -160,6 +160,17 @@ impl Resolver<'_> {
                     let span = self.ast.span(stmt);
                     self.declare(name, span);
                 }
+                Node::LetMulti { names, init, .. } => {
+                    self.collect_expr_decls(init);
+                    let span = self.ast.span(stmt);
+                    let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
+                    for name_node in names {
+                        let Node::Ident(name) = *self.ast.node(name_node) else {
+                            unreachable!("import names are identifiers");
+                        };
+                        self.declare(name, span);
+                    }
+                }
                 Node::ExprStmt { expr } => self.collect_expr_decls(expr),
                 _ => {}
             }
@@ -279,7 +290,7 @@ impl Resolver<'_> {
                     self.resolve_node(stmt);
                 }
             }
-            Node::Let { init, .. } => self.resolve_node(*init),
+            Node::Let { init, .. } | Node::LetMulti { init, .. } => self.resolve_node(*init),
             Node::ExprStmt { expr } => self.resolve_node(*expr),
             Node::Ident(sym) => self.resolve_ident(node, *sym),
             Node::Object(_) => {

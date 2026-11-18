@@ -144,6 +144,14 @@ pub enum Node {
         name: Symbol,
         init: NodeId,
     },
+    /// `let (a, b as c, ...) = expr`: bind every named field to a declaration.
+    LetMulti {
+        /// Field names read from `init`.
+        sources: NodeList,
+        /// Declared names, parallel to `sources`.
+        names: NodeList,
+        init: NodeId,
+    },
     ExprStmt {
         expr: NodeId,
     },
