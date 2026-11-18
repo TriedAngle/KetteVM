@@ -190,7 +190,7 @@ let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, far
     ])
 }
 
-let endPortalMode3D = { ||
+let endPortalMode3D = {
     rlDrawRenderBatchActive()
     rlMatrixMode(RL_PROJECTION)
     rlPopMatrix()

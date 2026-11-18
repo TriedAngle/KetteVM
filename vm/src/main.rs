@@ -81,7 +81,9 @@ fn main() {
         .add::<JSRuntime>()
         .expect("failed to install js runtime")
         .add::<KetteRuntime>()
-        .expect("failed to install kette runtime");
+        .expect("failed to install kette runtime")
+        .add_eval::<JavascriptCompiler>("js")
+        .add_eval::<KetteCompiler>("kette");
 
     vm.arm_gc_stress();
     let mut thread = vm.attach();

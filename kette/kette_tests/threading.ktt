@@ -41,3 +41,18 @@ Test.assert(cell.load(), 42)
 Test.assert(Thread.current().name(), "main")
 Thread.yield()
 Thread.sleep(1)
+
+// every ThreadObject exposes the same surface, not just the main object
+let self_tid = AtomicI64.new(-1)
+let self_api = {
+    let me = Thread.current()
+    me.yield()
+    me.sleep(0)
+    self_tid.store(me.threadId())
+}
+let self_thread = Thread.new(self_api, "self")
+self_thread.start()
+self_thread.join()
+Test.assert(self_thread.name(), "self")
+Test.assert(self_thread.isAlive(), false)
+Test.assert(self_thread.threadId(), self_tid.load())

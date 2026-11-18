@@ -32,7 +32,11 @@ impl core::fmt::Display for CompileError {
 }
 
 /// Resolve + lower a parsed unit. `functions[0]` is the script.
-pub fn compile_ast(ast: &mut Ast, declare_globals: NativeIndex) -> Result<Program, CompileError> {
+pub fn compile_ast(
+    ast: &mut Ast,
+    mode: SourceMode,
+    declare_globals: NativeIndex,
+) -> Result<Program, CompileError> {
     let _pipeline = trace::info_span!("kette::compile");
     let resolved = {
         let _span = trace::info_span!("kette::resolve").entered();
@@ -40,7 +44,7 @@ pub fn compile_ast(ast: &mut Ast, declare_globals: NativeIndex) -> Result<Progra
     };
     {
         let _span = trace::info_span!("kette::codegen").entered();
-        codegen::generate(ast, &resolved, declare_globals)
+        codegen::generate(ast, &resolved, mode, declare_globals)
     }
 }
 
@@ -51,9 +55,12 @@ pub fn compile_kette(
     mode: SourceMode,
     declare_globals: NativeIndex,
 ) -> Result<Program, FrontendError> {
-    if !matches!(mode, SourceMode::Script | SourceMode::Repl) {
+    if !matches!(
+        mode,
+        SourceMode::Script | SourceMode::Repl | SourceMode::EvalGlobal
+    ) {
         return Err(FrontendError::compile(
-            "kette: only script and repl mode are implemented",
+            "kette: only script, repl, and indirect eval mode are implemented",
         ));
     }
     let mut parser = Parser::new(Utf8SliceStream::new(source));
@@ -61,5 +68,5 @@ pub fn compile_kette(
         .parse_script()
         .map_err(|e| FrontendError::syntax(e.to_string()))?;
     let mut ast = parser.into_ast();
-    compile_ast(&mut ast, declare_globals).map_err(|e| FrontendError::compile(e.to_string()))
+    compile_ast(&mut ast, mode, declare_globals).map_err(|e| FrontendError::compile(e.to_string()))
 }

@@ -33,7 +33,7 @@ pub mod value;
 
 pub use objects::object::SetApplied;
 pub use objects::proxy;
-pub use objects::script_context::{global_lexical_get, global_lexical_set};
+pub use objects::script_context::{eval_global_context, global_lexical_get, global_lexical_set};
 pub use objects::string;
 
 pub use ffi::FfiState;
@@ -129,6 +129,14 @@ pub trait Compiler {
     const RUNTIME: RuntimeId;
 }
 
+/// A source language registered for indirect eval via `KetteTools.eval`.
+pub struct EvalLanguage {
+    pub name: &'static str,
+    pub compile:
+        fn(&VM, &str, bytecode::SourceMode) -> Result<bytecode::Program, bytecode::FrontendError>,
+    pub runtime: RuntimeId,
+}
+
 /// Number of slots per handle block.
 pub const HANDLE_BLOCK_SIZE: usize = 1024;
 
@@ -162,6 +170,8 @@ pub struct SharedVM {
     natives: NativeRegistry,
     /// Installed runtimes in `add` order; a [`RuntimeId`] indexes this.
     runtimes: Vec<Box<dyn ErasedRuntimeState>>,
+    /// Source languages available to `KetteTools.eval`.
+    eval_languages: Vec<EvalLanguage>,
     /// Weak slots the GC clears when their targets die; used for tests and
     /// the seed of a weak-registry feature.
     weak_slots: Mutex<Vec<RawCell>>,
@@ -196,6 +206,9 @@ pub struct ThreadState {
     acc: Register,
     pending_exception: Register,
     has_pending_exception: StdCell<bool>,
+    /// A guest callback threw during an FFI call on this thread; the FFI
+    /// trampoline re-raises once the C call has returned.
+    callback_threw: StdCell<bool>,
     /// Why this thread's execution terminated, if it did. Set exactly once,
     /// right before the uncatchable unwind; guest code can never observe or
     /// intercept it.
@@ -378,6 +391,22 @@ impl ThreadState {
 
     pub fn has_pending_exception(&self) -> bool {
         self.has_pending_exception.get()
+    }
+
+    /// A callback threw during this thread's FFI call.
+    #[inline(always)]
+    pub fn callback_threw(&self) -> bool {
+        self.callback_threw.get()
+    }
+
+    #[inline(always)]
+    pub fn set_callback_threw(&self) {
+        self.callback_threw.set(true);
+    }
+
+    #[inline(always)]
+    pub fn take_callback_threw(&self) -> bool {
+        self.callback_threw.replace(false)
     }
 
     /// The guest `Thread` object for this execution context, if any.
@@ -671,6 +700,7 @@ impl VM {
             prototype_registry: PrototypeRegistry::new(),
             natives: NativeRegistry::new(),
             runtimes: Vec::new(),
+            eval_languages: Vec::new(),
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
             thread_event_lock: Mutex::new(()),
@@ -730,6 +760,17 @@ impl VM {
         &mut Arc::get_mut(&mut self.shared)
             .expect("cannot mutate the FFI state on a shared VM")
             .ffi
+    }
+
+    /// A weak handle for host state that must not keep the VM alive (FFI
+    /// callback entries).
+    pub fn downgrade(&self) -> Weak<SharedVM> {
+        Arc::downgrade(&self.shared)
+    }
+
+    /// Re-attach to a live VM from [`VM::downgrade`].
+    pub fn from_shared_weak(shared: &Weak<SharedVM>) -> Option<VM> {
+        shared.upgrade().map(|shared| VM { shared })
     }
 
     pub fn threads(&self) -> &ThreadRegistry {
@@ -810,6 +851,7 @@ impl VM {
             acc: unsafe { Register::from_value(undefined) },
             pending_exception: unsafe { Register::from_value(the_hole) },
             has_pending_exception: StdCell::new(false),
+            callback_threw: StdCell::new(false),
             termination: StdCell::new(None),
             rust_stack_base: StdCell::new(0),
             construct_cache: unsafe { Register::from_value(the_hole) },
@@ -845,6 +887,27 @@ impl VM {
     pub fn add<R: Runtime>(mut self) -> Result<Self, SetupError> {
         self.install::<R>()?;
         Ok(self)
+    }
+
+    /// Register `C`'s front end under `name` for indirect `KetteTools.eval`.
+    pub fn add_eval<C: Compiler>(mut self, name: &'static str) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("cannot register eval languages on a shared VM")
+            .eval_languages
+            .push(EvalLanguage {
+                name,
+                compile: C::compile,
+                runtime: C::RUNTIME,
+            });
+        self
+    }
+
+    /// Look up a registered eval language.
+    pub fn eval_language(&self, name: &str) -> Option<&EvalLanguage> {
+        self.shared
+            .eval_languages
+            .iter()
+            .find(|language| language.name == name)
     }
 
     /// Whether `R` was installed on this VM.

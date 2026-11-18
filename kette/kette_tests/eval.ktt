@@ -1,0 +1,7 @@
+// Cross-language eval through KetteTools.
+
+let from_js = KetteTools.eval("js", "40 + 2")
+Test.assert(from_js, 42)
+
+let from_kette = KetteTools.eval("kette", "6 * 7")
+Test.assert(from_kette, 42)

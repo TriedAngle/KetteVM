@@ -513,7 +513,7 @@ fn ffi_callback<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
             Ok(signature) => signature,
             Err(error) => return raise_ffi(vm, heap, state, error),
         };
-        match callback(ffi, heap, &scope, &signature, &guest) {
+        match callback(ffi, vm, heap, &scope, &signature, &guest) {
             Ok(callback) => callback.as_tagged(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
@@ -900,7 +900,7 @@ fn type_callback<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged
         }
         let ty = scope.handle(ty);
         let guest = args.get_handle(heap, 0);
-        match callback(ffi, heap, &scope, &ty, &guest) {
+        match callback(ffi, vm, heap, &scope, &ty, &guest) {
             Ok(callback) => callback.as_tagged(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
@@ -1129,7 +1129,7 @@ fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
             Ok(raw) => raw,
             Err(error) => return raise_ffi(vm, heap, state, error),
         };
-        if ffi.take_callback_threw() {
+        if state.take_callback_threw() {
             return raise_runtime(heap, Thrown);
         }
         let library = callee

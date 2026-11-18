@@ -17,12 +17,12 @@ use crate::bootstrap::smi_slot;
 use crate::objects::FLAG_VARIADIC;
 use crate::{
     AccessorInfo, AccessorInfoInit, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
-    HandleScope, Heap, Map, MapInit, MapKind, NativeIndex, Object, SlotFlags, Smi, Tagged,
-    TypeInfo, TypeInfoInit, VM, Visitor,
+    HandleScope, Heap, Map, MapInit, MapKind, NativeIndex, Object, SharedVM, SlotFlags, Smi,
+    Tagged, TypeInfo, TypeInfoInit, VM, Visitor,
 };
 use libffi::middle::{Cif, Type};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Weak;
 
 pub struct FfiTypes {
     slots: [GcSlot<TypeInfo>; TypeKind::BUILTIN_COUNT],
@@ -59,6 +59,8 @@ pub struct ClosureEntry {
     pub params: GcSlot<FixedArray<TypeInfo>>,
     /// Always present: `void` is a `Void` type, not `None`.
     pub result: GcSlot<TypeInfo>,
+    /// Result bytes to zero before the guest runs; 0 for `void`.
+    pub result_size: usize,
     pub callback: GcSlot<Object>,
 }
 
@@ -66,7 +68,12 @@ pub struct ClosureEntry {
 ///
 /// Borrowing the leaked entry through this wrapper yields a `'static`
 /// reference, so the entry's root slots can be used as handles directly.
-pub struct EntryPtr(pub &'static ClosureEntry);
+/// The weak VM lets a callback invoked on a C-owned thread attach a fresh
+/// guest thread without keeping the VM alive through the leak.
+pub struct EntryPtr {
+    pub entry: &'static ClosureEntry,
+    pub vm: Weak<SharedVM>,
+}
 
 /// A live libffi closure plus its GC-visible entry.
 struct ClosureSlot {
@@ -90,25 +97,11 @@ pub struct FfiState {
     trampoline: NativeIndex,
     /// Guest callbacks and the libffi closures that call them.
     closures: Mutex<Vec<ClosureSlot>>,
-    /// A callback threw; the C call must return before it is re-raised.
-    callback_threw: AtomicBool,
 }
 
 impl FfiState {
     pub fn types(&self) -> &TypeRegistry {
         &self.types
-    }
-
-    pub fn callback_threw(&self) -> bool {
-        self.callback_threw.load(Ordering::Acquire)
-    }
-
-    pub fn set_callback_threw(&self) {
-        self.callback_threw.store(true, Ordering::Release);
-    }
-
-    pub fn take_callback_threw(&self) -> bool {
-        self.callback_threw.swap(false, Ordering::AcqRel)
     }
 
     pub fn register_closure(
@@ -286,7 +279,6 @@ impl Default for FfiState {
             accessors: (NativeIndex(0), NativeIndex(0)),
             trampoline: NativeIndex(0),
             closures: Mutex::new(Vec::new()),
-            callback_threw: AtomicBool::new(false),
         }
     }
 }

@@ -1,0 +1,140 @@
+// GLFW window bindings and tgpu.Window helpers.
+// Load after sys.ktt and tgpu.ktt with KetteTools.evalFile;
+// exports `globalThis.glfw`.
+// Raw bindings: `glfw.raw.<fn>`, `glfw.raw.lib`, and `glfw.raw.objc`.
+
+let (void, i32, f64, CString) = FFI
+let Ptr = FFI.pointer(void)
+let sys = globalThis.sys
+let tgpu = globalThis.tgpu
+
+let glfw_path = if os.name == "macos" {
+        "/opt/homebrew/lib/libglfw.dylib"
+    } else if os.name == "windows" {
+        "glfw3.dll"
+    } else {
+        "libglfw.so.3"
+    }
+
+let lib = FFI.library(glfw_path)
+
+let glfwGetCocoaWindow = if os.name == "macos" {
+        lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
+    } else {
+        null
+    }
+
+let glfwGetX11Display = if os.name == "linux" {
+        lib.fn("glfwGetX11Display", [], Ptr)
+    } else {
+        null
+    }
+
+let glfwGetX11Window = if os.name == "linux" {
+        lib.fn("glfwGetX11Window", [Ptr], Ptr)
+    } else {
+        null
+    }
+
+let glfwGetWin32Window = if os.name == "windows" {
+        lib.fn("glfwGetWin32Window", [Ptr], Ptr)
+    } else {
+        null
+    }
+
+let objc = if os.name == "macos" {
+        FFI.library("/usr/lib/libobjc.A.dylib")
+    } else {
+        null
+    }
+
+let sel_registerName = if os.name == "macos" {
+        objc.fn("sel_registerName", [CString], Ptr)
+    } else {
+        null
+    }
+
+let objc_msgSend = if os.name == "macos" {
+        objc.fn("objc_msgSend", [Ptr, Ptr], Ptr)
+    } else {
+        null
+    }
+
+let raw = {
+    lib: lib,
+    objc: objc,
+    init: lib.fn("glfwInit", [], i32),
+    terminate: lib.fn("glfwTerminate", [], void),
+    window_hint: lib.fn("glfwWindowHint", [i32, i32], void),
+    create_window: lib.fn("glfwCreateWindow", [i32, i32, CString, Ptr, Ptr], Ptr),
+    destroy_window: lib.fn("glfwDestroyWindow", [Ptr], void),
+    should_close: lib.fn("glfwWindowShouldClose", [Ptr], i32),
+    poll_events: lib.fn("glfwPollEvents", [], void),
+    framebuffer_size: lib.fn("glfwGetFramebufferSize", [Ptr, Ptr, Ptr], void),
+    window_size: lib.fn("glfwGetWindowSize", [Ptr, Ptr, Ptr], void),
+    time: lib.fn("glfwGetTime", [], f64),
+    set_cursor_pos_callback: lib.fn("glfwSetCursorPosCallback", [Ptr, Ptr], void),
+    set_key_callback: lib.fn("glfwSetKeyCallback", [Ptr, Ptr], void),
+    set_should_close: lib.fn("glfwSetWindowShouldClose", [Ptr, i32], void),
+    glfwGetCocoaWindow: glfwGetCocoaWindow,
+    glfwGetX11Display: glfwGetX11Display,
+    glfwGetX11Window: glfwGetX11Window,
+    glfwGetWin32Window: glfwGetWin32Window,
+    sel_registerName: sel_registerName,
+    objc_msgSend: objc_msgSend,
+}
+
+let glfw = {
+    init: raw.init,
+    terminate: raw.terminate,
+    windowHint: raw.window_hint,
+    createWindow: raw.create_window,
+    destroyWindow: raw.destroy_window,
+    shouldClose: raw.should_close,
+    pollEvents: raw.poll_events,
+    framebufferSize: raw.framebuffer_size,
+    windowSize: raw.window_size,
+    time: raw.time,
+    setCursorPosCallback: raw.set_cursor_pos_callback,
+    setKeyCallback: raw.set_key_callback,
+    setShouldClose: raw.set_should_close,
+
+    create: { |title, width, height|
+        if self.init() == 0 {
+            print("glfwInit failed")
+            sys.raw.exit(1)
+        }
+        // 139265 is GLFW_CLIENT_API, paired with GLFW_NO_API.
+        self.windowHint(139265, 0)
+        let window = self.createWindow(width, height, title, null, null)
+        if window == null {
+            print("glfwCreateWindow failed")
+            sys.raw.exit(1)
+        }
+        window
+    },
+
+    // Build the tgpu.Window desc for the current platform.
+    tgpuWindow: { |window|
+        let result = tgpu.Window.new()
+        if os.name == "macos" {
+            result.kind = tgpu.WindowKind.APP_KIT
+            let ns_window = raw.glfwGetCocoaWindow(window)
+            // [ns_window contentView]
+            let view = raw.objc_msgSend(ns_window, raw.sel_registerName("contentView"))
+            result.window = view
+        } else if os.name == "linux" {
+            result.kind = tgpu.WindowKind.XLIB
+            result.display = raw.glfwGetX11Display()
+            result.window = raw.glfwGetX11Window(window)
+        } else if os.name == "windows" {
+            result.kind = tgpu.WindowKind.WIN32
+            result.window = raw.glfwGetWin32Window(window)
+        }
+        result
+    },
+
+    raw: raw,
+}
+
+globalThis.glfw = glfw

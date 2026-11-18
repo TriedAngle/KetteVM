@@ -2,9 +2,9 @@ use crate::{
     Args, AtomicI64Object, AtomicI64ObjectInit, AtomicOptionGcSlot, CallInfo, Convert, DenseString,
     Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
     PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, Termination, Thread, ThreadObject,
-    ThreadObjectInit, ThreadState, VM, Value, Visitor, VmError, extend_lifetime,
+    ThreadObjectInit, ThreadState, Thrown, VM, Value, Visitor, VmError, extend_lifetime,
     objects::thread::{NEW, RUNNABLE, TERMINATED},
-    raise,
+    raise, raise_runtime,
 };
 use std::{
     sync::{
@@ -21,6 +21,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let thread_join_index = vm.register_native(thread_join);
     let thread_is_alive_index = vm.register_native(thread_is_alive);
     let thread_name_index = vm.register_native(thread_name);
+    let thread_id_index = vm.register_native(thread_id);
     let thread_current_index = vm.register_native(thread_current);
     let thread_sleep_index = vm.register_native(thread_sleep);
     let thread_yield_index = vm.register_native(thread_yield);
@@ -86,6 +87,41 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             thread_name_index,
             0,
         );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "threadId",
+            thread_id_index,
+            0,
+        );
+        // Every ThreadObject exposes the same surface; the global `Thread` is
+        // the main thread object and inherits these too.
+        Object::install_method(thread, &scope, thread_prototype, "new", thread_new_index, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "current",
+            thread_current_index,
+            0,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "sleep",
+            thread_sleep_index,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "yield",
+            thread_yield_index,
+            0,
+        );
         {
             let heap = thread.heap();
             let map = heap.known().thread_object_map.get_handle(heap, &scope);
@@ -148,6 +184,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         }
 
         let main_name = thread.intern(&scope, "main");
+        let main_tid = vm.threads().next_name();
         let main = {
             let heap = thread.heap();
             let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
@@ -156,7 +193,8 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
                     target: hole,
                     name: main_name.erase(),
                     state: RUNNABLE,
-                    slot: -1,
+                    tid: main_tid as i64,
+                    native: -1,
                 },
                 &scope,
             )
@@ -167,17 +205,6 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
                 .cast::<Object>(heap, main.as_tagged(heap).erase())
                 .expect("main thread object")
         };
-        Object::install_method(thread, &scope, main_object, "new", thread_new_index, 1);
-        Object::install_method(
-            thread,
-            &scope,
-            main_object,
-            "current",
-            thread_current_index,
-            0,
-        );
-        Object::install_method(thread, &scope, main_object, "sleep", thread_sleep_index, 1);
-        Object::install_method(thread, &scope, main_object, "yield", thread_yield_index, 0);
         {
             let heap = thread.heap();
             vm.threads().set_main(main.as_tagged(heap));
@@ -295,11 +322,14 @@ fn thread_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'
     } = ctx;
     state.handle_scope(|scope| {
         let target = args.get_handle(heap, 0);
+        if !target.as_tagged(heap).is_callable(heap) {
+            raise!(vm, heap, state, VmError::NotCallable);
+        }
+        let id = vm.threads().next_name();
         let name = args.get_handle(heap, 1);
         let name = if name.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
             name
         } else {
-            let id = vm.threads().next_name();
             vm.interner()
                 .intern_str(heap, &scope, &format!("thread-{id}"))
                 .erase()
@@ -309,7 +339,8 @@ fn thread_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'
                 target,
                 name,
                 state: NEW,
-                slot: -1,
+                tid: id as i64,
+                native: -1,
             },
             &scope,
         );
@@ -340,7 +371,7 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         let id = vm.threads().insert(Arc::clone(&slot));
         slot.object.store(object.as_tagged(heap).erase());
         slot.target.store(target);
-        object.as_tagged(heap).set_slot(id as i64);
+        object.as_tagged(heap).set_native(id as i64);
         let runtime = if state.is_frame_active() {
             state
                 .stack()
@@ -361,7 +392,7 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
             }
             Err(_) => {
                 object.as_tagged(heap).set_state(NEW);
-                object.as_tagged(heap).set_slot(-1);
+                object.as_tagged(heap).set_native(-1);
                 slot.object.clear(heap);
                 slot.target.clear(heap);
                 raise!(vm, heap, state, VmError::InvalidOperandType);
@@ -421,7 +452,7 @@ fn thread_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
         let (id, started) = {
             let heap = &*heap;
             let object = object.as_tagged(heap);
-            (object.slot(heap), object.state(heap) != NEW)
+            (object.native(heap), object.state(heap) != NEW)
         };
         if id < 0 || !started {
             return vm.known().undefined.get(heap).erase();
@@ -449,20 +480,10 @@ fn thread_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
         }
         if let Some(exception) = slot.exception.load(heap) {
             let exception = scope.handle(exception);
-            let text = match Object::to_string(vm, heap, state, exception) {
-                Ok(text) => Some(extend_lifetime!(heap, text)),
-                Err(_) => None,
-            };
-            let message = match text {
-                Some(text) => text
-                    .get_as::<DenseString>(heap)
-                    .map(|text| text.to_rust_string(heap))
-                    .unwrap_or_default(),
-                None => String::new(),
-            };
-            eprintln!("uncaught exception in thread: {message}");
             slot.exception
                 .store_word(vm.known().the_hole.raw().to_bits());
+            state.set_pending_exception(exception.as_tagged(heap).erase());
+            return raise_runtime(heap, Thrown);
         }
         vm.known().undefined.get(heap).erase()
     })
@@ -486,6 +507,50 @@ fn thread_name<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     object.as_ref().name(heap)
+}
+
+/// Mount a guest `Thread` object on a thread C attached (a callback invoked
+/// on a thread the VM did not create), like a JVM JNI attach. The object is
+/// not joinable: it has no `ThreadSlot`, so `native` stays -1.
+pub fn attach_foreign_thread(vm: &VM, heap: &mut Heap, state: &ThreadState) {
+    state.handle_scope(|scope| {
+        let id = vm.threads().next_name();
+        let name = vm
+            .interner()
+            .intern_str(heap, &scope, &format!("thread-{id}"))
+            .erase();
+        let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
+        let object = heap.allocate_handle::<ThreadObject>(
+            ThreadObjectInit {
+                target: hole,
+                name,
+                state: RUNNABLE,
+                tid: id as i64,
+                native: -1,
+            },
+            &scope,
+        );
+        state.set_thread_object(object.as_tagged(heap));
+    });
+}
+
+/// Mark an attached C thread's guest object terminated.
+pub fn finish_foreign_thread(heap: &Heap, state: &ThreadState) {
+    if let Some(object) = state.thread_object(heap)
+        && let Some(thread) = object.erase().get_as::<ThreadObject>(heap)
+    {
+        thread.as_ref().set_state(TERMINATED);
+    }
+}
+
+fn thread_id<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call.receiver.as_tagged(heap).get_as::<ThreadObject>(heap) else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    Smi::new(object.as_ref().tid(heap)).into_tagged()
 }
 
 fn thread_current<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {

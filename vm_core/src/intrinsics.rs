@@ -122,6 +122,8 @@ impl Runtime for VmCore {
             vm.register_native(KetteTools::force_minor_gc),
             vm.register_native(KetteTools::force_major_gc),
             vm.register_native(KetteTools::shutdown),
+            vm.register_native(KetteTools::eval),
+            vm.register_native(KetteTools::eval_file),
         ];
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {

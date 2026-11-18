@@ -4,29 +4,46 @@ use crate::{
 };
 use core::alloc::Layout;
 
-// Thread states.
+// Guest-visible thread status (a subset of java.lang.Thread.State).
 pub const NEW: i64 = 0;
 pub const RUNNABLE: i64 = 1;
 pub const TERMINATED: i64 = 2;
 
-/// The guest-facing `Thread` object; `slot` indexes the VM's host state.
+/// java.lang.Thread's default priority.
+pub const NORM_PRIORITY: i64 = 5;
+
+/// The guest-facing `Thread` object.
+///
+/// Mirrors the JVM split: VM-private fields (`native`, `tid`, `name`,
+/// `interrupted`) plus the `FieldHolder` fields (`target`, `state`,
+/// priority, daemon, stack size). `native` is the `eetop` analogue: the
+/// host slot index, or -1 when the thread has no joinable host state.
 #[repr(C)]
 pub struct ThreadObject {
     pub header: Header,
     pub slots: GcSlot<FixedArray>,
     pub elements: GcSlot<Value>,
     pub length: GcSlot<Smi>,
+    /// Stable id assigned at construction (`tid`).
+    pub tid: GcSlot<Smi>,
     pub target: GcSlot<Value>,
     pub name: GcSlot<Value>,
+    /// Interrupted flag (space reserved for interruption support).
+    pub interrupted: AtomicGcSlot<Smi>,
     pub state: AtomicGcSlot<Smi>,
-    pub slot: AtomicGcSlot<Smi>,
+    pub priority: GcSlot<Smi>,
+    pub daemon: GcSlot<Smi>,
+    pub stack_size: GcSlot<Smi>,
+    /// Host `ThreadSlot` index; -1 when there is none.
+    pub native: AtomicGcSlot<Smi>,
 }
 
 pub struct ThreadObjectInit<'a> {
     pub target: Handle<'a, Value>,
     pub name: Handle<'a, Value>,
     pub state: i64,
-    pub slot: i64,
+    pub tid: i64,
+    pub native: i64,
 }
 
 impl ThreadObject {
@@ -38,6 +55,10 @@ impl ThreadObject {
         self.name.get(heap)
     }
 
+    pub fn tid(&self, heap: &Heap) -> i64 {
+        self.tid.get(heap).to_i64().unwrap_or_default()
+    }
+
     pub fn state(&self, heap: &Heap) -> i64 {
         self.state.load_smi(heap).value()
     }
@@ -46,12 +67,12 @@ impl ThreadObject {
         self.state.store_smi(Smi::new(state));
     }
 
-    pub fn slot(&self, heap: &Heap) -> i64 {
-        self.slot.load_smi(heap).value()
+    pub fn native(&self, heap: &Heap) -> i64 {
+        self.native.load_smi(heap).value()
     }
 
-    pub fn set_slot(&self, slot: i64) {
-        self.slot.store_smi(Smi::new(slot));
+    pub fn set_native(&self, slot: i64) {
+        self.native.store_smi(Smi::new(slot));
     }
 
     pub fn is_alive(&self, heap: &Heap) -> bool {
@@ -76,10 +97,15 @@ impl HeapObject for ThreadObject {
         self.slots.init_tagged(empty);
         self.elements.init_tagged(empty.erase());
         self.length.init_tagged(Smi::new(0).into());
+        self.tid.init_tagged(Smi::new(config.tid).into());
         self.target.set(heap, host, config.target.as_tagged(heap));
         self.name.set(heap, host, config.name.as_tagged(heap));
+        self.interrupted.store_smi(Smi::new(0));
         self.state.store_smi(Smi::new(config.state));
-        self.slot.store_smi(Smi::new(config.slot));
+        self.priority.init_tagged(Smi::new(NORM_PRIORITY).into());
+        self.daemon.init_tagged(Smi::new(0).into());
+        self.stack_size.init_tagged(Smi::new(0).into());
+        self.native.store_smi(Smi::new(config.native));
     }
 
     fn header(&self) -> &Header {
@@ -97,9 +123,14 @@ impl EdgeVisitable for ThreadObject {
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.elements.as_raw());
         visitor.visit(self.length.as_raw());
+        visitor.visit(self.tid.as_raw());
         visitor.visit(self.target.as_raw());
         visitor.visit(self.name.as_raw());
+        visitor.visit(self.interrupted.as_raw());
         visitor.visit(self.state.as_raw());
-        visitor.visit(self.slot.as_raw());
+        visitor.visit(self.priority.as_raw());
+        visitor.visit(self.daemon.as_raw());
+        visitor.visit(self.stack_size.as_raw());
+        visitor.visit(self.native.as_raw());
     }
 }

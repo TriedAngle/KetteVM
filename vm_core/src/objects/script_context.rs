@@ -1,6 +1,7 @@
 use crate::{
-    ContextObject, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap,
-    HeapObject, INFO_GLOBAL, ObjectKind, Result, Smi, Tagged, Value, Visitor, VmError,
+    ContextInit, ContextObject, DenseString, EdgeVisitable, GcSlot, Handle, HandleScope,
+    HandleSlice, Header, Heap, HeapObject, INFO_GLOBAL, ObjectKind, Result, SCOPE_DECLARATION,
+    SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, Smi, Tagged, VM, Value, Visitor, VmError,
     info_is_immutable, info_is_lexical,
 };
 use core::alloc::Layout;
@@ -76,7 +77,12 @@ impl NameToIndexHashTable {
     }
 
     pub fn insert(&self, heap: &Heap, host: Tagged<Value>, name: Tagged<Value>, value: usize) {
-        if self.slot(heap, name).is_some() {
+        if let Some(index) = self.slot(heap, name) {
+            // A REPL entry may redeclare a lexical global; the newest
+            // binding wins.
+            self.entry(index)
+                .index
+                .set(heap, host, Smi::new(value as i64));
             return;
         }
         let capacity = self.capacity();
@@ -349,6 +355,33 @@ impl EdgeVisitable for ScriptContextTable {
             visitor.visit(self.context_slot(i).as_raw());
         }
     }
+}
+
+/// Fresh outer environment for an indirect eval: no declarations, global
+/// lookup for unbound names.
+pub fn eval_global_context<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+) -> Handle<'s, ContextObject> {
+    let info = heap.allocate_handle::<ScopeInfo>(
+        ScopeInfoInit {
+            names: HandleSlice::EMPTY,
+            infos: &[],
+            flags: SCOPE_DECLARATION | SCOPE_SCRIPT,
+        },
+        scope,
+    );
+    let outer = vm.known().empty_context.get_handle(heap, scope);
+    let slots = vm.known().empty_fixed_array.get_handle(heap, scope);
+    heap.allocate_handle::<ContextObject>(
+        ContextInit {
+            outer: Some(outer),
+            slots,
+            scope_info: info,
+        },
+        scope,
+    )
 }
 
 pub fn global_lexical_get<'a>(

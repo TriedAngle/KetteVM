@@ -4,9 +4,10 @@ use crate::ffi::{
     cif_for_signature,
 };
 
+use crate::threading::{attach_foreign_thread, finish_foreign_thread};
 use crate::{
     CValue, CValueFlags, CValueInit, CallTarget, ErasedRuntimeState, GcSlot, Handle, HandleScope,
-    Heap, Object, ThreadState, TypeInfo, VM, Value,
+    Heap, Object, RuntimeId, ThreadState, TypeInfo, VM, Value,
 };
 use core::cell::Cell;
 use libffi::middle::Closure;
@@ -61,15 +62,20 @@ impl CallbackCtx {
         unsafe { (&*self.ffi, &*self.vm, &*self.state, &mut *self.heap) }
     }
 
-    /// innermost C call on this thread.
-    pub fn current() -> &'static CallbackCtx {
+    /// The runtime the C call was made from.
+    pub fn runtime(&self) -> &'static dyn ErasedRuntimeState {
+        self.runtime
+    }
+
+    /// The innermost C call on this thread, if the callback was invoked from
+    /// one. C-owned threads have no context until they attach.
+    pub fn try_current() -> Option<&'static CallbackCtx> {
         let innermost = INNERMOST_CALL.with(|slot| slot.get());
-        assert!(
-            !innermost.is_null(),
-            "callback invoked outside a C call on this thread"
-        );
-        // Safety: a published context lives until its call returns
-        unsafe { &*innermost }
+        if innermost.is_null() {
+            return None;
+        }
+        // Safety: a published context lives until its call returns.
+        Some(unsafe { &*innermost })
     }
 }
 
@@ -82,6 +88,7 @@ impl Drop for CallbackCtx {
 /// Create a C function pointer that calls `guest` and has `signature`.
 pub fn callback<'s>(
     ffi: &FfiState,
+    vm: &VM,
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     signature: &Handle<TypeInfo>,
@@ -121,9 +128,17 @@ pub fn callback<'s>(
         // there is no old-to-young edge to record.
         params: unsafe { GcSlot::from_value(params.raw()) },
         result: unsafe { GcSlot::from_value(result.raw()) },
+        result_size: if result.kind() == TypeKind::Void {
+            0
+        } else {
+            result.size()
+        },
         callback: unsafe { GcSlot::from_value(callback.raw()) },
     }));
-    let userdata: &'static EntryPtr = Box::leak(Box::new(EntryPtr(entry)));
+    let userdata: &'static EntryPtr = Box::leak(Box::new(EntryPtr {
+        entry,
+        vm: vm.downgrade(),
+    }));
     let closure: Closure<'static> = Closure::new(cif, closure_trampoline, userdata);
     let address = *closure.code_ptr() as *const () as *mut u8;
     ffi.register_closure(entry, Box::new(closure));
@@ -141,17 +156,27 @@ pub fn callback<'s>(
     ))
 }
 
-unsafe extern "C" fn closure_trampoline(
-    _cif: &libffi::low::ffi_cif,
-    result: &mut u8,
+/// Zero the result buffer; libffi does not initialize it, and early returns
+/// (a guest throw or a panic) leave it untouched.
+fn zero_result(entry: &ClosureEntry, result: &mut u8) {
+    if entry.result_size > 0 {
+        // Safety: libffi guarantees a result buffer of `result_size` bytes.
+        unsafe { core::ptr::write_bytes(result as *mut u8, 0, entry.result_size) };
+    }
+}
+
+/// Stage the C arguments, run the guest callback, and encode its result.
+fn invoke(
+    entry: &'static ClosureEntry,
+    ffi: &FfiState,
+    vm: &VM,
+    runtime: &dyn ErasedRuntimeState,
+    state: &ThreadState,
+    heap: &mut Heap,
     args: *const *const c_void,
-    userdata: &EntryPtr,
+    result: &mut u8,
 ) {
-    let entry = userdata.0;
-    let ctx = CallbackCtx::current();
-    // Safety: the context outlives the C call this trampoline runs inside.
-    let (ffi, vm, state, heap) = unsafe { ctx.parts() };
-    if ffi.callback_threw() {
+    if state.callback_threw() {
         return;
     }
     state.handle_scope(|scope| {
@@ -169,7 +194,7 @@ unsafe extern "C" fn closure_trampoline(
             ffi.read_value(heap, &scope, &ty, bytes, None)
         });
         let value = vm.execute(
-            ctx.runtime,
+            runtime,
             heap,
             state,
             entry.callback.root_handle(),
@@ -177,7 +202,7 @@ unsafe extern "C" fn closure_trampoline(
             None,
         );
         let Ok(value) = value else {
-            ffi.set_callback_threw();
+            state.set_callback_threw();
             return;
         };
         let value = scope.handle(value);
@@ -187,7 +212,50 @@ unsafe extern "C" fn closure_trampoline(
         }
         let out = unsafe { core::slice::from_raw_parts_mut(result as *mut u8, result_ty.size()) };
         if encode_value(heap, result_ty, value.as_tagged(heap), out).is_err() {
-            ffi.set_callback_threw();
+            state.set_callback_threw();
         }
     });
+}
+
+unsafe extern "C" fn closure_trampoline(
+    _cif: &libffi::low::ffi_cif,
+    result: &mut u8,
+    args: *const *const c_void,
+    userdata: &EntryPtr,
+) {
+    let entry = userdata.entry;
+    zero_result(entry, result);
+    // Safety: the pointers and the guest values stay valid for this call; a
+    // panic must never unwind through the C frame.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(ctx) = CallbackCtx::try_current() {
+            let (ffi, vm, state, heap) = unsafe { ctx.parts() };
+            invoke(entry, ffi, vm, ctx.runtime(), state, heap, args, result);
+            return;
+        }
+        // The callback came from a thread the VM does not know yet (a thread
+        // created by C): attach it for the duration, like another runtime's
+        // callback entry would.
+        let Some(vm) = VM::from_shared_weak(&userdata.vm) else {
+            eprintln!("kettevm: callback invoked after its VM was dropped");
+            return;
+        };
+        let mut thread = vm.attach();
+        let (vm, heap, state) = thread.split();
+        let ffi = vm.ffi();
+        let runtime = vm.runtime_by_id(RuntimeId(0));
+        let mut ctx = CallbackCtx::new(vm, runtime, heap, state, ffi);
+        ctx.enter();
+        attach_foreign_thread(vm, heap, state);
+        invoke(entry, ffi, vm, runtime, state, heap, args, result);
+        finish_foreign_thread(heap, state);
+        if state.callback_threw() {
+            eprintln!("kettevm: uncaught exception in a C-thread callback");
+        }
+        let _ = state.take_pending_exception();
+        drop(ctx);
+    }));
+    if outcome.is_err() {
+        eprintln!("kettevm: panic in a C callback");
+    }
 }

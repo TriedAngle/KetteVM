@@ -1,10 +1,9 @@
 //! ES 19: function properties of the global object (eval, isNaN).
 use crate::JSRuntime;
 use vm_core::{
-    Args, CallInfo, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope,
-    HandleSlice, Heap, HostCtx, Object, Result, Runtime, SCOPE_DECLARATION, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, Smi, StringRef, Tagged, ThreadState, VM, Value, VmError, WellKnown,
-    materialize::Materialize, raise, raise_runtime, rt_try,
+    Args, CallInfo, Convert, DenseString, Handle, HandleSlice, Heap, HostCtx, Object, Result,
+    Runtime, Smi, StringRef, Tagged, ThreadState, VM, Value, VmError, WellKnown,
+    eval_global_context, materialize::Materialize, raise, raise_runtime, rt_try,
 };
 
 crate::register_natives! {
@@ -53,31 +52,6 @@ fn eval_runtime<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
         }
         .as_tagged(heap)
     })
-}
-
-fn eval_global_context<'s>(
-    vm: &VM,
-    heap: &mut Heap,
-    scope: &'s HandleScope<'_>,
-) -> Handle<'s, ContextObject> {
-    let info = heap.allocate_handle::<ScopeInfo>(
-        ScopeInfoInit {
-            names: HandleSlice::EMPTY,
-            infos: &[],
-            flags: SCOPE_DECLARATION | SCOPE_SCRIPT,
-        },
-        scope,
-    );
-    let outer = vm.known().empty_context.get_handle(heap, scope);
-    let slots = vm.known().empty_fixed_array.get_handle(heap, scope);
-    heap.allocate_handle::<ContextObject>(
-        ContextInit {
-            outer: Some(outer),
-            slots,
-            scope_info: info,
-        },
-        scope,
-    )
 }
 
 /// `isNaN ( number )`

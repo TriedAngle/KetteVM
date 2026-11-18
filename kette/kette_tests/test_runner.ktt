@@ -13,7 +13,7 @@ let Test = {
             print(expected)
         }
     }
-    summary: { ||
+    summary: {
         if self.failures == 0 {
             print("passed")
         } else {

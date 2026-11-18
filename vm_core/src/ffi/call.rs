@@ -1,6 +1,8 @@
 use crate::ffi::callback::CallbackCtx;
 use crate::ffi::memory;
-use crate::ffi::{FfiError, FfiResult, FfiState, ParamKind, TypeId, TypeKind, param_kind};
+use crate::ffi::{
+    FfiError, FfiResult, FfiState, ParamKind, ParamPlan, TypeId, TypeKind, param_kind,
+};
 use crate::{
     Args, CValue, CValueFlags, CValueInit, Convert, DenseString, ErasedRuntimeState,
     FixedByteArray, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, StringRef, Tagged,
@@ -126,8 +128,9 @@ impl FfiState {
         // address. Small signatures fit in the inline buffer.
         const INLINE_PARAMS: usize = 16;
         const INLINE_BYTES: usize = 128;
+        let count = plan.params.len();
         let mut inline = [0u128; INLINE_BYTES / 16];
-        let mut heap_buffer: Vec<u128> = Vec::new();
+        let mut heap_buffer;
         let base: *mut u8 = if plan.buffer_len <= INLINE_BYTES {
             inline.as_mut_ptr().cast()
         } else {
@@ -136,10 +139,9 @@ impl FfiState {
         };
 
         let mut scratch = CallScratch::default();
-        let mut pointers = [base as *const u8; INLINE_PARAMS];
-        for (index, param) in plan.params.iter().enumerate() {
+        let mut encode = |index: usize, param: &ParamPlan| -> FfiResult<Arg<'static>> {
             let value = args.get_handle(heap, index).as_tagged(heap);
-            pointers[index] = match param.kind {
+            let pointer: *const u8 = match param.kind {
                 ParamKind::Aggregate(type_id) => {
                     let value = value
                         .get_as::<CValue>(heap)
@@ -161,48 +163,43 @@ impl FfiState {
                     slot as *const u8
                 }
             };
-        }
+            // Safety: `pointer` is valid for the call: an aggregate points at
+            // its owning C value, a scalar at its 8-byte buffer slot.
+            Ok(unsafe { Arg::new(&*pointer) })
+        };
 
-        // Safety: every pointer above is valid for the call. The callee was
+        let mut heap_args: Vec<Arg<'static>> = Vec::new();
+        let mut inline_args =
+            [const { core::mem::MaybeUninit::<Arg<'static>>::uninit() }; INLINE_PARAMS];
+        let call_args: &[Arg<'static>] = if count <= INLINE_PARAMS {
+            for (index, slot) in inline_args[..count].iter_mut().enumerate() {
+                slot.write(encode(index, &plan.params[index])?);
+            }
+            // Safety: the first `count` slots were initialized above.
+            unsafe { core::slice::from_raw_parts(inline_args.as_ptr().cast(), count) }
+        } else {
+            heap_args.reserve(count);
+            for (index, param) in plan.params.iter().enumerate() {
+                heap_args.push(encode(index, param)?);
+            }
+            &heap_args
+        };
+        drop(encode);
+
+        // Safety: every argument pointer is valid for the call. The callee was
         // live-checked, aggregates point at their owner's storage, and scalars
         // point into `inline`/`heap_buffer`, which outlive the call.
         let code = CodePtr(address.cast());
         let mut context = CallbackCtx::new(vm, runtime, heap, state, self);
         context.enter();
-        let mut inline_args: [Arg<'static>; INLINE_PARAMS] =
-            core::array::from_fn(|_| Arg::new(&EMPTY_BYTE));
-        let mut heap_args: Vec<Arg<'static>> = Vec::new();
         unsafe {
-            if plan.params.len() <= INLINE_PARAMS {
-                for (slot, pointer) in inline_args.iter_mut().zip(&pointers) {
-                    *slot = Arg::new(&**pointer);
-                }
-                if plan.result_void {
-                    plan.cif
-                        .call_return_into(code, &inline_args[..plan.params.len()], Ret::void());
-                } else {
-                    let result = &mut *base.add(plan.result_offset);
-                    plan.cif.call_return_into(
-                        code,
-                        &inline_args[..plan.params.len()],
-                        Ret::new(result),
-                    );
-                }
+            if plan.result_void {
+                plan.cif.call_return_into(code, call_args, Ret::void());
             } else {
-                for pointer in &pointers {
-                    heap_args.push(Arg::new(&**pointer));
-                }
-                if plan.result_void {
-                    plan.cif.call_return_into(code, &heap_args, Ret::void());
-                } else {
-                    let result = &mut *base.add(plan.result_offset);
-                    plan.cif
-                        .call_return_into(code, &heap_args, Ret::new(result));
-                }
+                let result = &mut *base.add(plan.result_offset);
+                plan.cif.call_return_into(code, call_args, Ret::new(result));
             }
         }
-
-        drop(heap_buffer);
 
         let result_ty = {
             let function = callee
@@ -582,8 +579,6 @@ fn decode_utf16<'a>(
         .as_tagged(heap)
         .erase()
 }
-
-const EMPTY_BYTE: u8 = 0;
 
 /// Encode one scalar argument into its slot.
 fn encode_scalar(

@@ -1,0 +1,28 @@
+// libc bindings. Load first with KetteTools.evalFile.
+// Exports `globalThis.sys`; use `sys.raw.<fn>` and `sys.raw.lib`.
+// These are not wrapped yet, so there is deliberately no `sys.fopen` etc.
+
+let (void, i32, u32, i64, f32, f64, u8, u64, CString) = FFI
+
+let lib = FFI.library(null)
+let Ptr = FFI.pointer(void)
+
+let raw = {
+    lib: lib,
+    fopen: lib.fn("fopen", [CString, CString], Ptr),
+    fclose: lib.fn("fclose", [Ptr], i32),
+    access: lib.fn("access", [CString, i32], i32),
+    fseek: lib.fn("fseek", [Ptr, i64, i32], i32),
+    ftell: lib.fn("ftell", [Ptr], i64),
+    fread: lib.fn("fread", [Ptr, u64, u64, Ptr], u64),
+    srand: lib.fn("srand", [u32], void),
+    rand: lib.fn("rand", [], i32),
+    sinf: lib.fn("sinf", [f32], f32),
+    fabsf: lib.fn("fabsf", [f32], f32),
+    exit: lib.fn("exit", [i32], void),
+}
+
+let sys = {
+    raw: raw,
+}
+globalThis.sys = sys

@@ -87,7 +87,8 @@ fn every_object_kind_visits_its_entire_layout() {
                 target: undefined,
                 name: undefined,
                 state: 0,
-                slot: -1,
+                tid: 1,
+                native: -1,
             },
             &scope,
         );
@@ -101,10 +102,15 @@ fn every_object_kind_visits_its_entire_layout() {
                     raw.slots,
                     raw.elements,
                     raw.length,
+                    raw.tid,
                     raw.target,
                     raw.name,
+                    raw.interrupted,
                     raw.state,
-                    raw.slot,
+                    raw.priority,
+                    raw.daemon,
+                    raw.stack_size,
+                    raw.native,
                 ]
             );
         }

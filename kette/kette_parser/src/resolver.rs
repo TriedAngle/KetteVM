@@ -24,6 +24,8 @@ pub struct ScopeInfo {
     /// A direct `eval` can reach this scope's bindings by name, so they must
     /// live in a runtime context. Set on the eval site and all its ancestors.
     pub direct_eval: bool,
+    /// The root script scope owns a lexical context even without captures.
+    pub force_context: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +114,7 @@ impl Resolver<'_> {
             parent,
             decls: Vec::new(),
             direct_eval: false,
+            force_context: false,
         });
         self.stack.push(id);
         id
@@ -134,6 +137,7 @@ impl Resolver<'_> {
 
     fn resolve_root(&mut self, root: NodeId) {
         let scope = self.push_scope(ScopeKind::Script);
+        self.scopes[scope.0 as usize].force_context = true;
         self.node_scopes[root.0 as usize] = Some(scope);
         let stmts = match self.ast.node(root) {
             Node::StmtList { stmts } => *stmts,
@@ -401,22 +405,16 @@ impl Resolver<'_> {
             .scopes
             .iter()
             .zip(&captured)
-            // top-level declarations are global object properties: the script
-            // never needs a context
             .map(|(scope, decls)| {
-                !matches!(scope.kind, ScopeKind::Script)
-                    && (scope.direct_eval || decls.iter().any(|&c| c))
+                scope.force_context || scope.direct_eval || decls.iter().any(|&c| c)
             })
             .collect();
         for node in 0..self.resolutions.len() {
             let Some(Resolution::Capture { scope, decl, .. }) = self.resolutions[node] else {
                 continue;
             };
-            // top-level declarations resolve as globals, never as context slots,
-            // so their depth is unused
-            if matches!(self.scopes[scope.0 as usize].kind, ScopeKind::Script) {
-                continue;
-            }
+            // Top-level lexical declarations live in the script/eval context,
+            // so captures from nested callables hop through it like any other.
             let use_scope = self.capture_scopes[node].expect("captures record their use scope");
             let mut hops = 0u32;
             let mut cur = use_scope;
