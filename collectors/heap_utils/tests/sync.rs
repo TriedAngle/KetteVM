@@ -37,7 +37,7 @@ fn mutators_park_before_gc_runs() {
                 sync.attach(&node);
                 attached.fetch_add(1, Ordering::Relaxed);
                 spin_until(|| node.requested());
-                sync.park_for_collection(&node);
+                sync.park_for_collection(&node, true);
             });
         }
         spin_until(|| attached.load(Ordering::Relaxed) == 3);
@@ -98,7 +98,7 @@ fn attach_during_cycle_joins_and_is_released() {
         // the cycle cannot complete before `first` parks, so `late` is
         // guaranteed to join the armed cycle
         spin_until(|| late.requested());
-        sync.park_for_collection(&first);
+        sync.park_for_collection(&first, true);
     });
 
     assert_eq!(ran.load(Ordering::Relaxed), 1);
@@ -127,7 +127,7 @@ fn second_requester_parks_instead_of_running_gc() {
                 second_runs.fetch_add(1, Ordering::Relaxed);
             });
         });
-        sync.park_for_collection(&a);
+        sync.park_for_collection(&a, true);
     });
 
     assert_eq!(first_runs.load(Ordering::Relaxed), 1);
@@ -145,7 +145,7 @@ fn panicking_gc_still_disarms() {
     std::thread::scope(|s| {
         s.spawn(|| {
             spin_until(|| node.requested());
-            sync.park_for_collection(&node);
+            sync.park_for_collection(&node, true);
         });
         let panicked = s.spawn(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -172,7 +172,7 @@ fn churn_stress() {
                 let node = LocalNode::detached();
                 sync.attach(&node);
                 for _ in 0..2000 {
-                    sync.park_for_collection(&node);
+                    sync.park_for_collection(&node, true);
                     std::thread::yield_now();
                 }
                 sync.detach(&node);
@@ -207,7 +207,7 @@ fn cancel_executions_releases_threads_into_halt() {
                 attached.fetch_add(1, Ordering::Relaxed);
                 // a mutator: run until requested, then pause
                 spin_until(|| node.requested());
-                let paused = sync.park_for_collection(&node);
+                let paused = sync.park_for_collection(&node, true);
                 // the pause carried the cancel; taking it consumes it
                 let took = node.take_cancel();
                 let took_again = node.take_cancel();
@@ -250,12 +250,12 @@ fn cancel_survives_collection_cycles() {
             spin_until(|| node.requested());
             // first pause: the cancel cycle itself (the cancel is NOT
             // taken yet — it must survive what comes next)
-            let paused = sync.park_for_collection(&node);
+            let paused = sync.park_for_collection(&node, true);
             cancelled.fetch_add(paused as usize, Ordering::Relaxed);
             // an ordinary collection cycle arrives: the thread parks for
             // it, wakes, and the cancel is still observable afterwards
             spin_until(|| sync.is_armed());
-            let paused_again = sync.park_for_collection(&node);
+            let paused_again = sync.park_for_collection(&node, true);
             let took = node.take_cancel();
             cancelled.fetch_add((paused_again && took) as usize, Ordering::Relaxed);
             sync.detach(&node);
@@ -292,7 +292,7 @@ fn attach_after_cancel_starts_fresh() {
         s.spawn(|| {
             let node = LocalNode::detached();
             sync.attach(&node);
-            let paused_here = sync.park_for_collection(&node);
+            let paused_here = sync.park_for_collection(&node, true);
             paused.store(paused_here as usize, Ordering::Relaxed);
             sync.detach(&node);
         });

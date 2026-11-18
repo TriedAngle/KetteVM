@@ -897,7 +897,7 @@ impl MarkSweepLocal {
 
     fn park_if_requested(&self) -> bool {
         if self.node.requested() {
-            return self.state.safepoint.park_for_collection(&self.node);
+            return self.state.safepoint.park_for_collection(&self.node, true);
         }
         false
     }

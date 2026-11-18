@@ -151,7 +151,7 @@ impl Safepoint {
             }
         };
         if joined {
-            self.park_for_collection(node);
+            self.park_for_collection(node, true);
         }
     }
 
@@ -171,23 +171,24 @@ impl Safepoint {
                     node.state.fetch_and(!BLOCKED, Ordering::AcqRel);
                 }
             }
-            let _ = self.park_for_collection(node);
+            let _ = self.park_for_collection(node, true);
         }
     }
 
     /// Leave the blocked state. If a collection armed while the node was
-    /// blocked, wait for it before the mutator touches the heap again.
+    /// blocked, wait for it before the mutator touches the heap again. Such
+    /// a cycle excluded this node from `target`, so parking must not report.
     pub fn unblock(&self, node: &LocalNode) {
         let prev = node.state.fetch_and(!BLOCKED, Ordering::AcqRel);
         if prev & REQUESTED != 0 {
-            self.park_for_collection(node);
+            self.park_for_collection(node, false);
         }
     }
 
     pub fn detach(&self, node: &LocalNode) {
         loop {
             if node.pending() {
-                self.park_for_collection(node);
+                self.park_for_collection(node, true);
             }
             let mut list = self.list.lock().unwrap();
             if node.requested() {
@@ -216,7 +217,12 @@ impl Safepoint {
         }
     }
 
-    pub fn park_for_collection(&self, node: &LocalNode) -> bool {
+    /// Park at a safepoint. `report` is false when the armed cycle already
+    /// excluded this node (it was parked or blocked when the cycle armed):
+    /// reporting again would inflate `stopped` and let the collector scan
+    /// while another counted mutator is still running.
+    pub fn park_for_collection(&self, node: &LocalNode, report: bool) -> bool {
+        let mut excluded = !report;
         loop {
             let state = node.state.load(Ordering::Relaxed);
             if state == 0 {
@@ -237,12 +243,14 @@ impl Safepoint {
                 }
                 continue;
             }
-            if prev & PARKED != 0 {
+            if excluded || prev & PARKED != 0 {
                 self.wait_disarmed();
             } else {
                 self.count_in_and_wait();
             }
             if node.state.fetch_and(!PARKED, Ordering::AcqRel) & REQUESTED != 0 {
+                // The cycle that is armed now saw us parked and excluded us.
+                excluded = true;
                 continue;
             }
             return true;
@@ -312,7 +320,7 @@ impl Safepoint {
             }
             // Another thread's cycle is in flight: participate in it, then
             // retry.
-            self.park_for_collection(requester);
+            self.park_for_collection(requester, true);
         }
     }
 
@@ -371,7 +379,7 @@ impl Safepoint {
             }
         }
         if let Some(node) = requester {
-            self.park_for_collection(node);
+            self.park_for_collection(node, true);
         }
     }
 
