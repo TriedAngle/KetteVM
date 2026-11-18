@@ -1,9 +1,3 @@
-//! Scope resolution over the unified object AST.
-//!
-//! A scope exists for the script and for every callable object literal
-//! (`|params|` marker or non-empty body). `if` branches compile inline,
-//! so their `let`s belong to the enclosing scope, in source order.
-
 use crate::{Ast, Node, NodeId, SlotKind, plumbing::ByteSpan, plumbing::Symbol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,13 +21,16 @@ pub struct ScopeInfo {
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>,
     pub decls: Vec<Declaration>,
+    /// A direct `eval` can reach this scope's bindings by name, so they must
+    /// live in a runtime context. Set on the eval site and all its ancestors.
+    pub direct_eval: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
     /// declared in the current block scope
     Local { scope: ScopeId, decl: u32 },
-    /// declared in an enclosing block scope, `depth` blocks up
+    /// declared in an enclosing callable scope, `depth` contexts up
     Capture {
         scope: ScopeId,
         decl: u32,
@@ -49,6 +46,8 @@ pub struct Resolved {
     /// scope owned by a callable object / the root `StmtList` node
     node_scopes: Vec<Option<ScopeId>>,
     scopes: Vec<ScopeInfo>,
+    /// per scope: whether it pushes a runtime context
+    creates_context: Vec<bool>,
 }
 
 impl Resolved {
@@ -64,12 +63,19 @@ impl Resolved {
     pub fn scope(&self, id: ScopeId) -> &ScopeInfo {
         &self.scopes[id.0 as usize]
     }
+
+    /// Whether the scope pushes a context at entry. Scopes that capture
+    /// nothing and run no direct `eval` reuse the closure's context.
+    pub fn creates_context(&self, scope: ScopeId) -> bool {
+        self.creates_context[scope.0 as usize]
+    }
 }
 
 pub fn resolve(ast: &Ast) -> Resolved {
     let mut resolver = Resolver {
         ast,
         resolutions: vec![None; ast.node_count()],
+        capture_scopes: vec![None; ast.node_count()],
         node_scopes: vec![None; ast.node_count()],
         scopes: Vec::new(),
         stack: Vec::new(),
@@ -77,16 +83,20 @@ pub fn resolve(ast: &Ast) -> Resolved {
     if let Some(root) = ast.root() {
         resolver.resolve_root(root);
     }
+    let creates_context = resolver.finalize_contexts();
     Resolved {
         resolutions: resolver.resolutions,
         node_scopes: resolver.node_scopes,
         scopes: resolver.scopes,
+        creates_context,
     }
 }
 
 struct Resolver<'a> {
     ast: &'a Ast,
     resolutions: Vec<Option<Resolution>>,
+    /// the use-site scope of every capture, for the context-hop rewrite
+    capture_scopes: Vec<Option<ScopeId>>,
     node_scopes: Vec<Option<ScopeId>>,
     scopes: Vec<ScopeInfo>,
     /// innermost scope last
@@ -101,6 +111,7 @@ impl Resolver<'_> {
             kind,
             parent,
             decls: Vec::new(),
+            direct_eval: false,
         });
         self.stack.push(id);
         id
@@ -358,6 +369,62 @@ impl Resolver<'_> {
         }
     }
 
+    /// Compute the context predicate and rewrite capture depths.
+    ///
+    /// A scope creates a context when one of its declarations is captured or
+    /// a direct `eval` can reach its bindings. Capture depths therefore count
+    /// context-creating scopes, not lexical levels: a frame without a context
+    /// resolves outer slots through its inherited (closure) context.
+    fn finalize_contexts(&mut self) -> Vec<bool> {
+        let mut captured: Vec<Vec<bool>> = self
+            .scopes
+            .iter()
+            .map(|scope| vec![false; scope.decls.len()])
+            .collect();
+        for resolution in self.resolutions.iter().flatten() {
+            if let Resolution::Capture { scope, decl, .. } = *resolution {
+                captured[scope.0 as usize][decl as usize] = true;
+            }
+        }
+        let creates: Vec<bool> = self
+            .scopes
+            .iter()
+            .zip(&captured)
+            // top-level declarations are global object properties: the script
+            // never needs a context
+            .map(|(scope, decls)| {
+                !matches!(scope.kind, ScopeKind::Script)
+                    && (scope.direct_eval || decls.iter().any(|&c| c))
+            })
+            .collect();
+        for node in 0..self.resolutions.len() {
+            let Some(Resolution::Capture { scope, decl, .. }) = self.resolutions[node] else {
+                continue;
+            };
+            // top-level declarations resolve as globals, never as context slots,
+            // so their depth is unused
+            if matches!(self.scopes[scope.0 as usize].kind, ScopeKind::Script) {
+                continue;
+            }
+            let use_scope = self.capture_scopes[node].expect("captures record their use scope");
+            let mut hops = 0u32;
+            let mut cur = use_scope;
+            while let Some(parent) = self.scopes[cur.0 as usize].parent {
+                if creates[parent.0 as usize] {
+                    hops += 1;
+                }
+                cur = parent;
+                if cur == scope {
+                    break;
+                }
+            }
+            debug_assert!(hops > 0, "a captured declaration always lives in a context");
+            let depth = hops - u32::from(!creates[use_scope.0 as usize]);
+            self.resolutions[node] = Some(Resolution::Capture { scope, decl, depth });
+        }
+        creates
+    }
+
     fn resolve_ident(&mut self, node: NodeId, sym: Symbol) {
         let top = self.stack.len() - 1;
         let mut found = None;
@@ -373,7 +440,10 @@ impl Resolver<'_> {
         }
         self.resolutions[node.0 as usize] = Some(match found {
             Some((scope, decl, 0)) => Resolution::Local { scope, decl },
-            Some((scope, decl, depth)) => Resolution::Capture { scope, decl, depth },
+            Some((scope, decl, depth)) => {
+                self.capture_scopes[node.0 as usize] = Some(self.current_scope());
+                Resolution::Capture { scope, decl, depth }
+            }
             None => Resolution::Global,
         });
     }

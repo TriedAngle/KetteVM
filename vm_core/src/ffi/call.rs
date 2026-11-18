@@ -1,4 +1,4 @@
-use crate::ffi::closure::{CallbackCtx, enter_call, leave_call};
+use crate::ffi::callback::CallbackCtx;
 use crate::ffi::memory;
 use crate::ffi::{FfiError, FfiResult, FfiState, ParamKind, TypeId, TypeKind, param_kind};
 use crate::{
@@ -101,7 +101,7 @@ impl FfiState {
         vm: &VM,
         runtime: &dyn ErasedRuntimeState,
         heap: &mut Heap,
-        state: Option<&ThreadState>,
+        state: &ThreadState,
         scope: &'s HandleScope<'_>,
         callee: &Handle<'_, Value>,
         args: Args,
@@ -167,22 +167,8 @@ impl FfiState {
         // live-checked, aggregates point at their owner's storage, and scalars
         // point into `inline`/`heap_buffer`, which outlive the call.
         let code = CodePtr(address.cast());
-        let heap_pointer: *mut Heap = heap;
-        let context = state.map(|state| CallbackCtx {
-            vm,
-            // Safety: the VM owns its runtimes and outlives every call.
-            runtime: unsafe {
-                core::mem::transmute::<&dyn ErasedRuntimeState, &'static dyn ErasedRuntimeState>(
-                    runtime,
-                )
-            },
-            heap: heap_pointer,
-            state,
-            ffi: self,
-        });
-        if let Some(context) = context {
-            enter_call(context);
-        }
+        let mut context = CallbackCtx::new(vm, runtime, heap, state, self);
+        context.enter();
         let mut inline_args: [Arg<'static>; INLINE_PARAMS] =
             core::array::from_fn(|_| Arg::new(&EMPTY_BYTE));
         let mut heap_args: Vec<Arg<'static>> = Vec::new();
@@ -216,9 +202,6 @@ impl FfiState {
             }
         }
 
-        if context.is_some() {
-            leave_call();
-        }
         drop(heap_buffer);
 
         let result_ty = {

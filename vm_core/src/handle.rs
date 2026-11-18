@@ -243,6 +243,30 @@ impl<'d> HandleScope<'d> {
         unsafe { HandleSlice::from_slice(core::slice::from_raw_parts(start, len)) }
     }
 
+    /// Root `len` values built by `word` in contiguous slots.
+    ///
+    /// `word` may allocate: the reservation is filled with the scope's fill
+    /// root first, so a collection in the middle of `word` only sees live
+    /// words.
+    #[inline]
+    pub fn stage_values<F>(&self, heap: &mut Heap, len: usize, mut word: F) -> HandleSlice<'_>
+    where
+        F: FnMut(usize, &mut Heap) -> Tagged<'_, Value>,
+    {
+        let data = unsafe { &*self.data.as_ptr() };
+        let start = data.inner().allocate_block(len);
+        let fill = data.inner().fill.raw();
+        for i in 0..len {
+            unsafe { *start.add(i) = fill };
+        }
+        for i in 0..len {
+            let word = word(i, heap).raw();
+            debug_assert!(!word.is_weak_ptr(), "weak value staged for a call");
+            unsafe { *start.add(i) = word };
+        }
+        unsafe { HandleSlice::from_slice(core::slice::from_raw_parts(start, len)) }
+    }
+
     #[inline(always)]
     pub fn cast<T: HeapObject>(
         &self,

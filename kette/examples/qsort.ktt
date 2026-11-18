@@ -1,5 +1,5 @@
 // Guest callbacks into C: qsort with a Kette comparator.
-// Run: cargo run -q -p vm -- kette/examples/callbacks/qsort.ktt
+// Run: cargo run -q -p vm -- kette/examples/qsort.ktt
 
 let libc = FFI.library(null)
 

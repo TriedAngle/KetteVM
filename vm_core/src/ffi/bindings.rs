@@ -3,12 +3,12 @@ use crate::{
     AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
     PropertyDescriptor, SetupError, Smi, StringRef, Tagged, ThreadState, Thrown, TypeInfo, VM,
-    Value, VmCore, VmError, raise_runtime,
+    Value, VmError, raise_runtime,
 };
 
 /// Install the `FFI` namespace and register the FFI natives.
-pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
-    state.ffi_call = vm.register_native(ffi_trampoline);
+pub fn install(vm: &mut VM) -> Result<(), SetupError> {
+    let ffi_call = vm.register_native(ffi_trampoline);
     let library = vm.register_native(ffi_library);
     let cstring = vm.register_native(ffi_cstring);
     let wstring = vm.register_native(ffi_wstring);
@@ -43,10 +43,11 @@ pub fn install(vm: &mut VM, state: &mut VmCore) -> Result<(), SetupError> {
         .map(|&(name, read, write)| (name, vm.register_native(read), vm.register_native(write)))
         .collect();
 
-    let ffi = &state.ffi;
+    vm.ffi_mut().set_natives(ffi_call, field_get, field_set);
+    let ffi = vm.ffi();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        ffi.install(thread.heap(), &scope, field_get, field_set);
+        ffi.install(thread.heap(), &scope);
 
         let object_prototype = {
             let heap = thread.heap();
@@ -279,7 +280,7 @@ fn ffi_library<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     let path = {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         if value.is_nullish(heap) {
@@ -311,7 +312,7 @@ fn ffi_cstring<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     let text = {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         match string_of(heap, value) {
@@ -336,7 +337,7 @@ fn ffi_wstring<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         let Some(units) = StringRef::try_from(heap, value).map(|text| text.to_units(heap)) else {
@@ -365,7 +366,7 @@ fn ffi_string_at<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagge
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         let address = match value_address(heap, value) {
@@ -383,7 +384,7 @@ fn ffi_wstring_at<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagg
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         let address = match value_address(heap, value) {
@@ -402,7 +403,7 @@ fn ffi_pointer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(pointee) = args
             .get_handle(heap, 0)
@@ -445,7 +446,7 @@ fn ffi_fn<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, V
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(result) = args
             .get_handle(heap, 1)
@@ -476,7 +477,7 @@ fn ffi_callback<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let params = match param_types(heap, &scope, args.get_handle(heap, 0).as_tagged(heap)) {
             Ok(params) => params,
@@ -520,9 +521,8 @@ fn library_fn<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let core = vm.runtime::<VmCore>();
-    let ffi = &core.ffi;
-    let trampoline = core.ffi_call;
+    let ffi = vm.ffi();
+    let trampoline = vm.ffi().trampoline();
 
     let name = {
         let value = args.get_handle(heap, 0).as_tagged(heap);
@@ -580,7 +580,7 @@ fn library_symbol<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     let name = {
         let value = args.get_handle(heap, 0).as_tagged(heap);
         let Some(name) = string_of(heap, value) else {
@@ -618,7 +618,7 @@ fn library_close<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagge
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(library) = call.receiver.as_tagged(heap).get_as::<ForeignLibrary>(heap) else {
             return raise_ffi(vm, heap, state, FfiError::InvalidLibrary);
@@ -654,7 +654,7 @@ fn ffi_struct<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(fields) = args.get_handle(heap, 0).as_tagged(heap).as_heap_object() else {
             return raise_ffi(
@@ -733,7 +733,7 @@ fn c_type_new<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(ty) = call.receiver.as_tagged(heap).get_as::<TypeInfo>(heap) else {
             return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
@@ -775,7 +775,7 @@ fn c_value_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let key = args.get_handle(heap, 0).as_tagged(heap);
         let index = key.to_i64().and_then(|index| usize::try_from(index).ok());
@@ -824,7 +824,7 @@ fn c_value_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let key = args.get_handle(heap, 0).as_tagged(heap);
         let index = key.to_i64().and_then(|index| usize::try_from(index).ok());
@@ -872,7 +872,7 @@ fn ffi_array<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     let Some(count) = args.get_handle(heap, 1).as_tagged(heap).to_i64() else {
         return raise_ffi(
             vm,
@@ -917,9 +917,9 @@ fn ffi_trampoline<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagge
     let Some(callee) = call.callee else {
         return raise_ffi(vm, heap, state, FfiError::NotCallable);
     };
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
-        let raw = match ffi.call_raw(vm, runtime, heap, Some(state), &scope, &callee, args) {
+        let raw = match ffi.call_raw(vm, runtime, heap, state, &scope, &callee, args) {
             Ok(raw) => raw,
             Err(error) => return raise_ffi(vm, heap, state, error),
         };
@@ -950,7 +950,7 @@ fn c_value_field_get<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> T
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(accessor) = call
             .callee
@@ -995,7 +995,7 @@ fn c_value_field_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Ta
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|_scope| {
         let Some(accessor) = call
             .callee
@@ -1037,7 +1037,7 @@ fn c_value_add<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
             return raise_ffi(
@@ -1067,7 +1067,7 @@ fn c_value_cast<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(ty) = args
             .get_handle(heap, 0)
@@ -1097,7 +1097,7 @@ fn c_value_copy<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
             return raise_ffi(
@@ -1120,7 +1120,7 @@ fn c_type_wrap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(ty) = call.receiver.as_tagged(heap).get_as::<TypeInfo>(heap) else {
             return raise_ffi(vm, heap, state, FfiError::NotATypeObject);
@@ -1153,7 +1153,7 @@ fn c_value_free<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
             return raise_ffi(
@@ -1213,7 +1213,7 @@ fn scalar_read<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(offset) = byte_offset(heap, args, 0) else {
             return raise_ffi(
@@ -1252,7 +1252,7 @@ fn scalar_write<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|_scope| {
         let Some(offset) = byte_offset(heap, args, 0) else {
             return raise_ffi(
@@ -1318,7 +1318,7 @@ fn ffi_buffer<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let Some(len) = byte_offset(heap, args, 0) else {
             return raise_ffi(
@@ -1348,7 +1348,7 @@ fn c_read_bytes<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     state.handle_scope(|scope| {
         let (Some(offset), Some(len)) = (byte_offset(heap, args, 0), byte_offset(heap, args, 1))
         else {

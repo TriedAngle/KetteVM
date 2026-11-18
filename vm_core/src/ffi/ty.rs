@@ -407,13 +407,11 @@ impl TypeRegistry {
         }
         let plan = CallPlan::new(heap, params, result, variadic)?;
         let id = self.reserve_id();
-        let values: Vec<Tagged<Value>> = params
-            .iter()
-            .map(|param| param.as_tagged(heap).erase())
-            .collect();
+        let values: Vec<Tagged<TypeInfo>> =
+            params.iter().map(|param| param.as_tagged(heap)).collect();
         let staged = scope.stage(&values);
         drop(values);
-        let params_array = heap.allocate_handle::<FixedArray>(staged, scope);
+        let params_array = heap.allocate_handle::<FixedArray<TypeInfo>>(staged, scope);
         let raw = Box::into_raw(Box::new(plan));
         let ty = heap.allocate_handle::<TypeInfo>(
             TypeInfoInit {

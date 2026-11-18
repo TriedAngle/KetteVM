@@ -1,11 +1,6 @@
 // Kette port of raylib's `textures_portal_window.c` example.
 // https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
 // Run: cargo run -q -p vm -- kette/examples/raylib/portal_window.ktt
-//
-// C values own external storage: every `Type.new()` and every foreign call
-// that returns a struct allocates memory that must be released with `.free()`.
-// Values created once during setup are left to the process exit; the frame
-// loop releases everything it allocates.
 
 let path = if os.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"

@@ -523,8 +523,7 @@ fn every_object_kind_visits_its_entire_layout() {
         }
 
         let u8_ty = vm
-            .runtime::<VmCore>()
-            .ffi
+            .ffi()
             .types()
             .get(heap, TypeId::from_i64(TypeKind::U8 as i64))
             .expect("u8");
@@ -534,8 +533,10 @@ fn every_object_kind_visits_its_entire_layout() {
             scope.stage(&[undefined.as_tagged(heap), u8_handle.as_tagged(heap).erase()]),
             &scope,
         );
-        let params =
-            heap.allocate_handle::<FixedArray>(scope.stage(&[undefined.as_tagged(heap)]), &scope);
+        let params = heap.allocate_handle::<FixedArray<TypeInfo>>(
+            scope.stage(&[u8_handle.as_tagged(heap)]),
+            &scope,
+        );
         let type_info = heap.allocate_handle::<TypeInfo>(
             TypeInfoInit {
                 kind: TypeKind::Struct,

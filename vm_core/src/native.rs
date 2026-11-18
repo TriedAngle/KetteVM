@@ -117,7 +117,7 @@ impl<'a> HostCtx<'a> {
                 new_target,
             );
         }
-        (vm.shared.execute)(vm, runtime, heap, state, callable, args, new_target)
+        vm.execute(runtime, heap, state, callable, args, new_target)
     }
 
     /// A bound function's `[[Call]]`/`[[Construct]]` (ES 10.4.2): appends

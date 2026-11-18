@@ -1,6 +1,6 @@
 pub mod bindings;
 mod call;
-mod closure;
+mod callback;
 mod error;
 mod library;
 pub mod memory;
@@ -9,7 +9,7 @@ mod ty;
 mod values;
 
 pub use call::{CallSlot, ValueRead};
-pub use closure::{callback, enter_call, leave_call};
+pub use callback::callback;
 pub use error::{FfiError, FfiResult};
 pub use ty::{Abi, TypeError, TypeId, TypeKind, TypeRegistry};
 
@@ -17,8 +17,8 @@ use crate::bootstrap::smi_slot;
 use crate::objects::FLAG_VARIADIC;
 use crate::{
     AccessorInfo, AccessorInfoInit, DenseString, EdgeVisitable, FixedArray, GcSlot, Handle,
-    HandleScope, Heap, Map, MapInit, MapKind, NativeIndex, SlotFlags, Smi, Tagged, TypeInfo,
-    TypeInfoInit, VM, Value, Visitor,
+    HandleScope, Heap, Map, MapInit, MapKind, NativeIndex, Object, SlotFlags, Smi, Tagged,
+    TypeInfo, TypeInfoInit, VM, Visitor,
 };
 use libffi::middle::{Cif, Type};
 use std::sync::Mutex;
@@ -55,14 +55,22 @@ impl FfiTypes {
 
 /// A guest callback registered with C: the guarded entry libffi points at.
 pub struct ClosureEntry {
-    pub signature: GcSlot<TypeInfo>,
-    pub callback: GcSlot<Value>,
-    pub ffi: *const FfiState,
+    /// The parameter array of the function type the callback was made from.
+    pub params: GcSlot<FixedArray<TypeInfo>>,
+    /// Always present: `void` is a `Void` type, not `None`.
+    pub result: GcSlot<TypeInfo>,
+    pub callback: GcSlot<Object>,
 }
+
+/// The `userdata` libffi hands to the trampoline.
+///
+/// Borrowing the leaked entry through this wrapper yields a `'static`
+/// reference, so the entry's root slots can be used as handles directly.
+pub struct EntryPtr(pub &'static ClosureEntry);
 
 /// A live libffi closure plus its GC-visible entry.
 struct ClosureSlot {
-    entry: *mut ClosureEntry,
+    entry: &'static ClosureEntry,
     /// Kept alive for the process; the code pointer above points into it.
     _closure: Box<libffi::middle::Closure<'static>>,
 }
@@ -72,11 +80,14 @@ struct ClosureSlot {
 unsafe impl Send for ClosureSlot {}
 unsafe impl Sync for ClosureSlot {}
 
-/// FFI state owned by `VmCore`.
+/// C FFI state shared by every runtime: the type table, call plans and
+/// guest callbacks.
 pub struct FfiState {
     types: TypeRegistry,
-    /// Native getter/setter used by per-type field accessors.
-    accessors: Mutex<Option<(NativeIndex, NativeIndex)>>,
+    /// Native getter/setter for per-type field accessors;
+    accessors: (NativeIndex, NativeIndex),
+    /// The native every C function value maps to.
+    trampoline: NativeIndex,
     /// Guest callbacks and the libffi closures that call them.
     closures: Mutex<Vec<ClosureSlot>>,
     /// A callback threw; the C call must return before it is re-raised.
@@ -102,7 +113,7 @@ impl FfiState {
 
     pub fn register_closure(
         &self,
-        entry: *mut ClosureEntry,
+        entry: &'static ClosureEntry,
         closure: Box<libffi::middle::Closure<'static>>,
     ) {
         self.closures
@@ -114,15 +125,24 @@ impl FfiState {
             });
     }
 
-    /// Create the built-in types; run once during VM setup.
-    pub fn install(
-        &self,
-        heap: &mut Heap,
-        scope: &HandleScope<'_>,
+    /// Set the FFI natives; run once during install.
+    pub fn set_natives(
+        &mut self,
+        trampoline: NativeIndex,
         field_get: NativeIndex,
         field_set: NativeIndex,
     ) {
-        *self.accessors.lock().expect("ffi accessors poisoned") = Some((field_get, field_set));
+        self.trampoline = trampoline;
+        self.accessors = (field_get, field_set);
+    }
+
+    /// The native every C function value maps to.
+    #[inline(always)]
+    pub fn trampoline(&self) -> NativeIndex {
+        self.trampoline
+    }
+
+    pub fn install(&self, heap: &mut Heap, scope: &HandleScope<'_>) {
         for index in 0..TypeKind::BUILTIN_COUNT {
             let kind = TypeKind::from_u8(index as u8);
             let (size, align) = kind.builtin_layout();
@@ -190,9 +210,7 @@ impl FfiState {
             return;
         }
         let Some(fields) = fields else { return };
-        let Some((getter, setter)) = *self.accessors.lock().expect("ffi accessors poisoned") else {
-            return;
-        };
+        let (getter, setter) = self.accessors;
 
         let mut entries: Vec<(Handle<DenseString>, Handle<TypeInfo>, usize)> = Vec::new();
         let mut index = 0;
@@ -265,7 +283,8 @@ impl Default for FfiState {
     fn default() -> Self {
         Self {
             types: TypeRegistry::new(),
-            accessors: Mutex::new(None),
+            accessors: (NativeIndex(0), NativeIndex(0)),
+            trampoline: NativeIndex(0),
             closures: Mutex::new(Vec::new()),
             callback_threw: AtomicBool::new(false),
         }
@@ -277,10 +296,9 @@ impl EdgeVisitable for FfiState {
         self.types.visit_edges(visitor);
         let closures = self.closures.lock().expect("ffi closures poisoned");
         for slot in closures.iter() {
-            // Safety: entries are boxed and live as long as the slot.
-            let entry = unsafe { &*slot.entry };
-            visitor.visit(entry.signature.as_raw());
-            visitor.visit(entry.callback.as_raw());
+            visitor.visit(slot.entry.params.as_raw());
+            visitor.visit(slot.entry.result.as_raw());
+            visitor.visit(slot.entry.callback.as_raw());
         }
     }
 }
@@ -392,11 +410,7 @@ pub fn cif_for_signature(heap: &Heap, signature: Tagged<TypeInfo>) -> FfiResult<
         .ok_or(FfiError::NotAFunction(signature.id()))?;
     let mut lowered = Vec::with_capacity(params.len());
     for index in 0..params.len() {
-        let param = params
-            .at(heap, index)
-            .get_as::<TypeInfo>(heap)
-            .ok_or(FfiError::NotAFunction(signature.id()))?;
-        lowered.push(lower(heap, param)?);
+        lowered.push(lower(heap, params.at(heap, index))?);
     }
     let result = signature
         .result(heap)

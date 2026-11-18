@@ -186,6 +186,8 @@ struct FunctionGen<'a> {
     captured: Vec<bool>,
     /// per scope decl: frame register, when not captured
     reg_of: Vec<Option<Reg>>,
+    /// whether the prologue pushes a context (captured bindings or eval)
+    creates_context: bool,
     param_count: usize,
     /// `node -> function index` for closure creation
     object_fids: &'a [Option<u32>],
@@ -222,6 +224,11 @@ impl<'a> FunctionGen<'a> {
                 captured[decl as usize] = true;
             }
         }
+        // a direct eval reaches every binding of the scope by name
+        if resolved.scope(scope).direct_eval {
+            captured.fill(true);
+        }
+        let creates_context = resolved.creates_context(scope);
         let mut reg_of = vec![None; decls];
         let mut local_count = 0u32;
         for (decl, is_captured) in captured.iter().enumerate() {
@@ -244,6 +251,7 @@ impl<'a> FunctionGen<'a> {
             body,
             captured,
             reg_of,
+            creates_context,
             param_count,
             object_fids,
             declare_globals,
@@ -380,24 +388,27 @@ impl<'a> FunctionGen<'a> {
     // -- function body -----------------------------------------------------
 
     fn generate(&mut self) -> Result<(), CompileError> {
-        // prologue: one context per function (uniform chain); the shared
-        // ScopeInfo (constant 0) names every slot for dynamic resolution
-        let locals = self
-            .resolved
-            .scope(self.scope)
-            .decls
-            .iter()
-            .map(|d| ScopeLocal {
-                name: self.ast.symbol(d.name).into(),
-                info: MODE_VAR as u32,
-            })
-            .collect();
-        let ctx_info = self.b.constant(Constant::ScopeInfo(ScopeLayout {
-            locals,
-            flags: SCOPE_DECLARATION,
-        }));
-        self.b.create_function_context(ctx_info);
-        self.b.push_context(self.ctx_save);
+        // prologue: scopes with context-allocated bindings push a fresh
+        // context; the rest reuse the closure's context, and their baked
+        // capture depths skip this frame.
+        if self.creates_context {
+            let locals = self
+                .resolved
+                .scope(self.scope)
+                .decls
+                .iter()
+                .map(|d| ScopeLocal {
+                    name: self.ast.symbol(d.name).into(),
+                    info: MODE_VAR as u32,
+                })
+                .collect();
+            let ctx_info = self.b.constant(Constant::ScopeInfo(ScopeLayout {
+                locals,
+                flags: SCOPE_DECLARATION,
+            }));
+            self.b.create_function_context(ctx_info);
+            self.b.push_context(self.ctx_save);
+        }
         if self.scope == self.root_scope {
             // Script declarations become global object properties. The
             // declaration list creates them (as `undefined`) before the
@@ -414,14 +425,21 @@ impl<'a> FunctionGen<'a> {
         // parameters arrive at -(i + 2); bind them (context copies included)
         for i in 0..self.param_count {
             let param = self.b.param(i as u32);
-            self.b.load(param);
-            self.store_decl(i);
+            if self.captured[i] {
+                self.b.load(param);
+                self.b.store_context_slot(i as u32, 0);
+            } else {
+                let reg = self.reg_of[i].expect("uncaptured decl has a register");
+                self.b.move_reg(reg, param);
+            }
         }
 
         self.emit_body(self.body, self.completion)?;
 
         self.b.load(self.completion);
-        self.b.pop_context(self.ctx_save);
+        if self.creates_context {
+            self.b.pop_context(self.ctx_save);
+        }
         self.b.ret();
         Ok(())
     }
@@ -543,7 +561,9 @@ impl<'a> FunctionGen<'a> {
             Node::Assign { target, value } => self.emit_assign(target, value),
             Node::Return { value } => {
                 self.expr(value)?;
-                self.b.pop_context(self.ctx_save);
+                if self.creates_context {
+                    self.b.pop_context(self.ctx_save);
+                }
                 self.b.ret();
                 Ok(())
             }

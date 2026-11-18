@@ -2,7 +2,7 @@ use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::ffi::{FfiError, TypeId, TypeKind, ValueRead};
 use vm::{
     CValue, CValueFlags, CValueInit, DefaultInterpreter, FixedByteArray, Float, ForeignLibrary,
-    Handle, HandleScope, Heap, Smi, StringRef, TypeInfo, Utf8String, VM, Value, VmCore,
+    Handle, HandleScope, Heap, Smi, StringRef, Thread, TypeInfo, Utf8String, VM, Value, VmCore,
 };
 
 fn test_vm() -> VM {
@@ -27,18 +27,14 @@ fn struct_type<'s>(
     scope: &'s HandleScope<'_>,
     fields: &[(Option<&str>, Handle<TypeInfo>)],
 ) -> Handle<'s, TypeInfo> {
-    vm.runtime::<VmCore>()
-        .ffi
+    vm.ffi()
         .define_struct(vm, heap, scope, None, fields)
         .expect("struct type")
 }
 
 fn char_pointer<'s>(vm: &VM, heap: &mut Heap, scope: &'s HandleScope<'_>) -> Handle<'s, TypeInfo> {
     let char_ty = builtin(heap, scope, TypeKind::Char);
-    vm.runtime::<VmCore>()
-        .ffi
-        .types()
-        .pointer_to(heap, scope, &char_ty)
+    vm.ffi().types().pointer_to(heap, scope, &char_ty)
 }
 
 fn char16_pointer<'s>(
@@ -47,10 +43,7 @@ fn char16_pointer<'s>(
     scope: &'s HandleScope<'_>,
 ) -> Handle<'s, TypeInfo> {
     let char16 = builtin(heap, scope, TypeKind::Char16);
-    vm.runtime::<VmCore>()
-        .ffi
-        .types()
-        .pointer_to(heap, scope, &char16)
+    vm.ffi().types().pointer_to(heap, scope, &char16)
 }
 
 fn raw_function_pointer<'s>(
@@ -62,8 +55,8 @@ fn raw_function_pointer<'s>(
     result: &Handle<TypeInfo>,
     address: usize,
 ) -> Handle<'s, CValue> {
-    let core = vm.runtime::<VmCore>();
-    let ffi = &core.ffi;
+    let ffi = vm.ffi();
+    let trampoline = ffi.trampoline();
     let signature = ffi
         .types()
         .function(heap, scope, params, result, false)
@@ -80,18 +73,18 @@ fn raw_function_pointer<'s>(
         },
         scope,
     );
-    ffi.function(heap, scope, core.ffi_call, &signature, &target, library)
+    ffi.function(heap, scope, trampoline, &signature, &target, library)
         .expect("function")
 }
 
 fn call_pointer<'s>(
-    vm: &VM,
-    heap: &mut Heap,
+    thread: &mut Thread,
     scope: &'s HandleScope<'_>,
     callee: &Handle<CValue>,
     args: &[Handle<Value>],
 ) -> Handle<'s, Value> {
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let (vm, heap, state) = thread.split();
+    let ffi = vm.ffi();
     let callee = scope.handle(callee.as_tagged(heap).erase());
     let args = scope.stage_handles(args);
     let raw = ffi
@@ -99,7 +92,7 @@ fn call_pointer<'s>(
             vm,
             vm.runtime::<VmCore>(),
             heap,
-            None,
+            state,
             scope,
             &callee,
             args.as_args(),
@@ -130,8 +123,7 @@ fn raw_pointer<'s>(
 }
 
 fn call_value<'s>(
-    vm: &VM,
-    heap: &mut Heap,
+    thread: &mut Thread,
     scope: &'s HandleScope<'_>,
     library: &Handle<ForeignLibrary>,
     address: usize,
@@ -139,8 +131,11 @@ fn call_value<'s>(
     result: &Handle<TypeInfo>,
     args: &[Handle<Value>],
 ) -> Handle<'s, Value> {
-    let function = raw_function_pointer(vm, heap, scope, library, params, result, address);
-    call_pointer(vm, heap, scope, &function, args)
+    let function = {
+        let (vm, heap, _) = thread.split();
+        raw_function_pointer(vm, heap, scope, library, params, result, address)
+    };
+    call_pointer(thread, scope, &function, args)
 }
 
 #[test]
@@ -230,7 +225,7 @@ fn null_and_dead_pointer_errors() {
         assert!(!p.is_null());
         assert_eq!(p.read_u64(heap), Err(FfiError::DeadPointer));
 
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         assert_eq!(
             ffi.wrap_value(thread.heap(), &scope, &u64_ty, &null).err(),
             Some(FfiError::NullPointer)
@@ -243,7 +238,7 @@ fn pointer_arithmetic_and_bounds() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let i32_ty = builtin(thread.heap(), &scope, TypeKind::I32);
         let array = ffi
             .types()
@@ -285,7 +280,7 @@ fn library_ownership_and_close() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
@@ -320,7 +315,7 @@ fn library_errors() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
@@ -400,7 +395,7 @@ fn scalar_argument_and_return_conversions() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
@@ -410,8 +405,7 @@ fn scalar_argument_and_return_conversions() {
                 let ty = builtin(thread.heap(), &scope, $kind);
                 let arg = scope.handle(Smi::new($value).into_tagged());
                 let result = call_value(
-                    &vm,
-                    thread.heap(),
+                    thread,
                     &scope,
                     &library,
                     $function as *const () as usize,
@@ -445,8 +439,7 @@ fn scalar_argument_and_return_conversions() {
                 .erase();
             let arg = scope.handle(arg);
             let result = call_value(
-                &vm,
-                thread.heap(),
+                thread,
                 &scope,
                 &library,
                 function,
@@ -500,7 +493,7 @@ fn string_marshalling() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
@@ -555,33 +548,33 @@ fn string_marshalling() {
                 let string = thread.intern(&scope, text);
                 scope.handle(string.as_tagged(thread.heap()).erase())
             };
-            let value = call_pointer(&vm, thread.heap(), &scope, &length, &[value]);
+            let value = call_pointer(thread, &scope, &length, &[value]);
             assert_eq!(value.as_tagged(thread.heap()).to_i64(), Some(expected));
         }
 
         let latin1 = thread.intern(&scope, "héllo");
         let arg = scope.handle(latin1.as_tagged(thread.heap()).erase());
-        let value = call_pointer(&vm, thread.heap(), &scope, &length, &[arg]);
+        let value = call_pointer(thread, &scope, &length, &[arg]);
         assert_eq!(value.as_tagged(thread.heap()).to_i64(), Some(6));
 
         let bytes = thread
             .heap()
             .allocate_handle::<FixedByteArray>(b"bytes", &scope);
         let arg = scope.handle(bytes.as_tagged(thread.heap()).erase());
-        let value = call_pointer(&vm, thread.heap(), &scope, &length, &[arg]);
+        let value = call_pointer(thread, &scope, &length, &[arg]);
         assert_eq!(value.as_tagged(thread.heap()).to_i64(), Some(5));
 
         let wide = thread.intern(&scope, "h€");
         let arg = scope.handle(wide.as_tagged(thread.heap()).erase());
-        let value = call_pointer(&vm, thread.heap(), &scope, &wide_length, &[arg]);
+        let value = call_pointer(thread, &scope, &wide_length, &[arg]);
         assert_eq!(value.as_tagged(thread.heap()).to_i64(), Some(2));
 
-        let value = call_pointer(&vm, thread.heap(), &scope, &get_name, &[]);
+        let value = call_pointer(thread, &scope, &get_name, &[]);
         let heap = thread.heap();
         let text = StringRef::try_from(heap, value.as_tagged(heap)).expect("decoded string");
         assert_eq!(text.to_rust_string(heap), "héllo");
 
-        let value = call_pointer(&vm, thread.heap(), &scope, &get_wide_name, &[]);
+        let value = call_pointer(thread, &scope, &get_wide_name, &[]);
         let heap = thread.heap();
         let text = StringRef::try_from(heap, value.as_tagged(heap)).expect("decoded string");
         assert_eq!(text.to_rust_string(heap), "h€");
@@ -618,7 +611,7 @@ fn struct_by_value_and_hfa() {
     let vm = test_vm();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let library = ffi
             .open_library(&vm, thread.heap(), &scope, None)
             .expect("open");
@@ -649,8 +642,7 @@ fn struct_by_value_and_hfa() {
         }
         let arg = scope.handle(color_buffer.as_tagged(thread.heap()).erase());
         let result = call_value(
-            &vm,
-            thread.heap(),
+            thread,
             &scope,
             &library,
             color_to_int as *const () as usize,
@@ -704,7 +696,7 @@ fn struct_by_value_and_hfa() {
                 vm_ref,
                 vm_ref.runtime::<VmCore>(),
                 heap,
-                Some(state),
+                state,
                 &scope,
                 &callee,
                 args.as_args(),
@@ -733,7 +725,7 @@ fn read_float_field(
     value: Handle<CValue>,
     name: &str,
 ) -> f64 {
-    let ffi = &vm.runtime::<VmCore>().ffi;
+    let ffi = vm.ffi();
     let read = ffi
         .value_get_field(thread.heap(), scope, value, name)
         .expect("field");
@@ -757,7 +749,7 @@ fn type_registry_weak_collection() {
     let mut thread = vm.attach();
 
     let first = thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let ty = ffi
             .define_struct(&vm, thread.heap(), &scope, Some("Transient"), &[])
             .expect("struct");
@@ -765,16 +757,10 @@ fn type_registry_weak_collection() {
     });
 
     thread.heap().collect();
-    assert!(
-        vm.runtime::<VmCore>()
-            .ffi
-            .types()
-            .get(thread.heap(), first)
-            .is_none()
-    );
+    assert!(vm.ffi().types().get(thread.heap(), first).is_none());
 
     thread.handle_scope(|thread, scope| {
-        let ffi = &vm.runtime::<VmCore>().ffi;
+        let ffi = vm.ffi();
         let ty = ffi
             .define_struct(&vm, thread.heap(), &scope, Some("Transient"), &[])
             .expect("struct");

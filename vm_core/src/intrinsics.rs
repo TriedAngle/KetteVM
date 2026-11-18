@@ -5,11 +5,11 @@
 use crate::ffi::bindings;
 use crate::{
     AccessorInfo, Args, CallInfo, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
-    EdgeVisitable, FfiState, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx,
-    INFO_GLOBAL, MODE_CLASS, MODE_LET, Map, MapInit, MapKind, NativeIndex, Object,
-    PropertyDescriptor, Runtime, RuntimeId, ScriptContextTable, SetupError, SlotFlags, Smi, Tagged,
-    VM, Value, Visitor, VmError, frame_context_value, info_is_lexical, info_mode, lookup::Hit,
-    lookup::Lookup, mode_from_strict, raise, rt_try, threading, tools::KetteTools,
+    EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
+    MODE_CLASS, MODE_LET, Map, MapInit, MapKind, Object, PropertyDescriptor, Runtime, RuntimeId,
+    ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
+    frame_context_value, info_is_lexical, info_mode, lookup::Hit, lookup::Lookup, mode_from_strict,
+    raise, rt_try, threading, tools::KetteTools,
 };
 
 // ---- array `length` ----
@@ -81,17 +81,13 @@ pub fn array_length_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) ->
 /// The VM core runtime: intrinsic natives plus the core-owned FFI state.
 /// Available regardless of which languages a VM hosts; added with
 /// `vm.add::<VmCore>()` before the front end's runtime.
+/// The VM core runtime: intrinsic natives only; core infrastructure such as
+/// the FFI state lives on [`crate::SharedVM`].
 #[derive(Default)]
-pub struct VmCore {
-    pub ffi: FfiState,
-    /// The native every C function value maps to.
-    pub ffi_call: NativeIndex,
-}
+pub struct VmCore;
 
 impl EdgeVisitable for VmCore {
-    fn visit_edges(&self, visitor: &mut dyn Visitor) {
-        self.ffi.visit_edges(visitor);
-    }
+    fn visit_edges(&self, _visitor: &mut dyn Visitor) {}
 }
 
 /// `%Function.prototype%` (ES 19.2.3): the canonical empty function.
@@ -114,8 +110,8 @@ fn throw_type_error<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> T
 impl Runtime for VmCore {
     const ID: RuntimeId = RuntimeId(0);
 
-    fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
-        bindings::install(vm, state)?;
+    fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), SetupError> {
+        bindings::install(vm)?;
         threading::install(vm)?;
         let call_index = vm.register_native(function_prototype_call);
         let throw_index = vm.register_native(throw_type_error);

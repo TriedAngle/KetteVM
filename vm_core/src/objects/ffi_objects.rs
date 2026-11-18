@@ -286,7 +286,7 @@ pub struct TypeInfoInit<'a> {
     pub element: Option<Handle<'a, TypeInfo>>,
     pub len: usize,
     pub fields: Option<Handle<'a, FixedArray>>,
-    pub params: Option<Handle<'a, FixedArray>>,
+    pub params: Option<Handle<'a, FixedArray<TypeInfo>>>,
     pub result: Option<Handle<'a, TypeInfo>>,
     /// Leaked `*const CallPlan` for function types.
     pub cif: usize,
@@ -307,7 +307,7 @@ pub struct TypeInfo {
     pub element: OptionGcSlot<TypeInfo>,
     pub len: GcSlot<Smi>,
     pub fields: OptionGcSlot<FixedArray>,
-    pub params: OptionGcSlot<FixedArray>,
+    pub params: OptionGcSlot<FixedArray<TypeInfo>>,
     pub result: OptionGcSlot<TypeInfo>,
     /// Per-type map for struct/union CValue field accessors.
     pub value_map: OptionGcSlot<Map>,
@@ -366,7 +366,7 @@ impl TypeInfo {
         self.fields.get(heap)
     }
 
-    pub fn params<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedArray>> {
+    pub fn params<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedArray<TypeInfo>>> {
         self.params.get(heap)
     }
 

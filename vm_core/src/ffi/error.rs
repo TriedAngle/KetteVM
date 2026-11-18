@@ -26,6 +26,8 @@ pub enum FfiError {
     NotCallable,
     /// A type used as a call signature is not a function type.
     NotAFunction(TypeId),
+    /// A variadic signature cannot be used as a callback.
+    VariadicCallback,
     /// The call uses a type the current implementation does not pass yet.
     UnsupportedType(TypeId),
     /// Wrong number of arguments for the C signature.
@@ -85,6 +87,9 @@ impl fmt::Display for FfiError {
             }
             FfiError::NotCallable => write!(f, "value is not a C function"),
             FfiError::NotAFunction(id) => write!(f, "C type {id:?} is not a function type"),
+            FfiError::VariadicCallback => {
+                write!(f, "a variadic signature cannot be used as a callback")
+            }
             FfiError::UnsupportedType(id) => write!(f, "C type {id:?} is not supported here yet"),
             FfiError::ArgCount { expected, found } => {
                 write!(

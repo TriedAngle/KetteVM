@@ -150,6 +150,8 @@ const _: () = {
 
 pub struct SharedVM {
     heap: GlobalHeap,
+    /// Core C FFI: type table, call plans, callbacks.
+    ffi: FfiState,
     known: WellKnown,
     // TODO: investiage if Mutex is fine, maybe a lock-free mechanism exists
     thread_states: Mutex<Vec<Weak<ThreadState>>>,
@@ -456,6 +458,7 @@ impl SharedVM {
         for slot in self.weak_slots.lock().unwrap().iter() {
             visitor.visit(slot);
         }
+        self.ffi.visit_edges(visitor);
         for state in &self.runtimes {
             state.visit_edges(visitor);
         }
@@ -660,6 +663,7 @@ impl VM {
         let interner = StringInterner::new();
         let shared = Arc::new(SharedVM {
             heap,
+            ffi: FfiState::default(),
             known: WellKnown::uninit(),
             thread_states: Mutex::new(Vec::new()),
             threads: ThreadRegistry::default(),
@@ -716,6 +720,18 @@ impl VM {
         &self.shared.known
     }
 
+    #[inline(always)]
+    pub fn ffi(&self) -> &FfiState {
+        &self.shared.ffi
+    }
+
+    /// The FFI state during setup, before the VM is shared.
+    pub fn ffi_mut(&mut self) -> &mut FfiState {
+        &mut Arc::get_mut(&mut self.shared)
+            .expect("cannot mutate the FFI state on a shared VM")
+            .ffi
+    }
+
     pub fn threads(&self) -> &ThreadRegistry {
         &self.shared.threads
     }
@@ -726,6 +742,21 @@ impl VM {
 
     pub fn natives(&self) -> &NativeRegistry {
         &self.shared.natives
+    }
+
+    /// `[[Call]]`/`[[Construct]]` of an object callable without the
+    /// [`HostCtx::enter`] checks: `callable` must neither be bound nor a proxy.
+    #[inline]
+    pub fn execute<'h>(
+        &self,
+        runtime: &'h dyn ErasedRuntimeState,
+        heap: &'h mut Heap,
+        state: &'h ThreadState,
+        callable: Handle<'_, Object>,
+        args: HandleSlice<'_>,
+        new_target: Option<Handle<'_, Value>>,
+    ) -> Result<Tagged<'h, Value>> {
+        (self.shared.execute)(self, runtime, heap, state, callable, args, new_target)
     }
 
     #[inline]
