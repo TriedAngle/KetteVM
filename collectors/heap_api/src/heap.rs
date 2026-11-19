@@ -88,6 +88,7 @@ impl<V: Visitor + ?Sized> Visitor for &mut V {
 pub struct HeapStats {
     pub used: usize,
     pub capacity: usize,
+    pub free: usize,
 }
 
 /// VM services a collector needs, registered once via [`SharedHeap::set_host`].

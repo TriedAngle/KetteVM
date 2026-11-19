@@ -282,12 +282,15 @@ impl HeapObject for Map {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().map_map.get(heap));
         self.value_slot_count
-            .set(heap, host, Smi::new(config.value_slot_count as i64));
+            .init_tagged(Tagged::<Smi>::from(Smi::new(
+                config.value_slot_count as i64,
+            )));
         self.descriptor_count
-            .set(heap, host, Smi::new(config.descriptors.len() as i64));
+            .init_tagged(Tagged::<Smi>::from(Smi::new(
+                config.descriptors.len() as i64
+            )));
         self.flags.store_smi(Smi::new(config.kind.bits() as i64));
-        self.prototype
-            .set(heap, host, config.prototype.as_tagged(heap));
+        self.prototype.init(config.prototype.as_tagged(heap));
         self.pred.clear(heap);
         self.transitions.clear(heap);
         if config.kind.is_js_receiver() {
@@ -309,9 +312,10 @@ impl HeapObject for Map {
         for (i, (name, flags, value)) in config.descriptors.iter().enumerate() {
             let name_word = name.as_tagged(heap);
             let d = self.descriptor(i);
-            d.name.set(heap, host, name_word);
-            d.flags.set(heap, host, Smi::new(flags.bits() as i64));
-            d.value.set(heap, host, value.as_tagged(heap));
+            d.name.init_tagged(name_word);
+            d.flags
+                .init_tagged(Tagged::<Smi>::from(Smi::new(flags.bits() as i64)));
+            d.value.init_tagged(value.as_tagged(heap));
         }
     }
 

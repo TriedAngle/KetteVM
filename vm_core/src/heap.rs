@@ -1042,7 +1042,7 @@ impl Heap {
     /// collects or refills — `None` when the window is exhausted,
     /// leaving the caller free to take the general allocation path
     /// (which may collect) after snapshotting its code-relative pc.
-    #[inline]
+    #[inline(always)]
     pub fn try_new_array_literal<'a>(&'a mut self) -> Option<Tagged<'a, Object>> {
         // With GC stress every allocation must collect first: decline the
         // fast path so the caller falls back to the general path.
@@ -1056,7 +1056,7 @@ impl Heap {
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
+        unsafe { ptr.as_mut() }.init_raw(map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -1065,7 +1065,7 @@ impl Heap {
     /// elements, `length` 0. Never parks, collects or refills — `None`
     /// when the window is exhausted, leaving the caller free to take the
     /// general allocation path after snapshotting its pc.
-    #[inline]
+    #[inline(always)]
     pub fn try_new_empty_object<'a>(&'a mut self) -> Option<Tagged<'a, Object>> {
         #[cfg(feature = "stress-minor-gc")]
         if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
@@ -1077,7 +1077,7 @@ impl Heap {
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
+        unsafe { ptr.as_mut() }.init_raw(map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -1085,7 +1085,7 @@ impl Heap {
     /// Bump-only sized array literal: a hole-filled elements store of
     /// `capacity` plus the array object, both from the current TLAB.
     /// Never parks, collects or refills.
-    #[inline]
+    #[inline(always)]
     pub fn try_new_array_with_capacity<'a>(
         &'a mut self,
         capacity: usize,
@@ -1108,7 +1108,6 @@ impl Heap {
         let mut ptr = obj_raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
         unsafe { ptr.as_mut() }.init_raw(
-            self,
             self.known().js_array_map.get(self),
             self.known().empty_fixed_array.get(self),
             elements,

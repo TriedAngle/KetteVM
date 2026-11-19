@@ -186,9 +186,12 @@ impl SharedHeap for DummyHeap {
     }
 
     fn stats(&self) -> HeapStats {
+        let used = self.inner.used();
+        let capacity = self.inner.capacity();
         HeapStats {
-            used: self.inner.used(),
-            capacity: self.inner.capacity(),
+            used,
+            capacity,
+            free: capacity.saturating_sub(used),
         }
     }
 }

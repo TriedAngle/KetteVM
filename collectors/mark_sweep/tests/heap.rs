@@ -279,7 +279,7 @@ fn used_plus_free_conserve_arena_after_cycles() {
     collect(&local, &mut tlab);
 
     assert_eq!(
-        state.stats().used + state.free_bytes(),
+        state.stats().used + state.stats().free,
         state.stats().capacity
     );
     for ptr in keepers {
@@ -337,7 +337,7 @@ fn sweep_clears_its_own_chunk_mark_bits() {
             .is_none()
     }
 
-    let mut heap = ChunkedHeap::new(64 * 1024).unwrap();
+    let heap = ChunkedHeap::new(64 * 1024).unwrap();
     let layout = Layout::from_size_align(48, 8).unwrap();
     let host = host_for(&Roots::empty());
     let mut objects = Vec::new();
@@ -357,11 +357,11 @@ fn sweep_clears_its_own_chunk_mark_bits() {
     heap.flag_all_pending();
     while let Some(chunk) = heap.claim_pending(false) {
         let live_bytes = ChunkedHeap::sweep_claimed(&chunk, &host);
-        heap.publish_swept(&chunk, live_bytes);
+        heap.publish_swept(chunk, live_bytes);
     }
 
     assert!(chunk_mark_is_clear(&heap, objects[0]));
-    assert_eq!(heap.live_bytes(), 2 * 48);
+    assert_eq!(heap.stats().used, 2 * 48);
 }
 
 #[test]
@@ -418,7 +418,7 @@ fn parked_mutators_assist_marking() {
 
     assert_eq!(state.stats().used, CHAINS * CHAIN_LEN * 16);
     assert_eq!(
-        state.stats().used + state.free_bytes(),
+        state.stats().used + state.stats().free,
         state.stats().capacity
     );
 }
@@ -445,7 +445,7 @@ fn old_generation_pendings_drain_on_full_collection() {
         collect(&local, &mut tlab);
         assert_eq!(state.stats().used, 0);
         assert_eq!(
-            state.stats().used + state.free_bytes(),
+            state.stats().used + state.stats().free,
             state.stats().capacity
         );
     }

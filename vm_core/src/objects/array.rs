@@ -62,13 +62,13 @@ impl<T: 'static> HeapObject for FixedArray<T> {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        let host = self.tagged(heap);
         self.header.map.init(heap.known().array_map.get(heap));
-        self.size.set(heap, host, Smi::new(config.len() as i64));
+        self.size
+            .init_tagged(Tagged::<Smi>::from(Smi::new(config.len() as i64)));
         for (i, v) in config.iter().enumerate() {
             // Safety: the caller stages words of the array's element type.
             let v: Tagged<'_, T> = unsafe { v.as_tagged(heap).cast::<T>() };
-            self.element_slot(i).set(heap, host, v);
+            self.element_slot(i).init_tagged(v);
         }
     }
 

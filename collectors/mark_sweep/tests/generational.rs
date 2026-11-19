@@ -110,7 +110,7 @@ fn minor_then_full_conserves_arena() {
 
     assert!(state.minor_cycles() >= 1);
     assert_eq!(
-        state.stats().used + state.free_bytes(),
+        state.stats().used + state.stats().free,
         state.stats().capacity
     );
     assert_eq!(state.stats().used, NODE_SIZE.next_multiple_of(16));
