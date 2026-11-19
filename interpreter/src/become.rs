@@ -124,6 +124,30 @@ macro_rules! reenter {
     }};
 }
 
+/// Like `reenter!`, but checks for a suspension requested by a native call.
+#[macro_export]
+macro_rules! reenter_call {
+    ($op:ident, $pc:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr) => {{
+        let pc = $pc;
+        $ctx.reload_code();
+        let fault_ip = unsafe { $ctx.code_ptr().add(pc) };
+        if $acc.get($ctx.heap()) == $roots.exception.get($ctx.heap()).erase() {
+            become throw_dispatch::<STRIDE>(fault_ip, $regs, $acc, $ctx, $table, $roots, $float)
+        }
+        let size =
+            (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::$op.operands().len() };
+        if $ctx.state().take_suspend_request() {
+            $ctx.state()
+                .mark_suspended($acc.get($ctx.heap()), $pc + size);
+            return $acc;
+        }
+        let p = fault_ip.wrapping_add(size);
+        let regs = unsafe { Regs::new($ctx.regs_ptr()) };
+        let h = $table.get(unsafe { *p });
+        become h(p, regs, $acc, $ctx, $table, $roots, $float)
+    }};
+}
+
 /// Tailcall into a named handler
 #[macro_export]
 macro_rules! tail {
@@ -173,6 +197,11 @@ macro_rules! call_enter {
             }
             let size =
                 (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::$op.operands().len() };
+            if $ctx.state().take_suspend_request() {
+                $ctx.state()
+                    .mark_suspended(acc.get($ctx.heap()), $pc + size);
+                return acc;
+            }
             let p = unsafe { fault_ip.add(size) };
             let regs = unsafe { Regs::new($ctx.regs_ptr()) };
             let h = $table.get(unsafe { *p });
@@ -393,8 +422,12 @@ fn enter<'a, 't>(
                     bail!(vm, heap, state, VmError::StackOverflow);
                 }
             };
+            let top_level = !state.is_frame_active();
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
+            if top_level {
+                state.set_entry_base(frame.base);
+            }
 
             let mut ctx = Ctx::new(vm, state, heap, frame.base);
             let ip = ctx.code_ptr();
@@ -439,6 +472,9 @@ pub fn execute<'a, 't>(
         let acc = enter(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(acc.get(heap));
         let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
+        if state.is_suspended() {
+            return Ok(rooted.as_tagged(heap));
+        }
 
         stack.set_top(saved_top);
         if let Some(outer) = outer {
@@ -454,10 +490,48 @@ pub fn execute<'a, 't>(
     })
 }
 
+pub fn resume<'a>(vm: &VM, heap: &'a mut Heap, state: &ThreadState) -> Result<Tagged<'a, Value>> {
+    debug_assert!(state.is_frame_active());
+    state.handle_scope(|scope| {
+        let acc = resume_enter(vm, heap, state)?;
+        let rooted = scope.handle(acc.get(heap));
+        if state.is_suspended() {
+            return Ok(rooted.as_tagged(heap));
+        }
+
+        state.complete_execution();
+        let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
+        if threw {
+            Err(Thrown)
+        } else {
+            Ok(rooted.as_tagged(heap))
+        }
+    })
+}
+
+fn resume_enter<'a>(vm: &'a VM, heap: &'a mut Heap, state: &'a ThreadState) -> Result<Acc> {
+    let mut ctx = Ctx::new(vm, state, heap, state.entry_base());
+    let ip = unsafe { ctx.code_ptr().add(state.resume_pc()) };
+    let regs = unsafe { Regs::new(ctx.regs_ptr()) };
+    let table = TableArg::new(&TABLE);
+    let roots = RootsArg::new(vm.known());
+    let acc = Acc::set(state.acc_slot().get(ctx.heap()));
+    Ok(table.get(unsafe { *ip })(
+        ip,
+        regs,
+        acc,
+        &mut ctx,
+        table,
+        roots,
+        FloatReg::new(f64::NAN),
+    ))
+}
+
 pub struct BecomeInterpreter;
 
 impl Interpreter for BecomeInterpreter {
     const EXECUTE: EntryFn = execute;
+    const RESUME: vm_core::ResumeFn = resume;
 }
 /// `Wide` prefix comes back through here. The table argument is
 /// narrow for the whole execution; only the handler stride varies.

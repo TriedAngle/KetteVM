@@ -44,6 +44,7 @@ pub struct MatchInterpreter;
 
 impl Interpreter for MatchInterpreter {
     const EXECUTE: EntryFn = execute;
+    const RESUME: vm_core::ResumeFn = resume;
 }
 
 #[inline(always)]
@@ -55,6 +56,12 @@ pub fn offset(ctx: &Ctx<'_, '_>, pc: usize) -> *const u8 {
 #[inline(always)]
 pub fn throw_ptr() -> *const u8 {
     usize::MAX as *const u8
+}
+
+/// Successor sentinel meaning "the task suspended".
+#[inline(always)]
+pub fn suspend_ptr() -> *const u8 {
+    (usize::MAX - 1) as *const u8
 }
 
 /// Decode the current instruction into caller-named locals
@@ -139,6 +146,27 @@ macro_rules! reenter {
     }};
 }
 
+/// Like `reenter!`, but checks for a suspension requested by a native call.
+#[macro_export]
+macro_rules! reenter_call {
+    ($ctx:expr, $acc:expr, $pc:expr, $next_pc:expr, $v:expr) => {{
+        let v = $v;
+        let raw = v.raw().to_bits();
+        *$acc = Acc::set(v);
+        let sentinel = $ctx.vm().known().exception.get($ctx.heap()).raw().to_bits();
+        $ctx.reload_code();
+        if raw == sentinel {
+            $ctx.set_throw_pc($pc);
+            throw_ptr()
+        } else if $ctx.state().take_suspend_request() {
+            $ctx.state().mark_suspended($acc.get($ctx.heap()), $next_pc);
+            suspend_ptr()
+        } else {
+            offset($ctx, $next_pc)
+        }
+    }};
+}
+
 /// Raise a fault, re-deriving the code pointer (materializing the
 /// exception may collect), and re-enter at the faulting instruction.
 macro_rules! raise {
@@ -172,6 +200,9 @@ pub fn execute<'a>(
         let result = start(vm, runtime, heap, state, callable, args, new_target)?;
         let rooted = scope.handle(result);
         let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
+        if state.is_suspended() {
+            return Ok(rooted.as_tagged(heap));
+        }
 
         stack.set_top(saved_top);
         if let Some(outer) = outer {
@@ -185,6 +216,37 @@ pub fn execute<'a>(
             Ok(rooted.as_tagged(heap))
         }
     })
+}
+
+pub fn resume<'a>(vm: &VM, heap: &'a mut Heap, state: &ThreadState) -> Result<Tagged<'a, Value>> {
+    debug_assert!(state.is_frame_active());
+    state.handle_scope(|scope| {
+        let result = resume_start(vm, heap, state)?;
+        let rooted = scope.handle(result);
+        if state.is_suspended() {
+            return Ok(rooted.as_tagged(heap));
+        }
+
+        state.complete_execution();
+        let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
+        if threw {
+            Err(Thrown)
+        } else {
+            Ok(rooted.as_tagged(heap))
+        }
+    })
+}
+
+fn resume_start<'b>(
+    vm: &'b VM,
+    heap: &'b mut Heap,
+    state: &'b ThreadState,
+) -> Result<Tagged<'b, Value>> {
+    let mut ctx = Ctx::new(vm, state, heap, state.entry_base());
+    let ip = offset(&ctx, state.resume_pc());
+    let acc = Acc::set(state.acc_slot().get(ctx.heap()));
+    let acc = dispatch_from(&mut ctx, ip, acc)?;
+    Ok(acc.get(heap))
 }
 
 fn start<'b, 't>(
@@ -243,8 +305,12 @@ fn start<'b, 't>(
                     bail!(vm, heap, state, VmError::StackOverflow);
                 }
             };
+            let top_level = !state.is_frame_active();
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
+            if top_level {
+                state.set_entry_base(frame.base);
+            }
 
             let mut ctx = Ctx::new(vm, state, heap, frame.base);
             let value = dispatch(&mut ctx)?;
@@ -254,10 +320,17 @@ fn start<'b, 't>(
 }
 
 fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
-    let mut ip = ctx.code_ptr();
+    let ip = ctx.code_ptr();
+    let roots = RootsArg::new(ctx.vm().known());
+    let acc = Acc::set(roots.undefined.get(ctx.heap()).erase());
+    dispatch_from(ctx, ip, acc)
+}
+
+fn dispatch_from<'h>(ctx: &mut Ctx<'h, 'h>, ip: *const u8, acc: Acc) -> Result<Acc> {
+    let mut ip = ip;
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
-    let mut acc = Acc::set(roots.undefined.get(ctx.heap()).erase());
+    let mut acc = acc;
     let mut frame_base = ctx.frame_base();
 
     loop {
@@ -265,6 +338,10 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
 
         // A null successor is become's `return acc`: the execution is done.
         if ip.is_null() {
+            return Ok(acc);
+        }
+
+        if ip == suspend_ptr() {
             return Ok(acc);
         }
 
@@ -535,15 +612,15 @@ macro_rules! call_enter {
                 staged,
             }) => {
                 let v = $ctx.call_native(rt, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v)
+                reenter_call!($ctx, $acc, $pc, $next_pc, v)
             }
             Ok(StagedCall::Proxy { callee_reg, staged }) => {
                 let v = proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
+                reenter_call!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
             }
             Ok(StagedCall::Bound { callee_reg, staged }) => {
                 let v = bound_apply_staged($ctx, $roots, $regs, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
+                reenter_call!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
             }
         }
     }};

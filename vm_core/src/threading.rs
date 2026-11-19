@@ -1,10 +1,10 @@
+use crate::simple_scheduler::{Scheduler, SchedulerObject, SchedulerObjectInit};
 use crate::{
     Args, AtomicI64Object, AtomicI64ObjectInit, AtomicOptionGcSlot, CallInfo, Convert, DenseString,
     Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
-    PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, Termination, Thread, ThreadObject,
-    ThreadObjectInit, ThreadState, Thrown, VM, Value, Visitor, VmError, extend_lifetime,
-    objects::thread::{NEW, RUNNABLE, TERMINATED},
-    raise, raise_runtime,
+    PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, TaskStateObject, TaskStateObjectInit,
+    Termination, Thread, ThreadKind, ThreadObject, ThreadObjectInit, ThreadState, ThreadStatus,
+    Thrown, VM, Value, Visitor, VmError, extend_lifetime, raise, raise_runtime,
 };
 use std::{
     sync::{
@@ -16,13 +16,17 @@ use std::{
 
 /// Install the `Thread` and `Atomic` globals.
 pub fn install(vm: &mut VM) -> Result<(), SetupError> {
-    let thread_new_index = vm.register_native(thread_new);
+    let thread_new_platform_index = vm.register_native(thread_new_platform);
+    let thread_new_virtual_index = vm.register_native(thread_new_virtual);
     let thread_start_index = vm.register_native(thread_start);
     let thread_join_index = vm.register_native(thread_join);
     let thread_is_alive_index = vm.register_native(thread_is_alive);
     let thread_name_index = vm.register_native(thread_name);
     let thread_id_index = vm.register_native(thread_id);
     let thread_current_index = vm.register_native(thread_current);
+    let thread_scheduler_index = vm.register_native(thread_scheduler);
+    let thread_interrupt_index = vm.register_native(thread_interrupt);
+    let thread_is_interrupted_index = vm.register_native(thread_is_interrupted);
     let thread_sleep_index = vm.register_native(thread_sleep);
     let thread_yield_index = vm.register_native(thread_yield);
     let atomic_i64_new_index = vm.register_native(atomic_i64_new);
@@ -35,6 +39,14 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
         let heap = thread.heap();
+        let default_scheduler = heap.allocate_handle::<SchedulerObject>(
+            SchedulerObjectInit {
+                scheduler: Arc::new(Scheduler::new()),
+            },
+            &scope,
+        );
+        vm.set_default_scheduler(default_scheduler.as_tagged(heap));
+        vm.register_scheduler(default_scheduler.as_tagged(heap));
         let object_prototype = heap
             .known()
             .object_prototype
@@ -97,13 +109,60 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         );
         // Every ThreadObject exposes the same surface; the global `Thread` is
         // the main thread object and inherits these too.
-        Object::install_method(thread, &scope, thread_prototype, "new", thread_new_index, 1);
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "new",
+            thread_new_platform_index,
+            2,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "newPlatform",
+            thread_new_platform_index,
+            2,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "newVirtual",
+            thread_new_virtual_index,
+            3,
+        );
         Object::install_method(
             thread,
             &scope,
             thread_prototype,
             "current",
             thread_current_index,
+            0,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "scheduler",
+            thread_scheduler_index,
+            0,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "interrupt",
+            thread_interrupt_index,
+            0,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "isInterrupted",
+            thread_is_interrupted_index,
             0,
         );
         Object::install_method(
@@ -190,11 +249,13 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
             heap.allocate_handle::<ThreadObject>(
                 ThreadObjectInit {
+                    kind: ThreadKind::Platform,
                     target: hole,
                     name: main_name.erase(),
-                    state: RUNNABLE,
+                    task: None,
+                    state: ThreadStatus::Running,
                     tid: main_tid as i64,
-                    native: -1,
+                    platform_slot: -1,
                 },
                 &scope,
             )
@@ -301,7 +362,7 @@ impl ThreadRegistry {
         self.main.store(main);
     }
 
-    fn main<'a>(&self, heap: &'a Heap) -> Tagged<'a, ThreadObject> {
+    pub fn main<'a>(&self, heap: &'a Heap) -> Tagged<'a, ThreadObject> {
         self.main.load(heap).expect("main thread not installed")
     }
 
@@ -315,18 +376,33 @@ impl ThreadRegistry {
     }
 }
 
-// Creates a not-yet-started thread for `target`.
-fn thread_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+fn default_scheduler(vm: &VM, heap: &Heap) -> Arc<Scheduler> {
+    let scheduler = vm.default_scheduler(heap);
+    Arc::clone(scheduler.as_ref().scheduler())
+}
+
+fn task_scheduler(vm: &VM, heap: &Heap, state: &ThreadState) -> Arc<Scheduler> {
+    state
+        .thread_object(heap)
+        .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+        .and_then(|object| object.task(heap))
+        .and_then(|context| context.scheduler(heap))
+        .map(|scheduler| Arc::clone(scheduler.as_ref().scheduler()))
+        .unwrap_or_else(|| default_scheduler(vm, heap))
+}
+
+// Creates a not-yet-started platform thread for `target`.
+fn thread_new_platform<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
     state.handle_scope(|scope| {
-        let target = args.get_handle(heap, 0);
+        let name = args.get_handle(heap, 0);
+        let target = args.get_handle(heap, 1);
         if !target.as_tagged(heap).is_callable(heap) {
             raise!(vm, heap, state, VmError::NotCallable);
         }
         let id = vm.threads().next_name();
-        let name = args.get_handle(heap, 1);
         let name = if name.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
             name
         } else {
@@ -336,14 +412,77 @@ fn thread_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'
         };
         let object = heap.allocate_handle::<ThreadObject>(
             ThreadObjectInit {
+                kind: ThreadKind::Platform,
                 target,
                 name,
-                state: NEW,
+                task: None,
+                state: ThreadStatus::New,
                 tid: id as i64,
-                native: -1,
+                platform_slot: -1,
             },
             &scope,
         );
+        object.as_tagged(heap).erase()
+    })
+}
+
+// Creates a not-yet-started virtual thread for `target`.
+fn thread_new_virtual<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let name = args.get_handle(heap, 0);
+        let first = args.get_handle(heap, 1);
+        let second = args.get_handle(heap, 2);
+        let undefined = heap.known().undefined.get(heap);
+        let (target, scheduler) = if first.as_tagged(heap) == undefined {
+            (second, scope.handle(vm.default_scheduler(heap)))
+        } else if second.as_tagged(heap) == undefined && first.as_tagged(heap).is_callable(heap) {
+            (first, scope.handle(vm.default_scheduler(heap)))
+        } else {
+            let Some(scheduler) = first.as_tagged(heap).get_as::<SchedulerObject>(heap) else {
+                raise!(vm, heap, state, VmError::InvalidOperandType);
+            };
+            (second, scope.handle(scheduler))
+        };
+        if !target.as_tagged(heap).is_callable(heap) {
+            raise!(vm, heap, state, VmError::NotCallable);
+        }
+        let id = vm.threads().next_name();
+        let name = if name.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
+            name
+        } else {
+            vm.interner()
+                .intern_str(heap, &scope, &format!("thread-{id}"))
+                .erase()
+        };
+        let vm_state = Arc::new(ThreadState::new(heap));
+        let context = heap.allocate_handle::<TaskStateObject>(
+            TaskStateObjectInit {
+                state: Arc::clone(&vm_state),
+            },
+            &scope,
+        );
+        let object = heap.allocate_handle::<ThreadObject>(
+            ThreadObjectInit {
+                kind: ThreadKind::Virtual,
+                target,
+                name,
+                task: Some(context),
+                state: ThreadStatus::New,
+                tid: id as i64,
+                platform_slot: -1,
+            },
+            &scope,
+        );
+        context
+            .as_tagged(heap)
+            .set_thread(heap, object.as_tagged(heap));
+        context
+            .as_tagged(heap)
+            .set_scheduler(heap, scheduler.as_tagged(heap));
+        vm_state.set_thread_object(object.as_tagged(heap));
         object.as_tagged(heap).erase()
     })
 }
@@ -357,13 +496,46 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         let Some(object) = scope.cast::<ThreadObject>(heap, call.receiver.as_tagged(heap)) else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
+        let started = if object.as_tagged(heap).is_virtual(heap) {
+            ThreadStatus::Ready
+        } else {
+            ThreadStatus::Running
+        };
         if object
             .as_tagged(heap)
             .state
-            .compare_exchange_smi(Smi::new(NEW), Smi::new(RUNNABLE))
+            .compare_exchange_smi(Smi::new(ThreadStatus::New as i64), Smi::new(started as i64))
             .is_err()
         {
             raise!(vm, heap, state, VmError::ThreadAlreadyStarted);
+        }
+        if object.as_tagged(heap).is_virtual(heap) {
+            let Some(context) = object.as_tagged(heap).task(heap) else {
+                raise!(vm, heap, state, VmError::InvalidOperandType);
+            };
+            let runtime = if state.is_frame_active() {
+                state
+                    .stack()
+                    .frame_header(state.frame_base())
+                    .code(heap)
+                    .runtime()
+            } else {
+                RuntimeId(0)
+            };
+            context.as_ref().set_runtime(runtime);
+            let target_scheduler = context
+                .as_ref()
+                .scheduler(heap)
+                .map(|scheduler| Arc::clone(scheduler.as_ref().scheduler()))
+                .unwrap_or_else(|| default_scheduler(vm, heap));
+            target_scheduler.push_ready(heap, object.as_tagged(heap));
+            if let Some(current) = state.thread_object(heap)
+                && let Some(current) = current.erase().get_as::<ThreadObject>(heap)
+            {
+                task_scheduler(vm, heap, state).yield_current(heap, current);
+            }
+            state.request_suspend();
+            return vm.known().undefined.get(heap).erase();
         }
         let target = object.as_tagged(heap).target(heap);
         let slot = Arc::new(ThreadSlot::new(heap));
@@ -371,7 +543,7 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         let id = vm.threads().insert(Arc::clone(&slot));
         slot.object.store(object.as_tagged(heap).erase());
         slot.target.store(target);
-        object.as_tagged(heap).set_native(id as i64);
+        object.as_tagged(heap).set_platform_slot(id as i64);
         let runtime = if state.is_frame_active() {
             state
                 .stack()
@@ -391,8 +563,8 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
                 slot.handle.lock().unwrap().replace(handle);
             }
             Err(_) => {
-                object.as_tagged(heap).set_state(NEW);
-                object.as_tagged(heap).set_native(-1);
+                object.as_tagged(heap).set_state(ThreadStatus::New);
+                object.as_tagged(heap).set_platform_slot(-1);
                 slot.object.clear(heap);
                 slot.target.clear(heap);
                 raise!(vm, heap, state, VmError::InvalidOperandType);
@@ -429,7 +601,7 @@ fn run_thread(vm: VM, slot: Arc<ThreadSlot>, runtime: RuntimeId) {
             let (_, heap, _) = thread.split();
             if let Some(object) = slot.object.load(heap) {
                 if let Some(object) = object.erase().get_as::<ThreadObject>(heap) {
-                    object.as_ref().set_state(TERMINATED);
+                    object.as_ref().set_state(ThreadStatus::Terminated);
                 }
             }
             slot.target
@@ -449,10 +621,51 @@ fn thread_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
         let Some(object) = scope.cast::<ThreadObject>(heap, call.receiver.as_tagged(heap)) else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
+        if object.as_tagged(heap).is_virtual(heap) {
+            if object.as_tagged(heap).state(heap) == ThreadStatus::New {
+                return vm.known().undefined.get(heap).erase();
+            }
+            let Some(context) = object.as_tagged(heap).task(heap) else {
+                return vm.known().undefined.get(heap).erase();
+            };
+            if object.as_tagged(heap).state(heap) == ThreadStatus::Terminated {
+                if let Some(exception) = context.as_ref().exception(heap) {
+                    let exception = scope.handle(exception);
+                    state.set_pending_exception(exception.as_tagged(heap).erase());
+                    return raise_runtime(heap, Thrown);
+                }
+                return vm.known().undefined.get(heap).erase();
+            }
+            let Some(current) = state
+                .thread_object(heap)
+                .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+            else {
+                return vm.known().undefined.get(heap).erase();
+            };
+            if current.as_ref().is_interrupted(heap) {
+                return vm.known().undefined.get(heap).erase();
+            }
+            let target_scheduler = context
+                .as_ref()
+                .scheduler(heap)
+                .map(|scheduler| Arc::clone(scheduler.as_ref().scheduler()))
+                .unwrap_or_else(|| default_scheduler(vm, heap));
+            if target_scheduler.add_waiter_and_block(heap, object.as_tagged(heap), current) {
+                state.request_suspend();
+            } else if let Some(exception) = context.as_ref().exception(heap) {
+                let exception = scope.handle(exception);
+                state.set_pending_exception(exception.as_tagged(heap).erase());
+                return raise_runtime(heap, Thrown);
+            }
+            return vm.known().undefined.get(heap).erase();
+        }
         let (id, started) = {
             let heap = &*heap;
             let object = object.as_tagged(heap);
-            (object.native(heap), object.state(heap) != NEW)
+            (
+                object.platform_slot(heap),
+                object.state(heap) != ThreadStatus::New,
+            )
         };
         if id < 0 || !started {
             return vm.known().undefined.get(heap).erase();
@@ -461,11 +674,17 @@ fn thread_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
             return vm.known().undefined.get(heap).erase();
         };
         loop {
-            let done = {
+            let (done, interrupted) = {
                 let heap = &*heap;
-                object.as_tagged(heap).state(heap) == TERMINATED
+                let current = state
+                    .thread_object(heap)
+                    .and_then(|object| object.erase().get_as::<ThreadObject>(heap));
+                (
+                    object.as_tagged(heap).state(heap) == ThreadStatus::Terminated,
+                    current.is_some_and(|current| current.as_ref().is_interrupted(heap)),
+                )
             };
-            if done || vm.is_shutdown() {
+            if done || interrupted || vm.is_shutdown() {
                 break;
             }
             heap.block_on(|| vm.wait_thread_event(Duration::from_millis(50)));
@@ -509,9 +728,8 @@ fn thread_name<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
     object.as_ref().name(heap)
 }
 
-/// Mount a guest `Thread` object on a thread C attached (a callback invoked
-/// on a thread the VM did not create), like a JVM JNI attach. The object is
-/// not joinable: it has no `ThreadSlot`, so `native` stays -1.
+/// Mount a guest `Thread` object on a thread the VM did not create.
+/// It is not joinable; `native` stays -1.
 pub fn attach_foreign_thread(vm: &VM, heap: &mut Heap, state: &ThreadState) {
     state.handle_scope(|scope| {
         let id = vm.threads().next_name();
@@ -522,11 +740,13 @@ pub fn attach_foreign_thread(vm: &VM, heap: &mut Heap, state: &ThreadState) {
         let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
         let object = heap.allocate_handle::<ThreadObject>(
             ThreadObjectInit {
+                kind: ThreadKind::Platform,
                 target: hole,
                 name,
-                state: RUNNABLE,
+                task: None,
+                state: ThreadStatus::Running,
                 tid: id as i64,
-                native: -1,
+                platform_slot: -1,
             },
             &scope,
         );
@@ -539,7 +759,7 @@ pub fn finish_foreign_thread(heap: &Heap, state: &ThreadState) {
     if let Some(object) = state.thread_object(heap)
         && let Some(thread) = object.erase().get_as::<ThreadObject>(heap)
     {
-        thread.as_ref().set_state(TERMINATED);
+        thread.as_ref().set_state(ThreadStatus::Terminated);
     }
 }
 
@@ -551,6 +771,51 @@ fn thread_id<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a
         raise!(vm, heap, state, VmError::InvalidOperandType);
     };
     Smi::new(object.as_ref().tid(heap)).into_tagged()
+}
+
+fn thread_interrupt<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call.receiver.as_tagged(heap).get_as::<ThreadObject>(heap) else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    object.as_ref().set_interrupted(true);
+    if let Some(task) = object.as_ref().task(heap)
+        && let Some(scheduler) = task.as_ref().scheduler(heap)
+    {
+        scheduler.as_ref().scheduler().wake_blocked(heap, object);
+    }
+    vm.known().undefined.get(heap).erase()
+}
+
+fn thread_is_interrupted<'a>(
+    ctx: HostCtx<'a>,
+    call: CallInfo<'_>,
+    _args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call.receiver.as_tagged(heap).get_as::<ThreadObject>(heap) else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    Convert::boolean(heap, object.as_ref().is_interrupted(heap))
+}
+
+fn thread_scheduler<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    if let Some(scheduler) = state
+        .thread_object(heap)
+        .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+        .and_then(|object| object.task(heap))
+        .and_then(|context| context.scheduler(heap))
+    {
+        return scheduler.erase();
+    }
+    vm.default_scheduler(heap).erase()
 }
 
 fn thread_current<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
@@ -576,10 +841,40 @@ fn thread_sleep<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
         raise!(vm, heap, state, VmError::InvalidTimeValue);
     }
     let total = Duration::from_millis(millis as u64);
+    let current = state
+        .thread_object(heap)
+        .and_then(|object| object.erase().get_as::<ThreadObject>(heap));
+    if let Some(current) = current
+        && current.as_ref().is_interrupted(heap)
+    {
+        return vm.known().undefined.get(heap).erase();
+    }
+    if let Some(current) = current
+        && current.as_ref().task(heap).is_some()
+    {
+        let scheduler = task_scheduler(vm, heap, state);
+        if total.is_zero() {
+            scheduler.yield_current(heap, current);
+        } else {
+            scheduler.sleep_current(heap, current, total);
+        }
+        state.request_suspend();
+        return vm.known().undefined.get(heap).erase();
+    }
     let start = Instant::now();
     loop {
         if vm.is_shutdown() {
             return shutdown_now(vm, heap, state);
+        }
+        let interrupted = {
+            let heap = &*heap;
+            state
+                .thread_object(heap)
+                .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+                .is_some_and(|current| current.as_ref().is_interrupted(heap))
+        };
+        if interrupted {
+            break;
         }
         let elapsed = start.elapsed();
         if elapsed >= total {
@@ -592,8 +887,20 @@ fn thread_sleep<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
 }
 
 fn thread_yield<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
-    let HostCtx { vm, heap, .. } = ctx;
-    std::thread::yield_now();
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let current = state
+        .thread_object(heap)
+        .and_then(|object| object.erase().get_as::<ThreadObject>(heap));
+    if let Some(current) = current
+        && current.as_ref().task(heap).is_some()
+    {
+        task_scheduler(vm, heap, state).yield_current(heap, current);
+        state.request_suspend();
+    } else {
+        std::thread::yield_now();
+    }
     vm.known().undefined.get(heap).erase()
 }
 

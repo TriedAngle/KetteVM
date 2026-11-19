@@ -1,3 +1,4 @@
+use crate::simple_scheduler::{Carrier, Scheduler, SchedulerObject};
 use crate::threading::ThreadRegistry;
 use core::{cell::Cell as StdCell, ptr::NonNull};
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub mod materialize;
 pub mod native;
 pub mod objects;
 pub mod prototype;
+pub mod simple_scheduler;
 pub mod stack;
 pub mod threading;
 pub mod tools;
@@ -39,7 +41,7 @@ pub use objects::string;
 pub use ffi::FfiState;
 
 pub use access::{OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
-pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
+pub use api::{EntryFn, ErasedRuntimeState, Interpreter, ResumeFn, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
     smi_slot,
@@ -93,10 +95,11 @@ pub use objects::{
     ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo, ProxyInit, ProxyObject,
     SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, ScriptContextTable,
     ScriptContextTableInit, SiteRead, SlotDescriptor, SlotFlags, SlotName, StringData, StringOwn,
-    StringRef, Symbol, ThreadObject, ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String,
-    WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8, flatten, info_is_immutable,
-    info_is_lexical, info_mode, object_kind, object_layout, string_content_hash,
-    string_content_hash_units, visit_object,
+    StringRef, Symbol, TaskStateObject, TaskStateObjectInit, ThreadKind, ThreadObject,
+    ThreadObjectInit, ThreadStatus, TypeInfo, TypeInfoInit, Utf8String, WeakFixedArray,
+    WeakFixedArrayInit, WrapperKind, decode_wtf8, flatten, info_is_immutable, info_is_lexical,
+    info_mode, object_kind, object_layout, string_content_hash, string_content_hash_units,
+    visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
@@ -165,6 +168,10 @@ pub struct SharedVM {
     thread_states: Mutex<Vec<Weak<ThreadState>>>,
     /// Guest `Thread` host state: join handles and cross-thread roots.
     threads: ThreadRegistry,
+    /// Scheduler used when a virtual thread does not name one.
+    default_scheduler: AtomicOptionGcSlot<SchedulerObject>,
+    /// Live scheduler objects; their native queues are off-heap roots.
+    schedulers: Mutex<Vec<AtomicOptionGcSlot<SchedulerObject>>>,
     interner: StringInterner,
     prototype_registry: PrototypeRegistry,
     natives: NativeRegistry,
@@ -186,6 +193,8 @@ pub struct SharedVM {
     /// Interpreter entry ([[Call]]/[[Construct]] on bytecode callables);
     /// set once at construction from the `I: Interpreter` type parameter.
     execute: EntryFn,
+    /// Resume a suspended top-level task at `ThreadState::resume_pc`.
+    resume: ResumeFn,
 }
 
 pub struct VM {
@@ -195,6 +204,14 @@ pub struct VM {
 pub struct ThreadState {
     handles: HandleData,
     stack: Stack,
+    /// Saved resume pc inside the current frame.
+    resume_pc: StdCell<usize>,
+    /// Root frame base for a top-level task execution.
+    entry_base: StdCell<usize>,
+    /// Set by a native that needs to return to the carrier loop.
+    suspend_requested: StdCell<bool>,
+    /// Set by the interpreter after saving a suspension point.
+    suspended: StdCell<bool>,
     /// The current (innermost) interpreter frame's anchor. Frames are
     /// self-describing (see [`Stack`]): this cell is the only shadow
     /// state, written by push/pop/unwind frame switches.
@@ -227,9 +244,87 @@ pub struct ThreadState {
 }
 
 impl ThreadState {
+    pub fn new(heap: &Heap) -> Self {
+        // Safety: root-slot reads stored straight into rooted fill cells.
+        let the_hole = heap.known().the_hole.get(heap).erase();
+        let undefined = heap.known().undefined.get(heap).erase();
+        Self {
+            handles: HandleData::new(the_hole),
+            stack: Stack::new(STACK_SLOTS, undefined),
+            resume_pc: StdCell::new(0),
+            entry_base: StdCell::new(0),
+            suspend_requested: StdCell::new(false),
+            suspended: StdCell::new(false),
+            frame_base: StdCell::new(0),
+            frame_active: StdCell::new(false),
+            acc: unsafe { Register::from_value(undefined) },
+            pending_exception: unsafe { Register::from_value(the_hole) },
+            has_pending_exception: StdCell::new(false),
+            callback_threw: StdCell::new(false),
+            termination: StdCell::new(None),
+            rust_stack_base: StdCell::new(0),
+            construct_cache: unsafe { Register::from_value(the_hole) },
+            thread_object: unsafe { Register::from_value(the_hole) },
+        }
+    }
+
     #[inline(always)]
     pub fn stack(&self) -> &Stack {
         &self.stack
+    }
+
+    #[inline(always)]
+    pub fn resume_pc(&self) -> usize {
+        self.resume_pc.get()
+    }
+
+    #[inline(always)]
+    pub fn set_resume_pc(&self, pc: usize) {
+        self.resume_pc.set(pc);
+    }
+
+    #[inline(always)]
+    pub fn entry_base(&self) -> usize {
+        self.entry_base.get()
+    }
+
+    #[inline(always)]
+    pub fn set_entry_base(&self, base: usize) {
+        self.entry_base.set(base);
+    }
+
+    #[inline(always)]
+    pub fn request_suspend(&self) {
+        self.suspend_requested.set(true);
+    }
+
+    #[inline(always)]
+    pub fn take_suspend_request(&self) -> bool {
+        self.suspend_requested.replace(false)
+    }
+
+    #[inline(always)]
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.get()
+    }
+
+    #[inline(always)]
+    pub fn take_suspended(&self) -> bool {
+        self.suspended.replace(false)
+    }
+
+    pub fn mark_suspended(&self, acc: Tagged<'_, Value>, resume_pc: usize) {
+        self.acc_slot().store(acc);
+        self.set_resume_pc(resume_pc);
+        self.suspended.set(true);
+    }
+
+    /// Clear a completed top-level task's VM execution stack.
+    pub fn complete_execution(&self) {
+        self.stack.set_top(0);
+        self.set_frame_base(0);
+        self.set_frame_active(false);
+        self.suspended.set(false);
     }
 
     #[inline(always)]
@@ -501,6 +596,19 @@ impl SharedVM {
             state.visit_edges(visitor);
         }
         self.threads.visit_edges(visitor);
+        visitor.visit(self.default_scheduler.as_raw());
+        for slot in self.schedulers.lock().unwrap().iter() {
+            visitor.visit(slot.as_raw());
+            let word = slot.as_raw().load_atomic(Ordering::Acquire);
+            let value = Value::from_bits(word);
+            if !value.is_strong_ptr() {
+                continue;
+            }
+            // Safety: the root slot keeps the object (or its from-space
+            // copy) valid for this collection.
+            let scheduler = unsafe { &*(value.raw_addr() as *const SchedulerObject) };
+            scheduler.scheduler().visit_edges(visitor);
+        }
     }
 
     fn gc_host(&self) -> GcHost {
@@ -596,7 +704,110 @@ impl Thread {
         let _ = self.state.take_pending_exception();
         self.state.clear_termination();
         let _ = self.heap.take_cancel();
-        let result = self.state.handle_scope(|scope| {
+        let _ = self.state.take_suspended();
+        let _ = self.state.take_suspend_request();
+
+        let main_state = Arc::clone(&self.state);
+        let scheduler = {
+            let object = self.vm.default_scheduler(&self.heap);
+            Arc::clone(object.as_ref().scheduler())
+        };
+        let carrier = scheduler.register_carrier();
+        let result = main_state.handle_scope(|scope| {
+            let scheduler_object = {
+                let object = self.vm.default_scheduler(&self.heap);
+                scope.handle(object)
+            };
+            let object = main_state
+                .thread_object(&self.heap)
+                .and_then(|object| object.erase().get_as::<ThreadObject>(&self.heap));
+            let object = match object {
+                Some(object) => scope.handle(object),
+                None => {
+                    let main = self.vm.threads().main(&self.heap);
+                    main_state.set_thread_object(main);
+                    scope.handle(main)
+                }
+            };
+            let is_virtual = object.as_tagged(&self.heap).is_virtual(&self.heap);
+            let context = if is_virtual {
+                let context = object
+                    .as_tagged(&self.heap)
+                    .task(&self.heap)
+                    .expect("virtual thread without execution context");
+                scope.handle(context)
+            } else {
+                let context = self.heap.allocate_handle::<TaskStateObject>(
+                    TaskStateObjectInit {
+                        state: Arc::clone(&main_state),
+                    },
+                    &scope,
+                );
+                object
+                    .as_tagged(&self.heap)
+                    .set_task(&self.heap, context.as_tagged(&self.heap));
+                context
+                    .as_tagged(&self.heap)
+                    .set_thread(&self.heap, object.as_tagged(&self.heap));
+                context
+                    .as_tagged(&self.heap)
+                    .set_scheduler(&self.heap, scheduler_object.as_tagged(&self.heap));
+                context
+            };
+            context.as_tagged(&self.heap).set_runtime(runtime);
+            carrier.set_current(object.as_tagged(&self.heap));
+
+            let result = self.run_fresh_task(Arc::clone(&main_state), callable, args, runtime);
+            if main_state.is_suspended() {
+                if object.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Running {
+                    scheduler.yield_current(&self.heap, object.as_tagged(&self.heap));
+                }
+                let result = self.run_scheduler(&scheduler, &carrier, object, context);
+                self.state = Arc::clone(&main_state);
+                carrier.clear_current();
+                if !is_virtual {
+                    object.as_tagged(&self.heap).clear_task(&self.heap);
+                }
+                return result;
+            }
+
+            let keep_exception = result.is_err();
+            self.finish_task(
+                &scheduler,
+                object.as_tagged(&self.heap),
+                context.as_tagged(&self.heap),
+                &main_state,
+                &result,
+                !keep_exception,
+            );
+            self.state = Arc::clone(&main_state);
+            carrier.clear_current();
+            if !is_virtual {
+                object.as_tagged(&self.heap).clear_task(&self.heap);
+            }
+            if self.state.termination().is_some() {
+                let _ = self.state.take_pending_exception();
+                let heap = &self.heap;
+                return Ok(self.vm.known().undefined.get(heap).raw());
+            }
+            result
+        });
+        scheduler.unregister_carrier(&carrier);
+        result
+    }
+
+    fn run_fresh_task(
+        &mut self,
+        state: Arc<ThreadState>,
+        callable: Handle<'_, Object>,
+        args: &[Value],
+        runtime: RuntimeId,
+    ) -> Result<Value, Thrown> {
+        self.state = state;
+        let state = Arc::clone(&self.state);
+        let _ = state.take_suspended();
+        let _ = state.take_suspend_request();
+        let result = state.handle_scope(|scope| {
             let args = scope.stage(
                 &args
                     .iter()
@@ -608,19 +819,144 @@ impl Thread {
                 &self.vm,
                 runtime,
                 &mut self.heap,
-                &self.state,
+                &state,
                 callable,
                 args,
                 None,
             )
             .map(|value| value.raw())
         });
-        if self.state.termination().is_some() {
-            let _ = self.state.take_pending_exception();
+        if state.termination().is_some() {
+            let _ = state.take_pending_exception();
             let heap = &self.heap;
             return Ok(self.vm.known().undefined.get(heap).raw());
         }
         result
+    }
+
+    fn run_resume_task(&mut self, state: Arc<ThreadState>) -> Result<Value, Thrown> {
+        self.state = state;
+        let state = Arc::clone(&self.state);
+        let _ = state.take_suspended();
+        let result = state.handle_scope(|_| {
+            self.vm
+                .resume(&mut self.heap, &state)
+                .map(|value| value.raw())
+        });
+        if state.termination().is_some() {
+            let _ = state.take_pending_exception();
+            let heap = &self.heap;
+            return Ok(self.vm.known().undefined.get(heap).raw());
+        }
+        result
+    }
+
+    fn finish_task(
+        &self,
+        scheduler: &Scheduler,
+        thread: Tagged<'_, ThreadObject>,
+        context: Tagged<'_, TaskStateObject>,
+        state: &ThreadState,
+        result: &Result<Value, Thrown>,
+        take_exception: bool,
+    ) {
+        if thread.is_virtual(&self.heap) {
+            if take_exception {
+                if let Some(exception) = state.take_pending_exception_tagged(&self.heap) {
+                    context.set_exception(&self.heap, exception);
+                } else if let Ok(value) = result {
+                    // Safety: no collection can run between the guest
+                    // returning and this store; the slot roots it after.
+                    let value = unsafe { Tagged::<Value>::from_value_unchecked(*value) };
+                    context.set_result(&self.heap, value);
+                }
+            }
+            thread.set_state(ThreadStatus::Terminated);
+        }
+        scheduler.terminate(&self.heap, thread);
+    }
+
+    fn run_scheduler(
+        &mut self,
+        scheduler: &Scheduler,
+        carrier: &Carrier,
+        main: Handle<'_, ThreadObject>,
+        main_context: Handle<'_, TaskStateObject>,
+    ) -> Result<Value, Thrown> {
+        loop {
+            if main.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Terminated {
+                let state = Arc::clone(main_context.as_tagged(&self.heap).state());
+                self.state = state;
+                if let Some(exception) = main_context.as_tagged(&self.heap).exception(&self.heap) {
+                    self.state.set_pending_exception(exception);
+                    return Err(Thrown);
+                }
+                let heap = &self.heap;
+                let result = main_context
+                    .as_tagged(heap)
+                    .result(heap)
+                    .map(|value| value.raw())
+                    .unwrap_or_else(|| self.vm.known().undefined.get(heap).raw());
+                return Ok(result);
+            }
+
+            let Some(thread) = scheduler.next(&self.heap, carrier) else {
+                if let Some(timeout) = scheduler.next_timeout(&self.heap) {
+                    self.heap.block_on(|| std::thread::sleep(timeout));
+                    continue;
+                }
+                self.state = Arc::clone(main_context.as_tagged(&self.heap).state());
+                let heap = &self.heap;
+                return Ok(self.vm.known().undefined.get(heap).raw());
+            };
+            let Some(context) = thread.task(&self.heap) else {
+                carrier.clear_current();
+                continue;
+            };
+            let state = Arc::clone(context.state());
+            self.state = Arc::clone(&state);
+            state.set_thread_object(thread);
+            let fresh = state.entry_base() == 0;
+            let runtime = context.runtime().unwrap_or(RuntimeId(0));
+            let result = if fresh {
+                let target = thread.target(&self.heap).raw();
+                state.handle_scope(|scope| {
+                    // Safety: the thread is rooted by the carrier's current
+                    // slot, and no collection can run before it is rooted.
+                    let target = unsafe { Tagged::<Value>::from_value_unchecked(target) };
+                    let Some(target) = target.get_as::<Object>(&self.heap) else {
+                        return Ok(self.vm.known().undefined.get(&self.heap).raw());
+                    };
+                    let target = scope.handle(target);
+                    self.run_fresh_task(Arc::clone(&state), target, &[], runtime)
+                })
+            } else {
+                self.run_resume_task(Arc::clone(&state))
+            };
+
+            let Some(thread) = carrier.current(&self.heap) else {
+                continue;
+            };
+            let Some(context) = thread.task(&self.heap) else {
+                carrier.clear_current();
+                continue;
+            };
+            if state.is_suspended() {
+                if thread.state(&self.heap) == ThreadStatus::Running {
+                    scheduler.yield_current(&self.heap, thread);
+                }
+                carrier.clear_current();
+                continue;
+            }
+
+            let is_main = thread.raw() == main.as_tagged(&self.heap).raw();
+            let take_exception = !(is_main && result.is_err());
+            self.finish_task(scheduler, thread, context, &state, &result, take_exception);
+            carrier.clear_current();
+            if is_main {
+                return result;
+            }
+        }
     }
 
     pub fn run_program(
@@ -696,6 +1032,8 @@ impl VM {
             known: WellKnown::uninit(),
             thread_states: Mutex::new(Vec::new()),
             threads: ThreadRegistry::default(),
+            default_scheduler: AtomicOptionGcSlot::uninit(),
+            schedulers: Mutex::new(Vec::new()),
             interner,
             prototype_registry: PrototypeRegistry::new(),
             natives: NativeRegistry::new(),
@@ -706,6 +1044,7 @@ impl VM {
             thread_event_lock: Mutex::new(()),
             thread_event: Condvar::new(),
             execute: I::EXECUTE,
+            resume: I::RESUME,
         });
         shared.heap.set_host(shared.gc_host());
         let mut local = shared
@@ -777,6 +1116,25 @@ impl VM {
         &self.shared.threads
     }
 
+    /// The default scheduler object.
+    pub fn default_scheduler<'a>(&self, heap: &'a Heap) -> Tagged<'a, SchedulerObject> {
+        self.shared
+            .default_scheduler
+            .load(heap)
+            .expect("default scheduler not installed")
+    }
+
+    pub fn set_default_scheduler(&self, scheduler: Tagged<'_, SchedulerObject>) {
+        self.shared.default_scheduler.store(scheduler);
+    }
+
+    pub fn register_scheduler(&self, scheduler: Tagged<'_, SchedulerObject>) {
+        // Safety: the slot starts empty and is visited as a root.
+        let slot = unsafe { AtomicOptionGcSlot::from_value(self.shared.known.the_hole.raw()) };
+        slot.store(scheduler);
+        self.shared.schedulers.lock().unwrap().push(slot);
+    }
+
     pub fn interner(&self) -> &StringInterner {
         &self.shared.interner
     }
@@ -798,6 +1156,14 @@ impl VM {
         new_target: Option<Handle<'_, Value>>,
     ) -> Result<Tagged<'h, Value>> {
         (self.shared.execute)(self, runtime, heap, state, callable, args, new_target)
+    }
+
+    pub fn resume<'h>(
+        &self,
+        heap: &'h mut Heap,
+        state: &'h ThreadState,
+    ) -> Result<Tagged<'h, Value>> {
+        (self.shared.resume)(self, heap, state)
     }
 
     #[inline]
@@ -840,23 +1206,7 @@ impl VM {
             .shared
             .heap
             .new_local(&self.shared.known, &self.shared.prototype_registry);
-        // Safety: root-slot reads stored straight into rooted fill cells.
-        let the_hole = self.known().the_hole.get(&heap).erase();
-        let undefined = self.known().undefined.get(&heap).erase();
-        let state = Arc::new(ThreadState {
-            handles: HandleData::new(the_hole),
-            stack: Stack::new(STACK_SLOTS, undefined),
-            frame_base: StdCell::new(0),
-            frame_active: StdCell::new(false),
-            acc: unsafe { Register::from_value(undefined) },
-            pending_exception: unsafe { Register::from_value(the_hole) },
-            has_pending_exception: StdCell::new(false),
-            callback_threw: StdCell::new(false),
-            termination: StdCell::new(None),
-            rust_stack_base: StdCell::new(0),
-            construct_cache: unsafe { Register::from_value(the_hole) },
-            thread_object: unsafe { Register::from_value(the_hole) },
-        });
+        let state = Arc::new(ThreadState::new(&heap));
         let mut thread_states = self.shared.thread_states.lock().unwrap();
         // TODO: should we really call this every attach() ?
         thread_states.retain(|t| t.strong_count() > 0);

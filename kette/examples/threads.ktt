@@ -1,12 +1,12 @@
-// parallelism and atomic example
+// Platform threads run in parallel; virtual threads share a scheduler.
 // Run: cargo run -q -p vm -- kette/examples/threads.ktt
 
 let AtomicI64 = atomic.AtomicI64
+let rounds = 200000
 
-let rounds = 1
+// Platform threads: the plain load/store increment races by design.
 let atomic_counter = AtomicI64.new(0)
 let racy_counter = AtomicI64.new(0)
-
 let worker = {
     let i = 0
     while i < rounds {
@@ -16,17 +16,33 @@ let worker = {
     }
 }
 
-rounds = 200000
-
-let a = Thread.new(worker, "a")
-let b = Thread.new(worker, "b")
-
+let a = Thread.newPlatform("a", worker)
+let b = Thread.newPlatform("b", worker)
 a.start()
 b.start()
 a.join()
 b.join()
-
 print("atomic")
 print(atomic_counter.load())
 print("racy")
 print(racy_counter.load())
+
+// Virtual threads run cooperatively on the default scheduler object.
+let scheduler = Thread.scheduler()
+let order = ""
+let va = Thread.newVirtual("va", scheduler, {
+    order = order + "a1"
+    Thread.yield()
+    order = order + "a2"
+})
+let vb = Thread.newVirtual("vb", scheduler, {
+    order = order + "b1"
+    Thread.yield()
+    order = order + "b2"
+})
+va.start()
+vb.start()
+va.join()
+vb.join()
+print("virtual")
+print(order)

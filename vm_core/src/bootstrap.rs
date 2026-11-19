@@ -51,6 +51,10 @@ pub struct WellKnown {
     pub c_value_map: GcSlot<Map>,
     /// Guest `Thread` objects.
     pub thread_object_map: GcSlot<Map>,
+    /// VM execution state of virtual threads.
+    pub task_state_map: GcSlot<Map>,
+    /// Cooperative scheduler handles.
+    pub scheduler_object_map: GcSlot<Map>,
     /// 64-bit atomic cells.
     pub atomic_i64_map: GcSlot<Map>,
     pub feedback_vector_map: GcSlot<Map>,
@@ -294,6 +298,8 @@ impl WellKnown {
             c_type_map: smi_slot::<Map>(),
             c_value_map: smi_slot::<Map>(),
             thread_object_map: smi_slot::<Map>(),
+            task_state_map: smi_slot::<Map>(),
+            scheduler_object_map: smi_slot::<Map>(),
             atomic_i64_map: smi_slot::<Map>(),
             feedback_vector_map: smi_slot::<Map>(),
             cell_map: smi_slot::<Map>(),
@@ -391,6 +397,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.c_type_map.as_raw());
         visitor.visit(self.c_value_map.as_raw());
         visitor.visit(self.thread_object_map.as_raw());
+        visitor.visit(self.task_state_map.as_raw());
+        visitor.visit(self.scheduler_object_map.as_raw());
         visitor.visit(self.atomic_i64_map.as_raw());
         visitor.visit(self.feedback_vector_map.as_raw());
         visitor.visit(self.cell_map.as_raw());
@@ -656,6 +664,12 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .thread_object_map
         .init(thread_object_map.as_tagged(heap));
+    let task_state_map = alloc_map(heap, &scope, MapKind::TASK_STATE);
+    known.task_state_map.init(task_state_map.as_tagged(heap));
+    let scheduler_object_map = alloc_map(heap, &scope, MapKind::SCHEDULER);
+    known
+        .scheduler_object_map
+        .init(scheduler_object_map.as_tagged(heap));
     let atomic_i64_map = alloc_map(heap, &scope, MapKind::ATOMIC_I64);
     known.atomic_i64_map.init(atomic_i64_map.as_tagged(heap));
     let array_map = alloc_map(heap, &scope, MapKind::FIXED_ARRAY);

@@ -1,14 +1,16 @@
-// Threads and atomic cells.
+// Threads, virtual scheduling, and atomic cells.
 // Run: cargo run -q -p vm -- kette/kette_tests/threading.ktt
 // Check: kette/kette_tests/check.py
 
 let AtomicI64 = atomic.AtomicI64
-let counter = AtomicI64.new(0)
 
+// Main thread surface.
 Test.assert(Thread.name(), "main")
 Test.assert(Thread.isAlive(), true)
 Test.assert(Thread.current(), Thread)
 
+// Platform thread.
+let counter = AtomicI64.new(0)
 let worker = {
     let i = 0
     while i < 1000 {
@@ -16,18 +18,26 @@ let worker = {
         i = i + 1
     }
 }
-
-let t = Thread.new(worker, "worker")
-t.note = 42
-Test.assert(t.note, 42)
-Test.assert(t.name(), "worker")
-Test.assert(t.isAlive(), false)
-
-t.start()
-t.join()
-Test.assert(t.isAlive(), false)
+let platform = Thread.newPlatform("platform", worker)
+Test.assert(platform.name(), "platform")
+Test.assert(platform.isAlive(), false)
+platform.note = 42
+Test.assert(platform.note, 42)
+platform.start()
+platform.join()
+Test.assert(platform.isAlive(), false)
 Test.assert(counter.load(), 1000)
 
+// Virtual thread object before start, surviving a collection.
+let virtual = Thread.newVirtual("virtual", worker)
+Test.assert(virtual.name(), "virtual")
+Test.assert(virtual.threadId() > 0, true)
+Test.assert(virtual.isAlive(), false)
+KetteTools.forceMajorGC()
+Test.assert(virtual.name(), "virtual")
+Test.assert(virtual.isAlive(), false)
+
+// Atomic cells.
 let cell = AtomicI64.new(10)
 Test.assert(cell.load(), 10)
 Test.assert(cell.add(5), 15)
@@ -38,11 +48,7 @@ Test.assert(cell.compareExchange(123, 5), 7)
 Test.assert(cell.store(42), 42)
 Test.assert(cell.load(), 42)
 
-Test.assert(Thread.current().name(), "main")
-Thread.yield()
-Thread.sleep(1)
-
-// every ThreadObject exposes the same surface, not just the main object
+// Every ThreadObject exposes the same methods.
 let self_tid = AtomicI64.new(-1)
 let self_api = {
     let me = Thread.current()
@@ -50,9 +56,96 @@ let self_api = {
     me.sleep(0)
     self_tid.store(me.threadId())
 }
-let self_thread = Thread.new(self_api, "self")
+let self_thread = Thread.newPlatform("self", self_api)
 self_thread.start()
 self_thread.join()
 Test.assert(self_thread.name(), "self")
 Test.assert(self_thread.isAlive(), false)
 Test.assert(self_thread.threadId(), self_tid.load())
+
+// Virtual threads interleave at explicit yields.
+let scheduler = Thread.scheduler()
+Test.assert(Thread.scheduler(), scheduler)
+let order = ""
+let va = Thread.newVirtual("va", scheduler, {
+    order = order + "a1"
+    Thread.yield()
+    order = order + "a2"
+})
+let vb = Thread.newVirtual("vb", scheduler, {
+    order = order + "b1"
+    Thread.yield()
+    order = order + "b2"
+})
+va.start()
+vb.start()
+va.join()
+vb.join()
+Test.assert(order, "a1a2b1b2")
+Test.assert(va.isAlive(), false)
+Test.assert(vb.isAlive(), false)
+
+// Thread.current() names the virtual thread, not the carrier.
+let child_name = ""
+let vc = Thread.newVirtual("vc", scheduler, {
+    child_name = Thread.current().name()
+    Thread.yield()
+})
+vc.start()
+Test.assert(child_name, "vc")
+vc.join()
+
+// A ready task and a blocked joiner stay rooted across GC.
+let gc_order = ""
+let gva = Thread.newVirtual("gva", scheduler, {
+    gc_order = gc_order + "a"
+    Thread.yield()
+    KetteTools.forceMajorGC()
+    gc_order = gc_order + "b"
+})
+gva.start()
+KetteTools.forceMajorGC()
+gva.join()
+Test.assert(gc_order, "ab")
+Test.assert(gva.isAlive(), false)
+
+// The child sees the scheduler it was created with.
+let child_scheduler = 0
+let vs = Thread.newVirtual("vs", scheduler, {
+    child_scheduler = Thread.scheduler()
+    Thread.yield()
+})
+vs.start()
+vs.join()
+Test.assert(child_scheduler, scheduler)
+
+// Interrupts wake sleeping and joining virtual threads.
+let vsleep = Thread.newVirtual("vsleep", scheduler, {
+    Thread.sleep(10000)
+})
+vsleep.start()
+vsleep.interrupt()
+vsleep.join()
+Test.assert(vsleep.isInterrupted(), true)
+
+let target = Thread.newVirtual("target", scheduler, {
+    Thread.sleep(50)
+})
+let joiner = Thread.newVirtual("joiner", scheduler, {
+    target.join()
+})
+target.start()
+joiner.start()
+joiner.interrupt()
+target.join()
+joiner.join()
+Test.assert(joiner.isInterrupted(), true)
+
+// Platform carriers also sleep cooperatively and wake on interrupt.
+let psleep = Thread.newPlatform("psleep", {
+    Thread.sleep(10000)
+})
+psleep.start()
+psleep.interrupt()
+psleep.join()
+Test.assert(psleep.isInterrupted(), true)

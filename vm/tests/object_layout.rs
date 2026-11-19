@@ -9,9 +9,9 @@ use vm::{
     HandlerEntryInit, HandlerTable, HandlerTableInit, HeapPtr, Map, MapInit, MapKind, MaybeWeak,
     NameToIndexHashTable, NameToIndexHashTableInit, NativeIndex, NumberDictionary,
     NumberDictionaryInit, PrototypeInfo, ProxyInit, ProxyObject, RawCell, RuntimeId, ScopeInfo,
-    ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, Smi, Symbol, Tagged, ThreadObject,
-    ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String, VM, Value, Visitor, VmCore, WEAK_PTR,
-    WeakFixedArray, WeakFixedArrayInit, object_layout, visit_object,
+    ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, Smi, Symbol, Tagged, ThreadKind,
+    ThreadObject, ThreadObjectInit, ThreadStatus, TypeInfo, TypeInfoInit, Utf8String, VM, Value,
+    Visitor, VmCore, WEAK_PTR, WeakFixedArray, WeakFixedArrayInit, object_layout, visit_object,
 };
 
 struct Visited(Vec<usize>);
@@ -84,11 +84,13 @@ fn every_object_kind_visits_its_entire_layout() {
 
         let thread_object = heap.allocate_handle::<ThreadObject>(
             ThreadObjectInit {
+                kind: ThreadKind::Platform,
                 target: undefined,
                 name: undefined,
-                state: 0,
+                task: None,
+                state: ThreadStatus::New,
                 tid: 1,
-                native: -1,
+                platform_slot: -1,
             },
             &scope,
         );
@@ -103,14 +105,13 @@ fn every_object_kind_visits_its_entire_layout() {
                     raw.elements,
                     raw.length,
                     raw.tid,
+                    raw.kind,
                     raw.target,
                     raw.name,
-                    raw.interrupted,
+                    raw.task,
                     raw.state,
-                    raw.priority,
-                    raw.daemon,
-                    raw.stack_size,
-                    raw.native,
+                    raw.interrupted,
+                    raw.platform_slot,
                 ]
             );
         }

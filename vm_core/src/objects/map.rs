@@ -446,6 +446,8 @@ impl MapKind {
     pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
     pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
     pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
+    pub const TASK_STATE: MapKind = MapKind(ObjectKind::TaskStateObject as u64);
+    pub const SCHEDULER: MapKind = MapKind(ObjectKind::SchedulerObject as u64);
     pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
 
     pub const fn new(bits: u64) -> Self {
@@ -500,6 +502,8 @@ impl MapKind {
             Self::C_VALUE => ObjectKind::CValue,
             Self::C_TYPE => ObjectKind::TypeInfo,
             Self::THREAD_OBJECT => ObjectKind::ThreadObject,
+            Self::TASK_STATE => ObjectKind::TaskStateObject,
+            Self::SCHEDULER => ObjectKind::SchedulerObject,
             Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
             _ => panic!("invalid object kind"),
         }

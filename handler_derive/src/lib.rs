@@ -101,6 +101,7 @@ const EXITS: &[&str] = &[
     "dispatch",
     "tail",
     "reenter",
+    "reenter_call",
     "dispatch_frame",
     "call_enter",
 ];
@@ -504,7 +505,7 @@ impl Rewriter {
                 reject_turbofish(name, &path)?;
                 Ok(quote!(#name!(ip, regs, acc, ctx, table, roots, float, #path::<STRIDE>)))
             }
-            "reenter" => {
+            "reenter" | "reenter_call" => {
                 let pc = one_arg(name, args)?;
                 let op = op.unwrap();
                 Ok(quote!(#name!(#op, #pc, regs, acc, ctx, table, roots, float)))
@@ -597,10 +598,12 @@ impl Rewriter {
                 }
             }
 
-            "next" | "dispatch" | "tail" | "reenter" | "dispatch_frame" => Err(syn::Error::new(
-                method.span(),
-                format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
-            )),
+            "next" | "dispatch" | "tail" | "reenter" | "reenter_call" | "dispatch_frame" => {
+                Err(syn::Error::new(
+                    method.span(),
+                    format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
+                ))
+            }
 
             _ => Err(syn::Error::new(
                 method.span(),
@@ -693,10 +696,12 @@ impl MatchRewriter {
                 ))
             }
 
-            "next" | "dispatch" | "tail" | "reenter" | "dispatch_frame" => Err(syn::Error::new(
-                method.span(),
-                format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
-            )),
+            "next" | "dispatch" | "tail" | "reenter" | "reenter_call" | "dispatch_frame" => {
+                Err(syn::Error::new(
+                    method.span(),
+                    format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
+                ))
+            }
 
             _ => Err(syn::Error::new(
                 method.span(),
@@ -755,8 +760,20 @@ impl MatchRewriter {
                     ))
                 }
             }
-            "reenter" => {
+            "reenter" | "reenter_call" => {
                 let pc = one_arg(name, args)?;
+                let suspend = if name == "reenter_call" {
+                    quote! {
+                        if ctx.state().take_suspend_request() {
+                            ctx.state().mark_suspended(acc.get(ctx.heap()), __next_pc);
+                            crate::match_loop::suspend_ptr()
+                        } else {
+                            crate::match_loop::offset(ctx, __next_pc)
+                        }
+                    }
+                } else {
+                    quote!(crate::match_loop::offset(ctx, __next_pc))
+                };
                 Ok(quote!(
                     return {
                         let __next_pc = #pc
@@ -769,7 +786,7 @@ impl MatchRewriter {
                             ctx.set_throw_pc(#pc);
                             crate::match_loop::throw_ptr()
                         } else {
-                            crate::match_loop::offset(ctx, __next_pc)
+                            #suspend
                         }
                     };
                 ))

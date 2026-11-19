@@ -624,7 +624,24 @@ impl<T> AtomicOptionGcSlot<T> {
         self.slot.clear(heap);
     }
 
+    /// Store into an off-heap root slot: scanned directly, no barrier.
     pub fn store<'x, U>(&self, value: Tagged<'x, U>) {
+        self.store_word(value.raw().to_bits());
+    }
+
+    /// Store into an in-object slot: applies the generational barrier.
+    pub fn set<'h, 'x, U>(&self, heap: &Heap, host: Tagged<'h, Value>, value: Tagged<'x, U>)
+    where
+        U: 'x,
+    {
+        let value = value.erase();
+        debug_assert!(
+            !value.raw().is_weak_ptr(),
+            "weak value stored into a strong slot"
+        );
+        if value.raw().is_ptr() {
+            heap.write_barrier(host, self.slot.as_raw(), value);
+        }
         self.store_word(value.raw().to_bits());
     }
 

@@ -22,8 +22,15 @@ pub type EntryFn = for<'a, 'v, 's, 'c, 'r, 'n, 't> fn(
     new_target: Option<Handle<'n, Value>>,
 ) -> Result<Tagged<'a, Value>>;
 
+pub type ResumeFn = for<'a, 'v, 's> fn(
+    vm: &'v VM,
+    heap: &'a mut Heap,
+    state: &'s ThreadState,
+) -> Result<Tagged<'a, Value>>;
+
 pub trait Interpreter {
     const EXECUTE: EntryFn;
+    const RESUME: ResumeFn;
 }
 
 /// Index of an installed runtime in the VM's runtime list. Every callable
