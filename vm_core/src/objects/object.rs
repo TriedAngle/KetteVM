@@ -1010,14 +1010,16 @@ impl Object {
     #[inline]
     pub fn init_raw(
         &mut self,
+        heap: &Heap,
         map: Tagged<'_, Map>,
         slots: Tagged<'_, FixedArray>,
         elements: Tagged<'_, FixedArray>,
         length: usize,
     ) {
-        self.header.map.init(map);
-        self.slots.init(slots);
-        self.elements.init(elements.erase());
+        let host = self.tagged(heap);
+        self.header.map.set(heap, host, map);
+        self.slots.set(heap, host, slots);
+        self.elements.set(heap, host, elements.erase());
         self.length
             .init_tagged(Tagged::<Smi>::from(Smi::new(length as i64)));
     }
@@ -1046,6 +1048,7 @@ impl HeapObject for Object {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.init_raw(
+            heap,
             config.map.as_tagged(heap),
             config.slots.as_tagged(heap),
             config.elements.as_tagged(heap),

@@ -111,8 +111,6 @@ impl Runtime for VmCore {
     const ID: RuntimeId = RuntimeId(0);
 
     fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), SetupError> {
-        bindings::install(vm)?;
-        threading::install(vm)?;
         let call_index = vm.register_native(function_prototype_call);
         let throw_index = vm.register_native(throw_type_error);
         let getter = vm.register_native(array_length_get);
@@ -250,6 +248,9 @@ impl Runtime for VmCore {
             }
             KetteTools::install(thread.heap(), vm.known(), vm.interner(), &scope, tools)
         });
+        drop(thread);
+        bindings::install(vm)?;
+        threading::install(vm)?;
         Ok(())
     }
 }

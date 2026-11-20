@@ -39,8 +39,11 @@ impl HeapObject for Symbol {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        self.header.map.init(heap.known().symbol_map.get(heap));
-        self.description.init(config.as_tagged(heap));
+        let host = self.tagged(heap);
+        self.header
+            .map
+            .set(heap, host, heap.known().symbol_map.get(heap));
+        self.description.set(heap, host, config.as_tagged(heap));
     }
 
     fn header(&self) -> &Header {

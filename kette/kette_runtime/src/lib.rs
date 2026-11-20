@@ -30,13 +30,9 @@ impl Runtime for KetteRuntime {
         let print = vm.register_native(console_print);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
-            let object_prototype = {
-                let heap = thread.heap();
-                heap.known()
-                    .object_prototype
-                    .get_handle(thread.heap(), &scope)
-            };
-            let map = thread.heap().allocate_handle::<Map>(
+            let (thread_vm, heap, _) = thread.split();
+            let object_prototype = heap.known().object_prototype.get_handle(heap, &scope);
+            let map = heap.allocate_handle::<Map>(
                 MapInit {
                     kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                     value_slot_count: 0,
@@ -45,33 +41,31 @@ impl Runtime for KetteRuntime {
                 },
                 &scope,
             );
-            let console = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-            Object::install_method(thread, &scope, console, "print", print, 0);
-            let console_name = thread.intern(&scope, "Console");
-            let console_name = scope.handle(console_name.as_tagged(thread.heap()));
-            let global = {
-                let heap = thread.heap();
-                heap.known().global_object.get_handle(thread.heap(), &scope)
-            };
-            // a bare global `print(x)`, same native as `Console.print`
-            Object::install_method(thread, &scope, global, "print", print, 0);
+            let console = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
+            Object::add_method(thread_vm, heap, &scope, console, "print", print, 0);
+            let console_name = thread_vm.interner().intern_str(heap, &scope, "Console");
+            let console_name = scope.handle(console_name.as_tagged(heap));
+            let global = heap.known().global_object.get_handle(heap, &scope);
+            Object::add_method(thread_vm, heap, &scope, global, "print", print, 0);
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 global,
                 console_name,
                 PropertyDescriptor::data(console.erase()),
             )
             .expect("install console global");
-            Object::install_method(thread, &scope, object_prototype, "clone", clone, 0);
+            Object::add_method(thread_vm, heap, &scope, object_prototype, "clone", clone, 0);
 
-            let none_name = scope.handle(thread.intern(&scope, "None").as_tagged(thread.heap()));
-            let none = {
-                let heap = thread.heap();
-                heap.known().null.get_handle(heap, &scope).erase()
-            };
+            let none_name = scope.handle(
+                thread_vm
+                    .interner()
+                    .intern_str(heap, &scope, "None")
+                    .as_tagged(heap),
+            );
+            let none = heap.known().null.get_handle(heap, &scope).erase();
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 global,
                 none_name,
@@ -80,12 +74,24 @@ impl Runtime for KetteRuntime {
             .expect("install None global");
 
             // `os.name` reports the host OS for platform-specific paths.
-            let os = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
-            let name = scope.handle(thread.intern(&scope, "name").as_tagged(thread.heap()));
-            let os_name = scope.handle(thread.intern(&scope, "os").as_tagged(thread.heap()));
-            let value = thread.intern(&scope, std::env::consts::OS);
+            let os = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
+            let name = scope.handle(
+                thread_vm
+                    .interner()
+                    .intern_str(heap, &scope, "name")
+                    .as_tagged(heap),
+            );
+            let os_name = scope.handle(
+                thread_vm
+                    .interner()
+                    .intern_str(heap, &scope, "os")
+                    .as_tagged(heap),
+            );
+            let value = thread_vm
+                .interner()
+                .intern_str(heap, &scope, std::env::consts::OS);
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 os,
                 name,
@@ -93,7 +99,7 @@ impl Runtime for KetteRuntime {
             )
             .expect("install os name");
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 global,
                 os_name,

@@ -3,9 +3,9 @@ use crate::{
     Args, AtomicI64Object, AtomicI64ObjectInit, AtomicOptionGcSlot, CallInfo, Convert, DenseString,
     Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
     PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, TaskStart, TaskStateObject,
-    TaskStateObjectInit, Termination, Thread, ThreadKind, ThreadObject, ThreadObjectInit,
-    ThreadState, ThreadStatus, Thrown, VM, Value, Visitor, VmError, extend_lifetime, prepare_task,
-    raise, raise_runtime, release_task_run, task_outcome,
+    TaskStateObjectInit, Termination, ThreadKind, ThreadObject, ThreadObjectInit, ThreadState,
+    ThreadStatus, Thrown, VM, Value, Visitor, VmError, extend_lifetime, prepare_task, raise,
+    raise_runtime, release_task_run, task_outcome,
 };
 use std::{
     sync::{
@@ -46,7 +46,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
 
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        let heap = thread.heap();
+        let (thread_vm, heap, state) = thread.split();
         let default_scheduler = heap.allocate_handle::<SchedulerObject>(
             SchedulerObjectInit {
                 scheduler: Arc::new(Scheduler::new()),
@@ -60,8 +60,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             .object_prototype
             .get_handle(heap, &scope)
             .erase();
-        let make_prototype = |thread: &mut Thread| {
-            let heap = thread.heap();
+        let make_prototype = |heap: &mut Heap| {
             let map = heap.allocate_handle::<Map>(
                 MapInit {
                     kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
@@ -74,284 +73,299 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY))
         };
 
-        let thread_prototype = make_prototype(thread);
-        Object::install_method(
-            thread,
+        let thread_prototype = make_prototype(heap);
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "start",
             thread_start_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "join",
             thread_join_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "isAlive",
             thread_is_alive_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "name",
             thread_name_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "threadId",
             thread_id_index,
             0,
         );
-        // Every ThreadObject exposes the same surface; the global `Thread` is
-        // the main thread object and inherits these too.
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "new",
             thread_new_platform_index,
             2,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "newPlatform",
             thread_new_platform_index,
             2,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "newVirtual",
             thread_new_virtual_index,
             3,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "current",
             thread_current_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "scheduler",
             thread_scheduler_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "mount",
             thread_mount_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "park",
             thread_park_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "parkNanos",
             thread_park_index,
             1,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "unpark",
             thread_unpark_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "nanoTime",
             thread_nano_time_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "isReady",
             thread_is_ready_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "interrupt",
             thread_interrupt_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "isInterrupted",
             thread_is_interrupted_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "sleep",
             thread_sleep_index,
             1,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             thread_prototype,
             "yield",
             thread_yield_index,
             0,
         );
-        {
-            let heap = thread.heap();
-            let map = heap.known().thread_object_map.get_handle(heap, &scope);
-            map.as_tagged(heap).prototype.set(
-                heap,
-                map.as_tagged(heap).erase(),
-                thread_prototype.as_tagged(heap).erase(),
-            );
-        }
 
-        let atomic_prototype = make_prototype(thread);
-        Object::install_method(
-            thread,
+        let map = heap.known().thread_object_map.get_handle(heap, &scope);
+        map.as_tagged(heap).prototype.set(
+            heap,
+            map.as_tagged(heap).erase(),
+            thread_prototype.as_tagged(heap).erase(),
+        );
+
+        let atomic_prototype = make_prototype(heap);
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             atomic_prototype,
             "load",
             atomic_i64_load_index,
             0,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             atomic_prototype,
             "store",
             atomic_i64_store_index,
             1,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             atomic_prototype,
             "swap",
             atomic_i64_swap_index,
             1,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             atomic_prototype,
             "compareExchange",
             atomic_i64_compare_exchange_index,
             2,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             atomic_prototype,
             "add",
             atomic_i64_add_index,
             1,
         );
-        {
-            let heap = thread.heap();
-            let map = heap.known().atomic_i64_map.get_handle(heap, &scope);
-            map.as_tagged(heap).prototype.set(
-                heap,
-                map.as_tagged(heap).erase(),
-                atomic_prototype.as_tagged(heap).erase(),
-            );
-        }
 
-        let main_name = thread.intern(&scope, "main");
+        let map = heap.known().atomic_i64_map.get_handle(heap, &scope);
+        map.as_tagged(heap).prototype.set(
+            heap,
+            map.as_tagged(heap).erase(),
+            atomic_prototype.as_tagged(heap).erase(),
+        );
+
+        let main_name = thread_vm.interner().intern_str(heap, &scope, "main");
         let main_tid = vm.threads().next_name();
-        let main = {
-            let heap = thread.heap();
-            let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
-            heap.allocate_handle::<ThreadObject>(
-                ThreadObjectInit {
-                    kind: ThreadKind::Platform,
-                    target: hole,
-                    name: main_name.erase(),
-                    task: None,
-                    state: ThreadStatus::Running,
-                    tid: main_tid as i64,
-                    platform_slot: -1,
-                },
-                &scope,
-            )
-        };
-        let main_object = {
-            let heap = thread.heap();
-            scope
-                .cast::<Object>(heap, main.as_tagged(heap).erase())
-                .expect("main thread object")
-        };
-        {
-            let (_, heap, state) = thread.split();
-            let main = main.as_tagged(heap);
-            vm.threads().set_main(main);
-            state.set_thread_object(main);
-        }
-        let atomic_i64 = make_prototype(thread);
-        Object::install_method(thread, &scope, atomic_i64, "new", atomic_i64_new_index, 1);
-        let atomic_namespace = make_prototype(thread);
-        let atomic_i64_name = thread.intern(&scope, "AtomicI64");
-        let atomic_i64_name = scope.handle(atomic_i64_name.as_tagged(thread.heap()));
+        let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
+        let main = heap.allocate_handle::<ThreadObject>(
+            ThreadObjectInit {
+                kind: ThreadKind::Platform,
+                target: hole,
+                name: main_name.erase(),
+                task: None,
+                state: ThreadStatus::Running,
+                tid: main_tid as i64,
+                platform_slot: -1,
+            },
+            &scope,
+        );
+        let main_object = scope
+            .cast::<Object>(heap, main.as_tagged(heap).erase())
+            .expect("main thread object");
+        let main = main.as_tagged(heap);
+        vm.threads().set_main(main);
+        state.set_thread_object(main);
+        let atomic_i64 = make_prototype(heap);
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_i64,
+            "new",
+            atomic_i64_new_index,
+            1,
+        );
+        let atomic_namespace = make_prototype(heap);
+        let atomic_i64_name = thread_vm.interner().intern_str(heap, &scope, "AtomicI64");
+        let atomic_i64_name = scope.handle(atomic_i64_name.as_tagged(heap));
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             &scope,
             atomic_namespace,
             atomic_i64_name,
             PropertyDescriptor::data(atomic_i64.erase()),
         )
         .expect("install atomic.AtomicI64");
-        let global = {
-            let heap = thread.heap();
-            heap.known().global_object.get_handle(heap, &scope)
-        };
+        let global = heap.known().global_object.get_handle(heap, &scope);
         let thread_value = main_object.erase();
         let atomic_value = atomic_namespace.erase();
         for (name, value) in [("Thread", thread_value), ("atomic", atomic_value)] {
-            let name = thread.intern(&scope, name);
-            let name = scope.handle(name.as_tagged(thread.heap()));
+            let name = thread_vm.interner().intern_str(heap, &scope, name);
+            let name = scope.handle(name.as_tagged(heap));
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 global,
                 name,

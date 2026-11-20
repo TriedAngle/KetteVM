@@ -1107,7 +1107,7 @@ impl Heap {
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init_raw(map, empty, empty, 0);
+        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -1128,7 +1128,7 @@ impl Heap {
         let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init_raw(map, empty, empty, 0);
+        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -1159,6 +1159,7 @@ impl Heap {
         let mut ptr = obj_raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
         unsafe { ptr.as_mut() }.init_raw(
+            self,
             self.known().js_array_map.get(self),
             self.known().empty_fixed_array.get(self),
             elements,

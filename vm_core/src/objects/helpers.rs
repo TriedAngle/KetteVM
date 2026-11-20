@@ -1,7 +1,7 @@
 use crate::{
     CallableInfoInit, CallableInfoObject, DenseString, Float, FunctionKind, Handle, HandleScope,
     HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex, Object, PropertyDescriptor, Prototype,
-    Result, SlotFlags, SlotName, Smi, StringRef, Tagged, Thread, ThreadState, VM, Value, WellKnown,
+    Result, SlotFlags, SlotName, Smi, StringRef, Tagged, ThreadState, VM, Value, WellKnown,
     mode_from_strict,
 };
 
@@ -159,20 +159,22 @@ impl Object {
     }
 
     pub fn install_constructor<'s>(
-        thread: &mut Thread,
+        vm: &VM,
+        heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
         name: &str,
         proto_parent: Handle<'_, Object>,
         length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
-        Self::install_constructor_with(thread, scope, index, name, proto_parent, None, length)
+        Self::install_constructor_with(vm, heap, scope, index, name, proto_parent, None, length)
     }
 
     /// Like [`Object::install_constructor`], but the prototype object is
     /// itself a `PRIMITIVE_WRAPPER` carrying `value` in slot 0
     pub fn install_wrapper_constructor<'s>(
-        thread: &mut Thread,
+        vm: &VM,
+        heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
         name: &str,
@@ -181,7 +183,8 @@ impl Object {
         length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
         Self::install_constructor_with(
-            thread,
+            vm,
+            heap,
             scope,
             index,
             name,
@@ -192,7 +195,8 @@ impl Object {
     }
 
     fn install_constructor_with<'s>(
-        thread: &mut Thread,
+        vm: &VM,
+        heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
         name: &str,
@@ -200,9 +204,9 @@ impl Object {
         wrapper: Option<Handle<'_, Value>>,
         length: u32,
     ) -> (Handle<'s, Object>, Handle<'s, Object>) {
-        let name_str = thread.intern(scope, name);
-        let fn_obj = Self::native_constructor(thread.heap(), scope, index, length);
-        Self::set_builtin_name(thread, scope, fn_obj, name);
+        let name_str = vm.interner().intern_str(heap, scope, name);
+        let fn_obj = Self::native_constructor(heap, scope, index, length);
+        Self::set_builtin_name(vm, heap, scope, fn_obj, name);
 
         // prototype object: fresh extendable object chained to proto_parent
         // (wrapper prototypes also carry their primitive in slot 0)
@@ -212,7 +216,7 @@ impl Object {
                 .union(MapKind::PRIMITIVE_WRAPPER),
             None => MapKind::OBJECT.union(MapKind::EXTENDABLE),
         };
-        let map = thread.heap().allocate_handle::<Map>(
+        let map = heap.allocate_handle::<Map>(
             MapInit {
                 kind,
                 value_slot_count: usize::from(wrapper.is_some()),
@@ -221,7 +225,6 @@ impl Object {
             },
             scope,
         );
-        let heap = thread.heap();
         let proto = scope.handle(match wrapper {
             Some(v) => heap.new_object(scope, map, scope.stage(&[v.as_tagged(heap)])),
             None => heap.new_object(scope, map, HandleSlice::EMPTY),
@@ -240,7 +243,7 @@ impl Object {
         .expect("install constructor name");
         let prototype_name = heap.known().strings.prototype.get_handle(heap, scope);
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             scope,
             fn_obj,
             prototype_name,
@@ -254,14 +257,11 @@ impl Object {
         .expect("install constructor prototype");
 
         // global.Name = fn
-        let global = {
-            let heap = thread.heap();
-            heap.known().global_object.get_handle(heap, scope)
-        };
+        let global = heap.known().global_object.get_handle(heap, scope);
         // Safety: fresh interned word, rooted below before any allocation.
-        let name = scope.handle(name_str.as_tagged(thread.heap()));
+        let name = scope.handle(name_str.as_tagged(heap));
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             scope,
             global,
             name,
@@ -273,49 +273,45 @@ impl Object {
 
     /// `name` of a builtin function: { writable: false, enumerable: false, configurable: true }
     pub fn set_builtin_name(
-        thread: &mut Thread,
+        vm: &VM,
+        heap: &mut Heap,
         scope: &HandleScope<'_>,
         function: Handle<'_, Object>,
         name: &str,
     ) {
-        let name_str = thread.intern(scope, name);
+        let name_str = vm.interner().intern_str(heap, scope, name);
         // Safety: fresh interned word, rooted below before any allocation.
-        let name_str: Handle<'_, DenseString> = scope.handle(name_str.as_tagged(thread.heap()));
-        let name_key = thread
-            .heap()
-            .known()
-            .strings
-            .name
-            .get_handle(thread.heap(), scope);
+        let name_str: Handle<'_, DenseString> = scope.handle(name_str.as_tagged(heap));
+        let name_key = heap.known().strings.name.get_handle(heap, scope);
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             scope,
             function,
             name_key,
             PropertyDescriptor::non_enumerable(name_str.erase()),
         )
         .expect("install builtin name");
-        let (_vm, heap, _state) = thread.split();
         if let Some(info) = function.as_tagged(heap).callable_info(heap) {
             info.as_ref()
                 .set_name(heap, Some(name_str.as_tagged(heap).erase()));
         }
     }
 
-    pub fn install_method(
-        thread: &mut Thread,
+    pub fn add_method(
+        vm: &VM,
+        heap: &mut Heap,
         scope: &HandleScope<'_>,
         receiver: Handle<'_, Object>,
         name: &str,
         index: NativeIndex,
         length: u32,
     ) {
-        let method = Self::native_function(thread.heap(), scope, index, length);
-        let name_str = thread.intern(scope, name);
-        let method_name = scope.handle(name_str.as_tagged(thread.heap()));
-        Self::set_builtin_name(thread, scope, method, name);
+        let method = Self::native_function(heap, scope, index, length);
+        let name_str = vm.interner().intern_str(heap, scope, name);
+        let method_name = scope.handle(name_str.as_tagged(heap));
+        Self::set_builtin_name(vm, heap, scope, method, name);
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             scope,
             receiver,
             method_name,

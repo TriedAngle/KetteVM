@@ -162,20 +162,21 @@ impl HeapObject for CValue {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        match &config.map {
-            Some(map) => self.header.map.init(map.as_tagged(heap)),
-            None => self.header.map.init(heap.known().c_value_map.get(heap)),
-        }
+        let host = self.tagged(heap);
+        let map = match &config.map {
+            Some(map) => map.as_tagged(heap),
+            None => heap.known().c_value_map.get(heap),
+        };
+        self.header.map.set(heap, host, map);
         let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init(empty);
-        self.elements.init(empty.erase());
+        self.slots.set(heap, host, empty);
+        self.elements.set(heap, host, empty.erase());
         self.length.init_tagged(Smi::new(0).into());
-        self.ty.init_tagged(config.ty.as_tagged(heap));
+        self.ty.set(heap, host, config.ty.as_tagged(heap));
         self.address
             .init_tagged(Smi::new(config.address as usize as i64).into());
         self.flags
             .init_tagged(Smi::new(config.flags.bits() as i64).into());
-        let host = self.tagged(heap);
         match config.storage {
             Some(storage) => self.storage.set(heap, host, storage.as_tagged(heap)),
             None => self.storage.clear(heap),
@@ -248,11 +249,12 @@ impl HeapObject for ForeignLibrary {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
+        let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().foreign_library_map.get(heap));
-        self.handle.init_tagged(config.handle.as_tagged(heap));
-        self.path.init_tagged(config.path.as_tagged(heap));
+            .set(heap, host, heap.known().foreign_library_map.get(heap));
+        self.handle.set(heap, host, config.handle.as_tagged(heap));
+        self.path.set(heap, host, config.path.as_tagged(heap));
     }
 
     fn header(&self) -> &Header {

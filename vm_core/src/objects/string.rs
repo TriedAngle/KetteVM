@@ -671,12 +671,13 @@ impl HeapObject for DenseString {
             config.0.is_compressed(),
             "heap strings are always in the compressed encoding"
         );
+        let host = self.tagged(heap);
         let map = match config.0.encoding() {
             Encoding::Latin1 => heap.known().dense_latin1_string_map.get(heap),
             Encoding::Utf16 => heap.known().dense_utf16_string_map.get(heap),
             Encoding::Utf8 => unreachable!("dense strings never hold UTF-8"),
         };
-        self.header.map.init(map);
+        self.header.map.set(heap, host, map);
         self.hash
             .init_tagged(Tagged::<Smi>::from(Smi::new(config.1)));
         self.length

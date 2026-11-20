@@ -49,17 +49,17 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let ffi = vm.ffi();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
-        ffi.install(thread.heap(), &scope);
+        let (thread_vm, heap, _) = thread.split();
+        ffi.install(heap, &scope);
 
         let object_prototype = {
-            let heap = thread.heap();
             heap.known()
                 .object_prototype
                 .get_handle(heap, &scope)
                 .erase()
         };
 
-        let prototype_map = thread.heap().allocate_handle::<Map>(
+        let prototype_map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
@@ -68,23 +68,43 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             },
             &scope,
         );
-        let library_prototype = scope.handle(thread.heap().new_object(
+        let library_prototype =
+            scope.handle(heap.new_object(&scope, prototype_map, HandleSlice::EMPTY));
+        Object::add_method(thread_vm, heap, &scope, library_prototype, "fn", lib_fn, 3);
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
-            prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, library_prototype, "fn", lib_fn, 3);
-        Object::install_method(thread, &scope, library_prototype, "symbol", lib_symbol, 2);
-        Object::install_method(thread, &scope, library_prototype, "close", lib_close, 0);
-        Object::install_method(thread, &scope, library_prototype, "path", lib_path, 0);
+            library_prototype,
+            "symbol",
+            lib_symbol,
+            2,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            library_prototype,
+            "close",
+            lib_close,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            library_prototype,
+            "path",
+            lib_path,
+            0,
+        );
         {
-            let heap = thread.heap();
             let map = heap.known().foreign_library_map.get(heap);
             map.prototype
                 .set(heap, map.erase(), library_prototype.as_tagged(heap).erase());
         }
 
-        let type_prototype_map = thread.heap().allocate_handle::<Map>(
+        let type_prototype_map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
@@ -93,24 +113,52 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             },
             &scope,
         );
-        let type_prototype = scope.handle(thread.heap().new_object(
+        let type_prototype =
+            scope.handle(heap.new_object(&scope, type_prototype_map, HandleSlice::EMPTY));
+        Object::add_method(thread_vm, heap, &scope, type_prototype, "new", type_new, 0);
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
-            type_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, type_prototype, "new", type_new, 0);
-        Object::install_method(thread, &scope, type_prototype, "size", type_size, 0);
-        Object::install_method(thread, &scope, type_prototype, "align", type_align, 0);
-        Object::install_method(thread, &scope, type_prototype, "wrap", type_wrap, 1);
-        Object::install_method(thread, &scope, type_prototype, "callback", type_callback, 1);
+            type_prototype,
+            "size",
+            type_size,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            type_prototype,
+            "align",
+            type_align,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            type_prototype,
+            "wrap",
+            type_wrap,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            type_prototype,
+            "callback",
+            type_callback,
+            1,
+        );
         {
-            let heap = thread.heap();
             let map = heap.known().c_type_map.get(heap);
             map.prototype
                 .set(heap, map.erase(), type_prototype.as_tagged(heap).erase());
         }
 
-        let buffer_prototype_map = thread.heap().allocate_handle::<Map>(
+        let buffer_prototype_map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
@@ -119,27 +167,74 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             },
             &scope,
         );
-        let buffer_prototype = scope.handle(thread.heap().new_object(
+        let buffer_prototype =
+            scope.handle(heap.new_object(&scope, buffer_prototype_map, HandleSlice::EMPTY));
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
-            buffer_prototype_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, buffer_prototype, "copy", value_copy, 0);
-        Object::install_method(thread, &scope, buffer_prototype, "get", buffer_get, 1);
-        Object::install_method(thread, &scope, buffer_prototype, "set", buffer_set, 2);
-        Object::install_method(thread, &scope, buffer_prototype, "add", value_add, 1);
-        Object::install_method(thread, &scope, buffer_prototype, "cast", value_cast, 1);
-        Object::install_method(thread, &scope, buffer_prototype, "free", value_free, 0);
-        Object::install_method(
-            thread,
+            buffer_prototype,
+            "copy",
+            value_copy,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "get",
+            buffer_get,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "set",
+            buffer_set,
+            2,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "add",
+            value_add,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "cast",
+            value_cast,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "free",
+            value_free,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             buffer_prototype,
             "read_bytes",
             read_bytes,
             2,
         );
-        Object::install_method(
-            thread,
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
             buffer_prototype,
             "write_bytes",
@@ -147,7 +242,6 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             1,
         );
         {
-            let heap = thread.heap();
             let map = heap.known().c_value_map.get(heap);
             map.prototype
                 .set(heap, map.erase(), buffer_prototype.as_tagged(heap).erase());
@@ -156,11 +250,27 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         for &(name, read, write) in &scalars {
             let read_name = format!("read_{name}");
             let write_name = format!("write_{name}");
-            Object::install_method(thread, &scope, buffer_prototype, &read_name, read, 1);
-            Object::install_method(thread, &scope, buffer_prototype, &write_name, write, 2);
+            Object::add_method(
+                thread_vm,
+                heap,
+                &scope,
+                buffer_prototype,
+                &read_name,
+                read,
+                1,
+            );
+            Object::add_method(
+                thread_vm,
+                heap,
+                &scope,
+                buffer_prototype,
+                &write_name,
+                write,
+                2,
+            );
         }
 
-        let namespace_map = thread.heap().allocate_handle::<Map>(
+        let namespace_map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
@@ -169,23 +279,35 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             },
             &scope,
         );
-        let namespace = scope.handle(thread.heap().new_object(
+        let namespace = scope.handle(heap.new_object(&scope, namespace_map, HandleSlice::EMPTY));
+        Object::add_method(thread_vm, heap, &scope, namespace, "library", library, 1);
+        Object::add_method(thread_vm, heap, &scope, namespace, "cstring", cstring, 1);
+        Object::add_method(thread_vm, heap, &scope, namespace, "wstring", wstring, 1);
+        Object::add_method(
+            thread_vm,
+            heap,
             &scope,
-            namespace_map,
-            HandleSlice::EMPTY,
-        ));
-        Object::install_method(thread, &scope, namespace, "library", library, 1);
-        Object::install_method(thread, &scope, namespace, "cstring", cstring, 1);
-        Object::install_method(thread, &scope, namespace, "wstring", wstring, 1);
-        Object::install_method(thread, &scope, namespace, "string_at", string_at, 1);
-        Object::install_method(thread, &scope, namespace, "wstring_at", wstring_at, 1);
-        Object::install_method(thread, &scope, namespace, "pointer", pointer, 1);
-        Object::install_method(thread, &scope, namespace, "fn", fn_type, 2);
-        Object::install_method(thread, &scope, namespace, "callback", callback, 3);
-        Object::install_method(thread, &scope, namespace, "struct", struct_type, 1);
-        Object::install_method(thread, &scope, namespace, "enum", enum_type, 2);
-        Object::install_method(thread, &scope, namespace, "array", array_type, 2);
-        Object::install_method(thread, &scope, namespace, "buffer", buffer, 1);
+            namespace,
+            "string_at",
+            string_at,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            namespace,
+            "wstring_at",
+            wstring_at,
+            1,
+        );
+        Object::add_method(thread_vm, heap, &scope, namespace, "pointer", pointer, 1);
+        Object::add_method(thread_vm, heap, &scope, namespace, "fn", fn_type, 2);
+        Object::add_method(thread_vm, heap, &scope, namespace, "callback", callback, 3);
+        Object::add_method(thread_vm, heap, &scope, namespace, "struct", struct_type, 1);
+        Object::add_method(thread_vm, heap, &scope, namespace, "enum", enum_type, 2);
+        Object::add_method(thread_vm, heap, &scope, namespace, "array", array_type, 2);
+        Object::add_method(thread_vm, heap, &scope, namespace, "buffer", buffer, 1);
 
         for (name, id) in [
             ("void", TypeId::VOID),
@@ -205,18 +327,17 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             ("f64", TypeId::F64),
         ] {
             let value = {
-                let ty = thread
-                    .heap()
+                let ty = heap
                     .known()
                     .ffi_types
-                    .get(thread.heap(), id)
+                    .get(heap, id)
                     .expect("C FFI builtins are installed during VM setup");
                 scope.handle(ty).erase()
             };
-            let key = thread.intern(&scope, name);
-            let key = scope.handle(key.as_tagged(thread.heap()).erase().as_name());
+            let key = thread_vm.interner().intern_str(heap, &scope, name);
+            let key = scope.handle(key.as_tagged(heap).erase().as_name());
             Object::define_own_property_ordinary(
-                thread.heap(),
+                heap,
                 &scope,
                 namespace,
                 key,
@@ -226,19 +347,18 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         }
 
         let c_string = {
-            let heap = thread.heap();
             let char_type = heap
                 .known()
                 .ffi_types
                 .get(heap, TypeId::CHAR)
                 .expect("C FFI builtins are installed during VM setup");
             let char_type = scope.handle(char_type);
-            ffi.types().pointer_to(thread.heap(), &scope, &char_type)
+            ffi.types().pointer_to(heap, &scope, &char_type)
         };
-        let key = thread.intern(&scope, "CString");
-        let key = scope.handle(key.as_tagged(thread.heap()).erase().as_name());
+        let key = thread_vm.interner().intern_str(heap, &scope, "CString");
+        let key = scope.handle(key.as_tagged(heap).erase().as_name());
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             &scope,
             namespace,
             key,
@@ -246,16 +366,12 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         )
         .expect("install FFI CString type");
 
-        let global = thread
-            .heap()
-            .known()
-            .global_object
-            .get_handle(thread.heap(), &scope);
-        let value = scope.handle(namespace.as_tagged(thread.heap()).erase());
-        let name = thread.intern(&scope, "FFI");
-        let name = scope.handle(name.as_tagged(thread.heap()).erase().as_name());
+        let global = heap.known().global_object.get_handle(heap, &scope);
+        let value = scope.handle(namespace.as_tagged(heap).erase());
+        let name = thread_vm.interner().intern_str(heap, &scope, "FFI");
+        let name = scope.handle(name.as_tagged(heap).erase().as_name());
         Object::define_own_property_ordinary(
-            thread.heap(),
+            heap,
             &scope,
             global,
             name,

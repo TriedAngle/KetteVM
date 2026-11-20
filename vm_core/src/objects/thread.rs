@@ -160,10 +160,10 @@ impl HeapObject for ThreadObject {
         let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().thread_object_map.get(heap));
+            .set(heap, host, heap.known().thread_object_map.get(heap));
         let empty = heap.known().empty_fixed_array.get(heap);
-        self.slots.init_tagged(empty);
-        self.elements.init_tagged(empty.erase());
+        self.slots.set(heap, host, empty);
+        self.elements.set(heap, host, empty.erase());
         self.length.init_tagged(Smi::new(0).into());
         self.tid.init_tagged(Smi::new(config.tid).into());
         self.kind.init_tagged(Smi::new(config.kind as i64).into());
