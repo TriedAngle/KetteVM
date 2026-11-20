@@ -16,6 +16,34 @@ let empty = Sequence.new()
 Test.assert(empty.size(), 0)
 Test.assert(empty.isEmpty(), true)
 Test.assert(empty.nonEmpty(), false)
+Test.assert(empty.items.length, 0)
+
+let sized = Sequence.newWithSize(3)
+Test.assert(sized.size(), 3)
+Test.assert(sized.get(0) == undefined, true)
+Test.assert(sized.get(1) == undefined, true)
+Test.assert(sized.get(2) == undefined, true)
+
+let sized_zero = Sequence.newWithSize(0)
+Test.assert(sized_zero.size(), 0)
+Test.assert(sized_zero.items.length, 0)
+
+let filled_size = Sequence.newWithSizeFill(3, 7)
+Test.assert(filled_size.size(), 3)
+Test.assert(filled_size.get(0), 7)
+Test.assert(filled_size.get(1), 7)
+Test.assert(filled_size.get(2), 7)
+
+let filled_zero = Sequence.newWithSizeFill(0, 7)
+Test.assert(filled_zero.size(), 0)
+Test.assert(filled_zero.items.length, 0)
+
+let bad_size = try {
+    Sequence.newWithSize(-1)
+} catch (error) {
+    error.name
+}
+Test.assert(bad_size, "IndexOutOfBounds")
 Test.assert(empty.firstOrElse({ null }), null)
 Test.assert(empty.lastOrElse({ null }), null)
 Test.assert(empty.getOrElse(3, { null }), null)

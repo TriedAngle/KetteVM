@@ -496,13 +496,27 @@ let MutableIndexable = {
 let Sequence = {
     indexable*: MutableIndexable
     collection*: MutableCollection
+    items, start, count: undefined
     new: {
-        let sequence = {
-            parent*: self
-            items: [null, null, null, null]
-            start: 0
-            count: 0
+        self.newWithSize(0)
+    }
+    newWithSize: |size| {
+        self.newWithSizeFill(size, undefined)
+    }
+    newWithSizeFill: |size, fill| {
+        if size < 0 || size % 1 != 0 {
+            throw IndexOutOfBounds("sequence size out of range", size, 0)
         }
+        let sequence = self.clone()
+        let items = []
+        let i = 0
+        while i < size {
+            items[i] = fill
+            i = i + 1
+        }
+        sequence.items = items
+        sequence.start = 0
+        sequence.count = size
         sequence
     }
     from: |collection| {
