@@ -214,7 +214,6 @@ pub struct TaskStateObject {
     carrier: AtomicUsize,
     state: MaybeUninit<Arc<ThreadState>>,
     runtime: AtomicU16,
-    result: AtomicOptionGcSlot<Value>,
     exception: AtomicOptionGcSlot<Value>,
 }
 
@@ -271,14 +270,6 @@ impl TaskStateObject {
         self.runtime.store(runtime.0, Ordering::Release);
     }
 
-    pub fn result<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
-        self.result.load(heap)
-    }
-
-    pub fn set_result(&self, heap: &Heap, result: Tagged<'_, Value>) {
-        self.result.set(heap, self.tagged(heap), result);
-    }
-
     pub fn exception<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         self.exception.load(heap)
     }
@@ -319,7 +310,6 @@ impl HeapObject for TaskStateObject {
         // dropping a previous `Arc`.
         unsafe { self.state.as_mut_ptr().write(Arc::clone(&config.state)) };
         self.runtime = AtomicU16::new(u16::MAX);
-        self.result = unsafe { AtomicOptionGcSlot::from_value(hole) };
         self.exception = unsafe { AtomicOptionGcSlot::from_value(hole) };
     }
 
@@ -338,7 +328,6 @@ impl EdgeVisitable for TaskStateObject {
         visitor.visit(self.scheduler.as_raw());
         visitor.visit(self.waiting_on.as_raw());
         self.state().visit_edges(visitor);
-        visitor.visit(self.result.as_raw());
         visitor.visit(self.exception.as_raw());
     }
 }

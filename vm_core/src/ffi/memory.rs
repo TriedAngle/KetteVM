@@ -25,6 +25,7 @@ pub fn free(address: *mut u8) {
     unsafe { libc::free(address.cast()) };
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn copy_out(address: *const u8, out: &mut [u8]) {
     if out.is_empty() {
         return;
@@ -34,6 +35,7 @@ pub fn copy_out(address: *const u8, out: &mut [u8]) {
     unsafe { ptr::copy_nonoverlapping(address, out.as_mut_ptr(), out.len()) };
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn copy_in(address: *mut u8, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -43,6 +45,7 @@ pub fn copy_in(address: *mut u8, bytes: &[u8]) {
     unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), address, bytes.len()) };
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn copy_bytes(src: *const u8, dst: *mut u8, len: usize) {
     if len == 0 {
         return;

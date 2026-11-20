@@ -501,16 +501,51 @@ unsafe impl<T> Send for AtomicGcSlot<T> {}
 unsafe impl<T> Sync for AtomicGcSlot<T> {}
 
 impl<T> AtomicGcSlot<T> {
+    /// Initialize a slot without the generational barrier. The caller
+    /// guarantees the host object is not published yet.
+    #[inline(always)]
+    pub fn init<'x, U: 'x>(&self, value: impl Into<Tagged<'x, U>>) {
+        let v = value.into().raw();
+        debug_assert!(!v.is_weak_ptr(), "weak value stored into a strong slot");
+        self.slot
+            .as_raw()
+            .store_atomic(v.to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn init_tagged<'x>(&self, value: Tagged<'x, T>)
+    where
+        T: 'x,
+    {
+        debug_assert!(!value.is_weak_ptr(), "weak value stored into a strong slot");
+        self.slot
+            .as_raw()
+            .store_atomic(value.raw().to_bits(), Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn get<'a>(&self, heap: &'a Heap) -> Tagged<'a, T> {
+        self.load(heap)
+    }
+
+    #[inline(always)]
+    pub fn raw(&self) -> Value {
+        Value::from_bits(self.slot.as_raw().load_atomic(Ordering::Acquire))
+    }
+
+    #[inline(always)]
     pub fn load_word(&self, _heap: &Heap) -> Word {
         self.slot
             .as_raw()
             .load_atomic(core::sync::atomic::Ordering::Acquire)
     }
 
+    #[inline(always)]
     pub fn store_word(&self, word: Word) {
         self.slot.as_raw().store_atomic(word, Ordering::Release);
     }
 
+    #[inline]
     pub fn compare_exchange_word(&self, current: Word, new: Word) -> Result<Word, Word> {
         self.slot.as_raw().compare_exchange(
             current,
@@ -520,21 +555,20 @@ impl<T> AtomicGcSlot<T> {
         )
     }
 
+    #[inline(always)]
     pub fn as_raw(&self) -> &RawCell {
         self.slot.as_raw()
     }
 
+    #[inline(always)]
     pub fn load<'a>(&self, heap: &'a Heap) -> Tagged<'a, T> {
         // Safety: the GC keeps slots current; anchored by the borrow.
         unsafe { Tagged::from_value_unchecked(Value::from_bits(self.load_word(heap))) }
     }
 
-    pub fn store<'h, 'x>(
-        &self,
-        heap: &Heap,
-        host: Tagged<'h, Value>,
-        value: impl Into<Tagged<'x, T>>,
-    ) where
+    #[inline(always)]
+    pub fn set<'h, 'x>(&self, heap: &Heap, host: Tagged<'h, Value>, value: impl Into<Tagged<'x, T>>)
+    where
         T: 'x,
     {
         let value = value.into();

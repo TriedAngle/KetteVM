@@ -349,7 +349,7 @@ impl<'a> Tagged<'a, Value> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_as<T: HeapObject>(self, heap: &Heap) -> Option<Tagged<'a, T>> {
         // strong-pointer witness; every heap object is header-prefixed,
         // so the map slot is readable under the anchor
@@ -373,6 +373,7 @@ impl<'a> Tagged<'a, Value> {
         }
     }
 
+    #[inline(always)]
     pub fn as_heap_object(self) -> Option<Tagged<'a, Object>> {
         if self.raw.is_strong_ptr() {
             // Safety: strong pointer; the anchor `'a` proves no GC ran

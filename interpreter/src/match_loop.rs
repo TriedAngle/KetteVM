@@ -187,9 +187,9 @@ pub fn execute<'a>(
     })
 }
 
-fn start<'b, 't>(
+fn start<'b>(
     vm: &'b VM,
-    runtime: &'t dyn ErasedRuntimeState,
+    runtime: &dyn ErasedRuntimeState,
     heap: &'b mut Heap,
     state: &'b ThreadState,
     callable: Handle<'_, Object>,

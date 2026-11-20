@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -74,6 +74,8 @@ pub struct Scheduler {
     state: Mutex<SchedulerState>,
     carriers: Mutex<Vec<Arc<Carrier>>>,
     next_carrier: AtomicUsize,
+    event_lock: Mutex<()>,
+    event: Condvar,
 }
 
 impl Default for Scheduler {
@@ -85,6 +87,8 @@ impl Default for Scheduler {
             }),
             carriers: Mutex::new(Vec::new()),
             next_carrier: AtomicUsize::new(1),
+            event_lock: Mutex::new(()),
+            event: Condvar::new(),
         }
     }
 }
@@ -99,6 +103,16 @@ impl Scheduler {
         let carrier = Arc::new(Carrier::new(id));
         self.carriers.lock().unwrap().push(Arc::clone(&carrier));
         carrier
+    }
+
+    pub fn notify(&self) {
+        let _guard = self.event_lock.lock().unwrap();
+        self.event.notify_all();
+    }
+
+    pub fn wait(&self, timeout: Duration) {
+        let guard = self.event_lock.lock().unwrap();
+        let _ = self.event.wait_timeout(guard, timeout);
     }
 
     pub fn unregister_carrier(&self, carrier: &Arc<Carrier>) {
@@ -122,6 +136,8 @@ impl Scheduler {
         let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
         slot.store(thread);
         state.ready.push_back(slot);
+        drop(state);
+        self.notify();
     }
 
     pub fn yield_current(&self, heap: &Heap, thread: Tagged<'_, ThreadObject>) {
@@ -252,6 +268,7 @@ impl Scheduler {
                 None => self.push_ready(heap, waiter),
             }
         }
+        self.notify();
     }
 
     /// Wake a blocked thread without making it runnable elsewhere.
@@ -276,6 +293,8 @@ impl Scheduler {
         let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
         slot.store(thread);
         state.ready.push_back(slot);
+        drop(state);
+        self.notify();
     }
 
     /// Push an already-`Ready` thread onto this scheduler's run queue.
@@ -292,6 +311,8 @@ impl Scheduler {
         let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
         slot.store(thread);
         state.ready.push_back(slot);
+        drop(state);
+        self.notify();
     }
 
     pub fn visit_edges(&self, visitor: &mut dyn Visitor) {

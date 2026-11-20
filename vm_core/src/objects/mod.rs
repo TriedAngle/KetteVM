@@ -67,8 +67,8 @@ pub use thread::{
 };
 
 use crate::{
-    EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
-    simple_scheduler::SchedulerObject,
+    AtomicGcSlot, EdgeVisitable, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR,
+    Word, simple_scheduler::SchedulerObject,
 };
 use core::{alloc::Layout, ptr::NonNull};
 use std::sync::atomic::Ordering;
@@ -118,22 +118,23 @@ pub trait HeapObject: 'static {
 
 #[repr(C)]
 pub struct Header {
-    pub map: GcSlot<Map>,
+    /// Shared by mutators, the sweeper, and other threads reading a
+    /// guarded object: reads and writes use atomic access.
+    pub map: AtomicGcSlot<Map>,
 }
 
 impl Header {
+    #[inline(always)]
     pub fn map<'a>(&self, heap: &'a Heap) -> Tagged<'a, Map> {
         self.map.get(heap)
     }
 
-    /// Replace the map on a live object. The store is atomic because a
-    /// concurrent sweeper parses live objects' layouts while mutators still
-    /// run (see [`object_layout`]).
+    /// Replace the map on a live object. Writes are Release, matching the
+    /// Acquire reads in [`Header::map`] and the concurrent sweeper's layout
+    /// walk (see [`object_layout`]).
+    #[inline(always)]
     pub fn set_map(&self, heap: &Heap, host: Tagged<'_, Value>, map: Tagged<'_, Map>) {
-        heap.write_barrier(host, self.map.as_raw(), map.erase());
-        self.map
-            .as_raw()
-            .store_atomic(map.raw().to_bits(), Ordering::Release);
+        self.map.set(heap, host, map);
     }
 }
 

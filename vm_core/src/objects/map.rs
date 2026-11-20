@@ -42,10 +42,12 @@ impl Map {
             .0
     }
 
+    #[inline(always)]
     pub fn value_slot_count(&self) -> usize {
         self.value_slot_count.to_smi_unchecked().value() as usize
     }
 
+    #[inline(always)]
     pub fn descriptor_count(&self) -> usize {
         self.descriptor_count.to_smi_unchecked().value() as usize
     }
@@ -114,10 +116,12 @@ impl Map {
         self.descriptors.as_ptr() as *mut SlotDescriptor
     }
 
+    #[inline(always)]
     pub fn descriptors(&self) -> &[SlotDescriptor] {
         unsafe { core::slice::from_raw_parts(self.data_ptr(), self.descriptor_count()) }
     }
 
+    #[inline(always)]
     pub fn descriptor(&self, i: usize) -> &SlotDescriptor {
         debug_assert!(i < self.descriptor_count());
         unsafe { &*self.data_ptr().add(i) }

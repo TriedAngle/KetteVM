@@ -1,0 +1,22 @@
+// Mutex exclusion across platform threads.
+// Run:  cargo run -q -p vm -- kette/std/sync.ktt kette/kette_tests/sync.ktt
+// Check: kette/kette_tests/check.py
+
+let m = Mutex.new()
+let counter = 0
+let worker = {
+    let i = 0
+    while i < 1000 {
+        m.lock()
+        counter = counter + 1
+        m.unlock()
+        i = i + 1
+    }
+}
+let a = Thread.newPlatform("a", worker)
+let b = Thread.newPlatform("b", worker)
+a.start()
+b.start()
+a.join()
+b.join()
+Test.assert(counter, 2000)

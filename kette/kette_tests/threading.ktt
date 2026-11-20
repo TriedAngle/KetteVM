@@ -81,7 +81,7 @@ va.start()
 vb.start()
 va.join()
 vb.join()
-Test.assert(order, "a1a2b1b2")
+Test.assert(order, "a1b1a2b2")
 Test.assert(va.isAlive(), false)
 Test.assert(vb.isAlive(), false)
 
@@ -92,8 +92,8 @@ let vc = Thread.newVirtual("vc", scheduler, {
     Thread.yield()
 })
 vc.start()
-Test.assert(child_name, "vc")
 vc.join()
+Test.assert(child_name, "vc")
 
 // A ready task and a blocked joiner stay rooted across GC.
 let gc_order = ""

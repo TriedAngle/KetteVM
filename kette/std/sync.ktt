@@ -1,0 +1,125 @@
+// Userspace synchronization primitives built on atomics and park/unpark.
+//
+// Run before a program that uses them:
+//   cargo run -q -p vm -- kette/std/sync.ktt program.ktt
+
+// A FIFO queue of parked threads. Items need a `next` field.
+let WaitQueue = {
+    head: 0
+    tail: 0
+    guard: 0
+    new: {
+        let queue = {
+            parent*: self
+            head: 0
+            tail: 0
+            guard: atomic.AtomicI64.new(0)
+        }
+        queue
+    }
+    lock: {
+        while self.guard.compareExchange(0, 1) != 0 {
+            Thread.yield()
+        }
+    }
+    unlock: { self.guard.store(0) }
+    enqueue: { |item|
+        self.lock()
+        item.next = 0
+        if self.head == 0 {
+            self.head = item
+        } else {
+            self.tail.next = item
+        }
+        self.tail = item
+        self.unlock()
+    }
+    dequeue: {
+        self.lock()
+        let item = self.head
+        if item != 0 {
+            self.head = item.next
+            item.next = 0
+            if self.head == 0 {
+                self.tail = 0
+            }
+        }
+        self.unlock()
+        item
+    }
+    remove: { |item|
+        self.lock()
+        let prev = 0
+        let current = self.head
+        let done = false
+        while current != 0 && !done {
+            if current == item {
+                if prev == 0 {
+                    self.head = current.next
+                } else {
+                    prev.next = current.next
+                }
+                if self.tail == current {
+                    self.tail = prev
+                }
+                current.next = 0
+                done = true
+            } else {
+                prev = current
+                current = current.next
+            }
+        }
+        self.unlock()
+    }
+}
+
+// A non-reentrant mutex. Unlock hands the lock directly to one waiter.
+let Mutex = {
+    locked: 0
+    waiters: 0
+    new: {
+        let mutex = {
+            parent*: self
+            locked: atomic.AtomicI64.new(0)
+            waiters: WaitQueue.new()
+        }
+        mutex
+    }
+    lock: {
+        let me = Thread.current()
+        let waiter = me.waiter
+        if waiter == null {
+            waiter = {
+                thread: me
+                granted: atomic.AtomicI64.new(0)
+                next: 0
+            }
+            me.waiter = waiter
+        }
+        while true {
+            if self.locked.compareExchange(0, 1) == 0 {
+                return 0
+            }
+            waiter.granted.store(0)
+            self.waiters.enqueue(waiter)
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.waiters.remove(waiter)
+                return 0
+            }
+            me.park()
+            if waiter.granted.load() != 0 {
+                return 0
+            }
+            self.waiters.remove(waiter)
+        }
+    }
+    unlock: {
+        let waiter = self.waiters.dequeue()
+        if waiter != 0 {
+            waiter.granted.store(1)
+            waiter.thread.unpark()
+        } else {
+            self.locked.store(0)
+        }
+    }
+}

@@ -57,6 +57,7 @@ impl CallbackCtx {
     /// # Safety
     /// Only valid while this context is the innermost C call on the thread;
     /// the borrows must not outlive it.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn parts(&self) -> (&FfiState, &VM, &ThreadState, &mut Heap) {
         // Safety: the pointers are live for the duration of the call.
         unsafe { (&*self.ffi, &*self.vm, &*self.state, &mut *self.heap) }
