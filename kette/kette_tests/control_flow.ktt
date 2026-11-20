@@ -60,6 +60,41 @@ Test.assert(outer, 0)
 let loop_value = while false { 1 }
 Test.assert(loop_value == null, true)
 
+// break with and without a value
+let break_value = while true { break 42 }
+Test.assert(break_value, 42)
+
+let break_empty = while true { break }
+Test.assert(break_empty == null, true)
+
+let break_total = 0
+let break_i = 0
+let break_result = while true {
+    break_i = break_i + 1
+    if break_i == 3 {
+        break break_i
+    }
+    break_total = break_total + 1
+}
+Test.assert(break_result, 3)
+Test.assert(break_total, 2)
+
+// break only exits the innermost loop
+let outer_count = 0
+let inner_count = 0
+while outer_count < 2 {
+    outer_count = outer_count + 1
+    inner_count = 0
+    while true {
+        inner_count = inner_count + 1
+        if inner_count == 2 {
+            break
+        }
+    }
+}
+Test.assert(outer_count, 2)
+Test.assert(inner_count, 2)
+
 // sibling branches may reuse a `let` name; each use resolves to the
 // declaration visible at that source position
 let pick = { |flag|

@@ -57,3 +57,23 @@ Test.assert(question.present?(), true)
 
 let value? = |x| { x }
 Test.assert(value?(7), 7)
+
+let multi = {
+    a, b, c: undefined
+    d, e: 5
+}
+Test.assert(multi.a == undefined, true)
+Test.assert(multi.b == undefined, true)
+Test.assert(multi.c == undefined, true)
+Test.assert(multi.d, 5)
+Test.assert(multi.e, 5)
+
+let calls = 0
+let make = { calls = calls + 1; 7 }
+let shared = { a, b: make() }
+Test.assert(shared.a, 7)
+Test.assert(shared.b, 7)
+Test.assert(calls, 1)
+
+let semicolons = { a: 1; b: 2 }
+Test.assert(semicolons.a + semicolons.b, 3)

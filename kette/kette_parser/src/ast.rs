@@ -96,6 +96,12 @@ pub enum Node {
         key: NodeId,
         value: NodeId,
     },
+    /// `a, b, c: value` — one shared value for several named slots
+    SlotMulti {
+        kind: SlotKind,
+        keys: NodeList,
+        value: NodeId,
+    },
     /// `[a, b, c]` — sugar for element slots
     Array {
         elements: NodeList,
@@ -143,6 +149,10 @@ pub enum Node {
     /// `return expr` returns from the enclosing block
     Return {
         value: NodeId,
+    },
+    /// `break` / `break expr` exits the innermost loop
+    Break {
+        value: Option<NodeId>,
     },
     Throw {
         value: NodeId,

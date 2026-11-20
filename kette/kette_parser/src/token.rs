@@ -56,6 +56,7 @@ pub enum TokenKind {
     True,
     False,
     Return,
+    Break,
     As,
     SelfContext,
     Try,
@@ -126,6 +127,7 @@ const TOKEN_INFO: &[TokenInfo] = &[
     I::new("true", 0, I::F_KEYWORD),        // True
     I::new("false", 0, I::F_KEYWORD),       // False
     I::new("return", 0, I::F_KEYWORD),      // Return
+    I::new("break", 0, I::F_KEYWORD),       // Break
     I::new("as", 0, I::F_KEYWORD),          // As
     I::new("selfContext", 0, I::F_KEYWORD), // SelfContext
     I::new("try", 0, I::F_KEYWORD),         // Try

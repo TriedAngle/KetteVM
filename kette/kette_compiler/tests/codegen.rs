@@ -85,3 +85,14 @@ fn nested_lets_stay_local() {
     assert!(!contains(&p, body, Opcode::LoadGlobal));
     assert!(!contains(&p, body, Opcode::StoreGlobal));
 }
+
+#[test]
+fn break_outside_loop_is_rejected() {
+    let result = compile_kette(
+        "break 1;",
+        SourceMode::Script,
+        NativeIndex(0),
+        NativeIndex(1),
+    );
+    assert!(result.is_err());
+}

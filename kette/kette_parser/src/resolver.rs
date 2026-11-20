@@ -233,11 +233,15 @@ impl Resolver<'_> {
             Node::Object(ref parts) => {
                 // slot values evaluate in the enclosing scope
                 for &slot in self.ast.list_items(parts.slots) {
-                    if let Node::Slot { kind, key, value } = *self.ast.node(slot) {
-                        if kind == SlotKind::Element {
-                            self.collect_expr_decls(key);
+                    match *self.ast.node(slot) {
+                        Node::Slot { kind, key, value } => {
+                            if kind == SlotKind::Element {
+                                self.collect_expr_decls(key);
+                            }
+                            self.collect_expr_decls(value);
                         }
-                        self.collect_expr_decls(value);
+                        Node::SlotMulti { value, .. } => self.collect_expr_decls(value),
+                        _ => {}
                     }
                 }
             }
@@ -272,7 +276,10 @@ impl Resolver<'_> {
                 self.collect_expr_decls(lhs);
                 self.collect_expr_decls(rhs);
             }
+            Node::SlotMulti { value, .. } => self.collect_expr_decls(value),
             Node::Return { value } => self.collect_expr_decls(value),
+            Node::Break { value: Some(value) } => self.collect_expr_decls(value),
+            Node::Break { value: None } => {}
             Node::Throw { value } => self.collect_expr_decls(value),
             Node::Try {
                 body,
@@ -317,11 +324,15 @@ impl Resolver<'_> {
             _ => unreachable!("closure objects are Object nodes"),
         };
         for &slot in self.ast.list_items(parts.slots) {
-            if let Node::Slot { kind, key, value } = *self.ast.node(slot) {
-                if kind == SlotKind::Element {
-                    self.resolve_node(key);
+            match *self.ast.node(slot) {
+                Node::Slot { kind, key, value } => {
+                    if kind == SlotKind::Element {
+                        self.resolve_node(key);
+                    }
+                    self.resolve_slot_value(value);
                 }
-                self.resolve_slot_value(value);
+                Node::SlotMulti { value, .. } => self.resolve_slot_value(value),
+                _ => {}
             }
         }
         let scope = self.push_scope(ScopeKind::Block);
@@ -380,11 +391,15 @@ impl Resolver<'_> {
                         _ => unreachable!(),
                     };
                     for &slot in ast.list_items(parts.slots) {
-                        if let Node::Slot { kind, key, value } = ast.node(slot) {
-                            if *kind == SlotKind::Element {
-                                self.resolve_node(*key);
+                        match ast.node(slot) {
+                            Node::Slot { kind, key, value } => {
+                                if *kind == SlotKind::Element {
+                                    self.resolve_node(*key);
+                                }
+                                self.resolve_slot_value(*value);
                             }
-                            self.resolve_slot_value(*value);
+                            Node::SlotMulti { value, .. } => self.resolve_slot_value(*value),
+                            _ => {}
                         }
                     }
                 }
@@ -438,7 +453,10 @@ impl Resolver<'_> {
                 self.resolve_node(lhs);
                 self.resolve_node(rhs);
             }
+            Node::SlotMulti { value, .. } => self.resolve_node(*value),
             Node::Return { value } => self.resolve_node(*value),
+            Node::Break { value: Some(value) } => self.resolve_node(*value),
+            Node::Break { value: None } => {}
             Node::Throw { value } => self.resolve_node(*value),
             Node::Try {
                 body,

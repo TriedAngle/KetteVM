@@ -14,7 +14,7 @@
 use crate::CompileError;
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
-    Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
+    Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
@@ -37,11 +37,15 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
                 out.push(node);
             }
             for &slot in ast.list_items(parts.slots) {
-                if let Node::Slot { kind, key, value } = ast.node(slot) {
-                    if *kind == SlotKind::Element {
-                        collect_objects(ast, *key, out);
+                match ast.node(slot) {
+                    Node::Slot { kind, key, value } => {
+                        if *kind == SlotKind::Element {
+                            collect_objects(ast, *key, out);
+                        }
+                        collect_objects(ast, *value, out);
                     }
-                    collect_objects(ast, *value, out);
+                    Node::SlotMulti { value, .. } => collect_objects(ast, *value, out),
+                    _ => {}
                 }
             }
             if let Node::StmtList { stmts } = ast.node(parts.body) {
@@ -94,6 +98,8 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             collect_objects(ast, *rhs, out);
         }
         Node::Return { value } => collect_objects(ast, *value, out),
+        Node::Break { value: Some(value) } => collect_objects(ast, *value, out),
+        Node::Break { value: None } => {}
         Node::Throw { value } => collect_objects(ast, *value, out),
         Node::Try {
             body,
@@ -104,6 +110,7 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             collect_objects(ast, *handler, out);
         }
         Node::Slot { .. }
+        | Node::SlotMulti { .. }
         | Node::Number(_)
         | Node::String(_)
         | Node::Bool(_)
@@ -177,6 +184,9 @@ fn collect_object_names(
                         collect_object_names(ast, *value, names, None);
                     }
                 }
+                if let Node::SlotMulti { value, .. } = ast.node(slot) {
+                    collect_object_names(ast, *value, names, None);
+                }
             }
             if let Node::StmtList { stmts } = ast.node(parts.body) {
                 for &stmt in ast.list_items(*stmts) {
@@ -239,6 +249,8 @@ fn collect_object_names(
         Node::Return { value } | Node::Throw { value } => {
             collect_object_names(ast, *value, names, None);
         }
+        Node::Break { value: Some(value) } => collect_object_names(ast, *value, names, None),
+        Node::Break { value: None } => {}
         Node::Try {
             body,
             param: _,
@@ -248,6 +260,7 @@ fn collect_object_names(
             collect_object_names(ast, *handler, names, None);
         }
         Node::Slot { .. }
+        | Node::SlotMulti { .. }
         | Node::Number(_)
         | Node::String(_)
         | Node::Bool(_)
@@ -328,6 +341,12 @@ pub fn generate(
     Ok(program)
 }
 
+#[derive(Clone, Copy)]
+struct LoopCtx {
+    break_label: Label,
+    result: Reg,
+}
+
 struct FunctionGen<'a> {
     ast: &'a Ast,
     resolved: &'a Resolved,
@@ -358,6 +377,7 @@ struct FunctionGen<'a> {
     completion: Reg,
     /// decl index of the next `let` in this body (params come first)
     next_let: usize,
+    loops: Vec<LoopCtx>,
 }
 
 impl<'a> FunctionGen<'a> {
@@ -427,6 +447,7 @@ impl<'a> FunctionGen<'a> {
             ctx_save,
             completion,
             next_let: param_count,
+            loops: Vec::new(),
         }
     }
 
@@ -752,6 +773,18 @@ impl<'a> FunctionGen<'a> {
                 self.b.ret();
                 Ok(())
             }
+            Node::Break { value } => {
+                let Some(ctx) = self.loops.last().copied() else {
+                    return self.err(node, "break outside loop");
+                };
+                match value {
+                    Some(value) => self.expr(value)?,
+                    None => self.b.load_null(),
+                }
+                self.b.store(ctx.result);
+                self.b.jump(ctx.break_label);
+                Ok(())
+            }
             Node::If { .. } => {
                 let result = temps.temp();
                 self.emit_if(node, result)?;
@@ -761,7 +794,9 @@ impl<'a> FunctionGen<'a> {
             Node::While { .. } => self.emit_while(node),
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
-            Node::Slot { .. } => unreachable!("slots are only reachable through their object"),
+            Node::Slot { .. } | Node::SlotMulti { .. } => {
+                unreachable!("slots are only reachable through their object")
+            }
             Node::Throw { value } => {
                 self.expr(value)?;
                 self.b.throw();
@@ -938,6 +973,25 @@ impl<'a> FunctionGen<'a> {
                     let feedback = self.b.new_feedback();
                     self.b.store_named_property(obj, name, feedback);
                 }
+                Node::SlotMulti {
+                    kind: SlotKind::Named,
+                    keys,
+                    value,
+                } => {
+                    let temps = self.b.temp_scope();
+                    self.expr(value)?;
+                    let value = self.b.stage_acc(&temps);
+                    for &key in self.ast.list_items(keys) {
+                        let Node::Ident(sym) = *self.ast.node(key) else {
+                            return self.err(key, "named slot key");
+                        };
+                        let name = self.name_constant(sym);
+                        self.b.load(value);
+                        let feedback = self.b.new_feedback();
+                        self.b.store_named_property(obj, name, feedback);
+                    }
+                }
+                Node::SlotMulti { .. } => unreachable!("only named multi slots exist"),
                 Node::Slot {
                     kind: SlotKind::Getter,
                     key,
@@ -1152,8 +1206,15 @@ impl<'a> FunctionGen<'a> {
         };
         let temps = self.b.temp_scope();
         let sink = temps.temp();
+        let result = temps.temp();
         let start = self.b.new_label();
         let end = self.b.new_label();
+        self.b.load_null();
+        self.b.store(result);
+        self.loops.push(LoopCtx {
+            break_label: end,
+            result,
+        });
         self.b.bind(start);
         self.expr(cond)?;
         self.b.jump_if_falsy(end);
@@ -1161,8 +1222,9 @@ impl<'a> FunctionGen<'a> {
         if self.b.is_live() {
             self.b.jump(start);
         }
+        self.loops.pop();
         self.b.bind(end);
-        self.b.load_null();
+        self.b.load(result);
         Ok(())
     }
 

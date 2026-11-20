@@ -23,6 +23,7 @@ use crate::{
     ast::NodeList, ast::ObjectParts, ast::SlotKind, ast::UnaryOp, plumbing::ParseError,
     token::ByteSpan, token::Token, token::TokenKind, token::TokenValue,
 };
+use std::collections::VecDeque;
 
 fn is_name_kind(kind: TokenKind) -> bool {
     kind == TokenKind::Identifier || kind.is_keyword()
@@ -67,6 +68,7 @@ enum Entry {
 pub struct Parser<S: CharStream> {
     scanner: Scanner<S>,
     ast: Ast,
+    buffer: VecDeque<Token>,
 }
 
 impl<S: CharStream> Parser<S> {
@@ -75,7 +77,11 @@ impl<S: CharStream> Parser<S> {
         let self_symbol = scanner.symbols_mut().intern(b"self");
         let mut ast = Ast::new();
         ast.set_self_symbol(self_symbol);
-        Self { scanner, ast }
+        Self {
+            scanner,
+            ast,
+            buffer: VecDeque::new(),
+        }
     }
 
     pub fn ast(&self) -> &Ast {
@@ -107,11 +113,27 @@ impl<S: CharStream> Parser<S> {
     // -- token plumbing ------------------------------------------------------
 
     fn peek(&mut self) -> Result<Token, ParseError> {
+        if let Some(token) = self.buffer.front() {
+            return Ok(*token);
+        }
         self.scanner.peek().clone()
     }
 
     fn next(&mut self) -> Result<Token, ParseError> {
+        if let Some(token) = self.buffer.pop_front() {
+            return Ok(token);
+        }
         self.scanner.next_token()
+    }
+
+    fn peek_nth(&mut self, n: usize) -> Result<Token, ParseError> {
+        if self.buffer.is_empty() {
+            self.buffer.push_back(self.scanner.next_token()?);
+        }
+        while self.buffer.len() <= n {
+            self.buffer.push_back(self.scanner.next_token()?);
+        }
+        Ok(self.buffer[n])
     }
 
     fn eat(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
@@ -368,6 +390,29 @@ impl<S: CharStream> Parser<S> {
                 let span = ByteSpan::new(t.span.start, self.ast.span(value).end);
                 Ok(self.ast.add(Node::Return { value }, span))
             }
+            TokenKind::Break => {
+                self.next()?;
+                let next = self.peek()?;
+                let empty = next.after_newline
+                    || matches!(
+                        next.kind,
+                        TokenKind::RBrace
+                            | TokenKind::RParen
+                            | TokenKind::RBracket
+                            | TokenKind::Semicolon
+                            | TokenKind::Else
+                            | TokenKind::Eof
+                    );
+                if empty {
+                    return Ok(self.ast.add(
+                        Node::Break { value: None },
+                        ByteSpan::new(t.span.start, t.span.end),
+                    ));
+                }
+                let value = self.parse_expression()?;
+                let span = ByteSpan::new(t.span.start, self.ast.span(value).end);
+                Ok(self.ast.add(Node::Break { value: Some(value) }, span))
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -573,12 +618,18 @@ impl<S: CharStream> Parser<S> {
         if t.kind == TokenKind::If
             || t.kind == TokenKind::While
             || t.kind == TokenKind::Return
+            || t.kind == TokenKind::Break
             || t.kind == TokenKind::Try
             || t.kind == TokenKind::Throw
             || t.kind == TokenKind::SelfContext
         {
             let expr = self.parse_expression()?;
             return Ok(Entry::Stmt(self.expr_stmt(expr)?));
+        }
+        if is_name_kind(t.kind)
+            && let Some(slot) = self.multi_slot()?
+        {
+            return Ok(Entry::Slot(slot));
         }
         if is_name_kind(t.kind) {
             let name_tok = self.next()?;
@@ -649,6 +700,56 @@ impl<S: CharStream> Parser<S> {
             return Ok(Entry::Slot(slot));
         }
         Ok(Entry::Stmt(self.expr_stmt(expr)?))
+    }
+
+    /// `a, b, c: value` — several named slots sharing one initializer.
+    fn multi_slot(&mut self) -> Result<Option<NodeId>, ParseError> {
+        let first = self.peek_nth(0)?;
+        if !is_name_kind(first.kind) {
+            return Ok(None);
+        }
+        let mut count = 1;
+        let mut saw_comma = false;
+        loop {
+            let separator = self.peek_nth(count)?;
+            if separator.kind == TokenKind::Colon {
+                if !saw_comma {
+                    return Ok(None);
+                }
+                break;
+            }
+            if separator.kind != TokenKind::Comma {
+                return Ok(None);
+            }
+            saw_comma = true;
+            let next = self.peek_nth(count + 1)?;
+            if !is_name_kind(next.kind) {
+                return Ok(None);
+            }
+            count += 2;
+        }
+        let mut keys = Vec::with_capacity((count + 1) / 2);
+        for offset in 0..count {
+            if offset % 2 == 0 {
+                let token = self.next()?;
+                let name = self.token_name(token)?;
+                keys.push(self.ast.add(Node::Ident(name), token.span));
+            } else {
+                self.expect(TokenKind::Comma)?;
+            }
+        }
+        self.expect(TokenKind::Colon)?;
+        let value = self.parse_expression()?;
+        let span = ByteSpan::new(first.span.start, self.ast.span(value).end);
+        let keys = self.ast.list(&keys);
+        Ok(Some(self.ast.add(
+            Node::SlotMulti {
+                kind: SlotKind::Named,
+                keys,
+                value,
+            },
+            span,
+        )))
     }
 
     fn expr_stmt(&mut self, expr: NodeId) -> Result<NodeId, ParseError> {
