@@ -250,6 +250,44 @@ impl NumberDictionary {
     }
 
     /// Rehash every live entry into `new` (capacity already set).
+    pub fn clone_shallow<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        original: &Handle<'s, NumberDictionary>,
+    ) -> Handle<'s, NumberDictionary> {
+        let source = scope.handle(original.as_tagged(heap));
+        let capacity = source.as_tagged(heap).capacity();
+        let clone =
+            heap.allocate_handle::<NumberDictionary>(NumberDictionaryInit { capacity }, scope);
+        let target = clone.as_tagged(heap);
+        let host = target.tagged(heap);
+        target
+            .nof
+            .set(heap, host, Smi::new(source.as_tagged(heap).nof() as i64));
+        target
+            .nod
+            .set(heap, host, Smi::new(source.as_tagged(heap).nod() as i64));
+        target
+            .flags
+            .set(heap, host, source.as_tagged(heap).flags.get(heap));
+        for entry in 0..capacity {
+            target.key_slot(entry).set(
+                heap,
+                host,
+                source.as_tagged(heap).key_slot(entry).get(heap),
+            );
+            target
+                .value_slot(entry)
+                .set(heap, host, source.as_tagged(heap).value_at(heap, entry));
+            target.details_slot(entry).set(
+                heap,
+                host,
+                Smi::new(source.as_tagged(heap).details_at(heap, entry)).into_tagged(),
+            );
+        }
+        clone
+    }
+
     fn rehash_into(&self, heap: &Heap, new: Tagged<'_, NumberDictionary>) {
         for entry in 0..self.capacity() {
             let Some(index) = self.key_at(heap, entry) else {

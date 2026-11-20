@@ -958,6 +958,24 @@ impl<'a> Tagged<'a, Object> {
     }
 }
 
+fn clone_fixed_array<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    source: Handle<'s, FixedArray>,
+) -> Handle<'s, FixedArray> {
+    let len = source.as_tagged(heap).len();
+    if len == 0 {
+        return scope.handle(heap.known().empty_fixed_array.get(heap));
+    }
+    let clone = heap.allocate_hole_array(len).as_handle(scope);
+    for i in 0..len {
+        clone
+            .as_tagged(heap)
+            .set(heap, i, source.as_tagged(heap).at(heap, i));
+    }
+    clone
+}
+
 pub struct ObjectInit<'a> {
     pub map: Handle<'a, Map>,
     pub slots: Handle<'a, FixedArray>,
@@ -1053,6 +1071,56 @@ impl EdgeVisitable for Object {
 }
 
 impl Object {
+    pub fn clone_shallow<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        receiver: Handle<'_, Value>,
+    ) -> Option<Handle<'s, Object>> {
+        let source = scope.handle(receiver.as_tagged(heap).as_heap_object()?);
+        let kind = source.as_tagged(heap).map(heap).kind();
+        if kind.is_proxy()
+            || kind.is_callable()
+            || kind.is_arguments()
+            || !matches!(kind.kind(), ObjectKind::Object | ObjectKind::Array)
+        {
+            return None;
+        }
+        let map = scope.handle(source.as_tagged(heap).map(heap));
+        let slots = clone_fixed_array(
+            heap,
+            scope,
+            scope.handle(source.as_tagged(heap).slots(heap)),
+        );
+        let length = source.as_tagged(heap).length();
+        let empty = scope.handle(heap.known().empty_fixed_array.get(heap));
+        let clone = heap.allocate_handle::<Object>(
+            ObjectInit {
+                map,
+                slots,
+                elements: empty,
+                length,
+            },
+            scope,
+        );
+        if kind.is_dictionary_elements() {
+            if let Some(dictionary) = source.as_tagged(heap).element_dictionary(heap) {
+                let dictionary = scope.handle(dictionary);
+                let dictionary = NumberDictionary::clone_shallow(heap, scope, &dictionary);
+                let clone = clone.as_tagged(heap);
+                clone
+                    .elements
+                    .set(heap, clone.erase(), dictionary.as_tagged(heap).erase());
+            }
+        } else if let Some(elements) = source.as_tagged(heap).elements_array(heap) {
+            let elements = clone_fixed_array(heap, scope, scope.handle(elements));
+            let clone = clone.as_tagged(heap);
+            clone
+                .elements
+                .set(heap, clone.erase(), elements.as_tagged(heap).erase());
+        }
+        Some(clone)
+    }
+
     pub fn create_closure<'a>(
         heap: &'a mut Heap,
         scope: &HandleScope<'_>,

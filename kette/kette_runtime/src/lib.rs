@@ -11,6 +11,8 @@ pub struct KetteRuntime {
     pub declare_globals: NativeIndex,
     /// Id of the native that installs one accessor half.
     pub install_accessor: NativeIndex,
+    /// Id of the native that shallow-clones an object.
+    pub clone: NativeIndex,
 }
 
 impl EdgeVisitable for KetteRuntime {
@@ -23,6 +25,8 @@ impl Runtime for KetteRuntime {
     fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
         state.declare_globals = vm.register_native(declare_globals);
         state.install_accessor = vm.register_native(install_accessor);
+        state.clone = vm.register_native(object_clone);
+        let clone = state.clone;
         let print = vm.register_native(console_print);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -59,6 +63,7 @@ impl Runtime for KetteRuntime {
                 PropertyDescriptor::data(console.erase()),
             )
             .expect("install console global");
+            Object::install_method(thread, &scope, object_prototype, "clone", clone, 0);
 
             let none_name = scope.handle(thread.intern(&scope, "None").as_tagged(thread.heap()));
             let none = {
@@ -98,6 +103,19 @@ impl Runtime for KetteRuntime {
             Ok(())
         })
     }
+}
+
+fn object_clone<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = scope.handle(call.receiver.as_tagged(heap).erase());
+        let Some(clone) = Object::clone_shallow(heap, &scope, receiver) else {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        };
+        clone.as_tagged(heap).erase()
+    })
 }
 
 fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

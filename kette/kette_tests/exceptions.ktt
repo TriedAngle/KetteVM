@@ -28,6 +28,10 @@ Test.assert(plain_error.name, "Error")
 Test.assert(plain_error.message, "plain")
 Test.assert(plain_error.toString(), "Error: plain")
 
+let error_new = Error.new("new")
+Test.assert(error_new.name, "Error")
+Test.assert(error_new.message, "new")
+
 let missing_element = ElementDoesNotExist("missing")
 Test.assert(missing_element.name, "ElementDoesNotExist")
 Test.assert(missing_element.message, "missing")
