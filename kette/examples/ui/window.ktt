@@ -1,0 +1,361 @@
+// Run from the repository root:
+//   cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/examples/ui/window.ktt
+
+KetteTools.evalFile("kette/vendor/sys.ktt")
+KetteTools.evalFile("kette/vendor/tgpu.ktt")
+KetteTools.evalFile("kette/vendor/glfw.ktt")
+
+let sys = globalThis.sys
+let glfw = globalThis.glfw
+let tgpu = globalThis.tgpu
+let Ptr = FFI.pointer(FFI.void)
+let (struct, u32, f32) = FFI
+
+let CAPACITY = 4096
+let FLOATS = 8
+let INSTANCE_BYTES = FLOATS * 4
+
+let UiPush = struct({
+    instances: u32,
+    screen_width: f32,
+    screen_height: f32,
+    pad: f32,
+})
+
+let window = glfw.create("kette ui", 800, 600)
+let framebuffer_size = FFI.array(FFI.i32, 2).new()
+glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
+let width = framebuffer_size.get(0)
+let height = framebuffer_size.get(1)
+if width <= 0 || height <= 0 {
+    print("window has no framebuffer")
+    sys.raw.exit(1)
+}
+
+let on_key = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void, |handle, key, scancode, action, mods| {
+    if action == 1 && key == 256 {
+        glfw.setShouldClose(handle, 1)
+    }
+})
+glfw.setKeyCallback(window, on_key)
+
+let instance = tgpu.instanceCreate(null)
+tgpu.check()
+let queues = FFI.array(Ptr, 1).new()
+let device = tgpu.deviceCreate(instance, null, queues, 1)
+tgpu.check()
+let queue = queues.get(0)
+
+let swapchain_desc = tgpu.SwapchainDesc.new()
+swapchain_desc.struct_size = tgpu.SwapchainDesc.size()
+swapchain_desc.window = glfw.tgpuWindow(window)
+swapchain_desc.width = width
+swapchain_desc.height = height
+swapchain_desc.image_count = 3
+swapchain_desc.present_mode = tgpu.PresentMode.FIFO
+let swapchain = tgpu.swapchainCreate(device, swapchain_desc)
+tgpu.check()
+
+let extent = tgpu.Extent2D.new()
+tgpu.swapchainExtent(swapchain, extent)
+tgpu.check()
+let color_format = tgpu.swapchainFormat(swapchain)
+
+let buffer_desc = tgpu.BufferDesc.new()
+buffer_desc.struct_size = tgpu.BufferDesc.size()
+buffer_desc.size = CAPACITY * INSTANCE_BYTES
+buffer_desc.usage = tgpu.BufferUsage.STORAGE
+buffer_desc.memory = tgpu.MemoryPreset.DYNAMIC
+buffer_desc.host_access = tgpu.HostAccess.READ_WRITE_RANDOM
+let instance_buffer = tgpu.bufferCreate(device, buffer_desc, null, 0)
+tgpu.check()
+
+let bindless_desc = tgpu.BindlessDesc.new()
+bindless_desc.struct_size = tgpu.BindlessDesc.size()
+bindless_desc.max_read_buffers = 1
+let bindless = tgpu.bindlessCreate(device, bindless_desc)
+tgpu.check()
+let instance_index = tgpu.bindlessAddReadBuffer(bindless, instance_buffer)
+
+let shader = tgpu.loadSlang(device, "kette/examples/ui/shader.slang")
+tgpu.check()
+let vertex_entry = FFI.cstring("vertexMain")
+let fragment_entry = FFI.cstring("fragmentMain")
+
+let color_formats = FFI.array(FFI.i32, 1).new()
+color_formats.set(0, color_format)
+
+let pipeline_desc = tgpu.RenderPipelineDesc.new()
+pipeline_desc.struct_size = tgpu.RenderPipelineDesc.size()
+pipeline_desc.vertex_shader = shader
+pipeline_desc.vertex_entry = vertex_entry
+pipeline_desc.fragment_shader = shader
+pipeline_desc.fragment_entry = fragment_entry
+pipeline_desc.color_formats = color_formats
+pipeline_desc.color_format_count = 1
+pipeline_desc.depth_format = tgpu.Format.UNDEFINED
+pipeline_desc.depth_test = false
+pipeline_desc.depth_write = false
+pipeline_desc.depth_compare = 0
+pipeline_desc.bindless = bindless
+pipeline_desc.push_constant_size = UiPush.size()
+pipeline_desc.cull = 0
+pipeline_desc.front_face = tgpu.FrontFace.COUNTER_CLOCKWISE
+pipeline_desc.topology = tgpu.Topology.TRIANGLE_LIST
+pipeline_desc.blend = tgpu.Blend.ALPHA
+pipeline_desc.vertex_buffer_count = 0
+pipeline_desc.sample_count = 1
+let pipeline = tgpu.renderPipelineCreate(device, pipeline_desc)
+tgpu.check()
+
+let space = Space.new(width, height)
+let toolbar = Splitter.row(
+    8,
+    8,
+    Node.Box(60, 44, rgb(200, 80, 80)),
+    Node.Box(0, 44, rgb(80, 160, 80)),
+    rgb(120, 120, 140)
+)
+let inspector = Node.Window("Inspector", 60, 60, 360, 200, toolbar)
+
+let transcript_body = Splitter.row(
+    6,
+    6,
+    Node.Box(120, 0, rgb(90, 90, 110)),
+    Node.Box(0, 0, rgb(60, 60, 90)),
+    rgb(120, 120, 140)
+)
+let transcript = Node.Window("Transcript", 240, 180, 380, 240, transcript_body)
+
+space.root.addChild(inspector)
+space.root.addChild(transcript)
+Space.frame(space)
+
+let mouse = FFI.array(FFI.f32, 2).new()
+let window_size = FFI.array(FFI.i32, 2).new()
+let cursor_framebuffer = FFI.array(FFI.i32, 2).new()
+let drag = {
+    active: 0,
+    mode: 0,
+    window: null,
+    splitter: null,
+    dx: 0,
+    dy: 0,
+    startX: 0
+}
+
+let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, |handle, x, y| {
+    glfw.windowSize(handle, window_size.add(0), window_size.add(1))
+    glfw.framebufferSize(handle, cursor_framebuffer.add(0), cursor_framebuffer.add(1))
+    let window_width = window_size.get(0)
+    let window_height = window_size.get(1)
+    let frame_width = cursor_framebuffer.get(0)
+    let frame_height = cursor_framebuffer.get(1)
+    let scale_x = if window_width > 0 { frame_width / window_width } else { 1.0 }
+    let scale_y = if window_height > 0 { frame_height / window_height } else { 1.0 }
+    let mouse_x = x * scale_x
+    let mouse_y = y * scale_y
+    mouse.set(0, mouse_x)
+    mouse.set(1, mouse_y)
+    if drag.active == 1 {
+        if drag.mode == 2 && drag.splitter != null {
+            let delta = mouse_x - drag.startX
+            drag.startX = mouse_x
+            Splitter.resize(drag.splitter, delta)
+        } else if drag.mode == 1 && drag.window != null {
+            drag.window.x = Math.floor(mouse_x - drag.dx)
+            drag.window.y = Math.floor(mouse_y - drag.dy)
+            drag.window.markPaint()
+        }
+    }
+})
+glfw.setCursorPosCallback(window, on_cursor)
+
+let on_button = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32], FFI.void, |handle, button, action, mods| {
+    if button == 0 {
+        if action == 1 {
+            let hit = Hit.test(space.root, mouse.get(0), mouse.get(1))
+            if hit != null {
+                let win = Windows.rootOf(hit)
+                if win != null { Windows.raise(space.root, win) }
+                if hit.kind == K_SPLITTER {
+                    drag.active = 1
+                    drag.mode = 2
+                    drag.splitter = hit
+                    drag.startX = mouse.get(0)
+                } else if win != null {
+                    drag.active = 1
+                    drag.mode = 1
+                    drag.window = win
+                    drag.dx = mouse.get(0) - win.x
+                    drag.dy = mouse.get(1) - win.y
+                }
+            }
+        } else if action == 0 {
+            drag.active = 0
+            drag.mode = 0
+            drag.window = null
+            drag.splitter = null
+        }
+    }
+})
+glfw.setMouseButtonCallback(window, on_button)
+
+let instances = FFI.array(FFI.f32, CAPACITY * FLOATS).new()
+
+let fill_instances = |ops| {
+    let count = 0
+    let i = 0
+    while i < ops.length {
+        let op = ops[i]
+        if op == OP_RECT {
+            if count < CAPACITY {
+                let x = ops[i + 1]
+                let y = ops[i + 2]
+                let w = ops[i + 3]
+                let h = ops[i + 4]
+                let color = ops[i + 5]
+                let r = Math.floor(color / 65536)
+                let g = Math.floor(color / 256) - r * 256
+                let b = color - r * 65536 - g * 256
+                let base = count * FLOATS
+                instances.set(base + 0, x)
+                instances.set(base + 1, y)
+                instances.set(base + 2, w)
+                instances.set(base + 3, h)
+                instances.set(base + 4, r / 255.0)
+                instances.set(base + 5, g / 255.0)
+                instances.set(base + 6, b / 255.0)
+                instances.set(base + 7, 1.0)
+                count = count + 1
+            }
+            i = i + 6
+        } else if op == OP_SHADOW {
+            i = i + 6
+        } else if op == OP_CLIP {
+            i = i + 5
+        } else if op == OP_CLIP_POP {
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    count
+}
+
+let frame = tgpu.Frame.new()
+let attachment = tgpu.ColorAttachment.new()
+let attachments = FFI.array(tgpu.ColorAttachment, 1).new()
+let render_info = tgpu.RenderDesc.new()
+render_info.struct_size = tgpu.RenderDesc.size()
+render_info.color_count = 1
+render_info.colors = attachments
+let commands = FFI.array(Ptr, 1).new()
+let ui_push = UiPush.new()
+ui_push.instances = instance_index
+
+while glfw.shouldClose(window) == 0 {
+    glfw.pollEvents()
+
+    glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
+    let frame_width = framebuffer_size.get(0)
+    let frame_height = framebuffer_size.get(1)
+
+    if frame_width > 0 && frame_height > 0 {
+        if frame_width != extent.width || frame_height != extent.height {
+            extent.width = frame_width
+            extent.height = frame_height
+            tgpu.swapchainSetExtent(swapchain, extent)
+            tgpu.swapchainRecreate(swapchain)
+            tgpu.check()
+            space.root.w = frame_width
+            space.root.h = frame_height
+            space.root.markLayout()
+        }
+
+        tgpu.swapchainBeginFrame(queue, swapchain, frame)
+        tgpu.check()
+        tgpu.swapchainExtent(swapchain, extent)
+        tgpu.check()
+
+        let ops = Space.frame(space)
+        let count = fill_instances(ops)
+        if count > 0 {
+            tgpu.bufferWrite(
+                instance_buffer,
+                0,
+                instances.cast(FFI.u8),
+                count * INSTANCE_BYTES
+            )
+        }
+
+        ui_push.screen_width = extent.width
+        ui_push.screen_height = extent.height
+
+        let recorder = tgpu.recorderBegin(queue)
+        tgpu.recorderTransitionFrame(recorder, swapchain, frame, tgpu.ImageLayout.COLOR)
+
+        attachment.view = tgpu.swapchainView(swapchain, frame)
+        attachment.layout = tgpu.ImageLayout.COLOR
+        attachment.load = tgpu.LoadOp.CLEAR
+        attachment.store = tgpu.StoreOp.STORE
+        attachment.clear_color.set(0, 0.05)
+        attachment.clear_color.set(1, 0.05)
+        attachment.clear_color.set(2, 0.06)
+        attachment.clear_color.set(3, 1.0)
+        attachments.set(0, attachment)
+
+        render_info.width = extent.width
+        render_info.height = extent.height
+
+        tgpu.recorderBindRender(recorder, pipeline, bindless, ui_push, UiPush.size())
+        tgpu.recorderBeginRender(recorder, render_info)
+        tgpu.recorderDraw(recorder, 0, 6, 0, count)
+        tgpu.recorderEndRender(recorder)
+        tgpu.recorderTransitionFrame(recorder, swapchain, frame, tgpu.ImageLayout.PRESENT)
+        tgpu.check()
+
+        let command = tgpu.recorderFinish(recorder)
+        commands.set(0, command)
+        tgpu.swapchainEndFrame(queue, swapchain, frame, commands, 1)
+        tgpu.commandBufferDestroy(command)
+        tgpu.check()
+
+        Space.tick(space, 16)
+    }
+}
+
+tgpu.deviceWaitIdle(device)
+
+tgpu.bindlessDestroy(bindless)
+tgpu.bufferDestroy(instance_buffer)
+tgpu.renderPipelineDestroy(pipeline)
+tgpu.shaderDestroy(shader)
+tgpu.swapchainDestroy(swapchain)
+tgpu.queueDestroy(queue)
+tgpu.deviceDestroy(device)
+tgpu.instanceDestroy(instance)
+
+instances.free()
+framebuffer_size.free()
+mouse.free()
+window_size.free()
+cursor_framebuffer.free()
+queues.free()
+color_formats.free()
+attachments.free()
+swapchain_desc.free()
+buffer_desc.free()
+bindless_desc.free()
+pipeline_desc.free()
+render_info.free()
+frame.free()
+extent.free()
+attachment.free()
+commands.free()
+ui_push.free()
+vertex_entry.free()
+fragment_entry.free()
+
+glfw.destroyWindow(window)
+glfw.terminate()

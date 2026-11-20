@@ -22,6 +22,14 @@ Switches in `kette/examples/ui/demo.ktt`:
 - `TERMINAL`: `0` off, `1` ASCII, `2` ANSI truecolor.
 - `SHOW_OPS`: `1` dumps the flat paint list under the tree.
 
+The GLFW window demo draws the same scene with tgpu:
+
+    cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/examples/ui/window.ktt
+
+It needs the `tgpu-native` build, a Vulkan loader (MoltenVK on macOS), `slangc`,
+and GLFW. It renders the flat `OP_RECT` list as instanced quads. `tgpu` falls back
+to `$VULKAN_SDK/lib/libvulkan.dylib` when the loader is not on `DYLD_*PATH`.
+
 ## Other examples
 
 Quick standalone scripts:

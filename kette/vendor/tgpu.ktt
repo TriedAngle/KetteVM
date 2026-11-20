@@ -94,6 +94,30 @@ let ComputePipelineDesc = struct({
     bindless: Ptr,
     push_constant_size: u32,
 })
+let VertexAttribute = struct({
+    location: u32,
+    binding: u32,
+    format: i32,
+    offset: u32,
+})
+let VertexBufferLayout = struct({
+    binding: u32,
+    stride: u32,
+    input_rate: i32,
+    attributes: Ptr,
+    attribute_count: u64,
+})
+let BufferImageCopy = struct({
+    buffer_offset: u64,
+    buffer_row_length: u32,
+    buffer_image_height: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    width: u32,
+    height: u32,
+    depth: u32,
+})
 let RenderPipelineDesc = struct({
     struct_size: u64,
     label: CString,
@@ -115,6 +139,7 @@ let RenderPipelineDesc = struct({
     blend: i32,
     vertex_buffers: Ptr,
     vertex_buffer_count: u64,
+    sample_count: u32,
 })
 let ColorAttachment = struct({
     view: ImageView,
@@ -204,6 +229,20 @@ let raw = {
     recorder_bind_render: lib.fn("tgpu_recorder_bind_render", [Ptr, Ptr, Ptr, Ptr, u64], i32),
     recorder_begin_render: lib.fn("tgpu_recorder_begin_render", [Ptr, Ptr], i32),
     recorder_draw: lib.fn("tgpu_recorder_draw", [Ptr, u32, u32, u32, u32], i32),
+    recorder_draw_indexed: lib.fn("tgpu_recorder_draw_indexed", [Ptr, u32, u32, i32, u32, u32], i32),
+    recorder_bind_vertex: lib.fn("tgpu_recorder_bind_vertex_buffer", [Ptr, u32, Ptr, u64], i32),
+    recorder_update_buffer: lib.fn("tgpu_recorder_update_buffer", [Ptr, Ptr, u64, Ptr, u64], i32),
+    recorder_buffer_transition: lib.fn("tgpu_recorder_buffer_transition", [Ptr, Ptr, i32, i32], i32),
+    recorder_copy_buffer_to_image: lib.fn("tgpu_recorder_copy_buffer_to_image", [Ptr, Ptr, Image, i32, Ptr], i32),
+    recorder_copy_image_to_buffer: lib.fn("tgpu_recorder_copy_image_to_buffer", [Ptr, Image, i32, Ptr, Ptr], i32),
+    buffer_write: lib.fn("tgpu_buffer_write", [Ptr, u64, Ptr, u64], i32),
+    buffer_read: lib.fn("tgpu_buffer_read", [Ptr, u64, Ptr, u64], i32),
+    texture_create: lib.fn("tgpu_queue_create_texture_2d", [Ptr, Ptr, Ptr, Ptr, u64], Ptr),
+    bindless_add_read: lib.fn("tgpu_bindless_add_read_buffer", [Ptr, Ptr], u32),
+    bindless_add_uniform: lib.fn("tgpu_bindless_add_uniform_buffer", [Ptr, Ptr, u64], u32),
+    swapchain_set_present: lib.fn("tgpu_swapchain_set_present_mode", [Ptr, i32], void),
+    queue_submit: lib.fn("tgpu_queue_submit", [Ptr, Ptr, u64, Ptr], i32),
+    queue_wait: lib.fn("tgpu_queue_wait", [Ptr, u64], i32),
     recorder_end_render: lib.fn("tgpu_recorder_end_render", [Ptr], i32),
     recorder_finish: lib.fn("tgpu_recorder_finish", [Ptr], Ptr),
     command_buffer_destroy: lib.fn("tgpu_command_buffer_destroy", [Ptr], void),
@@ -252,6 +291,9 @@ let tgpu = {
     ViewImageDesc: ViewImageDesc,
     BindlessDesc: BindlessDesc,
     ComputePipelineDesc: ComputePipelineDesc,
+    VertexAttribute: VertexAttribute,
+    VertexBufferLayout: VertexBufferLayout,
+    BufferImageCopy: BufferImageCopy,
     RenderPipelineDesc: RenderPipelineDesc,
     ColorAttachment: ColorAttachment,
     RenderDesc: RenderDesc,
@@ -268,14 +310,21 @@ let tgpu = {
     },
     MemoryPreset: {
         GPU_ONLY: 0,
+        UPLOAD: 1,
+        READBACK: 2,
         DYNAMIC: 3,
+        TRANSIENT_ATTACHMENT: 4,
     },
     HostAccess: {
         NONE: 0,
+        WRITE_SEQUENTIAL: 1,
+        READ_RANDOM: 2,
         READ_WRITE_RANDOM: 3,
     },
     BufferUsage: {
+        COPY_SRC: 1,
         COPY_DST: 2,
+        VERTEX: 8,
         STORAGE: 32,
     },
     ImageUsage: {
@@ -291,10 +340,14 @@ let tgpu = {
         COMPUTE: 2,
         FRAGMENT: 3,
         COLOR: 4,
+        DEPTH_STENCIL: 5,
+        TRANSFER_DST: 6,
         PRESENT: 7,
     },
     LoadOp: {
+        LOAD: 0,
         CLEAR: 1,
+        DONT_CARE: 2,
     },
     StoreOp: {
         STORE: 0,
@@ -322,6 +375,11 @@ let tgpu = {
     },
     Blend: {
         DISABLED: 0,
+        ALPHA: 1,
+    },
+    VertexInputRate: {
+        VERTEX: 0,
+        INSTANCE: 1,
     },
     // Stops at the first recorded error. Swap this for `throw` once
     // Kette has exceptions.
@@ -566,6 +624,78 @@ let tgpu = {
             ),
             "tgpu_recorder_draw"
         )
+    },
+    recorderDrawIndexed: { |recorder, first_index, index_count, vertex_offset, first_instance, instance_count|
+        record_status(
+            raw.recorder_draw_indexed(
+                recorder,
+                first_index,
+                index_count,
+                vertex_offset,
+                first_instance,
+                instance_count
+            ),
+            "tgpu_recorder_draw_indexed"
+        )
+    },
+    recorderBindVertexBuffer: { |recorder, slot, buffer, offset|
+        record_status(
+            raw.recorder_bind_vertex(recorder, slot, buffer, offset),
+            "tgpu_recorder_bind_vertex_buffer"
+        )
+    },
+    recorderUpdateBuffer: { |recorder, buffer, offset, data, len|
+        record_status(
+            raw.recorder_update_buffer(recorder, buffer, offset, data, len),
+            "tgpu_recorder_update_buffer"
+        )
+    },
+    recorderBufferTransition: { |recorder, buffer, from, to|
+        record_status(
+            raw.recorder_buffer_transition(recorder, buffer, from, to),
+            "tgpu_recorder_buffer_transition"
+        )
+    },
+    recorderCopyBufferToImage: { |recorder, buffer, image, layout, region|
+        record_status(
+            raw.recorder_copy_buffer_to_image(recorder, buffer, image, layout, region),
+            "tgpu_recorder_copy_buffer_to_image"
+        )
+    },
+    recorderCopyImageToBuffer: { |recorder, image, layout, buffer, region|
+        record_status(
+            raw.recorder_copy_image_to_buffer(recorder, image, layout, buffer, region),
+            "tgpu_recorder_copy_image_to_buffer"
+        )
+    },
+    bufferWrite: { |buffer, offset, data, len|
+        record_status(raw.buffer_write(buffer, offset, data, len), "tgpu_buffer_write")
+    },
+    bufferRead: { |buffer, offset, data, len|
+        record_status(raw.buffer_read(buffer, offset, data, len), "tgpu_buffer_read")
+    },
+    textureCreate: { |queue, device, desc, data, len|
+        let value = raw.texture_create(queue, device, desc, data, len)
+        record_last("tgpu_queue_create_texture_2d")
+        value
+    },
+    bindlessAddReadBuffer: { |heap, buffer|
+        raw.bindless_add_read(heap, buffer)
+    },
+    bindlessAddUniformBuffer: { |heap, buffer, range|
+        raw.bindless_add_uniform(heap, buffer, range)
+    },
+    swapchainSetPresentMode: { |swapchain, mode|
+        raw.swapchain_set_present(swapchain, mode)
+    },
+    queueSubmit: { |queue, commands, count, out_value|
+        record_status(
+            raw.queue_submit(queue, commands, count, out_value),
+            "tgpu_queue_submit"
+        )
+    },
+    queueWait: { |queue, value|
+        record_status(raw.queue_wait(queue, value), "tgpu_queue_wait")
     },
     recorderEndRender: { |recorder|
         record_status(raw.recorder_end_render(recorder), "tgpu_recorder_end_render")
