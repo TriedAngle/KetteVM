@@ -1,11 +1,11 @@
 use crate::{
-    AccessorPair, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
+    AccessorPair, CValue, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
     NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
-    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
-    VmError, WrapperKind, bail, errors::Errors, raise_runtime,
+    SiblingChange, SlotName, Smi, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value,
+    Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
 };
 use core::alloc::Layout;
 
@@ -37,21 +37,15 @@ impl Object {
         if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
             return None;
         }
+        if kind.kind() == ObjectKind::CValue {
+            // Safety: the map kind is the type witness.
+            let value = unsafe { self.tagged(heap).cast::<CValue>() };
+            return value.callable(heap);
+        }
         // every non-exotic callable is laid out as [info, context]
         self.slots(heap)
             .at(heap, 0)
             .get_as::<CallableInfoObject>(heap)
-    }
-
-    pub fn closure_context<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ContextObject>> {
-        let kind = self.map(heap).kind();
-        if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
-            return None;
-        }
-        self.slots
-            .get(heap)
-            .at(heap, 1)
-            .get_as::<ContextObject>(heap)
     }
 
     /// The `idx`-th entry of the callable's constant pool, as a slot name.
@@ -371,6 +365,14 @@ impl<'a> Tagged<'a, Value> {
         }
         if !kind.is_callable() {
             return None;
+        }
+        if kind.kind() == ObjectKind::CValue {
+            // Safety: the map kind is the type witness.
+            let value = unsafe { obj.cast::<CValue>() };
+            return value
+                .callable(heap)
+                .and_then(|info| info.native_index(heap))
+                .map(CallTarget::Native);
         }
         // every non-runtime callable object is laid out with
         // `[callable info, context]` in its first two slots
@@ -987,19 +989,19 @@ impl Object {
     /// Initialize fresh storage directly from anchored words, without
     /// `Handle`s. The bump-allocation fast paths call this after reading
     /// well-known words and guarantee no GC between the reads and here.
+    #[inline]
     pub fn init_raw(
         &mut self,
-        heap: &Heap,
         map: Tagged<'_, Map>,
         slots: Tagged<'_, FixedArray>,
         elements: Tagged<'_, FixedArray>,
         length: usize,
     ) {
-        let host = self.tagged(heap);
-        self.header.map.set(heap, host, map);
-        self.slots.set(heap, host, slots);
-        self.elements.set(heap, host, elements.erase());
-        self.length.set(heap, host, Smi::new(length as i64));
+        self.header.map.init(map);
+        self.slots.init(slots);
+        self.elements.init(elements.erase());
+        self.length
+            .init_tagged(Tagged::<Smi>::from(Smi::new(length as i64)));
     }
 }
 
@@ -1014,6 +1016,8 @@ impl HeapObject for Object {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Oddball
+                | ObjectKind::CValue
+                | ObjectKind::ThreadObject
         )
     }
     type Init<'a> = ObjectInit<'a>;
@@ -1024,7 +1028,6 @@ impl HeapObject for Object {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.init_raw(
-            heap,
             config.map.as_tagged(heap),
             config.slots.as_tagged(heap),
             config.elements.as_tagged(heap),
@@ -1456,7 +1459,7 @@ impl Object {
             s.undefined.get(heap)
         } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
             s.boolean.get(heap)
-        } else if v.get_as::<DenseString>(heap).is_some() {
+        } else if StringRef::try_from(heap, v).is_some() {
             s.string.get(heap)
         } else if v.get_as::<Symbol>(heap).is_some() {
             s.symbol.get(heap)

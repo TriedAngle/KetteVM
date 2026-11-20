@@ -1,9 +1,9 @@
 use crate::{block::ALIGN, block::FreeList, block::need_for};
 use core::alloc::Layout;
-use heap_api::{AllocError, CellRef, GcHost, HeapPtr, ObjectAddr};
+use heap_api::{AllocError, CellRef, GcHost, HeapPtr, HeapStats, ObjectAddr};
 use heap_utils::MMapBuffer;
 use std::{
-    sync::Arc, sync::Mutex, sync::atomic::AtomicU8, sync::atomic::AtomicU64,
+    collections::VecDeque, sync::Arc, sync::Mutex, sync::atomic::AtomicU8, sync::atomic::AtomicU64,
     sync::atomic::AtomicUsize, sync::atomic::Ordering,
 };
 
@@ -12,23 +12,25 @@ pub const CHUNK_SIZE: usize = 256 * 1024;
 const SWEPT: u8 = 0;
 const PENDING: u8 = 1;
 const SWEEPING: u8 = 2;
+/// Max ready chunks probed per allocation.
+const READY_PROBE: usize = 8;
 
 const FLAG_YOUNG: u64 = 1 << 0;
 
 #[repr(C)]
 pub struct ChunkHeader {
-    /// bit 0: the chunk is in the young set
+    /// Young chunk flag.
     flags: AtomicU64,
-    /// Remember bits: 8 byte granule
+    /// Remembered bits, 8-byte slots.
     remembered: [AtomicU64; REMEMBERED_WORDS],
-    /// Mark bits: one bit per 16-byte granule in the usable region.
+    /// Mark bits, 16-byte granules.
     mark: [AtomicU64; MARK_WORDS],
     _pad: [u8; HEADER_SIZE - 8 - REMEMBERED_WORDS * 8 - MARK_WORDS * 8],
 }
 
-/// 512 words cover 512·64·8 = 256 KiB of 8-byte slots: a full chunk.
+// 512 words cover a full chunk of 8-byte slots.
 const REMEMBERED_WORDS: usize = 512;
-/// 256 words cover 256·64·16 = 256 KiB of 16-byte granules: a full chunk.
+// 256 words cover a full chunk of 16-byte granules.
 const MARK_WORDS: usize = 256;
 pub const HEADER_SIZE: usize = 8 * 1024;
 
@@ -141,8 +143,7 @@ impl ChunkHeader {
     }
 }
 
-/// The mapped region the chunks are carved from. Cheap to copy, so the
-/// collector threads can each hold their own view of it.
+/// The mapped region chunks are carved from.
 #[derive(Clone, Copy)]
 pub struct Reservation {
     base: usize,
@@ -170,15 +171,12 @@ impl Reservation {
         self.base + (addr - self.base) / CHUNK_SIZE * CHUNK_SIZE
     }
 
-    /// The header of the chunk containing `addr`.
     pub fn header(&self, addr: usize) -> &ChunkHeader {
         debug_assert!(self.contains(addr), "address outside the reservation");
-        // Safety: the reservation is mapped read-write for its whole length
-        // and each chunk starts with its header.
+        // Safety: the reservation is mapped and chunks start with a header.
         unsafe { &*(self.chunk_base(addr) as *const ChunkHeader) }
     }
 
-    /// The object starting at `addr`.
     pub fn object(&self, addr: usize) -> ObjectAddr {
         debug_assert!(self.contains(addr), "object outside the reservation");
         debug_assert_eq!(addr % ALIGN, 0, "unaligned object address");
@@ -186,7 +184,6 @@ impl Reservation {
         unsafe { ObjectAddr::from_addr(addr) }
     }
 
-    /// The traced slot at `addr`.
     pub fn cell(&self, addr: usize) -> CellRef {
         debug_assert!(self.contains(addr), "cell outside the reservation");
         // Safety: inside the reservation.
@@ -255,10 +252,6 @@ impl Chunk {
         }
     }
 
-    pub fn base_addr(&self) -> usize {
-        self.base.addr()
-    }
-
     pub fn base(&self) -> HeapPtr<u8> {
         self.base
     }
@@ -268,8 +261,7 @@ impl Chunk {
     }
 
     pub fn header(&self) -> &ChunkHeader {
-        // Safety: the chunk header lives in the reservation for the chunk's
-        // whole lifetime and is not moved by collection.
+        // Safety: the header is fixed in the reservation.
         unsafe { self.header.as_ref() }
     }
 
@@ -290,21 +282,32 @@ impl Chunk {
     }
 
     fn state(&self) -> u8 {
-        self.state.load(Ordering::Relaxed)
+        self.state.load(Ordering::Acquire)
     }
 }
+
+const NO_LIVE: usize = usize::MAX;
 
 pub struct ChunkedHeap {
     buffer: MMapBuffer,
     chunk_size: usize,
+    table: Mutex<ChunkTable>,
+    ready: Mutex<ReadyLists>,
+    pending_chunks: AtomicUsize,
+    sweep_live: AtomicUsize,
+    completed_live: AtomicUsize,
+    young_chunks: AtomicUsize,
+}
+
+struct ChunkTable {
     slots: Vec<Option<Arc<Chunk>>>,
     pooled: Vec<usize>,
     carved: usize,
-    pending_chunks: usize,
-    sweep_live: usize,
-    completed_live: Option<usize>,
-    atomic_sweep_block: bool,
-    young_chunks: usize,
+}
+
+struct ReadyLists {
+    old: VecDeque<Arc<Chunk>>,
+    young: VecDeque<Arc<Chunk>>,
 }
 
 impl ChunkedHeap {
@@ -315,19 +318,20 @@ impl ChunkedHeap {
         Ok(Self {
             buffer,
             chunk_size,
-            slots: (0..slots).map(|_| None).collect(),
-            pooled: Vec::new(),
-            carved: 0,
-            pending_chunks: 0,
-            sweep_live: 0,
-            completed_live: None,
-            atomic_sweep_block: false,
-            young_chunks: 0,
+            table: Mutex::new(ChunkTable {
+                slots: (0..slots).map(|_| None).collect(),
+                pooled: Vec::new(),
+                carved: 0,
+            }),
+            ready: Mutex::new(ReadyLists {
+                old: VecDeque::new(),
+                young: VecDeque::new(),
+            }),
+            pending_chunks: AtomicUsize::new(0),
+            sweep_live: AtomicUsize::new(0),
+            completed_live: AtomicUsize::new(NO_LIVE),
+            young_chunks: AtomicUsize::new(0),
         })
-    }
-
-    pub fn young_chunk_count(&self) -> usize {
-        self.young_chunks
     }
 
     pub fn reservation(&self) -> Reservation {
@@ -337,14 +341,27 @@ impl ChunkedHeap {
         }
     }
 
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
+    pub fn reserve_size(&self) -> usize {
+        self.buffer.size()
+    }
+
+    pub fn young_chunk_count(&self) -> usize {
+        self.young_chunks.load(Ordering::Relaxed)
+    }
+
     pub fn is_young_addr(&self, addr: usize) -> bool {
         self.reservation().header(addr).young()
     }
 
     pub fn remembered_slots(&self) -> Vec<CellRef> {
         let reservation = self.reservation();
+        let table = self.table.lock().unwrap();
         let mut slots = Vec::new();
-        for chunk in self.slots.iter().flatten() {
+        for chunk in table.slots.iter().flatten() {
             slots.extend(
                 chunk
                     .header()
@@ -356,33 +373,43 @@ impl ChunkedHeap {
     }
 
     pub fn clear_remembered_sets(&self) {
-        for chunk in self.slots.iter().flatten() {
+        let table = self.table.lock().unwrap();
+        for chunk in table.slots.iter().flatten() {
             chunk.header().clear_remembered();
         }
     }
 
+    pub fn clear_marks(&self) {
+        let table = self.table.lock().unwrap();
+        for chunk in table.slots.iter().flatten() {
+            chunk.header().clear_mark();
+        }
+    }
+
     pub fn young_indices(&self) -> Vec<usize> {
-        self.slots
+        let table = self.table.lock().unwrap();
+        table
+            .slots
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| slot.as_ref().filter(|c| c.is_young()).map(|_| i))
             .collect()
     }
 
-    pub fn remove_chunks(&mut self, indices: &[usize]) {
+    pub fn remove_chunks(&self, indices: &[usize]) {
+        let mut table = self.table.lock().unwrap();
+        self.ready.lock().unwrap().young.clear();
         for &index in indices {
-            let removed = self.slots[index].take().unwrap();
+            let removed = table.slots[index].take().unwrap();
             debug_assert!(removed.is_young(), "only young chunks are freed wholesale");
-            self.young_chunks -= 1;
-            // Keep the pages resident: minors recycle the same young chunks
-            // right away, and MADV_DONTNEED here only buys refault churn on
-            // the next allocation cycle.
+            self.young_chunks.fetch_sub(1, Ordering::Relaxed);
+            // Keep pages resident; minors reuse these chunks immediately.
             drop(removed);
-            self.pooled.push(index);
+            table.pooled.push(index);
         }
     }
 
-    pub fn finish_promotion(&mut self, chunk: &Chunk, cursor: usize) {
+    pub fn finish_promotion(&self, chunk: &Arc<Chunk>, cursor: usize) {
         let remainder = chunk.object_size() - cursor;
         let free = if remainder >= 2 * ALIGN {
             // Safety: the cursor stays inside the chunk's object region.
@@ -393,162 +420,108 @@ impl ChunkedHeap {
         };
         chunk.free_bytes.store(free.free_bytes(), Ordering::Relaxed);
         *chunk.free.lock().unwrap() = free;
+        self.ready.lock().unwrap().push(Arc::clone(chunk));
     }
 
-    pub fn activate_promotion_chunk(&mut self) -> Option<Arc<Chunk>> {
-        self.activate_chunk(false)
+    pub fn activate_promotion_chunk(&self) -> Option<Arc<Chunk>> {
+        let mut table = self.table.lock().unwrap();
+        self.activate_chunk(&mut table, false)
     }
 
-    pub fn chunk_size(&self) -> usize {
-        self.chunk_size
-    }
-
-    pub fn reserve_size(&self) -> usize {
-        self.buffer.size()
-    }
-
-    pub fn committed_bytes(&self) -> usize {
-        self.slots.iter().flatten().map(|c| c.object_size()).sum()
-    }
-
-    pub fn live_bytes(&self) -> usize {
-        self.slots
-            .iter()
-            .flatten()
-            .map(|c| c.free.lock().unwrap().live_bytes())
-            .sum()
-    }
-
-    pub fn free_bytes(&self) -> usize {
-        self.slots
-            .iter()
-            .flatten()
-            .map(|c| c.free_bytes.load(Ordering::Relaxed))
-            .sum()
+    pub fn stats(&self) -> HeapStats {
+        let table = self.table.lock().unwrap();
+        let mut used = 0;
+        let mut free = 0;
+        let mut capacity = 0;
+        for chunk in table.slots.iter().flatten() {
+            let free_list = chunk.free.lock().unwrap();
+            used += free_list.live_bytes();
+            free += free_list.free_bytes();
+            capacity += chunk.object_size();
+        }
+        HeapStats {
+            used,
+            capacity,
+            free,
+        }
     }
 
     pub fn active_chunks(&self) -> usize {
-        self.carved - self.pooled.len()
+        let table = self.table.lock().unwrap();
+        table.carved - table.pooled.len()
     }
 
     pub fn available_chunks(&self) -> usize {
-        self.pooled.len() + (self.slots.len() - self.carved)
+        let table = self.table.lock().unwrap();
+        table.pooled.len() + (table.slots.len() - table.carved)
     }
 
     pub fn pending_chunks(&self) -> usize {
-        self.pending_chunks
+        self.pending_chunks.load(Ordering::Relaxed)
     }
 
     pub fn in_heap(&self, addr: usize) -> bool {
+        let table = self.table.lock().unwrap();
         let base = self.buffer.start().addr();
-        addr >= base && addr < base + self.carved * self.chunk_size
+        addr >= base && addr < base + table.carved * self.chunk_size
     }
 
-    pub fn chunk_of(&self, addr: usize) -> &Chunk {
+    pub fn chunk_of(&self, addr: usize) -> Arc<Chunk> {
+        let table = self.table.lock().unwrap();
         let base = self.buffer.start().addr();
         let index = (addr - base) / self.chunk_size;
-        debug_assert!(index < self.slots.len(), "address outside reservation");
-        self.slots[index]
-            .as_ref()
-            .expect("pointer into pooled or uncarved chunk")
+        debug_assert!(index < table.slots.len(), "address outside reservation");
+        Arc::clone(
+            table.slots[index]
+                .as_ref()
+                .expect("pointer into pooled or uncarved chunk"),
+        )
     }
 
-    /// First-fit
+    /// Allocate any size from a ready chunk, then a fresh one.
+    /// `nursery` restricts reuse and pending claims to young chunks.
     pub fn allocate(
-        &mut self,
+        &self,
         layout: Layout,
         host: Option<&GcHost>,
+        nursery: bool,
     ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
-        self.allocate_impl(layout, host, false)
-    }
-
-    /// Nursery allocation for TLAB refills: only young chunks serve it, so
-    /// freshly allocated small objects are always minor-GC candidates.
-    pub fn allocate_young(
-        &mut self,
-        layout: Layout,
-        host: Option<&GcHost>,
-    ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
-        self.allocate_impl(layout, host, true)
-    }
-
-    fn allocate_impl(
-        &mut self,
-        layout: Layout,
-        host: Option<&GcHost>,
-        young_only: bool,
-    ) -> (Option<HeapPtr<u8>>, Option<Arc<Chunk>>) {
-        if let Some(ptr) = self.allocate_swept(layout, young_only) {
+        if let Some(ptr) = self.ready.lock().unwrap().take_ready(layout, nursery) {
             return (Some(ptr), None);
         }
-        if host.is_some()
-            && let Some(chunk) = self.claim_pending(young_only)
-        {
-            return (None, Some(chunk));
-        }
-        match self.activate_chunk(true) {
-            Some(chunk) => {
+
+        let fresh = {
+            let mut table = self.table.lock().unwrap();
+            self.activate_chunk(&mut table, true)
+        };
+        if let Some(chunk) = fresh {
+            let ptr = {
                 let mut free = chunk.free.lock().unwrap();
                 let ptr = free.allocate(layout);
                 chunk.free_bytes.store(free.free_bytes(), Ordering::Relaxed);
-                (ptr, None)
-            }
-            None => (None, None),
-        }
-    }
-
-    fn allocate_swept(&mut self, layout: Layout, young_only: bool) -> Option<HeapPtr<u8>> {
-        let need = need_for(layout);
-        for slot in &self.slots {
-            let Some(chunk) = slot else { continue };
-            if young_only && !chunk.is_young() {
-                continue;
-            }
-            if chunk.state() != SWEPT {
-                continue;
-            }
-            if chunk.free_bytes.load(Ordering::Relaxed) < need {
-                continue;
-            }
-            let mut free = chunk.free.lock().unwrap();
-            if let Some(ptr) = free.allocate(layout) {
-                chunk.free_bytes.store(free.free_bytes(), Ordering::Relaxed);
-                return Some(ptr);
+                ptr
+            };
+            self.ready.lock().unwrap().push(Arc::clone(&chunk));
+            if ptr.is_some() {
+                return (ptr, None);
             }
         }
-        None
+
+        let claimed = if host.is_some() {
+            let mut table = self.table.lock().unwrap();
+            table.claim_pending(nursery)
+        } else {
+            None
+        };
+        (None, claimed)
     }
 
-    pub fn claim_pending(&mut self, young_only: bool) -> Option<Arc<Chunk>> {
-        if self.atomic_sweep_block {
-            return None;
-        }
-        self.claim_pending_unblocked(young_only)
-    }
-
-    fn claim_pending_unblocked(&mut self, young_only: bool) -> Option<Arc<Chunk>> {
-        for slot in &self.slots {
-            let Some(chunk) = slot else { continue };
-            if young_only && !chunk.is_young() {
-                continue;
-            }
-            if chunk.state() == PENDING {
-                chunk.state.store(SWEEPING, Ordering::Relaxed);
-                return Some(Arc::clone(chunk));
-            }
-        }
-        None
-    }
-
-    pub fn set_sweep_block(&mut self, blocked: bool) {
-        self.atomic_sweep_block = blocked;
+    pub fn claim_pending(&self, nursery: bool) -> Option<Arc<Chunk>> {
+        self.table.lock().unwrap().claim_pending(nursery)
     }
 
     pub fn any_sweeping(&self) -> bool {
-        self.slots
-            .iter()
-            .flatten()
-            .any(|chunk| chunk.state() == SWEEPING)
+        self.table.lock().unwrap().any_sweeping()
     }
 
     pub fn sweep_claimed(chunk: &Chunk, host: &GcHost) -> usize {
@@ -559,28 +532,33 @@ impl ChunkedHeap {
         free.live_bytes()
     }
 
-    pub fn publish_swept(&mut self, chunk: &Chunk, live: usize) {
+    pub fn publish_swept(&self, chunk: Arc<Chunk>, live: usize) {
         if live == 0 {
+            let mut table = self.table.lock().unwrap();
             let index = chunk.index;
-            let removed = self.slots[index].take().unwrap();
+            let removed = table.slots[index].take().unwrap();
             if removed.is_young() {
-                self.young_chunks -= 1;
+                self.young_chunks.fetch_sub(1, Ordering::Relaxed);
             }
             self.buffer.decommit(removed.base(), removed.size);
             drop(removed);
-            self.pooled.push(index);
+            table.pooled.push(index);
         } else {
-            chunk.state.store(SWEPT, Ordering::Relaxed);
+            chunk.state.store(SWEPT, Ordering::Release);
+            self.ready.lock().unwrap().push(chunk);
         }
-        self.sweep_live += live;
-        self.pending_chunks -= 1;
-        if self.pending_chunks == 0 {
-            self.completed_live = Some(self.sweep_live);
+        self.sweep_live.fetch_add(live, Ordering::SeqCst);
+        if self.pending_chunks.fetch_sub(1, Ordering::SeqCst) == 1 {
+            let live = self.sweep_live.load(Ordering::SeqCst);
+            self.completed_live.store(live, Ordering::Release);
         }
     }
 
-    pub fn take_completed_live(&mut self) -> Option<usize> {
-        self.completed_live.take()
+    pub fn take_completed_live(&self) -> Option<usize> {
+        match self.completed_live.swap(NO_LIVE, Ordering::AcqRel) {
+            NO_LIVE => None,
+            live => Some(live),
+        }
     }
 
     fn chunk_region(&self, index: usize) -> (HeapPtr<u8>, usize) {
@@ -589,12 +567,12 @@ impl ChunkedHeap {
         (self.buffer.region(offset, size), size)
     }
 
-    fn activate_chunk(&mut self, young: bool) -> Option<Arc<Chunk>> {
-        let index = match self.pooled.pop() {
+    fn activate_chunk(&self, table: &mut ChunkTable, young: bool) -> Option<Arc<Chunk>> {
+        let index = match table.pooled.pop() {
             Some(index) => index,
-            None if self.carved < self.slots.len() => {
-                let index = self.carved;
-                self.carved += 1;
+            None if table.carved < table.slots.len() => {
+                let index = table.carved;
+                table.carved += 1;
                 index
             }
             None => return None,
@@ -602,31 +580,121 @@ impl ChunkedHeap {
         let (base, size) = self.chunk_region(index);
         let chunk = Arc::new(Chunk::new(index, base, size, young));
         if young {
-            self.young_chunks += 1;
+            self.young_chunks.fetch_add(1, Ordering::Relaxed);
         }
-        self.slots[index] = Some(Arc::clone(&chunk));
+        table.slots[index] = Some(Arc::clone(&chunk));
         Some(chunk)
     }
 
-    pub fn flag_all_pending(&mut self) {
+    pub fn flag_all_pending(&self) {
+        let table = self.table.lock().unwrap();
+        {
+            let mut ready = self.ready.lock().unwrap();
+            ready.old.clear();
+            ready.young.clear();
+        }
         let mut count = 0usize;
-        for chunk in self.slots.iter().flatten() {
+        for chunk in table.slots.iter().flatten() {
             debug_assert_ne!(chunk.state(), SWEEPING, "cycle started mid-sweep");
-            chunk.state.store(PENDING, Ordering::Relaxed);
+            chunk.state.store(PENDING, Ordering::Release);
             count += 1;
         }
-        self.pending_chunks = count;
-        self.sweep_live = 0;
-        if count == 0 {
-            self.completed_live = Some(0);
+        drop(table);
+        self.pending_chunks.store(count, Ordering::Release);
+        self.sweep_live.store(0, Ordering::Relaxed);
+        self.completed_live
+            .store(if count == 0 { 0 } else { NO_LIVE }, Ordering::Release);
+    }
+
+    pub fn finish_pending(&self, host: &GcHost) -> bool {
+        while let Some(chunk) = self.claim_pending(false) {
+            let live = Self::sweep_claimed(&chunk, host);
+            self.publish_swept(chunk, live);
+        }
+        !self.any_sweeping()
+    }
+}
+
+impl ChunkTable {
+    fn claim_pending(&mut self, nursery: bool) -> Option<Arc<Chunk>> {
+        for slot in &self.slots {
+            let Some(chunk) = slot else { continue };
+            if nursery && !chunk.is_young() {
+                continue;
+            }
+            if chunk.state() == PENDING {
+                chunk.state.store(SWEEPING, Ordering::Release);
+                return Some(Arc::clone(chunk));
+            }
+        }
+        None
+    }
+
+    fn any_sweeping(&self) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|chunk| chunk.state() == SWEEPING)
+    }
+}
+
+impl ReadyLists {
+    fn push(&mut self, chunk: Arc<Chunk>) {
+        if chunk.free_bytes.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if chunk.is_young() {
+            self.young.push_back(chunk);
+        } else {
+            self.old.push_back(chunk);
         }
     }
 
-    pub fn finish_pending(&mut self, host: &GcHost) -> bool {
-        while let Some(chunk) = self.claim_pending_unblocked(false) {
-            let live = Self::sweep_claimed(&chunk, host);
-            self.publish_swept(&chunk, live);
+    fn take_ready(&mut self, layout: Layout, nursery: bool) -> Option<HeapPtr<u8>> {
+        if let Some(ptr) = self.take_from(layout, nursery) {
+            return Some(ptr);
         }
-        !self.any_sweeping()
+        if !nursery {
+            self.take_from(layout, true)
+        } else {
+            None
+        }
+    }
+
+    fn take_from(&mut self, layout: Layout, young: bool) -> Option<HeapPtr<u8>> {
+        let need = need_for(layout);
+        let mut deferred = Vec::new();
+        let mut attempts = READY_PROBE;
+        while attempts > 0 {
+            attempts -= 1;
+            let next = if young {
+                self.young.pop_front()
+            } else {
+                self.old.pop_front()
+            };
+            let Some(chunk) = next else { break };
+            if chunk.state() != SWEPT || chunk.free_bytes.load(Ordering::Relaxed) < need {
+                deferred.push(chunk);
+                continue;
+            }
+            let ptr = {
+                let mut free = chunk.free.lock().unwrap();
+                let ptr = free.allocate(layout);
+                chunk.free_bytes.store(free.free_bytes(), Ordering::Relaxed);
+                ptr
+            };
+            if ptr.is_some() {
+                self.push(chunk);
+                for chunk in deferred {
+                    self.push(chunk);
+                }
+                return ptr;
+            }
+            deferred.push(chunk);
+        }
+        for chunk in deferred {
+            self.push(chunk);
+        }
+        None
     }
 }

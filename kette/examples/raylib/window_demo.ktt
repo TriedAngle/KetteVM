@@ -1,0 +1,38 @@
+// Kette + raylib: open a window, draw a few frames, close.
+// Run: cargo run -q -p vm -- kette/examples/raylib/window_demo.ktt
+
+// macOS does not search Homebrew's lib dir for bare library names.
+let (void, i32, f32, CString) = FFI
+let path = if os.name == "macos" {
+        "/opt/homebrew/lib/libraylib.dylib"
+    } else if os.name == "windows" {
+        "raylib.dll"
+    } else {
+        "libraylib.so"
+    }
+
+let raylib = FFI.library(path)
+
+let InitWindow = raylib.fn("InitWindow", [i32, i32, CString], void)
+let CloseWindow = raylib.fn("CloseWindow", [], void)
+let SetTargetFPS = raylib.fn("SetTargetFPS", [i32], void)
+let BeginDrawing = raylib.fn("BeginDrawing", [], void)
+let EndDrawing = raylib.fn("EndDrawing", [], void)
+let ClearBuffers = raylib.fn("rlClearScreenBuffers", [], void)
+let GetScreenWidth = raylib.fn("GetScreenWidth", [], i32)
+let GetFrameTime = raylib.fn("GetFrameTime", [], f32)
+
+InitWindow(800, 450, "kette + raylib")
+SetTargetFPS(60)
+print(GetScreenWidth())
+
+let frames = 0
+while frames < 90 {
+    BeginDrawing()
+    ClearBuffers()
+    EndDrawing()
+    frames = frames + 1
+}
+print(GetFrameTime())
+CloseWindow()
+print("done")

@@ -1,5 +1,8 @@
 use heap_utils::{LocalNode, Safepoint};
-use std::{sync::atomic::AtomicBool, sync::atomic::AtomicUsize, sync::atomic::Ordering};
+use std::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 
 fn spin_until(mut f: impl FnMut() -> bool) {
     while !f() {
@@ -20,7 +23,6 @@ fn single_node_cycle_runs_gc_immediately() {
 
     assert_eq!(ran.load(Ordering::Relaxed), 1);
     assert!(!sync.is_armed());
-    assert!(!node.requested());
     sync.detach(&node);
 }
 
@@ -36,7 +38,7 @@ fn mutators_park_before_gc_runs() {
                 let node = LocalNode::detached();
                 sync.attach(&node);
                 attached.fetch_add(1, Ordering::Relaxed);
-                spin_until(|| node.requested());
+                spin_until(|| sync.requested());
                 sync.park_for_collection(&node);
             });
         }
@@ -53,7 +55,7 @@ fn mutators_park_before_gc_runs() {
 }
 
 #[test]
-fn detach_without_parking_completes_cycle() {
+fn detach_acknowledges_a_running_cycle() {
     let sync = Safepoint::new();
     let node = LocalNode::detached();
     sync.attach(&node);
@@ -61,7 +63,7 @@ fn detach_without_parking_completes_cycle() {
     let ran = AtomicUsize::new(0);
     std::thread::scope(|s| {
         let leaver = s.spawn(|| {
-            spin_until(|| node.requested());
+            spin_until(|| sync.requested());
             sync.detach(&node);
         });
         sync.stop_the_world(None, || {
@@ -75,34 +77,83 @@ fn detach_without_parking_completes_cycle() {
 }
 
 #[test]
-fn attach_during_cycle_joins_and_is_released() {
+fn attach_waits_for_a_running_cycle() {
     let sync = Safepoint::new();
     let first = LocalNode::detached();
     sync.attach(&first);
     let late = LocalNode::detached();
+    let started = AtomicBool::new(false);
+    let release = AtomicBool::new(false);
+    let attached = AtomicBool::new(false);
 
-    let ran = AtomicUsize::new(0);
     std::thread::scope(|s| {
         s.spawn(|| {
             sync.stop_the_world(None, || {
-                ran.fetch_add(1, Ordering::Relaxed);
+                started.store(true, Ordering::Release);
+                spin_until(|| release.load(Ordering::Acquire));
             });
         });
-        spin_until(|| first.requested());
+        spin_until(|| sync.is_armed());
 
         s.spawn(|| {
             sync.attach(&late);
-            assert!(!late.requested());
+            attached.store(true, Ordering::Release);
             sync.detach(&late);
         });
-        // the cycle cannot complete before `first` parks, so `late` is
-        // guaranteed to join the armed cycle
-        spin_until(|| late.requested());
-        sync.park_for_collection(&first);
+
+        // Ack the cycle from another thread so the collector can start while
+        // this thread coordinates the late attacher and the release gate.
+        let parker = s.spawn(|| {
+            sync.park_for_collection(&first);
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!attached.load(Ordering::Acquire));
+
+        spin_until(|| started.load(Ordering::Acquire));
+        assert!(!attached.load(Ordering::Acquire));
+
+        release.store(true, Ordering::Release);
+        spin_until(|| attached.load(Ordering::Acquire));
+        parker.join().unwrap();
     });
 
-    assert_eq!(ran.load(Ordering::Relaxed), 1);
     sync.detach(&first);
+}
+
+#[test]
+fn unblock_acknowledges_and_waits_for_the_cycle() {
+    let sync = Safepoint::new();
+    let node = LocalNode::detached();
+    sync.attach(&node);
+    assert!(!sync.block(&node));
+
+    let started = AtomicBool::new(false);
+    let release = AtomicBool::new(false);
+    let unblocked = AtomicBool::new(false);
+
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            // A blocked node is excluded from the rendezvous.
+            sync.stop_the_world(None, || {
+                started.store(true, Ordering::Release);
+                spin_until(|| release.load(Ordering::Acquire));
+            });
+        });
+        spin_until(|| started.load(Ordering::Acquire));
+
+        s.spawn(|| {
+            sync.unblock(&node);
+            unblocked.store(true, Ordering::Release);
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!unblocked.load(Ordering::Acquire));
+
+        release.store(true, Ordering::Release);
+        spin_until(|| unblocked.load(Ordering::Acquire));
+    });
+
+    sync.detach(&node);
 }
 
 #[test]
@@ -121,7 +172,7 @@ fn second_requester_parks_instead_of_running_gc() {
                 first_runs.fetch_add(1, Ordering::Relaxed);
             });
         });
-        spin_until(|| b.requested());
+        spin_until(|| sync.requested());
         s.spawn(|| {
             sync.stop_the_world(Some(&b), || {
                 second_runs.fetch_add(1, Ordering::Relaxed);
@@ -144,7 +195,7 @@ fn panicking_gc_still_disarms() {
 
     std::thread::scope(|s| {
         s.spawn(|| {
-            spin_until(|| node.requested());
+            spin_until(|| sync.requested());
             sync.park_for_collection(&node);
         });
         let panicked = s.spawn(|| {
@@ -157,7 +208,6 @@ fn panicking_gc_still_disarms() {
     });
 
     assert!(!sync.is_armed());
-    assert!(!node.requested());
     sync.detach(&node);
 }
 
@@ -191,88 +241,39 @@ fn churn_stress() {
 }
 
 #[test]
-fn cancel_executions_releases_threads_into_halt() {
-    let sync = Safepoint::new();
-    let requester = LocalNode::detached();
-    sync.attach(&requester);
-
-    let attached = AtomicUsize::new(0);
-    let cancelled = AtomicUsize::new(0);
-
-    std::thread::scope(|s| {
-        for _ in 0..2 {
-            s.spawn(|| {
-                let node = LocalNode::detached();
-                sync.attach(&node);
-                attached.fetch_add(1, Ordering::Relaxed);
-                // a mutator: run until requested, then pause
-                spin_until(|| node.requested());
-                let paused = sync.park_for_collection(&node);
-                // the pause carried the cancel; taking it consumes it
-                let took = node.take_cancel();
-                let took_again = node.take_cancel();
-                cancelled.fetch_add((paused && took && !took_again) as usize, Ordering::Relaxed);
-                // a cancelled node still detaches cleanly
-                sync.detach(&node);
-            });
-        }
-        spin_until(|| attached.load(Ordering::Relaxed) == 2);
-
-        let protocol = AtomicUsize::new(0);
-        sync.cancel_executions(&requester, || {
-            protocol.fetch_add(1, Ordering::Relaxed);
-        });
-
-        assert_eq!(protocol.load(Ordering::Relaxed), 1);
-        assert!(!sync.is_armed());
-        // the requester itself carries no cancel
-        assert!(!requester.pending());
-        // cancelling again is a no-op cycle, not an error
-        sync.cancel_executions(&requester, || {});
-
-        spin_until(|| cancelled.load(Ordering::Relaxed) == 2);
-    });
-}
-
-#[test]
-fn cancel_survives_collection_cycles() {
+fn cancel_is_per_node_and_survives_cycles() {
     let sync = Safepoint::new();
     let requester = LocalNode::detached();
     let node = LocalNode::detached();
     sync.attach(&requester);
 
-    let cancelled = AtomicUsize::new(0);
+    let observed = AtomicUsize::new(0);
     let attached = AtomicBool::new(false);
     std::thread::scope(|s| {
         s.spawn(|| {
             sync.attach(&node);
-            attached.store(true, Ordering::Relaxed);
-            spin_until(|| node.requested());
-            // first pause: the cancel cycle itself (the cancel is NOT
-            // taken yet — it must survive what comes next)
-            let paused = sync.park_for_collection(&node);
-            cancelled.fetch_add(paused as usize, Ordering::Relaxed);
-            // an ordinary collection cycle arrives: the thread parks for
-            // it, wakes, and the cancel is still observable afterwards
-            spin_until(|| sync.is_armed());
-            let paused_again = sync.park_for_collection(&node);
-            let took = node.take_cancel();
-            cancelled.fetch_add((paused_again && took) as usize, Ordering::Relaxed);
+            attached.store(true, Ordering::Release);
+            while !node.take_cancelled() {
+                sync.park_for_collection(&node);
+                std::thread::yield_now();
+            }
+            observed.fetch_add(1, Ordering::Relaxed);
             sync.detach(&node);
         });
-        // the cancel protocol completes once the mutator paused once...
-        spin_until(|| attached.load(Ordering::Relaxed));
-        sync.cancel_executions(&requester, || {});
-        spin_until(|| cancelled.load(Ordering::Relaxed) == 1);
-        // ...and an ordinary cycle right after it runs normally (the
-        // pending cancel does not block barrier traffic) while the mutator
-        // is between pauses
-        let cycles = AtomicUsize::new(0);
-        sync.stop_the_world(Some(&requester), || {
-            cycles.fetch_add(1, Ordering::Relaxed);
+
+        spin_until(|| attached.load(Ordering::Acquire));
+        let protocol = AtomicUsize::new(0);
+        sync.cancel_executions(&requester, || {
+            protocol.fetch_add(1, Ordering::Relaxed);
         });
-        assert_eq!(cycles.load(Ordering::Relaxed), 1);
-        spin_until(|| cancelled.load(Ordering::Relaxed) == 2);
+        assert_eq!(protocol.load(Ordering::Relaxed), 1);
+        assert!(!sync.is_armed());
+        // The requester is not cancelled.
+        assert!(!requester.cancelled());
+
+        // A normal cycle still runs while the node has not taken its cancel.
+        sync.stop_the_world(Some(&requester), || {});
+        spin_until(|| observed.load(Ordering::Relaxed) == 1);
     });
 
     sync.detach(&requester);
@@ -285,19 +286,15 @@ fn attach_after_cancel_starts_fresh() {
     sync.attach(&requester);
     sync.cancel_executions(&requester, || {});
 
-    // a fresh node is not cancelled: shutdown only kills executions that
-    // were attached when the protocol ran
-    let paused = AtomicUsize::new(1);
     std::thread::scope(|s| {
         s.spawn(|| {
             let node = LocalNode::detached();
             sync.attach(&node);
-            let paused_here = sync.park_for_collection(&node);
-            paused.store(paused_here as usize, Ordering::Relaxed);
+            assert!(!sync.park_for_collection(&node));
+            assert!(!node.cancelled());
             sync.detach(&node);
         });
     });
 
-    assert_eq!(paused.load(Ordering::Relaxed), 0);
     sync.detach(&requester);
 }

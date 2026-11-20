@@ -1,0 +1,32 @@
+// parallelism and atomic example
+// Run: cargo run -q -p vm -- kette/examples/threads.ktt
+
+let AtomicI64 = atomic.AtomicI64
+
+let rounds = 1
+let atomic_counter = AtomicI64.new(0)
+let racy_counter = AtomicI64.new(0)
+
+let worker = {
+    let i = 0
+    while i < rounds {
+        atomic_counter.add(1)
+        racy_counter.store(racy_counter.load() + 1)
+        i = i + 1
+    }
+}
+
+rounds = 200000
+
+let a = Thread.new(worker, "a")
+let b = Thread.new(worker, "b")
+
+a.start()
+b.start()
+a.join()
+b.join()
+
+print("atomic")
+print(atomic_counter.load())
+print("racy")
+print(racy_counter.load())

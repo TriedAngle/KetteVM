@@ -49,14 +49,13 @@ impl<'a> HostCtx<'a> {
     }
 
     /// The state runtime `R` stored during `VM::add`.
+    ///
+    /// A VM stores exactly one state per runtime, so the installed state is
+    /// authoritative regardless of which frame happened to call the native
+    /// (shared built-ins are reached from more than one language).
     #[inline(always)]
     pub fn runtime<R: Runtime>(&self) -> &'a R {
-        debug_assert!(
-            self.runtime.as_any().is::<R>(),
-            "native read a foreign runtime's state"
-        );
-        // Safety: the executing runtime is `R` (asserted in debug builds).
-        unsafe { &*(self.runtime as *const dyn ErasedRuntimeState as *const R) }
+        self.vm.runtime::<R>()
     }
 
     /// Root a handle scope and hand the closure the context parts at their
@@ -117,7 +116,7 @@ impl<'a> HostCtx<'a> {
                 new_target,
             );
         }
-        (vm.shared.execute)(vm, runtime, heap, state, callable, args, new_target)
+        vm.execute(runtime, heap, state, callable, args, new_target)
     }
 
     /// A bound function's `[[Call]]`/`[[Construct]]` (ES 10.4.2): appends

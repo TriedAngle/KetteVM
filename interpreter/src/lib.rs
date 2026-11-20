@@ -4,7 +4,6 @@
 )]
 #![allow(incomplete_features)]
 #![allow(unused_imports, unused_macros, unused_unsafe, unused_variables)]
-#![allow(dead_code)]
 
 use bytecode::Opcode;
 use core::hint::black_box;
@@ -90,7 +89,7 @@ impl core::ops::Deref for RootsArg<'_> {
     }
 }
 
-#[cfg(feature = "star_fusion")]
+#[cfg(all(feature = "star_fusion", feature = "fast"))]
 const fn star_lookahead(op: Opcode) -> bool {
     matches!(
         op,
@@ -371,6 +370,10 @@ fn op_load_named_property(frame: Frame) {
                 frame.set_acc(getter);
                 tail!(slow_named_getter)
             }
+            LoadHit::NativeGetter(accessor) => {
+                frame.set_acc(accessor);
+                tail!(slow_named_native_getter)
+            }
             _ => {}
         }
     }
@@ -548,6 +551,21 @@ fn op_store_keyed_property_no_shadow(frame: Frame) {
 
 #[handler(StoreNamedPropertyNoShadow)]
 fn op_store_named_property_no_shadow(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let name_idx = frame.unsigned::<1>();
+    let fb_slot = frame.unsigned::<2>();
+    let name = frame.ctx().constants_ref(heap).at(heap, name_idx).as_name();
+    if InlineCache::try_store_fast(
+        heap,
+        frame.ctx().feedback_ref(heap),
+        fb_slot,
+        recv,
+        name,
+        frame.acc(),
+    ) {
+        next!()
+    }
     tail!(slow_store_named_no_shadow)
 }
 
@@ -1211,7 +1229,6 @@ fn op_dec_loc(frame: Frame) {
             frame.set_acc(v);
             next!()
         }
-        // acc keeps the old value; park it before the allocating tail
         frame.set_acc(v);
         if let Some(t) = frame.ctx().heap_mut().try_new_float(new) {
             frame.regs().set(r, t);
@@ -1220,8 +1237,6 @@ fn op_dec_loc(frame: Frame) {
     }
     tail!(slow_dec_loc)
 }
-
-// --- control flow ---
 
 #[handler(Jump)]
 fn op_jump(frame: Frame) {
@@ -1297,7 +1312,6 @@ fn op_call_native(frame: Frame) {
     frame.set_acc(v);
     reenter!(pc)
 }
-// --- literals ---
 
 #[handler(CreateClosure)]
 fn op_create_closure(frame: Frame) {

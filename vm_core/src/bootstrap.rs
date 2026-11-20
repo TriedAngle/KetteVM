@@ -1,3 +1,4 @@
+use crate::ffi::FfiTypes;
 use crate::{
     AccessorInfo, AccessorInfoInit, Cell, CellInit, ContextInit, ContextObject, DenseString,
     EdgeVisitable, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice, Heap, Map,
@@ -27,6 +28,10 @@ pub struct WellKnown {
     pub code_map: GcSlot<Map>,
     pub dense_latin1_string_map: GcSlot<Map>,
     pub dense_utf16_string_map: GcSlot<Map>,
+    pub utf8_string_map: GcSlot<Map>,
+    pub external_latin1_string_map: GcSlot<Map>,
+    pub external_utf16_string_map: GcSlot<Map>,
+    pub external_utf8_string_map: GcSlot<Map>,
     pub symbol_map: GcSlot<Map>,
     pub accessor_pair_map: GcSlot<Map>,
     pub accessor_info_map: GcSlot<Map>,
@@ -36,6 +41,18 @@ pub struct WellKnown {
     pub scope_info_map: GcSlot<Map>,
     pub script_context_table_map: GcSlot<Map>,
     pub name_index_table_map: GcSlot<Map>,
+    /// A loaded foreign library object; `[handle, path]` internal slots.
+    pub foreign_library_map: GcSlot<Map>,
+    /// A callable C value (a foreign function).
+    pub c_function_map: GcSlot<Map>,
+    /// A guest-visible C type descriptor: one internal `TypeId` slot.
+    pub c_type_map: GcSlot<Map>,
+    /// Storage for a C aggregate value.
+    pub c_value_map: GcSlot<Map>,
+    /// Guest `Thread` objects.
+    pub thread_object_map: GcSlot<Map>,
+    /// 64-bit atomic cells.
+    pub atomic_i64_map: GcSlot<Map>,
     pub feedback_vector_map: GcSlot<Map>,
     /// Maps of the prototype-validity machinery: `Cell` and `PrototypeInfo`.
     pub cell_map: GcSlot<Map>,
@@ -138,6 +155,7 @@ pub struct WellKnown {
     pub proxy_callable_map: GcSlot<Map>,
     pub proxy_constructor_map: GcSlot<Map>,
     pub strings: WellKnownStrings,
+    pub ffi_types: FfiTypes,
 }
 
 macro_rules! define_well_known_strings {
@@ -258,6 +276,10 @@ impl WellKnown {
             code_map: smi_slot::<Map>(),
             dense_latin1_string_map: smi_slot::<Map>(),
             dense_utf16_string_map: smi_slot::<Map>(),
+            utf8_string_map: smi_slot::<Map>(),
+            external_latin1_string_map: smi_slot::<Map>(),
+            external_utf16_string_map: smi_slot::<Map>(),
+            external_utf8_string_map: smi_slot::<Map>(),
             symbol_map: smi_slot::<Map>(),
             accessor_pair_map: smi_slot::<Map>(),
             accessor_info_map: smi_slot::<Map>(),
@@ -267,6 +289,12 @@ impl WellKnown {
             scope_info_map: smi_slot::<Map>(),
             script_context_table_map: smi_slot::<Map>(),
             name_index_table_map: smi_slot::<Map>(),
+            foreign_library_map: smi_slot::<Map>(),
+            c_function_map: smi_slot::<Map>(),
+            c_type_map: smi_slot::<Map>(),
+            c_value_map: smi_slot::<Map>(),
+            thread_object_map: smi_slot::<Map>(),
+            atomic_i64_map: smi_slot::<Map>(),
             feedback_vector_map: smi_slot::<Map>(),
             cell_map: smi_slot::<Map>(),
             prototype_info_map: smi_slot::<Map>(),
@@ -322,6 +350,7 @@ impl WellKnown {
             proxy_callable_map: smi_slot::<Map>(),
             proxy_constructor_map: smi_slot::<Map>(),
             strings: WellKnownStrings::uninit(),
+            ffi_types: FfiTypes::uninit(),
         }
     }
 }
@@ -344,6 +373,10 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.code_map.as_raw());
         visitor.visit(self.dense_latin1_string_map.as_raw());
         visitor.visit(self.dense_utf16_string_map.as_raw());
+        visitor.visit(self.utf8_string_map.as_raw());
+        visitor.visit(self.external_latin1_string_map.as_raw());
+        visitor.visit(self.external_utf16_string_map.as_raw());
+        visitor.visit(self.external_utf8_string_map.as_raw());
         visitor.visit(self.symbol_map.as_raw());
         visitor.visit(self.accessor_pair_map.as_raw());
         visitor.visit(self.accessor_info_map.as_raw());
@@ -353,6 +386,12 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.scope_info_map.as_raw());
         visitor.visit(self.script_context_table_map.as_raw());
         visitor.visit(self.name_index_table_map.as_raw());
+        visitor.visit(self.foreign_library_map.as_raw());
+        visitor.visit(self.c_function_map.as_raw());
+        visitor.visit(self.c_type_map.as_raw());
+        visitor.visit(self.c_value_map.as_raw());
+        visitor.visit(self.thread_object_map.as_raw());
+        visitor.visit(self.atomic_i64_map.as_raw());
         visitor.visit(self.feedback_vector_map.as_raw());
         visitor.visit(self.cell_map.as_raw());
         visitor.visit(self.prototype_info_map.as_raw());
@@ -408,6 +447,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.proxy_constructor_map.as_raw());
         visitor.visit(self.number_dictionary_map.as_raw());
         self.strings.visit_edges(visitor);
+        self.ffi_types.visit_edges(visitor);
     }
 }
 
@@ -594,12 +634,45 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     // exist before any other object is created (incl. interned strings)
     let smi_map = alloc_map(heap, &scope, MapKind::OBJECT);
     let float_map = alloc_map(heap, &scope, MapKind::FLOAT);
+    let foreign_library_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::FOREIGN_LIBRARY.union(MapKind::EXTENDABLE),
+    );
+    known
+        .foreign_library_map
+        .init(foreign_library_map.as_tagged(heap));
+    let c_function_map = alloc_map(heap, &scope, MapKind::C_VALUE.union(MapKind::CALLABLE));
+    known.c_function_map.init(c_function_map.as_tagged(heap));
+    let c_type_map = alloc_map(heap, &scope, MapKind::C_TYPE);
+    known.c_type_map.init(c_type_map.as_tagged(heap));
+    let c_value_map = alloc_map(heap, &scope, MapKind::C_VALUE);
+    known.c_value_map.init(c_value_map.as_tagged(heap));
+    let thread_object_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::THREAD_OBJECT.union(MapKind::EXTENDABLE),
+    );
+    known
+        .thread_object_map
+        .init(thread_object_map.as_tagged(heap));
+    let atomic_i64_map = alloc_map(heap, &scope, MapKind::ATOMIC_I64);
+    known.atomic_i64_map.init(atomic_i64_map.as_tagged(heap));
     let array_map = alloc_map(heap, &scope, MapKind::FIXED_ARRAY);
     let byte_array_map = alloc_map(heap, &scope, MapKind::FIXED_BYTE_ARRAY);
     let code_map = alloc_map(heap, &scope, MapKind::CODE);
     let dense_latin1_string_map =
         alloc_map(heap, &scope, MapKind::DENSE_STRING.union(MapKind::LATIN1));
     let dense_utf16_string_map = alloc_map(heap, &scope, MapKind::DENSE_STRING);
+    let utf8_string_map = alloc_map(heap, &scope, MapKind::UTF8_STRING.union(MapKind::UTF8));
+    let external_latin1_string_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::EXTERNAL_STRING.union(MapKind::LATIN1),
+    );
+    let external_utf16_string_map = alloc_map(heap, &scope, MapKind::EXTERNAL_STRING);
+    let external_utf8_string_map =
+        alloc_map(heap, &scope, MapKind::EXTERNAL_STRING.union(MapKind::UTF8));
     let symbol_map = alloc_map(heap, &scope, MapKind::SYMBOL);
     let accessor_pair_map = alloc_map(heap, &scope, MapKind::ACCESSOR_PAIR);
     let accessor_info_map = alloc_map(heap, &scope, MapKind::ACCESSOR_INFO);
@@ -667,6 +740,16 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .dense_utf16_string_map
         .init(dense_utf16_string_map.as_tagged(heap));
+    known.utf8_string_map.init(utf8_string_map.as_tagged(heap));
+    known
+        .external_latin1_string_map
+        .init(external_latin1_string_map.as_tagged(heap));
+    known
+        .external_utf16_string_map
+        .init(external_utf16_string_map.as_tagged(heap));
+    known
+        .external_utf8_string_map
+        .init(external_utf8_string_map.as_tagged(heap));
     known.symbol_map.init(symbol_map.as_tagged(heap));
     known
         .accessor_pair_map
@@ -750,6 +833,7 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
             AccessorInfoInit {
                 getter: None,
                 setter: None,
+                data: None,
             },
             &scope,
         );

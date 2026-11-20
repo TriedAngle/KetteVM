@@ -1,6 +1,6 @@
 use crate::{
-    Cell, CellInit, FixedArray, Handle, HandleScope, Heap, Map, MapKind, MaybeWeak, Object,
-    PrototypeInfo, PrototypeInfoInit, Smi, Tagged, Value, WeakFixedArray, WeakFixedArrayInit,
+    Cell, CellInit, FixedArray, Handle, HandleScope, Heap, Map, MapKind, Object, PrototypeInfo,
+    Smi, Tagged, Value, WeakFixedArray,
 };
 use std::{sync::Mutex, sync::MutexGuard};
 
@@ -63,9 +63,7 @@ impl Prototype {
         let holder = Self::try_get_validity_cell_holder_map(heap, map.as_tagged(heap))?;
         let holder = scope.handle(holder);
         holder.as_tagged(heap).mark_prototype(heap);
-
-        let _guard = heap.prototype_registry().lock();
-        lazy_register_prototype_user_locked(heap, scope, holder);
+        register_prototype_user_chain(heap, scope, holder);
 
         if let Some(cell) = holder.as_tagged(heap).published_validity_cell(heap)
             && cell.is_valid(heap)
@@ -123,7 +121,7 @@ impl Prototype {
             visited.push(id);
             parent.as_tagged(heap).mark_prototype(heap);
             let info = Self::get_or_create_prototype_info(heap, scope, parent);
-            append_prototype_child(heap, scope, info, cell);
+            append_prototype_child(heap, scope, info, cell, PrototypeInfo::UNREGISTERED);
             if !collect_parent_maps(heap, scope, parent.as_tagged(heap), &mut parents) {
                 return None;
             }
@@ -163,7 +161,7 @@ impl Prototype {
             if let Some(winner) = map.as_tagged(heap).prototype_info.load(heap) {
                 return winner.as_handle(scope);
             }
-            let info = heap.allocate_handle::<PrototypeInfo>(PrototypeInfoInit::default(), scope);
+            let info = heap.allocate_handle::<PrototypeInfo>((), scope);
             let host = map.as_tagged(heap).erase();
             match map.as_tagged(heap).prototype_info.publish(
                 heap,
@@ -175,15 +173,6 @@ impl Prototype {
                 Err(_) => continue,
             }
         }
-    }
-
-    pub fn lazy_register_prototype_user<'s>(
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        user: Handle<'s, Map>,
-    ) {
-        let _guard = heap.prototype_registry().lock();
-        lazy_register_prototype_user_locked(heap, scope, user);
     }
 
     pub fn shape_changed(heap: &Heap, old_map: Tagged<'_, Map>) {
@@ -291,7 +280,8 @@ fn push_parent_map<'s>(
     true
 }
 
-fn lazy_register_prototype_user_locked<'s>(
+/// Register `user` with every trackable ancestor.
+fn register_prototype_user_chain<'s>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     user: Handle<'s, Map>,
@@ -304,139 +294,187 @@ fn lazy_register_prototype_user_locked<'s>(
         };
         let proto_map = scope.handle(proto.map(heap));
         proto_map.as_tagged(heap).mark_prototype(heap);
-        let proto_info = Prototype::get_or_create_prototype_info(heap, scope, proto_map);
+        let info = Prototype::get_or_create_prototype_info(heap, scope, proto_map);
         let current_info = Prototype::get_or_create_prototype_info(heap, scope, current);
-
-        let slot = current_info.as_tagged(heap).registry_slot();
-        let registered = slot >= 1 && {
-            let users = proto_info.as_tagged(heap).prototype_users(heap);
-            users.is_some_and(|users| {
-                (slot as usize) < users.len()
-                    && users
-                        .element_slot(slot as usize)
-                        .get(heap)
-                        .as_strong()
-                        .is_some_and(|user| user.ptr_eq(current.as_tagged(heap).erase()))
-            })
-        };
-        if !registered {
-            let assigned = append_prototype_child(heap, scope, proto_info, current);
-            current_info.as_tagged(heap).set_registry_slot(
-                heap,
-                current_info.as_tagged(heap).erase(),
-                assigned,
-            );
+        let hint = current_info.as_tagged(heap).registry_slot();
+        let slot = append_prototype_child(heap, scope, info, current, hint);
+        if hint != slot as i64 {
+            current_info.as_tagged(heap).set_registry_slot(slot);
         }
         current = proto_map;
     }
 }
 
+const INITIAL_USERS_CAPACITY: usize = 2;
+
+/// Capacity for `len` entries, growing from the used length.
+fn users_capacity_for(len: usize) -> usize {
+    len + (len / 2).max(2)
+}
+
 /// Append `child` (a user map, or a validity cell for multi-parent maps) to
-/// `info`'s weak user registry, reusing an empty slot when possible.
+/// `info`'s registry and return its slot. `hint` is the caller's cached slot,
+/// validated by identity.
+///
+/// The lock is never held across an allocation: a mutator waiting for it
+/// could not reach a safepoint.
 fn append_prototype_child<'s, T: 's>(
     heap: &mut Heap,
     scope: &'s HandleScope<'_>,
     info: Handle<'s, PrototypeInfo>,
     child: Handle<'s, T>,
-) -> i64 {
-    enum Plan {
+    hint: i64,
+) -> usize {
+    enum Plan<'s> {
         Init,
-        Reuse(usize),
-        Grow(usize),
+        Grow(Handle<'s, WeakFixedArray>, usize, usize),
     }
 
-    let plan = match info.as_tagged(heap).prototype_users(heap) {
-        None => Plan::Init,
-        Some(array) => {
-            let len = array.len();
-            if len == 0 {
-                Plan::Init
-            } else {
-                let mut empty_slot = array.element_slot(0).get(heap).to_i64().unwrap_or(0);
-                if empty_slot == 0 && len > 1 {
-                    for i in 1..len {
-                        if array.element_slot(i).is_cleared() {
-                            mark_slot_empty(heap, array, i);
-                        }
+    // A validated hint means the child is already registered.
+    if let Some(array) = info.as_tagged(heap).prototype_users(heap)
+        && let Some(index) = hint_index(
+            hint,
+            array.len(),
+            heap,
+            array,
+            child.as_tagged(heap).erase(),
+        )
+    {
+        return index;
+    }
+
+    loop {
+        let plan = {
+            let _guard = heap.prototype_registry().lock();
+            let info_ref = info.as_tagged(heap);
+            match info_ref.prototype_users(heap) {
+                None => Plan::Init,
+                Some(array) => {
+                    let len = info_ref.users_len();
+                    let child_word = child.as_tagged(heap).erase();
+                    if let Some(slot) = find_registered(heap, array, len, hint, child_word) {
+                        return slot;
                     }
-                    empty_slot = array.element_slot(0).get(heap).to_i64().unwrap_or(0);
-                }
-                if empty_slot > 0 && (empty_slot as usize) < len {
-                    Plan::Reuse(empty_slot as usize)
-                } else {
-                    Plan::Grow(len)
+                    if len == array.len() {
+                        let live = count_live(heap, array, len);
+                        Plan::Grow(array.as_handle(scope), len, live)
+                    } else {
+                        array.set(heap, len, child_word.as_weak());
+                        info_ref.set_users_len(heap, len + 1);
+                        return len;
+                    }
                 }
             }
-        }
-    };
+        };
 
-    match plan {
-        Plan::Reuse(slot) => {
-            let array = info
-                .as_tagged(heap)
-                .prototype_users(heap)
-                .expect("planned against an existing registry");
-            let next = array.element_slot(slot).get(heap).to_i64().unwrap_or(0);
-            array.set_weak(heap, slot, child.as_tagged(heap).erase());
-            array.set(heap, 0, Smi::new(next).into_tagged().as_maybe_weak());
-            slot as i64
-        }
-        Plan::Init => {
-            let array = heap.allocate_token_enter_heap(
-                WeakFixedArray::<Value>::layout_for(2),
-                |token, heap| {
-                    let values = [
-                        Smi::new(0).into_tagged().as_maybe_weak(),
-                        child.as_tagged(heap).erase().as_weak(),
-                    ];
-                    token.allocate_handle::<WeakFixedArray>(
-                        WeakFixedArrayInit { values: &values },
-                        scope,
+        match plan {
+            Plan::Init => {
+                let array = heap
+                    .allocate_hole_weak_array(INITIAL_USERS_CAPACITY)
+                    .as_handle(scope);
+                let _guard = heap.prototype_registry().lock();
+                let info_ref = info.as_tagged(heap);
+                let expected = info_ref.prototype_users.load_word(heap);
+                if info_ref.prototype_users.decode(heap, expected).is_some() {
+                    continue;
+                }
+                array
+                    .as_tagged(heap)
+                    .set(heap, 0, child.as_tagged(heap).erase().as_weak());
+                info_ref
+                    .prototype_users
+                    .publish(
+                        heap,
+                        info.as_tagged(heap).erase(),
+                        expected,
+                        array.as_tagged(heap),
                     )
-                },
-            );
-            let host = info.as_tagged(heap).erase();
-            info.as_tagged(heap)
-                .prototype_users
-                .set(heap, host, array.as_tagged(heap));
-            1
-        }
-        Plan::Grow(len) => {
-            let array = heap.allocate_token_enter_heap(
-                WeakFixedArray::<Value>::layout_for(len + 1),
-                |token, heap| {
-                    let old = info
-                        .as_tagged(heap)
-                        .prototype_users(heap)
-                        .expect("planned against an existing registry");
-                    let mut values: Vec<Tagged<'_, MaybeWeak<Value>>> = Vec::with_capacity(len + 1);
-                    for i in 0..len {
-                        values.push(old.element_slot(i).get(heap));
+                    .expect("uncontended user registry publication");
+                info_ref.set_users_len(heap, 1);
+                return 0;
+            }
+            Plan::Grow(old, len, live) => {
+                let capacity = users_capacity_for(live + 1).max(INITIAL_USERS_CAPACITY);
+                let array = heap.allocate_hole_weak_array(capacity).as_handle(scope);
+                let _guard = heap.prototype_registry().lock();
+                let info_ref = info.as_tagged(heap);
+                let Some(current) = info_ref.prototype_users(heap) else {
+                    continue;
+                };
+                if !current.ptr_eq(old.as_tagged(heap)) || info_ref.users_len() != len {
+                    continue;
+                }
+                // Compaction drops cleared entries.
+                let mut written = 0;
+                for i in 0..len {
+                    let entry = old.as_tagged(heap).element_slot(i).get(heap);
+                    if entry.as_strong().is_none() {
+                        continue;
                     }
-                    values.push(child.as_tagged(heap).erase().as_weak());
-                    token.allocate_handle::<WeakFixedArray>(
-                        WeakFixedArrayInit { values: &values },
-                        scope,
+                    array.as_tagged(heap).set(heap, written, entry);
+                    written += 1;
+                }
+                array
+                    .as_tagged(heap)
+                    .set(heap, written, child.as_tagged(heap).erase().as_weak());
+                info_ref
+                    .prototype_users
+                    .publish(
+                        heap,
+                        info.as_tagged(heap).erase(),
+                        current.raw().to_bits(),
+                        array.as_tagged(heap),
                     )
-                },
-            );
-            let host = info.as_tagged(heap).erase();
-            info.as_tagged(heap)
-                .prototype_users
-                .set(heap, host, array.as_tagged(heap));
-            len as i64
+                    .expect("uncontended user registry publication");
+                info_ref.set_users_len(heap, written + 1);
+                return written;
+            }
         }
     }
 }
 
-fn mark_slot_empty(heap: &Heap, array: Tagged<'_, WeakFixedArray>, index: usize) {
-    let previous = array.element_slot(0).get(heap);
-    array.set(heap, index, previous);
-    array.set(
-        heap,
-        0,
-        Smi::new(index as i64).into_tagged().as_maybe_weak(),
-    );
+/// The cached slot if it still names `child`.
+fn hint_index(
+    hint: i64,
+    len: usize,
+    heap: &Heap,
+    array: Tagged<'_, WeakFixedArray>,
+    child: Tagged<'_, Value>,
+) -> Option<usize> {
+    let index = usize::try_from(hint).ok()?;
+    (index < len && same_user(heap, array, index, child)).then_some(index)
+}
+
+fn find_registered(
+    heap: &Heap,
+    array: Tagged<'_, WeakFixedArray>,
+    len: usize,
+    hint: i64,
+    child: Tagged<'_, Value>,
+) -> Option<usize> {
+    if let Some(index) = hint_index(hint, len, heap, array, child) {
+        return Some(index);
+    }
+    (0..len).find(|&index| same_user(heap, array, index, child))
+}
+
+fn same_user(
+    heap: &Heap,
+    array: Tagged<'_, WeakFixedArray>,
+    index: usize,
+    child: Tagged<'_, Value>,
+) -> bool {
+    array
+        .element_slot(index)
+        .get(heap)
+        .as_strong()
+        .is_some_and(|user| user.ptr_eq(child))
+}
+
+fn count_live(heap: &Heap, array: Tagged<'_, WeakFixedArray>, len: usize) -> usize {
+    (0..len)
+        .filter(|&i| array.element_slot(i).get(heap).as_strong().is_some())
+        .count()
 }
 
 fn invalidate_one_prototype_validity_cell(heap: &Heap, map: Tagged<'_, Map>) {
@@ -459,7 +497,7 @@ fn invalidate_prototype_chains(heap: &Heap, map: Tagged<'_, Map>) {
         let Some(users) = info.prototype_users(heap) else {
             return;
         };
-        for i in 1..users.len() {
+        for i in 0..users.len() {
             let Some(child) = users.element_slot(i).get(heap).as_strong() else {
                 continue;
             };

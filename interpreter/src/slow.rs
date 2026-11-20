@@ -5,11 +5,11 @@ use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_match as handler;
 use vm_core::{
-    AccessorPair, CallInfo, Compare, ContextInit, ContextObject, Convert, DenseString, Errors,
-    FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
-    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
-    VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, proxy::Proxy, raise,
-    raise_runtime, rt_try,
+    AccessorInfo, AccessorPair, Args, CallInfo, Compare, ContextInit, ContextObject, Convert,
+    DenseString, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
+    Object, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, StringRef,
+    Tagged, ThreadState, VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind,
+    proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -40,8 +40,8 @@ pub fn add_body<'a>(
             Ok(v) => scope.handle(v),
             Err(e) => return raise_runtime(heap, e),
         };
-        if lhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
-            || rhs.as_tagged(heap).get_as::<DenseString>(heap).is_some()
+        if StringRef::try_from(heap, lhs.as_tagged(heap)).is_some()
+            || StringRef::try_from(heap, rhs.as_tagged(heap)).is_some()
         {
             let a = scope.handle(rt_try!(
                 heap,
@@ -805,7 +805,7 @@ fn load_keyed_body<'a>(
                 i,
             );
             let name = scope.handle(key.as_tagged(heap).erase().as_name());
-            if let Some(unit) = DenseString::index_element(heap, scope, recv, name) {
+            if let Some(unit) = StringRef::index_element(heap, scope, recv, name) {
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
@@ -921,6 +921,37 @@ pub fn slow_named_getter(frame: Frame) {
         let getter = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
         call_getter(vm, heap, state, &scope, recv, getter)
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(LoadNamedProperty)]
+#[cold]
+pub fn slow_named_native_getter(frame: Frame) {
+    let pc = frame.pc();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let accessor = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let Some(info) = accessor.as_tagged(heap).get_as::<AccessorInfo>(heap) else {
+            return heap.known().undefined.get(heap).erase();
+        };
+        let Some(index) = info.getter() else {
+            return heap.known().undefined.get(heap).erase();
+        };
+        let result = scope.handle(vm.native(index)(
+            HostCtx::new(vm, state.runtime(vm, heap), heap, state),
+            CallInfo {
+                callee: Some(accessor),
+                receiver: recv,
+                new_target: None,
+            },
+            Args::EMPTY,
+        ));
+        result.as_tagged(heap).erase()
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -1298,10 +1329,11 @@ macro_rules! apply_store_hit {
                     Err(e) => raise_runtime($heap, e),
                 }
             }
-            StoreHit::NativeSetter(index) => {
+            StoreHit::NativeSetter { index, accessor } => {
+                let accessor = $scope.handle(accessor);
                 let args = $scope.stage(&[$value.as_tagged($heap).erase()]).as_args();
                 let info = CallInfo {
-                    callee: None,
+                    callee: Some(accessor),
                     receiver: $recv,
                     new_target: None,
                 };
@@ -1463,6 +1495,7 @@ pub fn slow_store_named_no_shadow(frame: Frame) {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<1>();
+    let fb_slot = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
     let val = state.handle_scope(|scope| {
@@ -1478,6 +1511,9 @@ pub fn slow_store_named_no_shadow(frame: Frame) {
                 .erase()
                 .as_name(),
         );
+        cached_store!(
+            vm, heap, state, roots, &scope, base, fb_slot, recv, name, value, mode
+        );
         store_named_tail_body(
             vm,
             heap,
@@ -1487,7 +1523,7 @@ pub fn slow_store_named_no_shadow(frame: Frame) {
             recv,
             name,
             value,
-            None,
+            Some(fb_slot),
             StoreSemantics::WriteThrough,
             mode,
         )

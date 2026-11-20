@@ -30,3 +30,32 @@ let b = true || mark()
 Test.assert(hits, 0)
 Test.assert(false || 7, 7)
 Test.assert(true && 5, 5)
+
+// while: condition is truthy/falsy, body runs each iteration
+let i = 0
+let total = 0
+while i < 5 {
+    total = total + i
+    i = i + 1
+}
+Test.assert(i, 5)
+Test.assert(total, 10)
+
+// a falsy condition skips the body
+let skipped_loop = 0
+while false {
+    skipped_loop = 1
+}
+Test.assert(skipped_loop, 0)
+
+// the loop body's own `let` is scoped to the body
+let outer = 3
+while outer > 0 {
+    let step = outer
+    outer = outer - step
+}
+Test.assert(outer, 0)
+
+// while in expression position evaluates to null
+let loop_value = while false { 1 }
+Test.assert(loop_value == null, true)

@@ -14,13 +14,15 @@
 use crate::CompileError;
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
-    Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
+    Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
     Symbol, UnaryOp,
 };
-use vm_core::{MODE_VAR, NativeIndex, SCOPE_DECLARATION};
+use vm_core::{
+    INFO_GLOBAL, MODE_LET, MODE_VAR, NativeIndex, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
+};
 
 /// `node -> function index` for every callable object (script is 0).
 fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
@@ -47,7 +49,7 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             }
         }
         Node::StmtList { stmts } => walk_stmts(ast, *stmts, out),
-        Node::Let { init, .. } => collect_objects(ast, *init, out),
+        Node::Let { init, .. } | Node::LetMulti { init, .. } => collect_objects(ast, *init, out),
         Node::ExprStmt { expr } => collect_objects(ast, *expr, out),
         Node::If { cond, then, else_ } => {
             collect_objects(ast, *cond, out);
@@ -55,6 +57,10 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             if let Some(else_) = else_ {
                 collect_branch(ast, *else_, out);
             }
+        }
+        Node::While { cond, body } => {
+            collect_objects(ast, *cond, out);
+            collect_branch(ast, *body, out);
         }
         Node::Array { elements } => {
             for &element in ast.list_items(*elements) {
@@ -114,6 +120,7 @@ fn collect_branch(ast: &Ast, branch: NodeId, out: &mut Vec<NodeId>) {
 pub fn generate(
     ast: &Ast,
     resolved: &Resolved,
+    mode: SourceMode,
     declare_globals: NativeIndex,
 ) -> Result<Program, CompileError> {
     let root = ast.root().expect("the parser sets a root");
@@ -137,6 +144,7 @@ pub fn generate(
             root_scope,
             root,
             0,
+            mode,
             &object_fids,
             declare_globals,
         );
@@ -161,6 +169,7 @@ pub fn generate(
             root_scope,
             parts.body,
             param_count,
+            mode,
             &object_fids,
             declare_globals,
         );
@@ -182,7 +191,10 @@ struct FunctionGen<'a> {
     captured: Vec<bool>,
     /// per scope decl: frame register, when not captured
     reg_of: Vec<Option<Reg>>,
+    /// whether the prologue pushes a context (captured bindings or eval)
+    creates_context: bool,
     param_count: usize,
+    mode: SourceMode,
     /// `node -> function index` for closure creation
     object_fids: &'a [Option<u32>],
     /// id of the native that installs the top-level declarations
@@ -205,6 +217,7 @@ impl<'a> FunctionGen<'a> {
         root_scope: ScopeId,
         body: NodeId,
         param_count: usize,
+        mode: SourceMode,
         object_fids: &'a [Option<u32>],
         declare_globals: NativeIndex,
     ) -> Self {
@@ -218,6 +231,15 @@ impl<'a> FunctionGen<'a> {
                 captured[decl as usize] = true;
             }
         }
+        // a direct eval reaches every binding of the scope by name
+        if resolved.scope(scope).direct_eval {
+            captured.fill(true);
+        }
+        // root lexical declarations live in the script/eval context
+        if scope == root_scope {
+            captured.fill(true);
+        }
+        let creates_context = resolved.creates_context(scope);
         let mut reg_of = vec![None; decls];
         let mut local_count = 0u32;
         for (decl, is_captured) in captured.iter().enumerate() {
@@ -240,7 +262,9 @@ impl<'a> FunctionGen<'a> {
             body,
             captured,
             reg_of,
+            creates_context,
             param_count,
+            mode,
             object_fids,
             declare_globals,
             b,
@@ -274,22 +298,6 @@ impl<'a> FunctionGen<'a> {
         self.b.name(self.ast.symbol(name))
     }
 
-    /// Every script-level declaration as a global `var` binding. Kette has
-    /// no function declarations, so the function half is always empty.
-    fn global_declarations(&self) -> GlobalDeclarations {
-        let mut vars: Vec<Box<[u8]>> = Vec::new();
-        for decl in &self.resolved.scope(self.root_scope).decls {
-            let name = self.ast.symbol(decl.name);
-            if !vars.iter().any(|existing| &existing[..] == name) {
-                vars.push(name.into());
-            }
-        }
-        GlobalDeclarations {
-            vars: vars.into_boxed_slice(),
-            funcs: Box::new([]),
-        }
-    }
-
     // -- locals ------------------------------------------------------------
 
     fn load_decl(&mut self, decl: usize) {
@@ -310,27 +318,7 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
-    /// Script-level declarations are global object properties (var-like),
-    /// not slots of the script context.
-    fn resolves_to_root(&self, node: NodeId) -> bool {
-        match self.resolved.resolution(node) {
-            Some(Resolution::Local { scope, .. } | Resolution::Capture { scope, .. }) => {
-                scope == self.root_scope
-            }
-            Some(Resolution::Global) | None => false,
-        }
-    }
-
     fn load_ident(&mut self, node: NodeId) {
-        if self.resolves_to_root(node) {
-            let Node::Ident(sym) = *self.ast.node(node) else {
-                unreachable!("identifier nodes carry a symbol");
-            };
-            let idx = self.name_constant(sym);
-            let feedback = self.b.new_feedback();
-            self.b.load_global(idx, feedback);
-            return;
-        }
         match self.resolved.resolution(node) {
             Some(Resolution::Local { decl, .. }) => self.load_decl(decl as usize),
             Some(Resolution::Capture { decl, depth, .. }) => {
@@ -348,15 +336,6 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn store_ident(&mut self, node: NodeId) {
-        if self.resolves_to_root(node) {
-            let Node::Ident(sym) = *self.ast.node(node) else {
-                unreachable!("identifier nodes carry a symbol");
-            };
-            let idx = self.name_constant(sym);
-            let feedback = self.b.new_feedback();
-            self.b.store_global(idx, feedback);
-            return;
-        }
         match self.resolved.resolution(node) {
             Some(Resolution::Local { decl, .. }) => self.store_decl(decl as usize),
             Some(Resolution::Capture { decl, depth, .. }) => {
@@ -376,31 +355,59 @@ impl<'a> FunctionGen<'a> {
     // -- function body -----------------------------------------------------
 
     fn generate(&mut self) -> Result<(), CompileError> {
-        // prologue: one context per function (uniform chain); the shared
-        // ScopeInfo (constant 0) names every slot for dynamic resolution
-        let locals = self
-            .resolved
-            .scope(self.scope)
-            .decls
-            .iter()
-            .map(|d| ScopeLocal {
-                name: self.ast.symbol(d.name).into(),
-                info: MODE_VAR as u32,
-            })
-            .collect();
-        let ctx_info = self.b.constant(Constant::ScopeInfo(ScopeLayout {
-            locals,
-            flags: SCOPE_DECLARATION,
-        }));
-        self.b.create_function_context(ctx_info);
-        self.b.push_context(self.ctx_save);
-        if self.scope == self.root_scope {
-            // Script declarations become global object properties. The
-            // declaration list creates them (as `undefined`) before the
-            // body runs, so strict global stores have a binding to write.
-            let idx = self
+        // prologue: scopes with context-allocated bindings push a fresh
+        // context; the rest reuse the closure's context, and their baked
+        // capture depths skip this frame.
+        let is_root = self.scope == self.root_scope;
+        // Script/Repl roots are global lexical contexts. EvalGlobal roots are
+        // eval-local and never registered with the script context table.
+        let root_global = is_root && matches!(self.mode, SourceMode::Script | SourceMode::Repl);
+        if self.creates_context {
+            let locals = self
+                .resolved
+                .scope(self.scope)
+                .decls
+                .iter()
+                .enumerate()
+                .map(|(index, d)| {
+                    // Parameters stay var-like; body lets are lexical.
+                    let mode = if index < self.param_count {
+                        MODE_VAR
+                    } else {
+                        MODE_LET
+                    };
+                    let info = if root_global && index >= self.param_count {
+                        mode | INFO_GLOBAL
+                    } else {
+                        mode
+                    };
+                    ScopeLocal {
+                        name: self.ast.symbol(d.name).into(),
+                        info: info as u32,
+                    }
+                })
+                .collect();
+            let mut flags = SCOPE_DECLARATION;
+            if root_global {
+                flags |= SCOPE_SCRIPT;
+                if self.mode == SourceMode::Repl {
+                    flags |= SCOPE_REPL;
+                }
+            }
+            let ctx_info = self
                 .b
-                .constant(Constant::GlobalDeclarations(self.global_declarations()));
+                .constant(Constant::ScopeInfo(ScopeLayout { locals, flags }));
+            self.b.create_function_context(ctx_info);
+            self.b.push_context(self.ctx_save);
+        }
+        if root_global {
+            // The context owns the lexical declarations; this call registers
+            // it in the script context table. Kette has no var declarations.
+            let declarations = GlobalDeclarations {
+                vars: Box::new([]),
+                funcs: Box::new([]),
+            };
+            let idx = self.b.constant(Constant::GlobalDeclarations(declarations));
             self.b
                 .call_native_staged(self.declare_globals, &[RtArg::Const(idx)]);
         }
@@ -410,14 +417,21 @@ impl<'a> FunctionGen<'a> {
         // parameters arrive at -(i + 2); bind them (context copies included)
         for i in 0..self.param_count {
             let param = self.b.param(i as u32);
-            self.b.load(param);
-            self.store_decl(i);
+            if self.captured[i] {
+                self.b.load(param);
+                self.b.store_context_slot(i as u32, 0);
+            } else {
+                let reg = self.reg_of[i].expect("uncaptured decl has a register");
+                self.b.move_reg(reg, param);
+            }
         }
 
         self.emit_body(self.body, self.completion)?;
 
         self.b.load(self.completion);
-        self.b.pop_context(self.ctx_save);
+        if self.creates_context {
+            self.b.pop_context(self.ctx_save);
+        }
         self.b.ret();
         Ok(())
     }
@@ -442,13 +456,33 @@ impl<'a> FunctionGen<'a> {
 
     fn emit_stmt(&mut self, stmt: NodeId, sink: Reg) -> Result<(), CompileError> {
         match *self.ast.node(stmt) {
-            Node::Let { name, init } => {
+            Node::Let { init, .. } => {
                 self.expr(init)?;
-                if self.scope == self.root_scope {
-                    let idx = self.name_constant(name);
+                let decl = self.next_let;
+                self.next_let += 1;
+                self.store_decl(decl);
+                Ok(())
+            }
+            Node::LetMulti {
+                sources,
+                names,
+                init,
+            } => {
+                let temps = self.b.temp_scope();
+                self.expr(init)?;
+                let module = self.b.stage_acc(&temps);
+                let sources: Vec<NodeId> = self.ast.list_items(sources).to_vec();
+                let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
+                for (source_node, name_node) in sources.into_iter().zip(names) {
+                    let Node::Ident(source) = *self.ast.node(source_node) else {
+                        unreachable!("import sources are identifiers");
+                    };
+                    let Node::Ident(_) = *self.ast.node(name_node) else {
+                        unreachable!("import names are identifiers");
+                    };
+                    let field = self.name_constant(source);
                     let feedback = self.b.new_feedback();
-                    self.b.store_global(idx, feedback);
-                } else {
+                    self.b.load_named_property(module, field, feedback);
                     let decl = self.next_let;
                     self.next_let += 1;
                     self.store_decl(decl);
@@ -539,7 +573,9 @@ impl<'a> FunctionGen<'a> {
             Node::Assign { target, value } => self.emit_assign(target, value),
             Node::Return { value } => {
                 self.expr(value)?;
-                self.b.pop_context(self.ctx_save);
+                if self.creates_context {
+                    self.b.pop_context(self.ctx_save);
+                }
                 self.b.ret();
                 Ok(())
             }
@@ -549,12 +585,14 @@ impl<'a> FunctionGen<'a> {
                 self.b.load(result);
                 Ok(())
             }
+            Node::While { .. } => self.emit_while(node),
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
             Node::Slot { .. } => unreachable!("slots are only reachable through their object"),
-            Node::StmtList { .. } | Node::Let { .. } | Node::ExprStmt { .. } => {
-                self.err(node, "statement in expression position")
-            }
+            Node::StmtList { .. }
+            | Node::Let { .. }
+            | Node::LetMulti { .. }
+            | Node::ExprStmt { .. } => self.err(node, "statement in expression position"),
         }
     }
 
@@ -891,6 +929,26 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn emit_while(&mut self, node: NodeId) -> Result<(), CompileError> {
+        let Node::While { cond, body } = *self.ast.node(node) else {
+            unreachable!("emit_while called on a While node");
+        };
+        let temps = self.b.temp_scope();
+        let sink = temps.temp();
+        let start = self.b.new_label();
+        let end = self.b.new_label();
+        self.b.bind(start);
+        self.expr(cond)?;
+        self.b.jump_if_falsy(end);
+        self.emit_body(body, sink)?;
+        if self.b.is_live() {
+            self.b.jump(start);
+        }
+        self.b.bind(end);
+        self.b.load_null();
+        Ok(())
     }
 
     /// An `if` branch: a statement list storing into `sink`, or a

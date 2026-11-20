@@ -35,18 +35,27 @@ impl RawCell {
         }
     }
 
+    #[inline(always)]
     pub fn load(&self) -> Word {
         unsafe { *self.raw.get() }
     }
 
+    #[inline(always)]
     pub fn store_raw(&self, w: Word) {
         unsafe { *self.raw.get() = w };
     }
 
+    #[inline(always)]
     pub fn load_atomic(&self, order: Ordering) -> Word {
         unsafe { (*self.raw.get().cast::<AtomicU64>()).load(order) }
     }
 
+    #[inline(always)]
+    pub fn store_atomic(&self, w: Word, order: Ordering) {
+        unsafe { (*self.raw.get().cast::<AtomicU64>()).store(w, order) }
+    }
+
+    #[inline]
     pub fn compare_exchange(
         &self,
         current: Word,
@@ -79,6 +88,7 @@ impl<V: Visitor + ?Sized> Visitor for &mut V {
 pub struct HeapStats {
     pub used: usize,
     pub capacity: usize,
+    pub free: usize,
 }
 
 /// VM services a collector needs, registered once via [`SharedHeap::set_host`].
@@ -107,6 +117,10 @@ pub trait LocalHeap: Send {
     fn collection_requested(&self) -> bool;
     fn park_for_collection(&self) -> bool;
     fn take_cancel(&self) -> bool;
+    /// Publish a host-blocked state: safepoint-safe, no heap access until
+    /// [`Self::unblock`]. Returns whether a cancellation was pending.
+    fn block(&self) -> bool;
+    fn unblock(&self);
     fn cancel_executions(&self, protocol: &dyn Fn());
     fn force_collect(&self);
     fn collect_minor(&self);

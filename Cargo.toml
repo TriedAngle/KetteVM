@@ -14,6 +14,7 @@ members = [
     "kette/kette_parser",
     "js/js_runtime",
     "kette/kette_runtime",
+    "structures",
     "trace",
     "vm",
     "vm_core",

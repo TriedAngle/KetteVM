@@ -56,6 +56,28 @@ impl Runtime for KetteRuntime {
                 PropertyDescriptor::data(console.erase()),
             )
             .expect("install console global");
+
+            // `os.name` reports the host OS for platform-specific paths.
+            let os = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+            let name = scope.handle(thread.intern(&scope, "name").as_tagged(thread.heap()));
+            let os_name = scope.handle(thread.intern(&scope, "os").as_tagged(thread.heap()));
+            let value = thread.intern(&scope, std::env::consts::OS);
+            Object::define_own_property_ordinary(
+                thread.heap(),
+                &scope,
+                os,
+                name,
+                PropertyDescriptor::data(value.erase()),
+            )
+            .expect("install os name");
+            Object::define_own_property_ordinary(
+                thread.heap(),
+                &scope,
+                global,
+                os_name,
+                PropertyDescriptor::data(os.erase()),
+            )
+            .expect("install os global");
             Ok(())
         })
     }

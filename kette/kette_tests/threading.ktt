@@ -1,0 +1,58 @@
+// Threads and atomic cells.
+// Run: cargo run -q -p vm -- kette/kette_tests/threading.ktt
+// Check: kette/kette_tests/check.py
+
+let AtomicI64 = atomic.AtomicI64
+let counter = AtomicI64.new(0)
+
+Test.assert(Thread.name(), "main")
+Test.assert(Thread.isAlive(), true)
+Test.assert(Thread.current(), Thread)
+
+let worker = {
+    let i = 0
+    while i < 1000 {
+        counter.add(1)
+        i = i + 1
+    }
+}
+
+let t = Thread.new(worker, "worker")
+t.note = 42
+Test.assert(t.note, 42)
+Test.assert(t.name(), "worker")
+Test.assert(t.isAlive(), false)
+
+t.start()
+t.join()
+Test.assert(t.isAlive(), false)
+Test.assert(counter.load(), 1000)
+
+let cell = AtomicI64.new(10)
+Test.assert(cell.load(), 10)
+Test.assert(cell.add(5), 15)
+Test.assert(cell.swap(99), 15)
+Test.assert(cell.compareExchange(99, 7), 99)
+Test.assert(cell.load(), 7)
+Test.assert(cell.compareExchange(123, 5), 7)
+Test.assert(cell.store(42), 42)
+Test.assert(cell.load(), 42)
+
+Test.assert(Thread.current().name(), "main")
+Thread.yield()
+Thread.sleep(1)
+
+// every ThreadObject exposes the same surface, not just the main object
+let self_tid = AtomicI64.new(-1)
+let self_api = {
+    let me = Thread.current()
+    me.yield()
+    me.sleep(0)
+    self_tid.store(me.threadId())
+}
+let self_thread = Thread.new(self_api, "self")
+self_thread.start()
+self_thread.join()
+Test.assert(self_thread.name(), "self")
+Test.assert(self_thread.isAlive(), false)
+Test.assert(self_thread.threadId(), self_tid.load())

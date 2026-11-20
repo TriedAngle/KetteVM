@@ -75,8 +75,7 @@ impl FreeList {
         let mut prev: Option<HeapPtr<FreeHeader>> = None;
         let mut run = self.head?;
         loop {
-            // Safety: free runs live in collector memory for the lifetime
-            // of the chunk; no collection touches free-list headers.
+            // Safety: free runs stay mapped for the chunk's lifetime.
             let header = unsafe { run.read() };
             let available = header.size;
             if available >= need {
@@ -107,7 +106,6 @@ impl FreeList {
         }
     }
 
-    /// Point `prev.next` (or the head, when `prev` is `None`) at `new`.
     fn splice(
         prev: &mut Option<HeapPtr<FreeHeader>>,
         new: Option<HeapPtr<FreeHeader>>,
@@ -153,8 +151,7 @@ impl FreeList {
 
     fn push_free(&mut self, tail: &mut Option<HeapPtr<FreeHeader>>, addr: usize, size: usize) {
         let header = Self::header_at(addr);
-        // Safety: `addr` starts a gap of `size` bytes, written under the
-        // free-list mutex.
+        // Safety: `addr` starts a free run of `size` bytes.
         unsafe { header.write(FreeHeader { size, next: None }) };
         match *tail {
             // Safety: the free-list mutex is held.

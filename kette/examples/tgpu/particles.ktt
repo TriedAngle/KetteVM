@@ -1,0 +1,429 @@
+// Particles example
+// Run from the repository root:
+//   cargo run -q -p vm -- kette/examples/tgpu/particles.ktt
+
+KetteTools.evalFile("kette/vendor/sys.ktt")
+KetteTools.evalFile("kette/vendor/tgpu.ktt")
+KetteTools.evalFile("kette/vendor/glfw.ktt")
+
+let sys = globalThis.sys
+let glfw = globalThis.glfw
+let tgpu = globalThis.tgpu
+let Ptr = FFI.pointer(FFI.void)
+
+let PARTICLE_COUNT = 10000
+let FLOATS_PER_PARTICLE = 8
+let PARTICLE_BYTES = PARTICLE_COUNT * FLOATS_PER_PARTICLE * 4
+let SHADER_PATH = "kette/examples/tgpu/shader.slang"
+
+let ceil_div = { |value, divisor|
+    let adjusted = value + divisor - 1
+    (adjusted - (adjusted % divisor)) / divisor
+}
+
+let window = glfw.create("tgpu particles (Kette)", 800, 600)
+
+let framebuffer_size = FFI.array(FFI.i32, 2).new()
+glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
+let start_width = framebuffer_size.get(0)
+let start_height = framebuffer_size.get(1)
+if start_width <= 0 || start_height <= 0 {
+    print("window has no framebuffer")
+    sys.raw.exit(1)
+}
+
+// Mouse position in framebuffer coordinates, written by the GLFW callback.
+let mouse = FFI.array(FFI.f32, 2).new()
+let window_size = FFI.array(FFI.i32, 2).new()
+let cursor_framebuffer = FFI.array(FFI.i32, 2).new()
+
+let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, { |window_handle, x, y|
+    glfw.windowSize(window_handle, window_size.add(0), window_size.add(1))
+    glfw.framebufferSize(window_handle, cursor_framebuffer.add(0), cursor_framebuffer.add(1))
+    let window_width = window_size.get(0)
+    let window_height = window_size.get(1)
+    let frame_width = cursor_framebuffer.get(0)
+    let frame_height = cursor_framebuffer.get(1)
+
+    let scale_x = 1.0
+    let scale_y = 1.0
+    if window_width > 0 {
+        scale_x = frame_width / window_width
+    }
+    if window_height > 0 {
+        scale_y = frame_height / window_height
+    }
+    mouse.set(0, x * scale_x)
+    mouse.set(1, frame_height - y * scale_y)
+})
+glfw.setCursorPosCallback(window, on_cursor)
+
+let on_key = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void, { |window_handle, key, scancode, action, mods|
+    // GLFW_PRESS = 1, GLFW_KEY_ESCAPE = 256
+    if action == 1 && key == 256 {
+        glfw.setShouldClose(window_handle, 1)
+    }
+})
+glfw.setKeyCallback(window, on_key)
+
+let instance = tgpu.instanceCreate(null)
+tgpu.check()
+
+// A null device desc asks for one graphics+compute queue. Queues are
+// independent handles owned by the caller.
+let queues = FFI.array(Ptr, 1).new()
+let device = tgpu.deviceCreate(instance, null, queues, 1)
+tgpu.check()
+let queue = queues.get(0)
+
+let swapchain_desc = tgpu.SwapchainDesc.new()
+swapchain_desc.struct_size = tgpu.SwapchainDesc.size()
+swapchain_desc.window = glfw.tgpuWindow(window)
+swapchain_desc.width = start_width
+swapchain_desc.height = start_height
+swapchain_desc.image_count = 3
+swapchain_desc.present_mode = tgpu.PresentMode.FIFO
+let swapchain = tgpu.swapchainCreate(device, swapchain_desc)
+tgpu.check()
+
+let extent = tgpu.Extent2D.new()
+tgpu.swapchainExtent(swapchain, extent)
+tgpu.check()
+let color_format = tgpu.swapchainFormat(swapchain)
+
+let particle_data = FFI.array(FFI.f32, PARTICLE_COUNT * FLOATS_PER_PARTICLE).new()
+let random_unit = { sys.raw.rand() / 2147483647.0 }
+sys.raw.srand(1)
+let particle_index = 0
+while particle_index < PARTICLE_COUNT {
+    let base = particle_index * FLOATS_PER_PARTICLE
+    particle_data.set(base + 0, random_unit() * extent.width)
+    particle_data.set(base + 1, random_unit() * extent.height)
+    particle_data.set(base + 2, (random_unit() * 2.0 - 1.0) * 30.0)
+    particle_data.set(base + 3, (random_unit() * 2.0 - 1.0) * 30.0)
+    particle_data.set(base + 4, 0.5 + random_unit() * 0.5)
+    particle_data.set(base + 5, 0.5 + random_unit() * 0.5)
+    particle_data.set(base + 6, 0.5 + random_unit() * 0.5)
+    particle_data.set(base + 7, 1.0)
+    particle_index = particle_index + 1
+}
+
+let buffer_desc = tgpu.BufferDesc.new()
+buffer_desc.struct_size = tgpu.BufferDesc.size()
+buffer_desc.size = PARTICLE_BYTES
+// STORAGE | COPY_DST
+buffer_desc.usage = tgpu.BufferUsage.STORAGE + tgpu.BufferUsage.COPY_DST
+buffer_desc.memory = tgpu.MemoryPreset.DYNAMIC
+buffer_desc.host_access = tgpu.HostAccess.READ_WRITE_RANDOM
+let particle_buffer = tgpu.bufferCreate(
+    device,
+    buffer_desc,
+    particle_data.cast(FFI.u8),
+    PARTICLE_BYTES
+)
+
+let sampler_desc = tgpu.SamplerDesc.new()
+sampler_desc.struct_size = tgpu.SamplerDesc.size()
+sampler_desc.mag = tgpu.Filter.LINEAR
+sampler_desc.min = tgpu.Filter.LINEAR
+sampler_desc.mipmap = tgpu.SamplerMipmapMode.LINEAR
+sampler_desc.address_u = tgpu.SamplerAddressMode.CLAMP_TO_EDGE
+sampler_desc.address_v = tgpu.SamplerAddressMode.CLAMP_TO_EDGE
+sampler_desc.address_w = tgpu.SamplerAddressMode.CLAMP_TO_EDGE
+
+let image_desc = tgpu.ImageDesc.new()
+image_desc.struct_size = tgpu.ImageDesc.size()
+image_desc.format = color_format
+image_desc.width = extent.width
+image_desc.height = extent.height
+image_desc.depth = 1
+image_desc.mip_levels = 1
+image_desc.array_layers = 1
+// COPY_SRC | COPY_DST | STORAGE | COLOR_ATTACHMENT | SAMPLED
+image_desc.usage = tgpu.ImageUsage.COPY_SRC + tgpu.ImageUsage.COPY_DST +
+    tgpu.ImageUsage.STORAGE + tgpu.ImageUsage.COLOR_ATTACHMENT + tgpu.ImageUsage.SAMPLED
+image_desc.memory = tgpu.MemoryPreset.GPU_ONLY
+image_desc.host_access = tgpu.HostAccess.NONE
+image_desc.initial_layout = tgpu.ImageLayout.UNDEFINED
+
+let view_image_desc = tgpu.ViewImageDesc.new()
+view_image_desc.struct_size = tgpu.ViewImageDesc.size()
+view_image_desc.image = image_desc
+view_image_desc.sampler = sampler_desc
+let present_image = tgpu.viewImageCreate(device, view_image_desc)
+
+let bindless_desc = tgpu.BindlessDesc.new()
+bindless_desc.struct_size = tgpu.BindlessDesc.size()
+bindless_desc.max_rw_buffers = 1
+bindless_desc.max_sampled_images = 1
+bindless_desc.max_storage_images = 1
+bindless_desc.max_samplers = 1
+let bindless = tgpu.bindlessCreate(device, bindless_desc)
+tgpu.check()
+
+let pc = tgpu.PushConstants.new()
+pc.particles = tgpu.bindlessAddRwBuffer(bindless, particle_buffer)
+pc.output_image = tgpu.bindlessAddStorageImage(
+    bindless,
+    tgpu.viewImageView(present_image),
+    tgpu.ImageLayout.GENERAL
+)
+pc.present_texture = tgpu.bindlessAddSampledImage(
+    bindless,
+    tgpu.viewImageView(present_image),
+    tgpu.ImageLayout.FRAGMENT
+)
+pc.present_sampler = tgpu.bindlessAddSampler(bindless, tgpu.viewImageSampler(present_image))
+tgpu.check()
+pc.window.set(0, extent.width)
+pc.window.set(1, extent.height)
+
+let shader = tgpu.loadSlang(device, SHADER_PATH)
+tgpu.check()
+
+let entry_compute_main = FFI.cstring("computeMain")
+let entry_compute_clear = FFI.cstring("computeClear")
+let entry_vertex_main = FFI.cstring("vertexMain")
+let entry_fragment_main = FFI.cstring("fragmentMain")
+
+let compute_desc = tgpu.ComputePipelineDesc.new()
+compute_desc.struct_size = tgpu.ComputePipelineDesc.size()
+compute_desc.shader = shader
+compute_desc.entry = entry_compute_main
+compute_desc.bindless = bindless
+compute_desc.push_constant_size = tgpu.PushConstants.size()
+let compute_pipeline = tgpu.computePipelineCreate(device, compute_desc)
+
+let clear_desc = tgpu.ComputePipelineDesc.new()
+clear_desc.struct_size = tgpu.ComputePipelineDesc.size()
+clear_desc.shader = shader
+clear_desc.entry = entry_compute_clear
+clear_desc.bindless = bindless
+clear_desc.push_constant_size = tgpu.PushConstants.size()
+let clear_pipeline = tgpu.computePipelineCreate(device, clear_desc)
+
+let color_formats = FFI.array(FFI.i32, 1).new()
+color_formats.set(0, color_format)
+
+let render_desc = tgpu.RenderPipelineDesc.new()
+render_desc.struct_size = tgpu.RenderPipelineDesc.size()
+render_desc.vertex_shader = shader
+render_desc.vertex_entry = entry_vertex_main
+render_desc.fragment_shader = shader
+render_desc.fragment_entry = entry_fragment_main
+render_desc.color_formats = color_formats
+render_desc.color_format_count = 1
+render_desc.depth_format = tgpu.Format.UNDEFINED
+render_desc.depth_test = false
+render_desc.depth_write = false
+render_desc.depth_compare = 0
+render_desc.bindless = bindless
+render_desc.push_constant_size = tgpu.PushConstants.size()
+render_desc.cull = tgpu.CullMode.BACK
+render_desc.front_face = tgpu.FrontFace.COUNTER_CLOCKWISE
+render_desc.topology = tgpu.Topology.TRIANGLE_LIST
+render_desc.blend = tgpu.Blend.DISABLED
+let render_pipeline = tgpu.renderPipelineCreate(device, render_desc)
+tgpu.check()
+
+let frame = tgpu.Frame.new()
+let current_extent = tgpu.Extent2D.new()
+let attachment = tgpu.ColorAttachment.new()
+let attachments = FFI.array(tgpu.ColorAttachment, 1).new()
+let render_info = tgpu.RenderDesc.new()
+render_info.struct_size = tgpu.RenderDesc.size()
+render_info.color_count = 1
+render_info.colors = attachments
+
+let last_time = glfw.time()
+let smoothed_dt = 1.0 / 60.0
+let frame_count = 0
+
+while glfw.shouldClose(window) == 0 {
+    glfw.pollEvents()
+
+    glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
+    let frame_width = framebuffer_size.get(0)
+    let frame_height = framebuffer_size.get(1)
+
+    if frame_width > 0 && frame_height > 0 {
+        if frame_width != extent.width || frame_height != extent.height {
+            extent.width = frame_width
+            extent.height = frame_height
+            tgpu.swapchainSetExtent(swapchain, extent)
+            tgpu.swapchainRecreate(swapchain)
+            tgpu.check()
+        }
+
+        let now = glfw.time()
+        let measured = now - last_time
+        last_time = now
+        if measured < 1.0 / 240.0 {
+            measured = 1.0 / 240.0
+        }
+        if measured > 1.0 / 15.0 {
+            measured = 1.0 / 15.0
+        }
+        smoothed_dt = smoothed_dt * 0.9 + measured * 0.1
+
+        tgpu.swapchainBeginFrame(queue, swapchain, frame)
+        tgpu.check()
+
+        tgpu.swapchainExtent(swapchain, current_extent)
+        tgpu.check()
+        if current_extent.width != extent.width || current_extent.height != extent.height {
+            extent.width = current_extent.width
+            extent.height = current_extent.height
+            tgpu.deviceWaitIdle(device)
+            tgpu.viewImageDestroy(present_image)
+
+            view_image_desc.image.width = extent.width
+            view_image_desc.image.height = extent.height
+            present_image = tgpu.viewImageCreate(device, view_image_desc)
+            tgpu.check()
+
+            tgpu.bindlessUpdateStorageImage(
+                bindless,
+                pc.output_image,
+                tgpu.viewImageView(present_image),
+                tgpu.ImageLayout.GENERAL
+            )
+            tgpu.bindlessUpdateSampledImage(
+                bindless,
+                pc.present_texture,
+                tgpu.viewImageView(present_image),
+                tgpu.ImageLayout.FRAGMENT
+            )
+            tgpu.bindlessUpdateSampler(
+                bindless,
+                pc.present_sampler,
+                tgpu.viewImageSampler(present_image)
+            )
+            pc.window.set(0, extent.width)
+            pc.window.set(1, extent.height)
+        }
+
+        pc.mouse.set(0, mouse.get(0))
+        pc.mouse.set(1, mouse.get(1))
+        pc.dt = smoothed_dt * 6.0
+
+        let recorder = tgpu.recorderBegin(queue)
+        tgpu.check()
+
+        tgpu.recorderTransitionImage(
+            recorder,
+            tgpu.viewImageImage(present_image),
+            tgpu.ImageLayout.COMPUTE
+        )
+
+        tgpu.recorderBindCompute(recorder, compute_pipeline, bindless, pc, tgpu.PushConstants.size())
+        tgpu.recorderDispatch(recorder, ceil_div(PARTICLE_COUNT, 256), 1, 1)
+
+        tgpu.recorderBindCompute(recorder, clear_pipeline, bindless, pc, tgpu.PushConstants.size())
+        tgpu.recorderDispatch(
+            recorder,
+            ceil_div(extent.width, 16),
+            ceil_div(extent.height, 16),
+            1
+        )
+
+        tgpu.recorderTransitionImage(
+            recorder,
+            tgpu.viewImageImage(present_image),
+            tgpu.ImageLayout.FRAGMENT
+        )
+
+        tgpu.recorderTransitionFrame(
+            recorder,
+            swapchain,
+            frame,
+            tgpu.ImageLayout.COLOR
+        )
+
+        let color = sys.raw.fabsf(sys.raw.sinf(frame_count / 120.0))
+        attachment.view = tgpu.swapchainView(swapchain, frame)
+        attachment.layout = tgpu.ImageLayout.COLOR
+        attachment.load = tgpu.LoadOp.CLEAR
+        attachment.store = tgpu.StoreOp.STORE
+        attachment.clear_color.set(0, 0.0)
+        attachment.clear_color.set(1, color)
+        attachment.clear_color.set(2, 1.0 - color)
+        attachment.clear_color.set(3, 1.0)
+        attachments.set(0, attachment)
+
+        render_info.width = extent.width
+        render_info.height = extent.height
+
+        tgpu.recorderBindRender(recorder, render_pipeline, bindless, pc, tgpu.PushConstants.size())
+        tgpu.recorderBeginRender(recorder, render_info)
+        tgpu.recorderDraw(recorder, 0, 6, 0, 1)
+        tgpu.recorderEndRender(recorder)
+
+        tgpu.recorderTransitionFrame(
+            recorder,
+            swapchain,
+            frame,
+            tgpu.ImageLayout.PRESENT
+        )
+
+        tgpu.check()
+
+        let command = tgpu.recorderFinish(recorder)
+        let commands = FFI.array(Ptr, 1).new()
+        commands.set(0, command)
+
+        tgpu.swapchainEndFrame(queue, swapchain, frame, commands, 1)
+        tgpu.commandBufferDestroy(command)
+        commands.free()
+        tgpu.check()
+
+        frame_count = frame_count + 1
+    }
+}
+
+tgpu.deviceWaitIdle(device)
+
+tgpu.renderPipelineDestroy(render_pipeline)
+tgpu.computePipelineDestroy(clear_pipeline)
+tgpu.computePipelineDestroy(compute_pipeline)
+tgpu.shaderDestroy(shader)
+tgpu.viewImageDestroy(present_image)
+tgpu.bindlessDestroy(bindless)
+tgpu.bufferDestroy(particle_buffer)
+tgpu.swapchainDestroy(swapchain)
+tgpu.queueDestroy(queue)
+tgpu.deviceDestroy(device)
+tgpu.instanceDestroy(instance)
+
+particle_data.free()
+framebuffer_size.free()
+mouse.free()
+window_size.free()
+cursor_framebuffer.free()
+queues.free()
+color_formats.free()
+attachments.free()
+swapchain_desc.free()
+extent.free()
+buffer_desc.free()
+sampler_desc.free()
+image_desc.free()
+view_image_desc.free()
+bindless_desc.free()
+pc.free()
+compute_desc.free()
+clear_desc.free()
+render_desc.free()
+frame.free()
+current_extent.free()
+attachment.free()
+render_info.free()
+entry_compute_main.free()
+entry_compute_clear.free()
+entry_vertex_main.free()
+entry_fragment_main.free()
+
+glfw.destroyWindow(window)
+glfw.terminate()
+
+print("done")

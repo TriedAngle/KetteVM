@@ -32,9 +32,8 @@ const MIN_YOUNG_CHUNKS: usize = 8;
 const MAX_YOUNG_CHUNKS: usize = 32;
 
 pub struct MarkSweepState {
-    /// The reservation the chunks are carved from
     reservation: Reservation,
-    alloc: Mutex<ChunkedHeap>,
+    heap: ChunkedHeap,
     safepoint: Safepoint,
     host: Mutex<Option<GcHost>>,
     mark_job: Mutex<Option<Arc<MarkJob>>>,
@@ -43,24 +42,29 @@ pub struct MarkSweepState {
     minor_cycles: AtomicUsize,
     young_limit: AtomicUsize,
     gc_threshold: AtomicUsize,
-    /// Bytes carved from the heap (TLABs and direct blocks) since the last
-    /// threshold update. A cheap proxy for the live set used to decide when
-    /// to run a full collection — avoids scanning every chunk.
+    /// Bytes allocated since the last threshold update.
     gc_allocated: AtomicUsize,
     sweep_signal: Arc<SweepSignal>,
-    sweeper: Mutex<Option<JoinHandle<()>>>,
+    /// Mark/sweep assistant threads.
+    assistants: Mutex<Vec<JoinHandle<()>>>,
 }
 
-/// Wakes and stops the background sweeper. Held by the sweeper thread
-/// itself, so it outlives the state it wakes.
+/// Coordinates the assistant pool; marking has priority.
 struct SweepSignal {
     state: Mutex<SweepSignalState>,
     cond: Condvar,
+    paused: AtomicBool,
 }
 
 struct SweepSignalState {
     epoch: usize,
     shutdown: bool,
+    /// Assistants currently sweeping.
+    active: usize,
+    /// Nested pause count.
+    depth: usize,
+    /// A mark is running; assistants join it instead of sweeping.
+    marking: bool,
 }
 
 impl SweepSignal {
@@ -69,19 +73,60 @@ impl SweepSignal {
             state: Mutex::new(SweepSignalState {
                 epoch: 0,
                 shutdown: false,
+                active: 0,
+                depth: 0,
+                marking: false,
             }),
             cond: Condvar::new(),
+            paused: AtomicBool::new(false),
         }
+    }
+
+    fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// Stop assistants at the next chunk boundary.
+    fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+        let mut signal = self.state.lock().unwrap();
+        signal.depth += 1;
+        while signal.active > 0 {
+            signal = self.cond.wait(signal).unwrap();
+        }
+    }
+
+    /// Release a pause; the outermost resume wakes the pool.
+    fn resume(&self) {
+        let mut signal = self.state.lock().unwrap();
+        signal.depth -= 1;
+        if signal.depth == 0 {
+            self.paused.store(false, Ordering::Release);
+            signal.epoch += 1;
+            self.cond.notify_all();
+        }
+    }
+
+    fn begin_mark(&self) {
+        let mut signal = self.state.lock().unwrap();
+        signal.marking = true;
+        self.cond.notify_all();
+    }
+
+    fn end_mark(&self) {
+        let mut signal = self.state.lock().unwrap();
+        signal.marking = false;
+        self.cond.notify_all();
     }
 }
 
 impl MarkSweepState {
     pub fn new(config: MarkSweepConfig) -> Result<Arc<Self>, AllocError> {
-        let alloc = ChunkedHeap::new(config.heap_size)?;
-        let reservation = alloc.reservation();
+        let heap = ChunkedHeap::new(config.heap_size)?;
+        let reservation = heap.reservation();
         let this = Arc::new(Self {
             reservation,
-            alloc: Mutex::new(alloc),
+            heap,
             safepoint: Safepoint::new(),
             host: Mutex::new(None),
             mark_job: Mutex::new(None),
@@ -92,10 +137,10 @@ impl MarkSweepState {
             gc_threshold: AtomicUsize::new(MIN_GC_THRESHOLD),
             gc_allocated: AtomicUsize::new(0),
             sweep_signal: Arc::new(SweepSignal::new()),
-            sweeper: Mutex::new(None),
+            assistants: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&this);
-        this.safepoint.set_work(Box::new({
+        this.safepoint.set_work(Arc::new({
             let weak = weak.clone();
             move || {
                 let Some(state) = weak.upgrade() else { return };
@@ -108,14 +153,21 @@ impl MarkSweepState {
                 }
             }
         }));
-        let sweeper = std::thread::Builder::new()
-            .name("mark-sweep-sweeper".into())
-            .spawn({
-                let signal = Arc::clone(&this.sweep_signal);
-                move || sweeper_loop(&weak, &signal)
-            })
-            .ok();
-        *this.sweeper.lock().unwrap() = sweeper;
+        let count = ASSIST_THREADS;
+        let mut assistants = this.assistants.lock().unwrap();
+        for index in 0..count {
+            let handle = std::thread::Builder::new()
+                .name(format!("mark-sweep-assist-{index}"))
+                .spawn({
+                    let weak = weak.clone();
+                    let signal = Arc::clone(&this.sweep_signal);
+                    move || assistant_loop(&weak, &signal)
+                });
+            if let Ok(handle) = handle {
+                assistants.push(handle);
+            }
+        }
+        drop(assistants);
         Ok(this)
     }
 
@@ -154,35 +206,23 @@ impl MarkSweepState {
     }
 
     pub fn active_chunks(&self) -> usize {
-        self.alloc.lock().unwrap().active_chunks()
+        self.heap.active_chunks()
     }
 
     pub fn pending_chunks(&self) -> usize {
-        self.alloc.lock().unwrap().pending_chunks()
+        self.heap.pending_chunks()
     }
 
     pub fn contains(&self, addr: usize) -> bool {
-        self.alloc.lock().unwrap().in_heap(addr)
+        self.heap.in_heap(addr)
     }
 
     pub fn stats(&self) -> HeapStats {
-        let alloc = self.alloc.lock().unwrap();
-        HeapStats {
-            used: alloc.live_bytes(),
-            capacity: alloc.committed_bytes(),
-        }
-    }
-
-    pub fn free_bytes(&self) -> usize {
-        self.alloc.lock().unwrap().free_bytes()
+        self.heap.stats()
     }
 
     pub fn collect_now(&self) {
         self.collect_internal(None);
-    }
-
-    pub fn collect_minor_now(&self) {
-        self.collect_minor_internal(None);
     }
 
     pub fn minor_cycles(&self) -> usize {
@@ -190,8 +230,7 @@ impl MarkSweepState {
     }
 
     pub fn should_minor_gc(&self) -> bool {
-        let heap = self.alloc.lock().unwrap();
-        heap.young_chunk_count() >= self.young_limit.load(Ordering::Relaxed)
+        self.heap.young_chunk_count() >= self.young_limit.load(Ordering::Relaxed)
     }
 
     fn update_young_limit(&self, survivors: usize, chunk_size: usize) {
@@ -203,53 +242,50 @@ impl MarkSweepState {
     }
 
     fn full_collect_stw(&self, host: &GcHost) -> Option<usize> {
-        let mut heap = self.alloc.lock().unwrap();
-        self.mark(&heap, host);
-        heap.flag_all_pending();
-        heap.finish_pending(host);
-        heap.set_sweep_block(false);
-        heap.take_completed_live()
+        while self.heap.any_sweeping() {
+            std::thread::yield_now();
+        }
+        self.mark(&self.heap, host);
+        self.heap.flag_all_pending();
+        self.heap.take_completed_live()
     }
 
     fn collect_minor_internal(&self, requester: Option<&MarkSweepLocal>) {
-        {
-            let heap = self.alloc.lock().unwrap();
-            if heap.young_chunk_count() == 0 {
-                return;
-            }
-        }
-        let host = self.host();
-        self.safepoint
-            .stop_the_world(requester.map(|local| &local.node), || {
-                self.collect_minor_stw(&host, true);
-            });
-    }
-
-    /// Evacuate the nursery. Must be called while the world is stopped.
-    ///
-    /// When there are too few free chunks to promote into, `fallback_to_full`
-    /// selects between bailing out to a full collection (a plain minor) and
-    /// simply leaving the nursery for the caller's own full collection.
-    fn collect_minor_stw(&self, host: &GcHost, fallback_to_full: bool) {
-        self.finish_sweeping(host);
-        let young = self.alloc.lock().unwrap().young_indices();
-        if young.is_empty() {
-            self.alloc.lock().unwrap().set_sweep_block(false);
+        if self.heap.young_chunk_count() == 0 {
             return;
         }
-        let starved = {
-            let heap = self.alloc.lock().unwrap();
-            heap.available_chunks() < 2 * young.len()
-        };
+        let host = self.host();
+        // Only a fallback full collection stops the pool.
+        let mut full = false;
+        self.safepoint
+            .stop_the_world(requester.map(|local| &local.node), || {
+                full = self.collect_minor_stw(&host, true);
+            });
+        if full {
+            self.kick_assistants(&host, requester);
+        }
+    }
+
+    /// Evacuate the nursery. The world must be stopped.
+    /// `fallback_to_full` runs a full collection when promotion space is short.
+    fn collect_minor_stw(&self, host: &GcHost, fallback_to_full: bool) -> bool {
+        let young = self.heap.young_indices();
+        if young.is_empty() {
+            return false;
+        }
+        let starved = self.heap.available_chunks() < 2 * young.len();
         if starved {
             if fallback_to_full {
+                // A full collection re-flags every chunk.
+                self.sweep_signal.pause();
                 let completed = self.full_collect_stw(host);
                 if let Some(live) = completed {
                     self.update_threshold(live);
                 }
                 self.cycles.fetch_add(1, Ordering::Relaxed);
+                return true;
             }
-            return;
+            return false;
         }
 
         let mut job = MinorJob {
@@ -264,20 +300,15 @@ impl MarkSweepState {
             let mut scanner = MinorScanner { job: &mut job };
             (host.visit_roots)(host.ctx, &mut scanner);
         }
-        // bind first: the temporary guard must not outlive the
-        // statement, the scanner below re-enters the alloc lock
-        let remembered = self.alloc.lock().unwrap().remembered_slots();
+        let remembered = self.heap.remembered_slots();
         for cell in remembered {
             let mut scanner = MinorScanner { job: &mut job };
-            // Safety: remembered slots live in collector memory and are
-            // GC-visited for the lifetime of the chunk.
+            // Safety: remembered slots live in collector memory.
             scanner.visit(unsafe { cell.as_ref() });
         }
         job.drain();
 
-        // weak references to young objects settle only after the
-        // strong closure: forwarded targets move the cell, dead
-        // targets clear it
+        // Weak young targets settle after the strong closure.
         for cell in job.deferred_weak {
             // Safety: deferred weak cells are root slots owned by the heap.
             let cell = unsafe { cell.as_ref() };
@@ -296,89 +327,73 @@ impl MarkSweepState {
             }
         }
 
-        let survivors;
-        {
-            let mut heap = self.alloc.lock().unwrap();
-            for (chunk, cursor) in &job.promote {
-                heap.finish_promotion(chunk, *cursor);
-            }
-            heap.remove_chunks(&young);
-            heap.clear_remembered_sets();
-            survivors = job.survivors;
-            let chunk_size = heap.chunk_size();
-            heap.set_sweep_block(false);
-            self.update_young_limit(survivors, chunk_size);
+        for (chunk, cursor) in &job.promote {
+            self.heap.finish_promotion(chunk, *cursor);
         }
+        self.heap.remove_chunks(&young);
+        self.heap.clear_remembered_sets();
+        let survivors = job.survivors;
+        self.update_young_limit(survivors, self.heap.chunk_size());
         self.minor_cycles.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn finish_sweeping(&self, host: &GcHost) {
-        {
-            let mut heap = self.alloc.lock().unwrap();
-            heap.set_sweep_block(true);
-        }
-        loop {
-            let ready = {
-                let mut heap = self.alloc.lock().unwrap();
-                heap.finish_pending(host)
-            };
-            if ready {
-                return;
-            }
-            std::thread::yield_now();
-        }
+        false
     }
 
     fn collect_internal(&self, requester: Option<&MarkSweepLocal>) {
         let host = self.host();
+        // Pause sweeping; the mark re-flags every chunk.
+        self.sweep_signal.pause();
+        self.wait_for_chunk_boundary();
         self.safepoint
             .stop_the_world(requester.map(|local| &local.node), || {
-                // Evacuate the nursery first, under the same stop-the-world:
-                // this empties the young generation and clears the remembered
-                // set, so the major below cannot trip over stale old->young
-                // remembered bits left behind by an earlier sweep.
+                // Empty the nursery before marking.
                 self.collect_minor_stw(&host, false);
-                self.finish_sweeping(&host);
-                let completed = {
-                    let mut heap = self.alloc.lock().unwrap();
-                    self.mark(&heap, &host);
-                    heap.flag_all_pending();
-                    heap.set_sweep_block(false);
-                    heap.take_completed_live()
-                };
+                self.mark(&self.heap, &host);
+                self.heap.flag_all_pending();
+                let completed = self.heap.take_completed_live();
                 if let Some(live) = completed {
                     self.update_threshold(live);
                 }
             });
         self.cycles.fetch_add(1, Ordering::Relaxed);
-        self.wake_sweeper();
-        self.sweep_to_completion(&host, requester);
+        self.kick_assistants(&host, requester);
     }
 
-    /// The initiating thread sweeps alongside the background sweeper (and
-    /// any lazy-sweeping mutators) until the cycle's pendings are drained.
+    /// Wait for an in-flight chunk sweep.
+    fn wait_for_chunk_boundary(&self) {
+        while self.heap.any_sweeping() {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Resume the pool, or sweep inline if it failed to spawn.
+    fn kick_assistants(&self, host: &GcHost, requester: Option<&MarkSweepLocal>) {
+        self.sweep_signal.resume();
+        if self.assistants.lock().unwrap().is_empty() {
+            self.sweep_to_completion(host, requester);
+        }
+    }
+
+    /// Publish a swept chunk and update the threshold when the cycle ends.
+    fn publish_swept(&self, chunk: Arc<Chunk>, live: usize) {
+        self.heap.publish_swept(chunk, live);
+        if let Some(live) = self.heap.take_completed_live() {
+            self.update_threshold(live);
+        }
+    }
+
+    /// Inline sweep when no assistant thread exists.
     fn sweep_to_completion(&self, host: &GcHost, requester: Option<&MarkSweepLocal>) {
         loop {
             if let Some(local) = requester {
                 local.park_if_requested();
             }
-            let chunk = self.alloc.lock().unwrap().claim_pending(false);
+            let chunk = self.heap.claim_pending(false);
             if let Some(chunk) = chunk {
                 let live = ChunkedHeap::sweep_claimed(&chunk, host);
-                let completed = {
-                    let mut heap = self.alloc.lock().unwrap();
-                    heap.publish_swept(&chunk, live);
-                    heap.take_completed_live()
-                };
-                if let Some(live) = completed {
-                    self.update_threshold(live);
-                }
+                self.publish_swept(chunk, live);
                 continue;
             }
-            let drained = {
-                let heap = self.alloc.lock().unwrap();
-                heap.pending_chunks() == 0 && !heap.any_sweeping()
-            };
+            let drained = self.heap.pending_chunks() == 0 && !self.heap.any_sweeping();
             if drained {
                 return;
             }
@@ -386,61 +401,57 @@ impl MarkSweepState {
         }
     }
 
-    fn wake_sweeper(&self) {
-        let mut signal = self.sweep_signal.state.lock().unwrap();
-        signal.epoch += 1;
-        self.sweep_signal.cond.notify_all();
-    }
-
     fn drain_pending(&self) {
         let Some(host) = self.try_host() else { return };
         loop {
-            let chunk = self.alloc.lock().unwrap().claim_pending(false);
+            if self.sweep_signal.paused() {
+                return;
+            }
+            let chunk = self.heap.claim_pending(false);
             let Some(chunk) = chunk else { return };
             let live = ChunkedHeap::sweep_claimed(&chunk, &host);
-            let completed = {
-                let mut heap = self.alloc.lock().unwrap();
-                heap.publish_swept(&chunk, live);
-                heap.take_completed_live()
-            };
-            if let Some(live) = completed {
-                self.update_threshold(live);
-            }
+            self.publish_swept(chunk, live);
         }
     }
 
     fn update_threshold(&self, live: usize) {
-        let reserve = self.alloc.lock().unwrap().reserve_size();
-        let threshold = (live * 2).max(MIN_GC_THRESHOLD).min(reserve);
+        let threshold = (live * 2)
+            .max(MIN_GC_THRESHOLD)
+            .min(self.heap.reserve_size());
         self.gc_threshold.store(threshold, Ordering::Relaxed);
         self.gc_allocated.store(0, Ordering::Relaxed);
     }
 
     fn collect_terminal(
         &self,
-        requester: Option<&LocalNode>,
+        requester: Option<&MarkSweepLocal>,
         layout: Layout,
     ) -> TerminalAllocation {
         let host = self.host();
+        self.sweep_signal.pause();
+        self.wait_for_chunk_boundary();
         let mut executed = false;
         let mut allocated = None;
-        self.safepoint.stop_the_world(requester, || {
-            executed = true;
-            self.finish_sweeping(&host);
-            let (ptr, completed) = {
-                let mut heap = self.alloc.lock().unwrap();
-                self.mark(&heap, &host);
-                heap.flag_all_pending();
-                heap.finish_pending(&host);
-                let (ptr, _) = heap.allocate(layout, Some(&host));
-                heap.set_sweep_block(false);
-                (ptr, heap.take_completed_live())
-            };
-            if let Some(live) = completed {
-                self.update_threshold(live);
-            }
-            allocated = ptr;
-        });
+        self.safepoint
+            .stop_the_world(requester.map(|local| &local.node), || {
+                executed = true;
+                self.wait_for_chunk_boundary();
+                self.mark(&self.heap, &host);
+                self.heap.flag_all_pending();
+                loop {
+                    self.heap.finish_pending(&host);
+                    if self.heap.pending_chunks() == 0 && !self.heap.any_sweeping() {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                let completed = self.heap.take_completed_live();
+                if let Some(live) = completed {
+                    self.update_threshold(live);
+                }
+                allocated = self.alloc_slow(layout, false);
+            });
+        self.sweep_signal.resume();
         if executed {
             self.cycles.fetch_add(1, Ordering::Relaxed);
             TerminalAllocation::Done(allocated)
@@ -453,33 +464,25 @@ impl MarkSweepState {
         self.gc_allocated.load(Ordering::Relaxed) > self.gc_threshold.load(Ordering::Relaxed)
     }
 
-    fn alloc_block(&self, layout: Layout, young: bool) -> Option<HeapPtr<u8>> {
+    /// Allocate any size; may claim and sweep a pending chunk.
+    fn alloc_slow(&self, layout: Layout, nursery: bool) -> Option<HeapPtr<u8>> {
         let host = self.try_host();
         loop {
-            let (ptr, claimed, completed) = {
-                let mut heap = self.alloc.lock().unwrap();
-                let (ptr, claimed) = if young {
-                    heap.allocate_young(layout, host.as_ref())
-                } else {
-                    heap.allocate(layout, host.as_ref())
-                };
-                (ptr, claimed, heap.take_completed_live())
+            let claim_host = if self.sweep_signal.paused() {
+                None
+            } else {
+                host.as_ref()
             };
+            let (ptr, claimed) = self.heap.allocate(layout, claim_host, nursery);
+            let completed = self.heap.take_completed_live();
             if let Some(live) = completed {
                 self.update_threshold(live);
             }
             let Some(ptr) = ptr else {
-                let chunk = claimed?;
+                let Some(chunk) = claimed else { return None };
                 let host = host.expect("claimed pending chunk without host");
                 let live = ChunkedHeap::sweep_claimed(&chunk, &host);
-                let completed = {
-                    let mut heap = self.alloc.lock().unwrap();
-                    heap.publish_swept(&chunk, live);
-                    heap.take_completed_live()
-                };
-                if let Some(live) = completed {
-                    self.update_threshold(live);
-                }
+                self.publish_swept(chunk, live);
                 continue;
             };
             self.gc_allocated
@@ -502,6 +505,9 @@ impl MarkSweepState {
     }
 
     fn mark(&self, heap: &ChunkedHeap, host: &GcHost) {
+        self.gc_allocated.store(0, Ordering::Relaxed);
+        // Old mark bits may belong to an unfinished cycle.
+        heap.clear_marks();
         let job = Arc::new(MarkJob::new(heap, *host));
         *self.mark_job.lock().unwrap() = Some(Arc::clone(&job));
         self.safepoint.publish_work();
@@ -510,30 +516,72 @@ impl MarkSweepState {
             (host.visit_roots)(host.ctx, &mut scanner);
         }
         job.roots_scanned.store(true, Ordering::Release);
+        self.sweep_signal.begin_mark();
         self.safepoint.publish_work();
         join_marking(&job, true);
+        self.sweep_signal.end_mark();
         job.settle_weaks();
         *self.mark_job.lock().unwrap() = None;
     }
 }
 
-fn sweeper_loop(state: &Weak<MarkSweepState>, signal: &Arc<SweepSignal>) {
+enum AssistantJob {
+    Mark,
+    Sweep,
+}
+
+fn assistant_loop(state: &Weak<MarkSweepState>, signal: &Arc<SweepSignal>) {
     let mut seen_epoch = 0;
     loop {
-        {
+        let job = {
             let mut sig = signal.state.lock().unwrap();
-            while sig.epoch == seen_epoch && !sig.shutdown {
+            loop {
+                if sig.shutdown {
+                    return;
+                }
+                if sig.marking {
+                    break AssistantJob::Mark;
+                }
+                if !signal.paused() && sig.epoch != seen_epoch {
+                    sig.active += 1;
+                    seen_epoch = sig.epoch;
+                    break AssistantJob::Sweep;
+                }
                 sig = signal.cond.wait(sig).unwrap();
             }
-            if sig.shutdown {
-                return;
+        };
+        // Drop must be able to join the threads.
+        let upgraded = state.upgrade();
+        let Some(state) = upgraded else {
+            if matches!(job, AssistantJob::Sweep) {
+                let mut sig = signal.state.lock().unwrap();
+                sig.active -= 1;
+                signal.cond.notify_all();
             }
-            seen_epoch = sig.epoch;
+            return;
+        };
+        match job {
+            AssistantJob::Mark => {
+                if let Some(job) = state.mark_job.lock().unwrap().clone()
+                    && !job.done.load(Ordering::Acquire)
+                {
+                    join_marking(&job, false);
+                }
+                let mut sig = signal.state.lock().unwrap();
+                while sig.marking && !sig.shutdown {
+                    sig = signal.cond.wait(sig).unwrap();
+                }
+                if sig.shutdown {
+                    return;
+                }
+            }
+            AssistantJob::Sweep => {
+                state.drain_pending();
+                let mut sig = signal.state.lock().unwrap();
+                sig.active -= 1;
+                signal.cond.notify_all();
+            }
         }
-        // Hold the state only while sweeping: waiting on the signal must not
-        // keep it alive, or dropping the heap could never signal the thread.
-        let Some(state) = state.upgrade() else { return };
-        state.drain_pending();
     }
 }
 
@@ -544,11 +592,19 @@ impl Drop for MarkSweepState {
             signal.shutdown = true;
             self.sweep_signal.cond.notify_all();
         }
-        if let Some(handle) = self.sweeper.lock().unwrap().take() {
+        let current = std::thread::current().id();
+        for handle in self.assistants.get_mut().unwrap().drain(..) {
+            // An assistant can hold the last Arc; never join the current thread.
+            if handle.thread().id() == current {
+                continue;
+            }
             let _ = handle.join();
         }
     }
 }
+
+/// Fixed assistant pool; all join marking and sweep when idle.
+const ASSIST_THREADS: usize = 4;
 
 const MARK_BATCH: usize = 32;
 const MARK_SPILL: usize = 512;
@@ -558,9 +614,7 @@ struct MarkJob {
     reservation: Reservation,
     host: GcHost,
     worklist: Mutex<Vec<ObjectAddr>>,
-    /// Weak cells seen while tracing (roots and live objects alike):
-    /// liveness cannot be decided mid-closure, so they are recorded here
-    /// and settled against the mark bits once the closure drains.
+    /// Weak cells settled after the closure.
     deferred_weak: Mutex<Vec<CellRef>>,
     roots_scanned: AtomicBool,
     active: AtomicUsize,
@@ -727,10 +781,8 @@ fn join_marking(job: &MarkJob, persistent: bool) {
 struct MinorJob<'a> {
     state: &'a MarkSweepState,
     host: GcHost,
-    /// Promotion chunks with their bump cursors
     promote: Vec<(Arc<Chunk>, usize)>,
     worklist: Vec<ObjectAddr>,
-    /// Weak cells whose young targets settle after the strong closure.
     deferred_weak: Vec<CellRef>,
     survivors: usize,
 }
@@ -774,9 +826,7 @@ impl MinorJob<'_> {
         }
         let chunk = self
             .state
-            .alloc
-            .lock()
-            .unwrap()
+            .heap
             .activate_promotion_chunk()
             .expect("promotion chunks guaranteed by the pre-flight gate");
         let at = chunk.object_base_ptr();
@@ -816,7 +866,7 @@ impl Visitor for MinorScanner<'_, '_> {
     }
 }
 
-/// Per-thread local heap of the mark-sweep collector.
+/// Per-thread local heap.
 pub struct MarkSweepLocal {
     state: Arc<MarkSweepState>,
     node: LocalNode,
@@ -853,10 +903,7 @@ impl MarkSweepLocal {
         self.state.collect_minor_internal(Some(self));
     }
 
-    /// Slow allocation: park, collect if the heuristics demand it, then
-    /// hand back a [`Tlab`] of at least `min_size` usable bytes. `min_size`
-    /// is a multiple of [`heap_api::Tlab::ALIGN`]; callers bump the window
-    /// for the object they are allocating.
+    /// Slow allocation; returns a TLAB of at least `min_size`.
     pub fn allocate_slow(&self, min_size: usize) -> Result<Tlab, AllocError> {
         self.park_if_requested();
         let layout = Layout::from_size_align(min_size, ALIGN).expect("allocation layout");
@@ -866,28 +913,26 @@ impl MarkSweepLocal {
         if self.state.used_exceeds_threshold() {
             self.collect();
         }
-        if let Some(tlab) = self.tlab_refill(min_size) {
+        if let Some(tlab) = self.alloc_block(min_size) {
             return Ok(tlab);
         }
-        // Contended slow path. A collect may be absorbed by another
-        // thread's cycle whose memory siblings consume before the retry
         for _ in 0..TRANSIENT_ATTEMPTS {
-            if let Some(ptr) = self.state.alloc_block(layout, false) {
+            if let Some(ptr) = self.state.alloc_slow(layout, false) {
                 return Ok(Tlab::new(ptr, min_size));
             }
             if self.state.should_minor_gc() {
                 self.collect_minor();
             }
             self.collect();
-            if let Some(tlab) = self.tlab_refill(min_size) {
+            if let Some(tlab) = self.alloc_block(min_size) {
                 return Ok(tlab);
             }
         }
         loop {
-            if let Some(ptr) = self.state.alloc_block(layout, false) {
+            if let Some(ptr) = self.state.alloc_slow(layout, false) {
                 return Ok(Tlab::new(ptr, min_size));
             }
-            match self.state.collect_terminal(Some(&self.node), layout) {
+            match self.state.collect_terminal(Some(self), layout) {
                 TerminalAllocation::Done(Some(ptr)) => {
                     return Ok(Tlab::new(ptr, min_size));
                 }
@@ -900,19 +945,20 @@ impl MarkSweepLocal {
     }
 
     fn park_if_requested(&self) -> bool {
-        if self.node.requested() {
+        if self.state.safepoint.requested() || self.node.cancelled() {
             return self.state.safepoint.park_for_collection(&self.node);
         }
         false
     }
 
-    fn tlab_refill(&self, need: usize) -> Option<Tlab> {
+    /// Allocate a TLAB block; tries the configured sizes.
+    fn alloc_block(&self, need: usize) -> Option<Tlab> {
         if need > *TLAB_SIZES.last().unwrap() {
             return None;
         }
         for &size in &TLAB_SIZES {
             let layout = Layout::from_size_align(size, ALIGN).unwrap();
-            if let Some(block) = self.state.alloc_block(layout, true) {
+            if let Some(block) = self.state.alloc_slow(layout, true) {
                 return Some(Tlab::new(block, size));
             }
         }
@@ -952,7 +998,7 @@ impl LocalHeap for MarkSweepLocal {
     }
 
     fn collection_requested(&self) -> bool {
-        self.node.pending()
+        self.state.safepoint.requested() || self.node.cancelled()
     }
 
     fn park_for_collection(&self) -> bool {
@@ -960,11 +1006,21 @@ impl LocalHeap for MarkSweepLocal {
     }
 
     fn take_cancel(&self) -> bool {
-        self.node.take_cancel()
+        self.node.take_cancelled()
+    }
+
+    fn block(&self) -> bool {
+        self.state.safepoint.block(&self.node)
+    }
+
+    fn unblock(&self) {
+        self.state.safepoint.unblock(&self.node);
     }
 
     fn cancel_executions(&self, protocol: &dyn Fn()) {
-        self.state.safepoint.cancel_executions(&self.node, protocol);
+        self.state
+            .safepoint
+            .cancel_executions(&self.node, || protocol());
     }
 
     fn force_collect(&self) {

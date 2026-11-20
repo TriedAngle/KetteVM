@@ -118,9 +118,13 @@ vm_errors! {
     InvalidArrayLength => Range, "Invalid array length";
     InvalidTimeValue => Range, "Invalid time value";
     StackOverflow => Range, "maximum call stack size exceeded";
+    FfiError => Type, "C FFI: %";
+    EvalError => Eval, "%";
     UninitializedVariable => Reference, "cannot access variable before initialization";
     NotDefined => Reference, "'%' is not defined";
     InvalidDeclaration => Syntax, "invalid or conflicting declaration";
+    ThreadAlreadyStarted => Type, "thread has already been started";
+    AtomicNonInteger => Type, "atomic operations require integer operands";
     ProxyBadTargetOrHandler => Type, "cannot create proxy with a non-object target or handler";
     ProxyConstructNotObject => Type, "proxy construct trap must return an object";
     ProxyDefineIncompatible => Type, "proxy defineProperty trap returned an incompatible descriptor";

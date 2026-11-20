@@ -1,7 +1,7 @@
 use crate::{
-    AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
-    HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
-    Smi, Symbol, Tagged, Value, Visitor, WeakFixedArray,
+    AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, Cell, Compare, DenseString,
+    EdgeVisitable, GcSlot, Handle, Header, Heap, HeapObject, MaybeWeak, NativeIndex, ObjectKind,
+    OptionGcSlot, PrototypeInfo, Smi, StringRef, Symbol, Tagged, Value, Visitor, WeakFixedArray,
 };
 use core::alloc::Layout;
 
@@ -10,8 +10,8 @@ pub struct Map {
     pub header: Header,
     pub value_slot_count: GcSlot<Smi>,
     pub descriptor_count: GcSlot<Smi>,
-    /// Object kind tag (low byte) and capability flags (second byte).
-    pub kind: GcSlot<Smi>,
+    /// Object kind tag, capability flags, and atomic dynamic flags.
+    pub flags: AtomicGcSlot<Smi>,
     /// The prototype(s) for property lookup:
     /// - an object: single parent (JS `[[Prototype]]`)
     /// - a `FixedArray` of objects: multiple parents in priority order (Self-style `parent*`)
@@ -23,7 +23,7 @@ pub struct Map {
     /// publication, inserts race-publish a grown copy with a CAS.
     pub transitions: AtomicOptionGcSlot<WeakFixedArray>,
     pub prototype_info: AtomicOptionGcSlot<PrototypeInfo>,
-    pub prototype_validity_cell: MaybeWeakGcSlot<Cell>,
+    pub prototype_validity_cell: AtomicMaybeWeakGcSlot<Cell>,
     pub descriptors: [SlotDescriptor; 0],
 }
 
@@ -54,25 +54,29 @@ impl Map {
         self.pred.get(heap)
     }
 
+    #[inline(always)]
     pub fn kind(&self) -> MapKind {
-        MapKind::new(self.kind.to_smi_unchecked().value() as u64)
+        MapKind::new(self.flags.load_smi_relaxed().value() as u64)
     }
 
+    #[inline(always)]
     pub fn is_prototype(&self) -> bool {
-        self.kind().is_prototype()
+        MapKind::new(self.flags.load_smi_acquire().value() as u64).is_prototype()
     }
 
-    pub fn mark_prototype(&self, heap: &Heap) {
-        let kind = self.kind();
-        if kind.contains(MapKind::PROTOTYPE) {
-            return;
+    pub fn mark_prototype(&self, _heap: &Heap) {
+        let mut flags = self.flags.load_smi_relaxed();
+        loop {
+            let kind = MapKind::new(flags.value() as u64);
+            if kind.contains(MapKind::PROTOTYPE) {
+                return;
+            }
+            let new = Smi::new(kind.union(MapKind::PROTOTYPE).bits() as i64);
+            match self.flags.compare_exchange_smi(flags, new) {
+                Ok(_) => return,
+                Err(observed) => flags = observed,
+            }
         }
-        let host = self.tagged(heap);
-        self.kind.set(
-            heap,
-            host,
-            Smi::new(kind.union(MapKind::PROTOTYPE).bits() as i64),
-        );
     }
 
     pub fn try_get_prototype_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, PrototypeInfo>> {
@@ -80,7 +84,7 @@ impl Map {
     }
 
     pub fn published_validity_cell<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Cell>> {
-        self.prototype_validity_cell.get(heap).as_strong()
+        self.prototype_validity_cell.get_acquire(heap).as_strong()
     }
 
     pub fn is_prototype_validity_cell_valid(&self, heap: &Heap) -> bool {
@@ -92,7 +96,7 @@ impl Map {
 
     pub fn set_validity_cell(&self, heap: &Heap, cell: Tagged<'_, Cell>) {
         let host = self.tagged(heap);
-        self.prototype_validity_cell.set_strong(heap, host, cell);
+        self.prototype_validity_cell.set_release(heap, host, cell);
     }
 
     pub fn set_validity_cell_sentinel(&self, heap: &Heap) {
@@ -278,17 +282,19 @@ impl HeapObject for Map {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().map_map.get(heap));
         self.value_slot_count
-            .set(heap, host, Smi::new(config.value_slot_count as i64));
+            .init_tagged(Tagged::<Smi>::from(Smi::new(
+                config.value_slot_count as i64,
+            )));
         self.descriptor_count
-            .set(heap, host, Smi::new(config.descriptors.len() as i64));
-        self.kind
-            .set(heap, host, Smi::new(config.kind.bits() as i64));
-        self.prototype
-            .set(heap, host, config.prototype.as_tagged(heap));
+            .init_tagged(Tagged::<Smi>::from(Smi::new(
+                config.descriptors.len() as i64
+            )));
+        self.flags.store_smi(Smi::new(config.kind.bits() as i64));
+        self.prototype.init(config.prototype.as_tagged(heap));
         self.pred.clear(heap);
         self.transitions.clear(heap);
         if config.kind.is_js_receiver() {
-            self.prototype_validity_cell.set_strong(
+            self.prototype_validity_cell.set(
                 heap,
                 host,
                 heap.known().invalid_prototype_validity_cell.get(heap),
@@ -306,9 +312,10 @@ impl HeapObject for Map {
         for (i, (name, flags, value)) in config.descriptors.iter().enumerate() {
             let name_word = name.as_tagged(heap);
             let d = self.descriptor(i);
-            d.name.set(heap, host, name_word);
-            d.flags.set(heap, host, Smi::new(flags.bits() as i64));
-            d.value.set(heap, host, value.as_tagged(heap));
+            d.name.init_tagged(name_word);
+            d.flags
+                .init_tagged(Tagged::<Smi>::from(Smi::new(flags.bits() as i64)));
+            d.value.init_tagged(value.as_tagged(heap));
         }
     }
 
@@ -398,6 +405,7 @@ impl MapKind {
     /// Arguments exotic object: slots[0] is `[[ParameterMap]]`.
     pub const ARGUMENTS: MapKind = MapKind(1 << 29);
 
+    pub const UTF8: MapKind = MapKind(1 << 11);
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
 
@@ -410,6 +418,8 @@ impl MapKind {
     pub const FIXED_ARRAY: MapKind = MapKind(ObjectKind::FixedArray as u64);
     pub const FIXED_BYTE_ARRAY: MapKind = MapKind(ObjectKind::FixedByteArray as u64);
     pub const DENSE_STRING: MapKind = MapKind(ObjectKind::DenseString as u64);
+    pub const UTF8_STRING: MapKind = MapKind(ObjectKind::Utf8String as u64);
+    pub const EXTERNAL_STRING: MapKind = MapKind(ObjectKind::ExternalString as u64);
     pub const ACCESSOR_PAIR: MapKind = MapKind(ObjectKind::AccessorPair as u64);
     pub const ACCESSOR_INFO: MapKind = MapKind(ObjectKind::AccessorInfo as u64);
     pub const CALLABLE_INFO: MapKind = MapKind(ObjectKind::CallableInfo as u64);
@@ -432,6 +442,11 @@ impl MapKind {
     pub const CODE: MapKind = MapKind(ObjectKind::Code as u64);
     pub const SCRIPT_CONTEXT_TABLE: MapKind = MapKind(ObjectKind::ScriptContextTable as u64);
     pub const NAME_INDEX_TABLE: MapKind = MapKind(ObjectKind::NameToIndexHashTable as u64);
+    pub const FOREIGN_LIBRARY: MapKind = MapKind(ObjectKind::ForeignLibrary as u64);
+    pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
+    pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
+    pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
+    pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -457,6 +472,8 @@ impl MapKind {
             Self::FIXED_ARRAY => ObjectKind::FixedArray,
             Self::FIXED_BYTE_ARRAY => ObjectKind::FixedByteArray,
             Self::DENSE_STRING => ObjectKind::DenseString,
+            Self::UTF8_STRING => ObjectKind::Utf8String,
+            Self::EXTERNAL_STRING => ObjectKind::ExternalString,
             Self::ACCESSOR_PAIR => ObjectKind::AccessorPair,
             Self::ACCESSOR_INFO => ObjectKind::AccessorInfo,
             Self::CALLABLE_INFO => ObjectKind::CallableInfo,
@@ -479,6 +496,11 @@ impl MapKind {
             Self::CODE => ObjectKind::Code,
             Self::SCRIPT_CONTEXT_TABLE => ObjectKind::ScriptContextTable,
             Self::NAME_INDEX_TABLE => ObjectKind::NameToIndexHashTable,
+            Self::FOREIGN_LIBRARY => ObjectKind::ForeignLibrary,
+            Self::C_VALUE => ObjectKind::CValue,
+            Self::C_TYPE => ObjectKind::TypeInfo,
+            Self::THREAD_OBJECT => ObjectKind::ThreadObject,
+            Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
             _ => panic!("invalid object kind"),
         }
     }
@@ -505,6 +527,8 @@ impl MapKind {
             || k == ObjectKind::ByteArray as u64
             || k == ObjectKind::String as u64
             || k == ObjectKind::Oddball as u64
+            || k == ObjectKind::CValue as u64
+            || k == ObjectKind::ThreadObject as u64
     }
 
     /// Whether this map is a Proxy.
@@ -680,13 +704,13 @@ impl<'a> Tagged<'a, Value> {
             }
             return None;
         }
-        if let Some(s) = self.get_as::<DenseString>(heap) {
-            if let Some(i) = s.data(heap).canonical_index()
+        if let Some(s) = StringRef::try_from(heap, self) {
+            if let Some(i) = s.canonical_index(heap)
                 && i < u32::MAX as usize
             {
                 return Some(Key::Element(i));
             }
-            return Some(Key::Name(s.into()));
+            return s.flat().map(|flat| Key::Name(flat.into()));
         }
         if let Some(s) = self.get_as::<Symbol>(heap) {
             return Some(Key::Name(s.into()));
@@ -707,13 +731,6 @@ impl<'a> Tagged<'a, SlotName> {
     pub fn as_index(self) -> Option<usize> {
         let v = self.to_i64()?;
         (0..u32::MAX as i64).contains(&v).then_some(v as usize)
-    }
-}
-
-impl SlotName {
-    /// The erased name word.
-    pub fn into_value(self) -> Value {
-        self.0
     }
 }
 
@@ -788,11 +805,14 @@ pub struct AccessorInfo {
     pub getter: GcSlot<Smi>,
     /// Native registry index of the setter; `-1` means absent.
     pub setter: GcSlot<Smi>,
+    /// Opaque per-accessor state handed to the native callback.
+    pub data: GcSlot<Value>,
 }
 
-pub struct AccessorInfoInit {
+pub struct AccessorInfoInit<'a> {
     pub getter: Option<NativeIndex>,
     pub setter: Option<NativeIndex>,
+    pub data: Option<Handle<'a, Value>>,
 }
 
 impl AccessorInfo {
@@ -815,6 +835,14 @@ impl AccessorInfo {
         Self::decode(self.setter.to_smi())
     }
 
+    /// The opaque payload attached to this accessor.
+    pub fn data<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
+        if self.data.raw() == heap.known().the_hole.raw() {
+            return None;
+        }
+        Some(self.data.get(heap))
+    }
+
     /// Point the accessor at native registry slots (the front end does this
     /// after installing its runtime table).
     pub fn set_natives(
@@ -831,7 +859,7 @@ impl AccessorInfo {
 
 impl HeapObject for AccessorInfo {
     const KIND: ObjectKind = ObjectKind::AccessorInfo;
-    type Init<'a> = AccessorInfoInit;
+    type Init<'a> = AccessorInfoInit<'a>;
 
     fn layout_for(_config: &Self::Init<'_>) -> Layout {
         Layout::new::<Self>()
@@ -844,6 +872,12 @@ impl HeapObject for AccessorInfo {
             .init(heap.known().accessor_info_map.get(heap));
         self.getter.set(heap, host, Self::encode(config.getter));
         self.setter.set(heap, host, Self::encode(config.setter));
+        match &config.data {
+            Some(data) => self.data.set(heap, host, data.as_tagged(heap)),
+            None => self
+                .data
+                .set(heap, host, heap.known().the_hole.get(heap).erase()),
+        }
     }
 
     fn header(&self) -> &Header {
@@ -858,5 +892,6 @@ impl HeapObject for AccessorInfo {
 impl EdgeVisitable for AccessorInfo {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
+        visitor.visit(self.data.as_raw());
     }
 }

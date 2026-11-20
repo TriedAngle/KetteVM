@@ -1,6 +1,6 @@
 use crate::{
-    DenseString, Float, Handle, HandleScope, Heap, Object, Result, StringData, Symbol, Tagged,
-    ThreadState, VM, Value, VmError, WrapperKind, bail,
+    DenseString, Float, Handle, HandleScope, Heap, Object, Result, StringData, StringRef, Symbol,
+    Tagged, ThreadState, VM, Value, VmError, WrapperKind, bail, flatten,
 };
 
 /// ToPrimitive hint (ES 7.1.1).
@@ -73,8 +73,12 @@ impl<'a> Tagged<'a, Value> {
         if let Some(f) = self.get_as::<Float>(heap) {
             return Some(f.value.get());
         }
-        if let Some(s) = self.get_as::<DenseString>(heap) {
-            return Some(Convert::string_to_number(s.data(heap)).unwrap_or(f64::NAN));
+        if let Some(s) = StringRef::try_from(heap, self) {
+            if let Some(data) = s.data(heap) {
+                return Some(Convert::string_to_number(data).unwrap_or(f64::NAN));
+            }
+            let units = s.to_units(heap);
+            return Some(Convert::string_to_number(StringData::Utf16(&units)).unwrap_or(f64::NAN));
         }
         None
     }
@@ -92,7 +96,7 @@ impl<'a> Tagged<'a, Value> {
             || self == known.true_object.get(heap)
             || self == known.false_object.get(heap)
             || self.get_as::<Float>(heap).is_some()
-            || self.get_as::<DenseString>(heap).is_some()
+            || StringRef::try_from(heap, self).is_some()
             || self.get_as::<Symbol>(heap).is_some()
     }
 
@@ -319,7 +323,7 @@ impl Convert {
             || v == known.true_object.get(heap)
             || v == known.false_object.get(heap)
             || v.get_as::<Float>(heap).is_some()
-            || v.get_as::<DenseString>(heap).is_some()
+            || StringRef::try_from(heap, v).is_some()
             || v.get_as::<Symbol>(heap).is_some()
     }
 
@@ -341,6 +345,13 @@ impl Convert {
             return Ok(s.as_tagged(heap).erase());
         }
 
+        if StringRef::try_from(heap, v.as_tagged(heap)).is_some() {
+            if v.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
+                return Ok(v.as_tagged(heap));
+            }
+            let flat = flatten(heap, scope, v).expect("string value flattens");
+            return Ok(flat.as_tagged(heap).erase());
+        }
         let known = heap.known();
         let val = v.as_tagged(heap);
         if val == known.undefined.get(heap) {
@@ -354,10 +365,6 @@ impl Convert {
         }
         if val == known.false_object.get(heap) {
             return Ok(known.strings.false_.get(heap).erase());
-        }
-        // Strings are their own stringification.
-        if v.as_tagged(heap).get_as::<DenseString>(heap).is_some() {
-            return Ok(v.as_tagged(heap));
         }
         // Floats allocate a fresh string; the tagged view is copied out
         // before the allocation so its heap borrow is released.

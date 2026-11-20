@@ -1,6 +1,10 @@
 # Rust build output, at any depth
 target/
 target-become/
+target-tsan/
+
+# they are being written right now not ready for publish
+docs/
 
 tmp/
 # CI logs (uploaded as artifacts)

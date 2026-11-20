@@ -1,5 +1,10 @@
+use crate::threading::ThreadRegistry;
 use core::{cell::Cell as StdCell, ptr::NonNull};
-use std::{sync::Arc, sync::Mutex, sync::Weak, sync::atomic::AtomicBool, sync::atomic::Ordering};
+use std::time::Duration;
+use std::{
+    sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
+    sync::atomic::Ordering,
+};
 
 pub mod access;
 pub mod api;
@@ -7,6 +12,7 @@ pub mod bootstrap;
 pub mod compare;
 pub mod convert;
 pub mod errors;
+pub mod ffi;
 pub mod handle;
 pub mod heap;
 pub mod ic;
@@ -20,14 +26,17 @@ pub mod native;
 pub mod objects;
 pub mod prototype;
 pub mod stack;
+pub mod threading;
 pub mod tools;
 pub mod transition;
 pub mod value;
 
 pub use objects::object::SetApplied;
 pub use objects::proxy;
-pub use objects::script_context::{global_lexical_get, global_lexical_set};
+pub use objects::script_context::{eval_global_context, global_lexical_get, global_lexical_set};
 pub use objects::string;
+
+pub use ffi::FfiState;
 
 pub use access::{OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
@@ -59,8 +68,8 @@ pub struct SetupError;
 /// cannot throw should return their value directly.
 pub type Result<T, E = Thrown> = core::result::Result<T, E>;
 pub use heap::{
-    AllocToken, AtomicGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot, GlobalHeap, Heap,
-    MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
+    AllocToken, AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, EdgeVisitable, GcSlot,
+    GlobalHeap, Heap, MaybeWeakGcSlot, OptionGcSlot, Register, WordType,
 };
 pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
@@ -71,27 +80,31 @@ pub use native::{
     CallInfo, HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, CallTarget, CallableInfoInit,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, AtomicI64Object,
+    AtomicI64ObjectInit, CValue, CValueFlags, CValueInit, CallTarget, CallableInfoInit,
     CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject,
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
-    DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, FeedbackVector,
-    FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, GlobalLexicalBinding,
-    HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
-    INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,
-    MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
-    NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
-    PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
-    ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SlotDescriptor,
-    SlotFlags, SlotName, StringData, StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit,
-    WrapperKind, decode_wtf8, info_is_immutable, info_is_lexical, info_mode, object_kind,
-    object_layout, string_content_hash, visit_object,
+    DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding, ExternalString,
+    ExternalStringInit, FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float,
+    ForeignLibrary, ForeignLibraryInit, FunctionKind, GlobalLexicalBinding, HandlerEntry,
+    HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject, INFO_GLOBAL,
+    INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit, MapKind,
+    NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary, NumberDictionaryInit, Object,
+    ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo, ProxyInit, ProxyObject,
+    SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, ScriptContextTable,
+    ScriptContextTableInit, SiteRead, SlotDescriptor, SlotFlags, SlotName, StringData, StringOwn,
+    StringRef, Symbol, ThreadObject, ThreadObjectInit, TypeInfo, TypeInfoInit, Utf8String,
+    WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8, flatten, info_is_immutable,
+    info_is_lexical, info_mode, object_kind, object_layout, string_content_hash,
+    string_content_hash_units, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
-    MaybeWeak, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value, WEAK_BIT, WEAK_PTR, Word,
+    MaybeWeak, MaybeWeakStore, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value,
+    WEAK_BIT, WEAK_PTR, Word,
 };
 
 pub use heap_api::{
@@ -116,6 +129,14 @@ pub trait Compiler {
     const RUNTIME: RuntimeId;
 }
 
+/// A source language registered for indirect eval via `KetteTools.eval`.
+pub struct EvalLanguage {
+    pub name: &'static str,
+    pub compile:
+        fn(&VM, &str, bytecode::SourceMode) -> Result<bytecode::Program, bytecode::FrontendError>,
+    pub runtime: RuntimeId,
+}
+
 /// Number of slots per handle block.
 pub const HANDLE_BLOCK_SIZE: usize = 1024;
 
@@ -137,14 +158,20 @@ const _: () = {
 
 pub struct SharedVM {
     heap: GlobalHeap,
+    /// Core C FFI: type table, call plans, callbacks.
+    ffi: FfiState,
     known: WellKnown,
     // TODO: investiage if Mutex is fine, maybe a lock-free mechanism exists
-    threads: Mutex<Vec<Weak<ThreadState>>>,
+    thread_states: Mutex<Vec<Weak<ThreadState>>>,
+    /// Guest `Thread` host state: join handles and cross-thread roots.
+    threads: ThreadRegistry,
     interner: StringInterner,
     prototype_registry: PrototypeRegistry,
     natives: NativeRegistry,
     /// Installed runtimes in `add` order; a [`RuntimeId`] indexes this.
     runtimes: Vec<Box<dyn ErasedRuntimeState>>,
+    /// Source languages available to `KetteTools.eval`.
+    eval_languages: Vec<EvalLanguage>,
     /// Weak slots the GC clears when their targets die; used for tests and
     /// the seed of a weak-registry feature.
     weak_slots: Mutex<Vec<RawCell>>,
@@ -152,6 +179,10 @@ pub struct SharedVM {
     /// live on the safepoint nodes, not here — the VM stays usable after a
     /// shutdown.
     shutdown_requested: AtomicBool,
+    /// Wakes host-blocked mutators (`join`, `sleep`) on thread lifecycle
+    /// events and shutdown.
+    thread_event_lock: Mutex<()>,
+    thread_event: Condvar,
     /// Interpreter entry ([[Call]]/[[Construct]] on bytecode callables);
     /// set once at construction from the `I: Interpreter` type parameter.
     execute: EntryFn,
@@ -175,6 +206,9 @@ pub struct ThreadState {
     acc: Register,
     pending_exception: Register,
     has_pending_exception: StdCell<bool>,
+    /// A guest callback threw during an FFI call on this thread; the FFI
+    /// trampoline re-raises once the C call has returned.
+    callback_threw: StdCell<bool>,
     /// Why this thread's execution terminated, if it did. Set exactly once,
     /// right before the uncatchable unwind; guest code can never observe or
     /// intercept it.
@@ -188,6 +222,8 @@ pub struct ThreadState {
     /// initial_map]`; a closure's entry is valid while its map and the
     /// `.prototype` slot value compare equal. The hole = not yet allocated.
     construct_cache: Register,
+    /// The guest `Thread` object mounted on this execution context.
+    thread_object: Register,
 }
 
 impl ThreadState {
@@ -316,11 +352,11 @@ impl ThreadState {
             let slot = table.element_slot(base);
             let free = entry.raw() == the_hole || (entry.raw().is_weak_ptr() && slot.is_cleared());
             if free {
-                table.set_weak(heap, base, closure.erase());
-                table.set_strong(heap, base + 1, fn_map.erase());
-                table.set_strong(heap, base + 2, proto);
-                table.set_strong(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
-                table.set_strong(heap, base + 4, initial_map.erase());
+                table.set(heap, base, closure.erase().as_weak());
+                table.set(heap, base + 1, fn_map.erase());
+                table.set(heap, base + 2, proto);
+                table.set(heap, base + 3, Smi::new(proto_slot as i64).into_tagged());
+                table.set(heap, base + 4, initial_map.erase());
                 return;
             }
             i = (i + 1) & mask;
@@ -355,6 +391,32 @@ impl ThreadState {
 
     pub fn has_pending_exception(&self) -> bool {
         self.has_pending_exception.get()
+    }
+
+    /// A callback threw during this thread's FFI call.
+    #[inline(always)]
+    pub fn callback_threw(&self) -> bool {
+        self.callback_threw.get()
+    }
+
+    #[inline(always)]
+    pub fn set_callback_threw(&self) {
+        self.callback_threw.set(true);
+    }
+
+    #[inline(always)]
+    pub fn take_callback_threw(&self) -> bool {
+        self.callback_threw.replace(false)
+    }
+
+    /// The guest `Thread` object for this execution context, if any.
+    pub fn thread_object<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Object>> {
+        let word = self.thread_object.get(heap);
+        (word.raw() != heap.known().the_hole.raw()).then(|| unsafe { word.cast() })
+    }
+
+    pub fn set_thread_object<'x>(&self, object: Tagged<'x, ThreadObject>) {
+        self.thread_object.store(object.erase());
     }
 
     /// Whether re-entering the interpreter would exhaust the Rust stack.
@@ -425,13 +487,20 @@ impl SharedVM {
         for slot in self.weak_slots.lock().unwrap().iter() {
             visitor.visit(slot);
         }
+        self.ffi.visit_edges(visitor);
         for state in &self.runtimes {
             state.visit_edges(visitor);
         }
-        let threads = self.threads.lock().unwrap();
-        for state in threads.iter().filter_map(Weak::upgrade) {
+        for state in self
+            .thread_states
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
             state.visit_edges(visitor);
         }
+        self.threads.visit_edges(visitor);
     }
 
     fn gc_host(&self) -> GcHost {
@@ -464,6 +533,7 @@ impl EdgeVisitable for ThreadState {
         visitor.visit(self.acc.as_raw());
         visitor.visit(self.pending_exception.as_raw());
         visitor.visit(self.construct_cache.as_raw());
+        visitor.visit(self.thread_object.as_raw());
     }
 }
 
@@ -622,14 +692,19 @@ impl VM {
         let interner = StringInterner::new();
         let shared = Arc::new(SharedVM {
             heap,
+            ffi: FfiState::default(),
             known: WellKnown::uninit(),
-            threads: Mutex::new(Vec::new()),
+            thread_states: Mutex::new(Vec::new()),
+            threads: ThreadRegistry::default(),
             interner,
             prototype_registry: PrototypeRegistry::new(),
             natives: NativeRegistry::new(),
             runtimes: Vec::new(),
+            eval_languages: Vec::new(),
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
+            thread_event_lock: Mutex::new(()),
+            thread_event: Condvar::new(),
             execute: I::EXECUTE,
         });
         shared.heap.set_host(shared.gc_host());
@@ -654,10 +729,52 @@ impl VM {
         self.shared
             .shutdown_requested
             .store(true, Ordering::Release);
+        self.notify_thread_event();
+    }
+
+    /// Wake every host-blocked mutator waiting on a thread lifecycle event.
+    pub fn notify_thread_event(&self) {
+        let _guard = self.shared.thread_event_lock.lock().unwrap();
+        self.shared.thread_event.notify_all();
+    }
+
+    /// Wait up to `timeout` for a lifecycle event. The caller loops on its
+    /// own predicate. Must run inside [`Heap::block_on`] so the safepoint
+    /// does not wait on this thread.
+    pub fn wait_thread_event(&self, timeout: Duration) {
+        let guard = self.shared.thread_event_lock.lock().unwrap();
+        let _ = self.shared.thread_event.wait_timeout(guard, timeout);
     }
 
     pub fn known(&self) -> &WellKnown {
         &self.shared.known
+    }
+
+    #[inline(always)]
+    pub fn ffi(&self) -> &FfiState {
+        &self.shared.ffi
+    }
+
+    /// The FFI state during setup, before the VM is shared.
+    pub fn ffi_mut(&mut self) -> &mut FfiState {
+        &mut Arc::get_mut(&mut self.shared)
+            .expect("cannot mutate the FFI state on a shared VM")
+            .ffi
+    }
+
+    /// A weak handle for host state that must not keep the VM alive (FFI
+    /// callback entries).
+    pub fn downgrade(&self) -> Weak<SharedVM> {
+        Arc::downgrade(&self.shared)
+    }
+
+    /// Re-attach to a live VM from [`VM::downgrade`].
+    pub fn from_shared_weak(shared: &Weak<SharedVM>) -> Option<VM> {
+        shared.upgrade().map(|shared| VM { shared })
+    }
+
+    pub fn threads(&self) -> &ThreadRegistry {
+        &self.shared.threads
     }
 
     pub fn interner(&self) -> &StringInterner {
@@ -666,6 +783,21 @@ impl VM {
 
     pub fn natives(&self) -> &NativeRegistry {
         &self.shared.natives
+    }
+
+    /// `[[Call]]`/`[[Construct]]` of an object callable without the
+    /// [`HostCtx::enter`] checks: `callable` must neither be bound nor a proxy.
+    #[inline]
+    pub fn execute<'h>(
+        &self,
+        runtime: &'h dyn ErasedRuntimeState,
+        heap: &'h mut Heap,
+        state: &'h ThreadState,
+        callable: Handle<'_, Object>,
+        args: HandleSlice<'_>,
+        new_target: Option<Handle<'_, Value>>,
+    ) -> Result<Tagged<'h, Value>> {
+        (self.shared.execute)(self, runtime, heap, state, callable, args, new_target)
     }
 
     #[inline]
@@ -719,14 +851,16 @@ impl VM {
             acc: unsafe { Register::from_value(undefined) },
             pending_exception: unsafe { Register::from_value(the_hole) },
             has_pending_exception: StdCell::new(false),
+            callback_threw: StdCell::new(false),
             termination: StdCell::new(None),
             rust_stack_base: StdCell::new(0),
             construct_cache: unsafe { Register::from_value(the_hole) },
+            thread_object: unsafe { Register::from_value(the_hole) },
         });
-        let mut threads = self.shared.threads.lock().unwrap();
+        let mut thread_states = self.shared.thread_states.lock().unwrap();
         // TODO: should we really call this every attach() ?
-        threads.retain(|t| t.strong_count() > 0);
-        threads.push(Arc::downgrade(&state));
+        thread_states.retain(|t| t.strong_count() > 0);
+        thread_states.push(Arc::downgrade(&state));
         Thread {
             vm: self.clone(),
             heap,
@@ -753,6 +887,27 @@ impl VM {
     pub fn add<R: Runtime>(mut self) -> Result<Self, SetupError> {
         self.install::<R>()?;
         Ok(self)
+    }
+
+    /// Register `C`'s front end under `name` for indirect `KetteTools.eval`.
+    pub fn add_eval<C: Compiler>(mut self, name: &'static str) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("cannot register eval languages on a shared VM")
+            .eval_languages
+            .push(EvalLanguage {
+                name,
+                compile: C::compile,
+                runtime: C::RUNTIME,
+            });
+        self
+    }
+
+    /// Look up a registered eval language.
+    pub fn eval_language(&self, name: &str) -> Option<&EvalLanguage> {
+        self.shared
+            .eval_languages
+            .iter()
+            .find(|language| language.name == name)
     }
 
     /// Whether `R` was installed on this VM.

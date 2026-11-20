@@ -2,13 +2,14 @@
 //! instantiation (ES 9.1.1.4.16, shared by the JS front end and Kette) and
 //! the array exotic object's `length` accessor.
 
+use crate::ffi::bindings;
 use crate::{
     AccessorInfo, Args, CallInfo, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
     EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
     MODE_CLASS, MODE_LET, Map, MapInit, MapKind, Object, PropertyDescriptor, Runtime, RuntimeId,
     ScriptContextTable, SetupError, SlotFlags, Smi, Tagged, VM, Value, Visitor, VmError,
     frame_context_value, info_is_lexical, info_mode, lookup::Hit, lookup::Lookup, mode_from_strict,
-    raise, rt_try, tools::KetteTools,
+    raise, rt_try, threading, tools::KetteTools,
 };
 
 // ---- array `length` ----
@@ -77,9 +78,11 @@ pub fn array_length_set<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) ->
 
 // ---- the VM's own runtime ----
 
-/// The VM's own runtime: the natives that are not a front end's, so they are
-/// available regardless of which languages a VM hosts. Added with
+/// The VM core runtime: intrinsic natives plus the core-owned FFI state.
+/// Available regardless of which languages a VM hosts; added with
 /// `vm.add::<VmCore>()` before the front end's runtime.
+/// The VM core runtime: intrinsic natives only; core infrastructure such as
+/// the FFI state lives on [`crate::SharedVM`].
 #[derive(Default)]
 pub struct VmCore;
 
@@ -108,6 +111,8 @@ impl Runtime for VmCore {
     const ID: RuntimeId = RuntimeId(0);
 
     fn setup(vm: &mut VM, _state: &mut Self) -> Result<(), SetupError> {
+        bindings::install(vm)?;
+        threading::install(vm)?;
         let call_index = vm.register_native(function_prototype_call);
         let throw_index = vm.register_native(throw_type_error);
         let getter = vm.register_native(array_length_get);
@@ -117,6 +122,8 @@ impl Runtime for VmCore {
             vm.register_native(KetteTools::force_minor_gc),
             vm.register_native(KetteTools::force_major_gc),
             vm.register_native(KetteTools::shutdown),
+            vm.register_native(KetteTools::eval),
+            vm.register_native(KetteTools::eval_file),
         ];
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -168,6 +175,7 @@ impl Runtime for VmCore {
                 vm.known().function_map.get(heap),
                 vm.known().non_constructor_function_map.get(heap),
                 vm.known().class_constructor_map.get(heap),
+                vm.known().c_function_map.get(heap),
             ] {
                 map.prototype.set(
                     heap,

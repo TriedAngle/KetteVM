@@ -1,13 +1,13 @@
 use crate::{
-    EdgeVisitable, Header, Heap, HeapObject, MaybeWeak, MaybeWeakGcSlot, ObjectKind, Tagged, Value,
-    Visitor,
+    AtomicMaybeWeakGcSlot, EdgeVisitable, Header, Heap, HeapObject, MaybeWeak, ObjectKind, Tagged,
+    Value, Visitor,
 };
-use core::alloc::Layout;
+use core::{alloc::Layout, sync::atomic::Ordering};
 
 #[repr(C)]
 pub struct Cell {
     pub header: Header,
-    pub maybe_value: MaybeWeakGcSlot,
+    pub maybe_value: AtomicMaybeWeakGcSlot,
 }
 
 pub struct CellInit<'a> {
@@ -25,8 +25,7 @@ impl Cell {
 
     pub fn clear(&self) {
         self.maybe_value
-            .as_raw()
-            .store_raw(Value::CLEARED.to_bits());
+            .store_word(Value::CLEARED.to_bits(), Ordering::Relaxed);
     }
 
     pub fn payload<'a>(&self, heap: &'a Heap) -> Tagged<'a, MaybeWeak<Value>> {

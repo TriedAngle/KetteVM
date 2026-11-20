@@ -38,9 +38,7 @@ pub fn call_native_target<'a>(
 }
 
 /// The outcome of a call-site start helper.
-pub enum StagedCall<'a> {
-    /// the call completed: the value or the exception sentinel
-    Value(Tagged<'a, Value>),
+pub enum StagedCall {
     /// a frame was pushed and made current: enter it at pc 0
     Frame,
     /// a rooted argument window for a runtime callee; `callee_reg` is the
@@ -83,7 +81,7 @@ pub fn push_callee_frame<'a>(
     size: usize,
     callee: Callee<'_>,
     args: Args,
-) -> Result<StagedCall<'a>, CallFault> {
+) -> Result<StagedCall, CallFault> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
@@ -107,7 +105,7 @@ pub fn push_callee_frame_values<'a>(
     size: usize,
     callee: Callee<'_>,
     values: &[Tagged<'_, Value>],
-) -> Result<StagedCall<'a>, CallFault> {
+) -> Result<StagedCall, CallFault> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
     let undefined = roots.undefined.get(heap).erase();
@@ -164,7 +162,7 @@ pub fn resolve_target<'a>(
     callee_reg: i32,
     target: Option<CallTarget<'a>>,
     staged: Args,
-) -> Result<StagedCall<'a>, CallFault> {
+) -> Result<StagedCall, CallFault> {
     match target {
         None => Err(CallFault::Raise(VmError::NotCallable)),
         Some(CallTarget::Proxy(_)) => Ok(StagedCall::Proxy { callee_reg, staged }),
@@ -215,7 +213,7 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
     callee: Tagged<'a, Value>,
     recv: Tagged<'a, Value>,
     args: &[Tagged<'a, Value>],
-) -> Result<StagedCall<'a>, CallFault> {
+) -> Result<StagedCall, CallFault> {
     let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * (2 + METHOD as usize + args.len());
     // parameter payload: [receiver, args..]
     let mut window = [recv; 3];
@@ -284,7 +282,7 @@ pub fn call_window_start<'a, const STRIDE: usize>(
     callee: Tagged<'a, Value>,
     base: i32,
     count: usize,
-) -> Result<StagedCall<'a>, CallFault> {
+) -> Result<StagedCall, CallFault> {
     let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Call.operands().len() };
     let staged = x.stack().window(x.frame_base(), base, count);
     match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee) {

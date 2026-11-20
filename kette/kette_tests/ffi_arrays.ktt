@@ -1,0 +1,94 @@
+// C arrays, array element access, and pointer arithmetic/indexing.
+// Run:  cargo run -q -p vm -- kette/kette_tests/ffi_arrays.ktt
+// Check: kette/kette_tests/check.py
+
+let (struct, i32, u64, CString) = FFI
+let I32x4 = FFI.array(i32, 4)
+let values = I32x4.new()
+values.set(0, 7)
+values.set(3, 9)
+Test.assert(values.get(0), 7)
+Test.assert(values.get(1), 0)
+Test.assert(values.get(3), 9)
+
+// A value view can be offset like a pointer.
+Test.assert(values.get(3), 9)
+values.set(1, 42)
+Test.assert(values.get(1), 42)
+
+let advanced = values.add(2)
+Test.assert(advanced.get(0), 0)
+Test.assert(advanced.get(1), 9)
+
+// Typed pointer writes go through the pointee type.
+advanced.set(0, 11)
+Test.assert(values.get(2), 11)
+
+// char* pointer arithmetic reads bytes
+let text = FFI.cstring("abc")
+Test.assert(text.get(0), 97)
+Test.assert(text.add(1).get(0), 98)
+Test.assert(text.add(2).get(0), 99)
+Test.assert(text.add(3).get(0), 0)
+
+// struct fields are addressable by name; a pointer to a struct yields
+// struct values (copies) when indexed
+let Point = struct({x: i32, y: i32})
+let point = Point.new(3, 5)
+Test.assert(point.get("x"), 3)
+Test.assert(point.get("y"), 5)
+Test.assert(point.x, 3)
+Test.assert(point.y, 5)
+point.x = 11
+Test.assert(point.x, 11)
+Test.assert(point.get("x"), 11)
+point.set("x", 8)
+Test.assert(point.get("x"), 8)
+
+// aggregate fields are zero-copy views: writes go through
+let Vec2 = struct({x: i32, y: i32})
+let Rect = struct({origin: Vec2, size: Vec2})
+let rect = Rect.new()
+rect.origin.x = 7
+rect.size.y = 9
+Test.assert(rect.origin.x, 7)
+Test.assert(rect.size.y, 9)
+Test.assert(rect.get("origin").x, 7)
+
+// copy detaches
+let detached = point.copy()
+detached.x = 99
+Test.assert(point.x, 8)
+Test.assert(detached.x, 99)
+
+// pointer to pointer
+let I32p = FFI.pointer(i32)
+let slot = FFI.array(I32p, 1).new()
+slot.set(0, values)
+let back = slot.get(0)
+Test.assert(back.get(0), 7)
+
+// UTF-16 C strings and explicit string readers
+let wtext = FFI.wstring("h€")
+Test.assert(FFI.wstring_at(wtext), "h€")
+
+let ascii = FFI.cstring("hello")
+Test.assert(FFI.string_at(ascii), "hello")
+
+// guest strings marshal directly to char* parameters
+let libc = FFI.library(null)
+let strlen = libc.fn("strlen", [CString], u64)
+Test.assert(strlen("hello"), 5)
+Test.assert(strlen("héllo"), 6)
+Test.assert(strlen(ascii), 5)
+
+// enums are named constants plus an underlying integer type
+let Color = FFI.enum({ RED: 0, GREEN: 1, BLUE: 2 })
+Test.assert(Color.RED + Color.GREEN + Color.BLUE, 3)
+Test.assert(FFI.array(Color.type, 2).size(), 8)
+Test.assert(Color.type, FFI.i32)
+
+let Tiny = FFI.enum(FFI.i8, { A: 0, B: 7 })
+Test.assert(Tiny.B, 7)
+Test.assert(Tiny.type, FFI.i8)
+Test.assert(FFI.array(Tiny.type, 2).size(), 2)

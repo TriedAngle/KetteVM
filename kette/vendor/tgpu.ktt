@@ -1,0 +1,581 @@
+let (struct, void, bool, i32, u32, f32, u8, u64, CString) = FFI
+let Ptr = FFI.pointer(void)
+let sys = globalThis.sys
+
+let tgpu_native_path = if os.name == "macos" {
+        "/Users/sebastian/Projects/tgpu/target/release/libtgpu_native.dylib"
+    } else if os.name == "windows" {
+        "tgpu_native.dll"
+    } else {
+        "libtgpu_native.so"
+    }
+
+let lib = FFI.library(tgpu_native_path)
+
+let pending = { error: null }
+let error_buffer = FFI.array(u8, 512).new()
+let invalid_handle = 4294967295
+let ImageView = struct({
+    handle: Ptr,
+})
+let Image = struct({
+    handle: Ptr,
+})
+let Sampler = struct({
+    handle: Ptr,
+})
+let Window = struct({
+    kind: i32,
+    display: Ptr,
+    window: Ptr,
+})
+let SwapchainDesc = struct({
+    struct_size: u64,
+    window: Window,
+    width: u32,
+    height: u32,
+    image_count: u32,
+    present_mode: i32,
+})
+let BufferDesc = struct({
+    struct_size: u64,
+    label: CString,
+    size: u64,
+    usage: u32,
+    memory: i32,
+    host_access: i32,
+})
+let SamplerDesc = struct({
+    struct_size: u64,
+    label: CString,
+    mag: i32,
+    min: i32,
+    mipmap: i32,
+    address_u: i32,
+    address_v: i32,
+    address_w: i32,
+    anisotropy: f32,
+    min_lod: f32,
+    max_lod: f32,
+})
+let ImageDesc = struct({
+    struct_size: u64,
+    label: CString,
+    format: i32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    mip_levels: u32,
+    array_layers: u32,
+    usage: u32,
+    memory: i32,
+    host_access: i32,
+    initial_layout: i32,
+})
+let ViewImageDesc = struct({
+    struct_size: u64,
+    image: ImageDesc,
+    sampler: Ptr,
+})
+let BindlessDesc = struct({
+    struct_size: u64,
+    max_read_buffers: u32,
+    max_rw_buffers: u32,
+    max_sampled_images: u32,
+    max_storage_images: u32,
+    max_samplers: u32,
+    max_uniform_buffers: u32,
+})
+let ComputePipelineDesc = struct({
+    struct_size: u64,
+    label: CString,
+    shader: Ptr,
+    entry: CString,
+    bindless: Ptr,
+    push_constant_size: u32,
+})
+let RenderPipelineDesc = struct({
+    struct_size: u64,
+    label: CString,
+    vertex_shader: Ptr,
+    vertex_entry: CString,
+    fragment_shader: Ptr,
+    fragment_entry: CString,
+    color_formats: Ptr,
+    color_format_count: u64,
+    depth_format: i32,
+    depth_test: bool,
+    depth_write: bool,
+    depth_compare: i32,
+    bindless: Ptr,
+    push_constant_size: u32,
+    cull: i32,
+    front_face: i32,
+    topology: i32,
+    blend: i32,
+    vertex_buffers: Ptr,
+    vertex_buffer_count: u64,
+})
+let ColorAttachment = struct({
+    view: ImageView,
+    layout: i32,
+    load: i32,
+    store: i32,
+    clear_color: FFI.array(f32, 4),
+})
+let RenderDesc = struct({
+    struct_size: u64,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    colors: Ptr,
+    color_count: u64,
+    depth: Ptr,
+    stencil: Ptr,
+})
+let Frame = struct({
+    index: u32,
+    flight_index: u64,
+    suboptimal: bool,
+    out_of_date: bool,
+})
+let Extent2D = struct({
+    width: u32,
+    height: u32,
+})
+// Must match the Slang PushData layout.
+let PushConstants = struct({
+    output_image: u32,
+    particles: u32,
+    present_texture: u32,
+    present_sampler: u32,
+    window: FFI.array(u32, 2),
+    mouse: FFI.array(f32, 2),
+    dt: f32,
+    pad: f32,
+})
+
+let raw = {
+    lib: lib,
+    instance_create: lib.fn("tgpu_instance_create", [Ptr], Ptr),
+    instance_destroy: lib.fn("tgpu_instance_destroy", [Ptr], void),
+    device_create: lib.fn("tgpu_device_create", [Ptr, Ptr, Ptr, u64], Ptr),
+    device_destroy: lib.fn("tgpu_device_destroy", [Ptr], void),
+    device_wait_idle: lib.fn("tgpu_device_wait_idle", [Ptr], void),
+    queue_destroy: lib.fn("tgpu_queue_destroy", [Ptr], void),
+    swapchain_create: lib.fn("tgpu_device_create_swapchain", [Ptr, Ptr], Ptr),
+    swapchain_destroy: lib.fn("tgpu_swapchain_destroy", [Ptr], void),
+    swapchain_extent: lib.fn("tgpu_swapchain_extent", [Ptr, Ptr], i32),
+    swapchain_format: lib.fn("tgpu_swapchain_format", [Ptr], i32),
+    swapchain_begin_frame: lib.fn("tgpu_swapchain_begin_frame", [Ptr, Ptr, Ptr], i32),
+    swapchain_end_frame: lib.fn("tgpu_swapchain_end_frame", [Ptr, Ptr, Frame, Ptr, u64], i32),
+    swapchain_view: lib.fn("tgpu_swapchain_view", [Ptr, Frame], ImageView),
+    swapchain_set_extent: lib.fn("tgpu_swapchain_set_extent", [Ptr, Extent2D], void),
+    swapchain_recreate: lib.fn("tgpu_swapchain_recreate", [Ptr], i32),
+    buffer_create: lib.fn("tgpu_device_create_buffer", [Ptr, Ptr, Ptr, u64], Ptr),
+    buffer_destroy: lib.fn("tgpu_buffer_destroy", [Ptr], void),
+    view_image_create: lib.fn("tgpu_device_create_view_image", [Ptr, Ptr], Ptr),
+    view_image_destroy: lib.fn("tgpu_view_image_destroy", [Ptr], void),
+    view_image_image: lib.fn("tgpu_view_image_image", [Ptr], Image),
+    view_image_view: lib.fn("tgpu_view_image_view", [Ptr], ImageView),
+    view_image_sampler: lib.fn("tgpu_view_image_sampler", [Ptr], Sampler),
+    bindless_create: lib.fn("tgpu_device_create_bindless", [Ptr, Ptr], Ptr),
+    bindless_destroy: lib.fn("tgpu_bindless_destroy", [Ptr], void),
+    bindless_add_rw_buffer: lib.fn("tgpu_bindless_add_rw_buffer", [Ptr, Ptr], u32),
+    bindless_add_storage_image: lib.fn("tgpu_bindless_add_storage_image", [Ptr, ImageView, i32], u32),
+    bindless_add_sampled_image: lib.fn("tgpu_bindless_add_sampled_image", [Ptr, ImageView, i32], u32),
+    bindless_add_sampler: lib.fn("tgpu_bindless_add_sampler", [Ptr, Sampler], u32),
+    bindless_update_storage_image: lib.fn("tgpu_bindless_update_storage_image", [Ptr, u32, ImageView, i32], i32),
+    bindless_update_sampled_image: lib.fn("tgpu_bindless_update_sampled_image", [Ptr, u32, ImageView, i32], i32),
+    bindless_update_sampler: lib.fn("tgpu_bindless_update_sampler", [Ptr, u32, Sampler], i32),
+    shader_create: lib.fn("tgpu_device_create_shader", [Ptr, CString, Ptr, u64], Ptr),
+    shader_create_slang: lib.fn("tgpu_device_create_shader_slang", [Ptr, CString, Ptr, u64], Ptr),
+    shader_destroy: lib.fn("tgpu_shader_destroy", [Ptr], void),
+    compute_pipeline_create: lib.fn("tgpu_device_create_compute_pipeline", [Ptr, Ptr], Ptr),
+    compute_pipeline_destroy: lib.fn("tgpu_compute_pipeline_destroy", [Ptr], void),
+    render_pipeline_create: lib.fn("tgpu_device_create_render_pipeline", [Ptr, Ptr], Ptr),
+    render_pipeline_destroy: lib.fn("tgpu_render_pipeline_destroy", [Ptr], void),
+    recorder_begin: lib.fn("tgpu_queue_begin_commands", [Ptr], Ptr),
+    recorder_transition_image: lib.fn("tgpu_recorder_transition_image", [Ptr, Image, i32], i32),
+    recorder_transition_frame: lib.fn("tgpu_recorder_transition_frame", [Ptr, Ptr, Frame, i32], i32),
+    recorder_bind_compute: lib.fn("tgpu_recorder_bind_compute", [Ptr, Ptr, Ptr, Ptr, u64], i32),
+    recorder_dispatch: lib.fn("tgpu_recorder_dispatch", [Ptr, u32, u32, u32], i32),
+    recorder_bind_render: lib.fn("tgpu_recorder_bind_render", [Ptr, Ptr, Ptr, Ptr, u64], i32),
+    recorder_begin_render: lib.fn("tgpu_recorder_begin_render", [Ptr, Ptr], i32),
+    recorder_draw: lib.fn("tgpu_recorder_draw", [Ptr, u32, u32, u32, u32], i32),
+    recorder_end_render: lib.fn("tgpu_recorder_end_render", [Ptr], i32),
+    recorder_finish: lib.fn("tgpu_recorder_finish", [Ptr], Ptr),
+    command_buffer_destroy: lib.fn("tgpu_command_buffer_destroy", [Ptr], void),
+    last_error: lib.fn("tgpu_last_error", [Ptr, u64], i32),
+}
+
+let record_status = { |status, what|
+    if status != 0 && pending.error == null {
+        raw.last_error(error_buffer, 512)
+        pending.error = {
+            status: status,
+            what: what,
+            message: FFI.string_at(error_buffer)
+        }
+    }
+}
+let record_last = { |what|
+    let status = raw.last_error(error_buffer, 512)
+    if status != 0 && pending.error == null {
+        pending.error = {
+            status: status,
+            what: what,
+            message: FFI.string_at(error_buffer)
+        }
+    }
+}
+let record_handle = { |value, what|
+    if value == invalid_handle {
+        record_last(what)
+    }
+    value
+}
+
+
+let tgpu = {
+    INVALID_HANDLE: invalid_handle,
+    raw: raw,
+    ImageView: ImageView,
+    Image: Image,
+    Sampler: Sampler,
+    Window: Window,
+    SwapchainDesc: SwapchainDesc,
+    BufferDesc: BufferDesc,
+    SamplerDesc: SamplerDesc,
+    ImageDesc: ImageDesc,
+    ViewImageDesc: ViewImageDesc,
+    BindlessDesc: BindlessDesc,
+    ComputePipelineDesc: ComputePipelineDesc,
+    RenderPipelineDesc: RenderPipelineDesc,
+    ColorAttachment: ColorAttachment,
+    RenderDesc: RenderDesc,
+    Frame: Frame,
+    Extent2D: Extent2D,
+    PushConstants: PushConstants,
+    WindowKind: {
+        APP_KIT: 1,
+        XLIB: 2,
+        WIN32: 3,
+    },
+    PresentMode: {
+        FIFO: 0,
+    },
+    MemoryPreset: {
+        GPU_ONLY: 0,
+        DYNAMIC: 3,
+    },
+    HostAccess: {
+        NONE: 0,
+        READ_WRITE_RANDOM: 3,
+    },
+    BufferUsage: {
+        COPY_DST: 2,
+        STORAGE: 32,
+    },
+    ImageUsage: {
+        COPY_SRC: 1,
+        COPY_DST: 2,
+        SAMPLED: 4,
+        STORAGE: 8,
+        COLOR_ATTACHMENT: 16,
+    },
+    ImageLayout: {
+        UNDEFINED: 0,
+        GENERAL: 1,
+        COMPUTE: 2,
+        FRAGMENT: 3,
+        COLOR: 4,
+        PRESENT: 7,
+    },
+    LoadOp: {
+        CLEAR: 1,
+    },
+    StoreOp: {
+        STORE: 0,
+    },
+    Filter: {
+        LINEAR: 1,
+    },
+    SamplerMipmapMode: {
+        LINEAR: 1,
+    },
+    SamplerAddressMode: {
+        CLAMP_TO_EDGE: 2,
+    },
+    Format: {
+        UNDEFINED: 0,
+    },
+    CullMode: {
+        BACK: 2,
+    },
+    FrontFace: {
+        COUNTER_CLOCKWISE: 0,
+    },
+    Topology: {
+        TRIANGLE_LIST: 0,
+    },
+    Blend: {
+        DISABLED: 0,
+    },
+    // Stops at the first recorded error. Swap this for `throw` once
+    // Kette has exceptions.
+    check: {
+        if pending.error != null {
+            print("tgpu error:")
+            print(pending.error.what)
+            print(pending.error.message)
+            sys.raw.exit(1)
+        }
+    },
+    instanceCreate: { |desc|
+        let value = raw.instance_create(desc)
+        record_last("tgpu_instance_create")
+        value
+    },
+    instanceDestroy: raw.instance_destroy,
+    deviceCreate: { |instance, desc, queues, capacity|
+        let value = raw.device_create(instance, desc, queues, capacity)
+        record_last("tgpu_device_create")
+        value
+    },
+    deviceDestroy: raw.device_destroy,
+    deviceWaitIdle: raw.device_wait_idle,
+    queueDestroy: raw.queue_destroy,
+    swapchainCreate: { |device, desc|
+        let value = raw.swapchain_create(device, desc)
+        record_last("tgpu_device_create_swapchain")
+        value
+    },
+    swapchainDestroy: raw.swapchain_destroy,
+    swapchainExtent: { |swapchain, out|
+        record_status(raw.swapchain_extent(swapchain, out), "tgpu_swapchain_extent")
+    },
+    swapchainFormat: raw.swapchain_format,
+    swapchainBeginFrame: { |queue, swapchain, out|
+        record_status(
+            raw.swapchain_begin_frame(queue, swapchain, out),
+            "tgpu_swapchain_begin_frame"
+        )
+    },
+    swapchainEndFrame: { |queue, swapchain, frame, records, count|
+        record_status(
+            raw.swapchain_end_frame(queue, swapchain, frame, records, count),
+            "tgpu_swapchain_end_frame"
+        )
+    },
+    swapchainView: raw.swapchain_view,
+    swapchainSetExtent: raw.swapchain_set_extent,
+    swapchainRecreate: { |swapchain|
+        record_status(raw.swapchain_recreate(swapchain), "tgpu_swapchain_recreate")
+    },
+    bufferCreate: { |device, desc, data, len|
+        let value = raw.buffer_create(device, desc, data, len)
+        record_last("tgpu_device_create_buffer")
+        value
+    },
+    bufferDestroy: raw.buffer_destroy,
+    viewImageCreate: { |device, desc|
+        let value = raw.view_image_create(device, desc)
+        record_last("tgpu_device_create_view_image")
+        value
+    },
+    viewImageDestroy: raw.view_image_destroy,
+    viewImageImage: raw.view_image_image,
+    viewImageView: raw.view_image_view,
+    viewImageSampler: raw.view_image_sampler,
+    bindlessCreate: { |device, desc|
+        let value = raw.bindless_create(device, desc)
+        record_last("tgpu_device_create_bindless")
+        value
+    },
+    bindlessDestroy: raw.bindless_destroy,
+    bindlessAddRwBuffer: { |heap, buffer|
+        record_handle(
+            raw.bindless_add_rw_buffer(heap, buffer),
+            "tgpu_bindless_add_rw_buffer"
+        )
+    },
+    bindlessAddStorageImage: { |heap, view, layout|
+        record_handle(
+            raw.bindless_add_storage_image(heap, view, layout),
+            "tgpu_bindless_add_storage_image"
+        )
+    },
+    bindlessAddSampledImage: { |heap, view, layout|
+        record_handle(
+            raw.bindless_add_sampled_image(heap, view, layout),
+            "tgpu_bindless_add_sampled_image"
+        )
+    },
+    bindlessAddSampler: { |heap, sampler_value|
+        record_handle(
+            raw.bindless_add_sampler(heap, sampler_value),
+            "tgpu_bindless_add_sampler"
+        )
+    },
+    bindlessUpdateStorageImage: { |heap, handle, view, layout|
+        record_status(
+            raw.bindless_update_storage_image(heap, handle, view, layout),
+            "tgpu_bindless_update_storage_image"
+        )
+    },
+    bindlessUpdateSampledImage: { |heap, handle, view, layout|
+        record_status(
+            raw.bindless_update_sampled_image(heap, handle, view, layout),
+            "tgpu_bindless_update_sampled_image"
+        )
+    },
+    bindlessUpdateSampler: { |heap, handle, sampler_value|
+        record_status(
+            raw.bindless_update_sampler(heap, handle, sampler_value),
+            "tgpu_bindless_update_sampler"
+        )
+    },
+    loadSpirv: { |path|
+        if sys.raw.access(path, 0) != 0 {
+            print("cannot open shader:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        let file = sys.raw.fopen(path, "rb")
+        sys.raw.fseek(file, 0, 2)
+        let size = sys.raw.ftell(file)
+        sys.raw.fseek(file, 0, 0)
+        if size <= 0 || size % 4 != 0 {
+            print("not a SPIR-V file:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        let bytes = FFI.array(u8, size).new()
+        let read = sys.raw.fread(bytes, 1, size, file)
+        sys.raw.fclose(file)
+        if read != size {
+            print("cannot read shader:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        { data: bytes, size: size }
+    },
+    shaderCreate: { |device, label, words, count|
+        let value = raw.shader_create(device, label, words, count)
+        record_last("tgpu_device_create_shader")
+        value
+    },
+    loadSlang: { |device, path|
+        if sys.raw.access(path, 0) != 0 {
+            print("cannot open shader:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        let file = sys.raw.fopen(path, "rb")
+        sys.raw.fseek(file, 0, 2)
+        let size = sys.raw.ftell(file)
+        sys.raw.fseek(file, 0, 0)
+        if size <= 0 {
+            print("empty shader:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        let bytes = FFI.array(u8, size + 1).new()
+        let read = sys.raw.fread(bytes, 1, size, file)
+        sys.raw.fclose(file)
+        if read != size {
+            print("cannot read shader:")
+            print(path)
+            sys.raw.exit(1)
+        }
+        bytes.set(size, 0)
+        let value = raw.shader_create_slang(device, path, bytes, size)
+        record_last("tgpu_device_create_shader_slang")
+        bytes.free()
+        value
+    },
+    shaderCreateSlang: { |device, label, source, len|
+        let value = raw.shader_create_slang(device, label, source, len)
+        record_last("tgpu_device_create_shader_slang")
+        value
+    },
+    shaderDestroy: raw.shader_destroy,
+    computePipelineCreate: { |device, desc|
+        let value = raw.compute_pipeline_create(device, desc)
+        record_last("tgpu_device_create_compute_pipeline")
+        value
+    },
+    computePipelineDestroy: raw.compute_pipeline_destroy,
+    renderPipelineCreate: { |device, desc|
+        let value = raw.render_pipeline_create(device, desc)
+        record_last("tgpu_device_create_render_pipeline")
+        value
+    },
+    renderPipelineDestroy: raw.render_pipeline_destroy,
+    recorderBegin: { |queue|
+        let value = raw.recorder_begin(queue)
+        record_last("tgpu_queue_begin_commands")
+        value
+    },
+    recorderTransitionImage: { |recorder, image, layout|
+        record_status(
+            raw.recorder_transition_image(recorder, image, layout),
+            "tgpu_recorder_transition_image"
+        )
+    },
+    recorderTransitionFrame: { |recorder, swapchain, frame, layout|
+        record_status(
+            raw.recorder_transition_frame(recorder, swapchain, frame, layout),
+            "tgpu_recorder_transition_frame"
+        )
+    },
+    recorderBindCompute: { |recorder, pipeline, heap, push, len|
+        record_status(
+            raw.recorder_bind_compute(recorder, pipeline, heap, push, len),
+            "tgpu_recorder_bind_compute"
+        )
+    },
+    recorderDispatch: { |recorder, x, y, z|
+        record_status(
+            raw.recorder_dispatch(recorder, x, y, z),
+            "tgpu_recorder_dispatch"
+        )
+    },
+    recorderBindRender: { |recorder, pipeline, heap, push, len|
+        record_status(
+            raw.recorder_bind_render(recorder, pipeline, heap, push, len),
+            "tgpu_recorder_bind_render"
+        )
+    },
+    recorderBeginRender: { |recorder, desc|
+        record_status(
+            raw.recorder_begin_render(recorder, desc),
+            "tgpu_recorder_begin_render"
+        )
+    },
+    recorderDraw: { |recorder, first_vertex, vertex_count, first_instance, instance_count|
+        record_status(
+            raw.recorder_draw(
+                recorder,
+                first_vertex,
+                vertex_count,
+                first_instance,
+                instance_count
+            ),
+            "tgpu_recorder_draw"
+        )
+    },
+    recorderEndRender: { |recorder|
+        record_status(raw.recorder_end_render(recorder), "tgpu_recorder_end_render")
+    },
+    recorderFinish: { |recorder|
+        let value = raw.recorder_finish(recorder)
+        record_last("tgpu_recorder_finish")
+        value
+    },
+    commandBufferDestroy: raw.command_buffer_destroy,
+}
+
+globalThis.tgpu = tgpu

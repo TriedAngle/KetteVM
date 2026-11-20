@@ -137,6 +137,25 @@ impl Smi {
 
 pub struct MaybeWeak<T>(PhantomData<fn() -> T>);
 
+/// A value accepted by a maybe-weak slot store.
+pub trait MaybeWeakStore<'a, T> {
+    fn into_stored(self) -> Tagged<'a, MaybeWeak<T>>;
+}
+
+impl<'a, T> MaybeWeakStore<'a, T> for Tagged<'a, T> {
+    #[inline(always)]
+    fn into_stored(self) -> Tagged<'a, MaybeWeak<T>> {
+        self.as_maybe_weak()
+    }
+}
+
+impl<'a, T> MaybeWeakStore<'a, T> for Tagged<'a, MaybeWeak<T>> {
+    #[inline(always)]
+    fn into_stored(self) -> Tagged<'a, MaybeWeak<T>> {
+        self
+    }
+}
+
 /// Tagged is a typed Value that is valid for the lifetime `'a` of the
 /// heap borrow it was loaded (or allocated) under: a *flow type*. While
 /// any `Tagged<'a, _>` exists, the borrow checker keeps the `'a` borrow
@@ -216,6 +235,7 @@ impl<'a, T> Tagged<'a, T> {
         }
     }
 
+    #[inline(always)]
     pub fn raw(self) -> Value {
         self.raw
     }
@@ -253,6 +273,7 @@ impl<'a, T> Tagged<'a, T> {
         self.raw.raw_addr()
     }
 
+    #[inline(always)]
     pub fn is_strong_ptr(self) -> bool {
         self.raw.is_strong_ptr()
     }
@@ -272,6 +293,7 @@ impl<'a, T> Tagged<'a, T> {
         self.raw.to_bits() == (other.raw.to_bits() | WEAK_PTR)
     }
 
+    #[inline(always)]
     pub fn to_i64(self) -> Option<i64> {
         self.raw.to_i64()
     }
@@ -460,9 +482,10 @@ impl<'a, T> Tagged<'a, T> {
         }
     }
 
-    /// The weak view of this word: sets the weak tag bit. Callers are
-    /// responsible for the word being a heap pointer.
+    /// The weak view of this word: sets the weak tag bit. Only heap pointers
+    /// may be weak.
     pub fn as_weak(self) -> Tagged<'a, MaybeWeak<T>> {
+        debug_assert!(self.raw.is_ptr(), "weak reference to a non-pointer");
         Tagged {
             raw: Value(self.raw.to_bits() | WEAK_PTR),
             _phantom: PhantomData,
@@ -479,6 +502,7 @@ impl<'a> Tagged<'a, MaybeWeak<Value>> {
 }
 
 impl<'a, T> Tagged<'a, MaybeWeak<T>> {
+    #[inline(always)]
     pub unsafe fn from_maybe_weak_unchecked(value: Value) -> Self {
         Tagged {
             raw: value,
@@ -498,6 +522,7 @@ impl<'a, T> Tagged<'a, MaybeWeak<T>> {
 
     /// The strong view of a live reference; `None` for cleared or
     /// non-pointer words.
+    #[inline(always)]
     pub fn as_strong(self) -> Option<Tagged<'a, T>> {
         if !self.raw.is_ptr() || self.raw.is_cleared() {
             return None;
@@ -508,6 +533,7 @@ impl<'a, T> Tagged<'a, MaybeWeak<T>> {
         })
     }
 
+    #[inline(always)]
     pub fn is_cleared(self) -> bool {
         self.raw.is_cleared()
     }

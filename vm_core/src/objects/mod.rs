@@ -1,4 +1,5 @@
 pub mod array;
+pub mod atomic;
 pub mod byte_array;
 pub mod callable;
 pub mod cell;
@@ -8,9 +9,10 @@ pub mod data_handler;
 pub mod descriptor;
 pub mod dictionary;
 pub mod feedback;
+pub mod ffi_objects;
 pub mod float;
 mod helpers;
-pub mod js_array;
+mod js_array;
 pub mod map;
 pub mod object;
 pub mod prototype_info;
@@ -18,8 +20,10 @@ pub mod proxy;
 pub mod script_context;
 pub mod string;
 pub mod symbol;
+pub mod thread;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
+pub use atomic::{AtomicI64Object, AtomicI64ObjectInit};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
 pub use cell::{Cell, CellInit};
@@ -35,7 +39,11 @@ pub use dictionary::{
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,
     NumberDictionary, NumberDictionaryInit,
 };
-pub use feedback::{FeedbackVector, FeedbackVectorInit};
+pub use feedback::{FeedbackVector, FeedbackVectorInit, SiteRead};
+pub use ffi_objects::{
+    CValue, CValueFlags, CValueInit, FLAG_VARIADIC, ForeignLibrary, ForeignLibraryInit, TypeInfo,
+    TypeInfoInit,
+};
 pub use float::Float;
 pub use helpers::WrapperKind;
 pub use map::{
@@ -43,19 +51,24 @@ pub use map::{
     SlotDescriptor, SlotFlags, SlotName,
 };
 pub use object::{ArgumentsCreate, CallTarget, Object, ObjectInit, ObjectSlotsInit};
-pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
+pub use prototype_info::PrototypeInfo;
 pub use proxy::{ProxyInit, ProxyObject};
 pub use script_context::{
     GlobalLexicalBinding, NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable,
     ScriptContextTableInit,
 };
-pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
+pub use string::{
+    DenseString, Encoding, ExternalString, ExternalStringInit, StringData, StringOwn, StringRef,
+    Utf8String, decode_wtf8, flatten, string_content_hash, string_content_hash_units,
+};
 pub use symbol::Symbol;
+pub use thread::{NEW, RUNNABLE, TERMINATED, ThreadObject, ThreadObjectInit};
 
 use crate::{
     EdgeVisitable, GcSlot, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR, Word,
 };
 use core::{alloc::Layout, ptr::NonNull};
+use std::sync::atomic::Ordering;
 
 pub trait HeapObject: 'static {
     type Init<'a>;
@@ -109,6 +122,16 @@ impl Header {
     pub fn map<'a>(&self, heap: &'a Heap) -> Tagged<'a, Map> {
         self.map.get(heap)
     }
+
+    /// Replace the map on a live object. The store is atomic because a
+    /// concurrent sweeper parses live objects' layouts while mutators still
+    /// run (see [`object_layout`]).
+    pub fn set_map(&self, heap: &Heap, host: Tagged<'_, Value>, map: Tagged<'_, Map>) {
+        heap.write_barrier(host, self.map.as_raw(), map.erase());
+        self.map
+            .as_raw()
+            .store_atomic(map.raw().to_bits(), Ordering::Release);
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -155,6 +178,20 @@ pub enum ObjectKind {
     ScriptContextTable = 26,
     /// Internal name -> script-context-index hash table.
     NameToIndexHashTable = 27,
+    /// A loaded foreign library: dynamic-loader handle and path.
+    ForeignLibrary = 29,
+    /// Storage for a C aggregate value (struct, union, array).
+    CValue = 31,
+    /// A C type descriptor: kind, layout, related types, call plan.
+    TypeInfo = 32,
+    /// A Valid UTF-8 string with inline bytes (non-ECma representation).
+    Utf8String = 33,
+    /// A string whose payload lives in host memory, kept alive by `owner`.
+    ExternalString = 34,
+    /// A guest `Thread` object; host execution state lives in `VmCore`.
+    ThreadObject = 35,
+    /// A shared cell with an atomically accessed `Value` payload.
+    AtomicI64Object = 36,
 }
 
 impl ObjectKind {
@@ -170,6 +207,8 @@ impl ObjectKind {
                 | ObjectKind::ByteArray
                 | ObjectKind::String
                 | ObjectKind::Proxy
+                | ObjectKind::CValue
+                | ObjectKind::ThreadObject
         )
     }
 }
@@ -178,8 +217,10 @@ pub unsafe fn object_kind(addr: ObjectAddr) -> ObjectKind {
     let header = unsafe { &*addr.cast::<Header>().as_ptr() };
     // Safety: GC-callback context — there is no heap borrow to anchor at,
     // so the map word read from the visited header is promoted unsafely.
-    let map = header.map.raw();
-    unsafe { Tagged::<Map>::from_value_unchecked(map) }
+    // The load is atomic: mutators may still transition live objects' maps
+    // while the sweeper walks the chunk.
+    let map = header.map.as_raw().load_atomic(Ordering::Acquire);
+    unsafe { Tagged::<Map>::from_value_unchecked(Value::from_bits(map)) }
         .kind()
         .kind()
 }
@@ -192,6 +233,8 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::FixedArray => (*addr.cast::<FixedArray>().as_ptr()).layout(),
             ObjectKind::FixedByteArray => (*addr.cast::<FixedByteArray>().as_ptr()).layout(),
             ObjectKind::DenseString => (*addr.cast::<DenseString>().as_ptr()).layout(),
+            ObjectKind::Utf8String => (*addr.cast::<Utf8String>().as_ptr()).layout(),
+            ObjectKind::ExternalString => (*addr.cast::<ExternalString>().as_ptr()).layout(),
             ObjectKind::AccessorPair => (*addr.cast::<AccessorPair>().as_ptr()).layout(),
             ObjectKind::CallableInfo => (*addr.cast::<CallableInfoObject>().as_ptr()).layout(),
             ObjectKind::Float => (*addr.cast::<Float>().as_ptr()).layout(),
@@ -212,6 +255,11 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).layout()
             }
+            ObjectKind::ForeignLibrary => (*addr.cast::<ForeignLibrary>().as_ptr()).layout(),
+            ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
+            ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
+            ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
+            ObjectKind::AtomicI64Object => (*addr.cast::<AtomicI64Object>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -235,6 +283,10 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
                 (*addr.cast::<FixedByteArray>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::DenseString => (*addr.cast::<DenseString>().as_ptr()).visit_edges(visitor),
+            ObjectKind::Utf8String => (*addr.cast::<Utf8String>().as_ptr()).visit_edges(visitor),
+            ObjectKind::ExternalString => {
+                (*addr.cast::<ExternalString>().as_ptr()).visit_edges(visitor)
+            }
             ObjectKind::AccessorPair => {
                 (*addr.cast::<AccessorPair>().as_ptr()).visit_edges(visitor)
             }
@@ -270,6 +322,17 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             }
             ObjectKind::NameToIndexHashTable => {
                 (*addr.cast::<NameToIndexHashTable>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::ForeignLibrary => {
+                (*addr.cast::<ForeignLibrary>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).visit_edges(visitor),
+            ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).visit_edges(visitor),
+            ObjectKind::ThreadObject => {
+                (*addr.cast::<ThreadObject>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::AtomicI64Object => {
+                (*addr.cast::<AtomicI64Object>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::Object
             | ObjectKind::Array

@@ -135,6 +135,12 @@ impl LocalHeap for DummyLocalHeap {
         false
     }
 
+    fn block(&self) -> bool {
+        false
+    }
+
+    fn unblock(&self) {}
+
     /// The dummy heap has no safepoint barrier: shutdown only terminates
     /// the calling thread's execution itself.
     fn cancel_executions(&self, _protocol: &dyn Fn()) {}
@@ -180,9 +186,12 @@ impl SharedHeap for DummyHeap {
     }
 
     fn stats(&self) -> HeapStats {
+        let used = self.inner.used();
+        let capacity = self.inner.capacity();
         HeapStats {
-            used: self.inner.used(),
-            capacity: self.inner.capacity(),
+            used,
+            capacity,
+            free: capacity.saturating_sub(used),
         }
     }
 }

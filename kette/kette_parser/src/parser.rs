@@ -218,6 +218,48 @@ impl<S: CharStream> Parser<S> {
 
     fn parse_let(&mut self) -> Result<NodeId, ParseError> {
         let kw = self.expect(TokenKind::Let)?;
+        if self.peek()?.kind == TokenKind::LParen {
+            self.next()?;
+            let mut sources = Vec::new();
+            let mut names = Vec::new();
+            loop {
+                if self.peek()?.kind == TokenKind::RParen {
+                    break;
+                }
+                let source_tok = self.next()?;
+                let source_span = source_tok.span;
+                let source = self.token_name(source_tok)?;
+                sources.push(self.ast.add(Node::Ident(source), source_span));
+                let (bound, bound_span) = if self.eat(TokenKind::As)? {
+                    let bound_tok = self.next()?;
+                    let span = bound_tok.span;
+                    (self.token_name(bound_tok)?, span)
+                } else {
+                    (source, source_span)
+                };
+                names.push(self.ast.add(Node::Ident(bound), bound_span));
+                if !self.eat(TokenKind::Comma)? {
+                    break;
+                }
+            }
+            let close = self.expect(TokenKind::RParen)?;
+            if names.is_empty() {
+                return Err(ParseError::new(close.span, "expected at least one name"));
+            }
+            self.expect(TokenKind::Assign)?;
+            let init = self.parse_expression()?;
+            let span = ByteSpan::new(kw.span.start, self.ast.span(init).end);
+            let sources = self.ast.list(&sources);
+            let names = self.ast.list(&names);
+            return Ok(self.ast.add(
+                Node::LetMulti {
+                    sources,
+                    names,
+                    init,
+                },
+                span,
+            ));
+        }
         let name_tok = self.next()?;
         let name = self.token_name(name_tok)?;
         self.expect(TokenKind::Assign)?;
@@ -434,6 +476,7 @@ impl<S: CharStream> Parser<S> {
             TokenKind::LBrace => self.parse_object(),
             TokenKind::LBracket => self.parse_array(),
             TokenKind::If => self.parse_if(),
+            TokenKind::While => self.parse_while(),
             _ => Err(ParseError::new(
                 t.span,
                 format!("expected an expression, found `{}`", t.kind.describe()),
@@ -510,7 +553,7 @@ impl<S: CharStream> Parser<S> {
         }
         // `if` / `return` parse as (odd) expressions; they are keywords,
         // so they can never begin a slot
-        if t.kind == TokenKind::If || t.kind == TokenKind::Return {
+        if t.kind == TokenKind::If || t.kind == TokenKind::While || t.kind == TokenKind::Return {
             let expr = self.parse_expression()?;
             return Ok(Entry::Stmt(self.expr_stmt(expr)?));
         }
@@ -660,6 +703,14 @@ impl<S: CharStream> Parser<S> {
             .unwrap_or_else(|| self.ast.span(then).end);
         let span = ByteSpan::new(kw.span.start, end);
         Ok(self.ast.add(Node::If { cond, then, else_ }, span))
+    }
+
+    fn parse_while(&mut self) -> Result<NodeId, ParseError> {
+        let kw = self.expect(TokenKind::While)?;
+        let cond = self.parse_expression()?;
+        let body = self.parse_branch()?;
+        let span = ByteSpan::new(kw.span.start, self.ast.span(body).end);
+        Ok(self.ast.add(Node::While { cond, body }, span))
     }
 
     /// `{ statements }` compiled inline: a plain statement list, not an

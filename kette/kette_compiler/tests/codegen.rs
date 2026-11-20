@@ -54,26 +54,28 @@ fn element_slots_recycle_the_key_temp() {
 }
 
 #[test]
-fn top_level_lets_are_global_properties() {
+fn top_level_lets_are_script_lexical() {
     let p = compile("let x = 1; x; x = 2;", SourceMode::Script);
     let f = script_fn(&p);
+    // Kette has no `var`; the script context owns top-level `let` bindings.
     let declarations = p.constants(f).iter().find_map(|constant| match constant {
         Constant::GlobalDeclarations(declarations) => Some(declarations),
         _ => None,
     });
     let declarations = declarations.expect("script declares its global bindings");
-    assert_eq!(declarations.vars.len(), 1);
-    assert_eq!(&*declarations.vars[0], b"x");
-    assert!(contains(&p, f, Opcode::StoreGlobal));
-    assert!(contains(&p, f, Opcode::LoadGlobal));
+    assert!(declarations.vars.is_empty());
+    assert!(contains(&p, f, Opcode::CreateFunctionContext));
+    assert!(contains(&p, f, Opcode::StoreContextSlot));
+    assert!(contains(&p, f, Opcode::LoadContextSlot));
 }
 
 #[test]
 fn repl_mode_shares_the_same_global_lowering() {
     let p = compile("let x = 1; x; x = 2;", SourceMode::Repl);
     let f = script_fn(&p);
-    assert!(contains(&p, f, Opcode::StoreGlobal));
-    assert!(contains(&p, f, Opcode::LoadGlobal));
+    assert!(contains(&p, f, Opcode::CreateFunctionContext));
+    assert!(contains(&p, f, Opcode::StoreContextSlot));
+    assert!(contains(&p, f, Opcode::LoadContextSlot));
 }
 
 #[test]

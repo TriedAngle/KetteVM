@@ -1,4 +1,4 @@
-use crate::{DenseString, Float, Heap, Smi, Tagged, Value, WellKnown};
+use crate::{Float, Heap, Smi, StringRef, Tagged, Value, WellKnown};
 
 pub struct Compare;
 
@@ -34,8 +34,7 @@ impl Compare {
         if x == y {
             return true;
         }
-        if let (Some(sx), Some(sy)) = (x.get_as::<DenseString>(heap), y.get_as::<DenseString>(heap))
-        {
+        if let (Some(sx), Some(sy)) = (StringRef::try_from(heap, x), StringRef::try_from(heap, y)) {
             return sx.content_eq(heap, sy);
         }
         false
@@ -60,13 +59,13 @@ impl Compare {
         let is_bool = |v: Tagged<'_, Value>| {
             v == known.true_object.get(heap) || v == known.false_object.get(heap)
         };
-        let is_string = |v: Tagged<'_, Value>| v.get_as::<DenseString>(heap).is_some();
+        let is_str = |v: Tagged<'_, Value>| StringRef::try_from(heap, v).is_some();
         let is_number = |v: Tagged<'_, Value>| v.is_smi() || v.get_as::<Float>(heap).is_some();
         // number ↔ string: the string parses as a number
-        if is_number(x) && is_string(y) {
+        if is_number(x) && is_str(y) {
             return x.to_number(heap).unwrap() == y.to_number(heap).unwrap();
         }
-        if is_string(x) && is_number(y) {
+        if is_str(x) && is_number(y) {
             return x.to_number(heap).unwrap() == y.to_number(heap).unwrap();
         }
         // booleans become numbers (exactly representable as smis, no allocation)
@@ -91,7 +90,7 @@ impl Compare {
         }
 
         let is_object = |v: Tagged<'_, Value>| {
-            !v.is_smi() && !is_bool(v) && !nullish(v) && !is_string(v) && !is_number(v)
+            !v.is_smi() && !is_bool(v) && !nullish(v) && !is_str(v) && !is_number(v)
         };
         if is_object(x) || is_object(y) {
             // callers pre-coerce object operands (compare_bool); any that
@@ -126,8 +125,7 @@ impl Compare {
             // equal values: +/-0 are distinct
             return !(a == 0.0 && a.is_sign_negative() != b.is_sign_negative());
         }
-        if let (Some(sx), Some(sy)) = (x.get_as::<DenseString>(heap), y.get_as::<DenseString>(heap))
-        {
+        if let (Some(sx), Some(sy)) = (StringRef::try_from(heap, x), StringRef::try_from(heap, y)) {
             return sx.content_eq(heap, sy);
         }
         false
@@ -150,9 +148,9 @@ impl Compare {
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
     ) -> Option<core::cmp::Ordering> {
-        let sx = x.get_as::<DenseString>(heap)?;
-        let sy = y.get_as::<DenseString>(heap)?;
-        Some(sx.data(heap).cmp(&sy.data(heap)))
+        let sx = StringRef::try_from(heap, x)?;
+        let sy = StringRef::try_from(heap, y)?;
+        Some(sx.cmp(heap, sy))
     }
 
     pub fn less_than<'a>(

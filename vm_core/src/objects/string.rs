@@ -1,6 +1,6 @@
 use crate::{
     EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject, Key, Map, MapKind,
-    ObjectKind, PropertyDescriptor, SlotName, Smi, Tagged, Value, Visitor,
+    ObjectKind, OptionGcSlot, PropertyDescriptor, RawCell, SlotName, Smi, Tagged, Value, Visitor,
 };
 use core::{alloc::Layout, cell::UnsafeCell, cmp::Ordering};
 
@@ -17,6 +17,7 @@ pub enum StringOwn {
 pub enum Encoding {
     Latin1,
     Utf16,
+    Utf8,
 }
 
 #[derive(Clone, Copy)]
@@ -226,14 +227,22 @@ impl PartialOrd for StringData<'_> {
 
 // TODO: decide on a hash algorithm
 pub fn string_content_hash(data: StringData<'_>) -> i64 {
+    match data {
+        StringData::Latin1(bytes) => string_hash_units(bytes.iter().map(|&b| b as u16)),
+        StringData::Utf16(units) => string_hash_units(units.iter().copied()),
+    }
+}
+
+/// Content hash for an already-decoded code-unit sequence.
+pub fn string_content_hash_units(units: &[u16]) -> i64 {
+    string_hash_units(units.iter().copied())
+}
+
+fn string_hash_units(units: impl IntoIterator<Item = u16>) -> i64 {
     let mut h: u64 = 0xcbf29ce484222325;
-    let mut mix = |unit: u16| {
+    for unit in units {
         h ^= unit as u64;
         h = h.wrapping_mul(0x100000001b3);
-    };
-    match data {
-        StringData::Latin1(b) => b.iter().for_each(|&l| mix(l as u16)),
-        StringData::Utf16(u) => u.iter().for_each(|&c| mix(c)),
     }
     let masked = (h & ((1 << 62) - 1)) as i64;
     if masked == 0 { 1 } else { masked }
@@ -254,37 +263,154 @@ impl<'a> Tagged<'a, Value> {
     /// Whether the value is the empty string (a non-string is not empty).
     #[inline]
     pub fn is_empty_string(self, heap: &Heap) -> bool {
-        self.get_as::<DenseString>(heap)
-            .is_some_and(|s| s.is_empty())
+        StringRef::try_from(heap, self).is_some_and(|s| s.is_empty())
     }
 }
 
-impl DenseString {
-    /// The backing string of a String primitive or String wrapper (slot 0 of
-    /// a `PRIMITIVE_WRAPPER` whose value is a string); `None` otherwise.
-    /// The single entry point for String exotic own properties.
+#[derive(Clone, Copy)]
+pub enum StringRef<'a> {
+    Flat(Tagged<'a, DenseString>),
+    Utf8(Tagged<'a, Utf8String>),
+    External(Tagged<'a, ExternalString>),
+}
+
+impl<'a> StringRef<'a> {
     #[inline]
-    pub fn from_receiver<'a>(
-        heap: &'a Heap,
-        receiver: Tagged<'a, Value>,
-    ) -> Option<Tagged<'a, DenseString>> {
+    pub fn try_from(heap: &'a Heap, value: Tagged<'a, Value>) -> Option<Self> {
+        if let Some(flat) = value.get_as::<DenseString>(heap) {
+            return Some(Self::Flat(flat));
+        }
+        if let Some(utf8) = value.get_as::<Utf8String>(heap) {
+            return Some(Self::Utf8(utf8));
+        }
+        value.get_as::<ExternalString>(heap).map(Self::External)
+    }
+
+    pub fn from_receiver(heap: &'a Heap, receiver: Tagged<'a, Value>) -> Option<Self> {
         let obj = receiver.as_heap_object()?;
         let kind = obj.map(heap).kind();
         if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
-            return obj.slots.get(heap).at(heap, 0).get_as::<DenseString>(heap);
+            return Self::try_from(heap, obj.slots.get(heap).at(heap, 0));
         }
-        if kind.kind() == ObjectKind::DenseString {
-            // Safety: the map kind is DenseString, so the view is exact.
-            return Some(unsafe { obj.cast::<DenseString>() });
+        Self::try_from(heap, receiver)
+    }
+
+    pub fn len(&self) -> usize {
+        match *self {
+            Self::Flat(s) => s.len(),
+            Self::Utf8(s) => s.unit_len(),
+            Self::External(s) => s.unit_len(),
         }
-        None
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn encoding(&self, heap: &'a Heap) -> Encoding {
+        match *self {
+            Self::Flat(s) => s.encoding(heap),
+            Self::Utf8(_) => Encoding::Utf8,
+            Self::External(s) => s.encoding(heap),
+        }
+    }
+
+    pub fn is_flat(&self) -> bool {
+        matches!(self, Self::Flat(_))
+    }
+
+    pub fn flat(&self) -> Option<Tagged<'a, DenseString>> {
+        match *self {
+            Self::Flat(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn data(&self, heap: &'a Heap) -> Option<StringData<'a>> {
+        match *self {
+            Self::Flat(s) => Some(s.as_ref().data(heap)),
+            _ => None,
+        }
+    }
+
+    pub fn code_unit(&self, heap: &'a Heap, i: usize) -> u16 {
+        match *self {
+            Self::Flat(s) => s.code_unit(heap, i),
+            Self::Utf8(s) => s.code_unit(heap, i),
+            Self::External(s) => s.code_unit(heap, i),
+        }
+    }
+
+    pub fn to_units(&self, heap: &'a Heap) -> Vec<u16> {
+        match *self {
+            Self::Flat(s) => {
+                let mut units = Vec::with_capacity(s.len());
+                s.data(heap).write_units(&mut units);
+                units
+            }
+            Self::Utf8(s) => s.to_units(heap),
+            Self::External(s) => s.to_units(heap),
+        }
+    }
+
+    pub fn to_rust_string(&self, heap: &'a Heap) -> String {
+        match *self {
+            Self::Flat(s) => s.to_rust_string(heap),
+            Self::Utf8(s) => s.to_rust_string(heap),
+            Self::External(s) => s.to_rust_string(heap),
+        }
+    }
+
+    pub fn content_eq(&self, heap: &'a Heap, other: Self) -> bool {
+        match (*self, other) {
+            (Self::Flat(a), Self::Flat(b)) => a.content_eq(heap, b),
+            _ => self.to_units(heap) == other.to_units(heap),
+        }
+    }
+
+    pub fn cmp(&self, heap: &'a Heap, other: Self) -> Ordering {
+        match (*self, other) {
+            (Self::Flat(a), Self::Flat(b)) => a.data(heap).cmp(&b.data(heap)),
+            _ => self.to_units(heap).cmp(&other.to_units(heap)),
+        }
+    }
+
+    /// Canonical array-index form: decimal digits, no leading zero, no
+    /// overflow past `u32::MAX`-worthy lengths.
+    pub fn canonical_index(&self, heap: &'a Heap) -> Option<usize> {
+        let len = self.len();
+        if len == 0 || len > 10 {
+            return None;
+        }
+        if self.code_unit(heap, 0) == b'0' as u16 {
+            return (len == 1).then_some(0);
+        }
+        let mut n: usize = 0;
+        for i in 0..len {
+            let c = self.code_unit(heap, i);
+            if !(b'0' as u16..=b'9' as u16).contains(&c) {
+                return None;
+            }
+            n = n.checked_mul(10)?.checked_add((c - b'0' as u16) as usize)?;
+        }
+        Some(n)
+    }
+
+    pub fn utf8_bytes(&self, heap: &'a Heap) -> Option<&'a [u8]> {
+        match *self {
+            Self::Utf8(s) => Some(s.as_ref().bytes(heap)),
+            Self::Flat(s) => match s.as_ref().data(heap) {
+                StringData::Latin1(bytes) if bytes.is_ascii() => Some(bytes),
+                _ => None,
+            },
+            Self::External(s) => s.as_ref().utf8_bytes(heap),
+        }
     }
 
     /// Classify `name` as a String exotic own key (ES 10.4.3.4): `length` or
     /// an in-range code-unit index. The interned `"length"` name makes the
     /// common check a single pointer compare.
-    #[inline]
-    pub fn own_key<'a>(&self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Option<StringOwn> {
+    pub fn own_key(&self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Option<StringOwn> {
         if name.erase().ptr_eq(heap.known().strings.length.get(heap)) {
             return Some(StringOwn::Length(self.len()));
         }
@@ -304,7 +430,7 @@ impl DenseString {
         key: Handle<'_, Value>,
     ) -> Option<PropertyDescriptor<'s>> {
         let (own, unit) = {
-            let s = Self::from_receiver(heap, receiver.as_tagged(heap))?;
+            let s = StringRef::from_receiver(heap, receiver.as_tagged(heap))?;
             let own = s.own_key(heap, key.as_tagged(heap).as_name())?;
             let unit = match own {
                 StringOwn::Index(i) => Some(s.code_unit(heap, i)),
@@ -335,24 +461,41 @@ impl DenseString {
     /// The one-unit string an index load on a String primitive or wrapper
     /// yields (ES 5.4.3.1): `"ab"[1]` is "b". `None` for out-of-range keys
     /// and non-string receivers, which fall through to the ordinary path.
-    pub fn index_element<'a>(
-        heap: &'a mut Heap,
+    pub fn index_element<'x>(
+        heap: &'x mut Heap,
         scope: &HandleScope<'_>,
         receiver: Handle<'_, Value>,
         key: Handle<'_, SlotName>,
-    ) -> Option<Tagged<'a, Value>> {
-        let Some(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) else {
-            return None;
+    ) -> Option<Tagged<'x, Value>> {
+        let unit = {
+            let heap: &Heap = heap;
+            let Some(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) else {
+                return None;
+            };
+            let s = StringRef::from_receiver(heap, receiver.as_tagged(heap))?;
+            (i < s.len()).then(|| s.code_unit(heap, i))?
         };
-        let s = Self::from_receiver(heap, receiver.as_tagged(heap))?;
-        let unit = (i < s.len()).then(|| s.code_unit(heap, i))?;
         Some(
-            Self::from_units(heap, scope, &[unit])
+            DenseString::from_units(heap, scope, &[unit])
                 .as_tagged(heap)
                 .erase(),
         )
     }
+}
 
+pub fn flatten<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    value: Handle<'_, Value>,
+) -> Option<Handle<'s, DenseString>> {
+    let units = {
+        let heap: &Heap = heap;
+        StringRef::try_from(heap, value.as_tagged(heap))?.to_units(heap)
+    };
+    Some(DenseString::from_units(heap, scope, &units))
+}
+
+impl DenseString {
     fn data_ptr(&self) -> *mut u8 {
         UnsafeCell::raw_get(self.data.as_ptr())
     }
@@ -375,6 +518,22 @@ impl DenseString {
             Encoding::Utf16 => {
                 StringData::Utf16(unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len) })
             }
+            Encoding::Utf8 => unreachable!("dense strings never hold UTF-8"),
+        }
+    }
+
+    /// Payload including the trailing NUL, as `len + 1` code units.
+    pub fn terminated_data<'s>(&'s self, heap: &Heap) -> StringData<'s> {
+        let ptr = self.data_ptr();
+        let len = self.len();
+        match self.encoding(heap) {
+            Encoding::Latin1 => {
+                StringData::Latin1(unsafe { core::slice::from_raw_parts(ptr, len + 1) })
+            }
+            Encoding::Utf16 => StringData::Utf16(unsafe {
+                core::slice::from_raw_parts(ptr.cast::<u16>(), len + 1)
+            }),
+            Encoding::Utf8 => unreachable!("dense strings never hold UTF-8"),
         }
     }
 
@@ -416,6 +575,7 @@ impl DenseString {
         match self.encoding(heap) {
             Encoding::Latin1 => unsafe { *self.data_ptr().add(i) as u16 },
             Encoding::Utf16 => unsafe { *self.data_ptr().cast::<u16>().add(i) },
+            Encoding::Utf8 => unreachable!("dense strings never hold UTF-8"),
         }
     }
 
@@ -473,17 +633,20 @@ impl DenseString {
         a: Handle<'_, Value>,
         b: Handle<'_, Value>,
     ) -> Handle<'s, DenseString> {
-        let sa = a
-            .as_tagged(heap)
-            .get_as::<DenseString>(heap)
-            .expect("concat operand must be a string");
-        let sb = b
-            .as_tagged(heap)
-            .get_as::<DenseString>(heap)
-            .expect("concat operand must be a string");
+        let sa =
+            StringRef::try_from(heap, a.as_tagged(heap)).expect("concat operand must be a string");
+        let sb =
+            StringRef::try_from(heap, b.as_tagged(heap)).expect("concat operand must be a string");
         let mut units = Vec::with_capacity(sa.len() + sb.len());
-        sa.data(heap).write_units(&mut units);
-        sb.data(heap).write_units(&mut units);
+        let mut push = |s: StringRef<'_>| {
+            if let Some(data) = s.data(heap) {
+                data.write_units(&mut units);
+            } else {
+                units.extend(s.to_units(heap));
+            }
+        };
+        push(sa);
+        push(sb);
         Self::from_units(heap, scope, &units)
     }
 }
@@ -494,8 +657,8 @@ impl HeapObject for DenseString {
 
     fn layout_for(config: &Self::Init<'_>) -> Layout {
         let values = match config.0 {
-            StringData::Latin1(b) => Layout::array::<u8>(b.len()).expect("string layout"),
-            StringData::Utf16(u) => Layout::array::<u16>(u.len()).expect("string layout"),
+            StringData::Latin1(b) => Layout::array::<u8>(b.len() + 1).expect("string layout"),
+            StringData::Utf16(u) => Layout::array::<u16>(u.len() + 1).expect("string layout"),
         };
         Layout::new::<Self>()
             .extend(values)
@@ -508,25 +671,29 @@ impl HeapObject for DenseString {
             config.0.is_compressed(),
             "heap strings are always in the compressed encoding"
         );
-        let host = self.tagged(heap);
         let map = match config.0.encoding() {
             Encoding::Latin1 => heap.known().dense_latin1_string_map.get(heap),
             Encoding::Utf16 => heap.known().dense_utf16_string_map.get(heap),
+            Encoding::Utf8 => unreachable!("dense strings never hold UTF-8"),
         };
-        self.header.map.set(heap, host, map);
-        self.hash.set(heap, host, Smi::new(config.1));
-        self.length.set(heap, host, Smi::new(config.0.len() as i64));
+        self.header.map.init(map);
+        self.hash
+            .init_tagged(Tagged::<Smi>::from(Smi::new(config.1)));
+        self.length
+            .init_tagged(Tagged::<Smi>::from(Smi::new(config.0.len() as i64)));
         let ptr = self.data_ptr();
         match config.0 {
             StringData::Latin1(b) => unsafe {
-                core::ptr::copy_nonoverlapping(b.as_ptr(), ptr, b.len())
+                core::ptr::copy_nonoverlapping(b.as_ptr(), ptr, b.len());
+                *ptr.add(b.len()) = 0;
             },
             StringData::Utf16(u) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     u.as_ptr().cast::<u8>(),
                     ptr,
                     core::mem::size_of_val(u),
-                )
+                );
+                *ptr.cast::<u16>().add(u.len()) = 0;
             },
         }
     }
@@ -541,9 +708,9 @@ impl HeapObject for DenseString {
         // callback.
         let map = unsafe { Tagged::<Map>::from_value_unchecked(self.header.map.raw()) };
         let values = if map.kind().contains(MapKind::LATIN1) {
-            Layout::array::<u8>(self.len()).expect("string layout")
+            Layout::array::<u8>(self.len() + 1).expect("string layout")
         } else {
-            Layout::array::<u16>(self.len()).expect("string layout")
+            Layout::array::<u16>(self.len() + 1).expect("string layout")
         };
         Layout::new::<Self>()
             .extend(values)
@@ -555,6 +722,341 @@ impl HeapObject for DenseString {
 impl EdgeVisitable for DenseString {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
+    }
+}
+
+#[repr(C)]
+pub struct Utf8String {
+    pub header: Header,
+    /// Lazy content hash over code units; Smi 0 = not yet computed.
+    pub hash: GcSlot<Smi>,
+    /// Length in UTF-16 code units.
+    pub unit_len: GcSlot<Smi>,
+    /// Payload length in bytes, excluding the trailing NUL.
+    pub byte_len: GcSlot<Smi>,
+    /// Inline payload: `byte_len` UTF-8 bytes plus a NUL.
+    pub data: [UnsafeCell<u8>; 0],
+}
+
+impl Utf8String {
+    fn data_ptr(&self) -> *mut u8 {
+        UnsafeCell::raw_get(self.data.as_ptr())
+    }
+
+    pub fn unit_len(&self) -> usize {
+        self.unit_len.to_smi_unchecked().value() as usize
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.byte_len.to_smi_unchecked().value() as usize
+    }
+
+    /// The payload bytes, excluding the trailing NUL.
+    pub fn bytes<'s>(&'s self, _heap: &Heap) -> &'s [u8] {
+        let len = self.byte_len();
+        if len == 0 {
+            return &[];
+        }
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), len) }
+    }
+
+    /// The payload including the trailing NUL.
+    pub fn terminated_bytes<'s>(&'s self, _heap: &Heap) -> &'s [u8] {
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), self.byte_len() + 1) }
+    }
+
+    pub fn code_unit(&self, heap: &Heap, i: usize) -> u16 {
+        debug_assert!(i < self.unit_len());
+        let text = core::str::from_utf8(self.bytes(heap)).expect("Utf8String holds valid UTF-8");
+        let mut unit = 0;
+        let mut buf = [0u16; 2];
+        for ch in text.chars() {
+            for &u in ch.encode_utf16(&mut buf).iter() {
+                if unit == i {
+                    return u;
+                }
+                unit += 1;
+            }
+        }
+        unreachable!("code unit index out of range")
+    }
+
+    pub fn to_units(&self, heap: &Heap) -> Vec<u16> {
+        core::str::from_utf8(self.bytes(heap))
+            .expect("Utf8String holds valid UTF-8")
+            .encode_utf16()
+            .collect()
+    }
+
+    pub fn to_rust_string(&self, heap: &Heap) -> String {
+        core::str::from_utf8(self.bytes(heap))
+            .expect("Utf8String holds valid UTF-8")
+            .to_string()
+    }
+
+    pub fn hash(&self, heap: &Heap) -> i64 {
+        let cached = self.hash.to_smi().value();
+        if cached != 0 {
+            return cached;
+        }
+        let text = core::str::from_utf8(self.bytes(heap)).expect("Utf8String holds valid UTF-8");
+        let hash = string_hash_units(text.encode_utf16());
+        self.hash.set(heap, self.tagged(heap), Smi::new(hash));
+        hash
+    }
+
+    pub fn from_str<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        text: &str,
+    ) -> Handle<'s, Utf8String> {
+        heap.allocate_handle::<Utf8String>((text.as_bytes(), 0), scope)
+    }
+
+    /// Build from bytes; `None` when they are not valid UTF-8.
+    pub fn from_bytes<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        bytes: &[u8],
+    ) -> Option<Handle<'s, Utf8String>> {
+        core::str::from_utf8(bytes).ok()?;
+        Some(heap.allocate_handle::<Utf8String>((bytes, 0), scope))
+    }
+}
+
+impl HeapObject for Utf8String {
+    const KIND: ObjectKind = ObjectKind::Utf8String;
+    type Init<'a> = (&'a [u8], i64);
+
+    fn layout_for(config: &Self::Init<'_>) -> Layout {
+        let values = Layout::array::<u8>(config.0.len() + 1).expect("string layout");
+        Layout::new::<Self>()
+            .extend(values)
+            .expect("string layout")
+            .0
+    }
+
+    fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
+        let text = core::str::from_utf8(config.0).expect("Utf8String init requires valid UTF-8");
+        let host = self.tagged(heap);
+        self.header
+            .map
+            .set(heap, host, heap.known().utf8_string_map.get(heap));
+        self.hash.set(heap, host, Smi::new(config.1));
+        self.unit_len
+            .set(heap, host, Smi::new(text.encode_utf16().count() as i64));
+        self.byte_len
+            .set(heap, host, Smi::new(config.0.len() as i64));
+        let ptr = self.data_ptr();
+        unsafe {
+            core::ptr::copy_nonoverlapping(config.0.as_ptr(), ptr, config.0.len());
+            *ptr.add(config.0.len()) = 0;
+        }
+    }
+
+    fn header(&self) -> &Header {
+        &self.header
+    }
+
+    fn layout(&self) -> Layout {
+        let values = Layout::array::<u8>(self.byte_len() + 1).expect("string layout");
+        Layout::new::<Self>()
+            .extend(values)
+            .expect("string layout")
+            .0
+    }
+}
+
+impl EdgeVisitable for Utf8String {
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        visitor.visit(self.header.map.as_raw());
+    }
+}
+
+pub struct ExternalStringInit<'a> {
+    /// Absolute address of the payload; it must stay valid while `owner` is
+    /// alive and be NUL-terminated.
+    pub address: usize,
+    /// Payload length: bytes for Latin1/UTF-8, code units for UTF-16.
+    pub len: usize,
+    /// Length in UTF-16 code units.
+    pub unit_len: usize,
+    pub encoding: Encoding,
+    /// Object keeping the payload alive (pointer, value, library, ...).
+    pub owner: Option<Tagged<'a, Value>>,
+}
+
+#[repr(C)]
+pub struct ExternalString {
+    pub header: Header,
+    /// Lazy content hash over code units; Smi 0 = not yet computed.
+    pub hash: GcSlot<Smi>,
+    /// Length in UTF-16 code units.
+    pub unit_len: GcSlot<Smi>,
+    /// Payload length in `encoding` units, excluding the terminator.
+    pub len: GcSlot<Smi>,
+    pub address: RawCell,
+    pub owner: OptionGcSlot<Value>,
+}
+
+impl ExternalString {
+    pub fn unit_len(&self) -> usize {
+        self.unit_len.to_smi_unchecked().value() as usize
+    }
+
+    pub fn len(&self) -> usize {
+        self.len.to_smi_unchecked().value() as usize
+    }
+
+    pub fn address(&self, _heap: &Heap) -> usize {
+        self.address.load() as usize
+    }
+
+    pub fn owner<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
+        self.owner.get(heap)
+    }
+
+    pub fn encoding(&self, heap: &Heap) -> Encoding {
+        let kind = self.header.map.get(heap).kind();
+        if kind.contains(MapKind::LATIN1) {
+            Encoding::Latin1
+        } else if kind.contains(MapKind::UTF8) {
+            Encoding::Utf8
+        } else {
+            Encoding::Utf16
+        }
+    }
+
+    /// The Latin-1/UTF-8 payload bytes, excluding the terminator.
+    pub fn bytes<'s>(&'s self, heap: &Heap) -> &'s [u8] {
+        let len = self.len();
+        if len == 0 {
+            return &[];
+        }
+        let address = self.address(heap);
+        debug_assert!(address != 0, "external string without storage");
+        // Safety: the owner keeps `address` live and the C string is
+        // NUL-terminated; `len` was measured when the string was created.
+        unsafe { core::slice::from_raw_parts(address as *const u8, len) }
+    }
+
+    /// The UTF-16 payload, excluding the terminator.
+    pub fn units<'s>(&'s self, heap: &Heap) -> &'s [u16] {
+        let len = self.len();
+        if len == 0 {
+            return &[];
+        }
+        let address = self.address(heap);
+        debug_assert!(address != 0, "external string without storage");
+        // Safety: same invariant as `bytes`; UTF-16 payloads are aligned.
+        unsafe { core::slice::from_raw_parts(address as *const u16, len) }
+    }
+
+    pub fn code_unit(&self, heap: &Heap, i: usize) -> u16 {
+        debug_assert!(i < self.unit_len());
+        match self.encoding(heap) {
+            Encoding::Latin1 => self.bytes(heap)[i] as u16,
+            Encoding::Utf16 => self.units(heap)[i],
+            Encoding::Utf8 => {
+                let text = core::str::from_utf8(self.bytes(heap))
+                    .expect("external UTF-8 string holds valid UTF-8");
+                let mut unit = 0;
+                let mut buf = [0u16; 2];
+                for ch in text.chars() {
+                    for &u in ch.encode_utf16(&mut buf).iter() {
+                        if unit == i {
+                            return u;
+                        }
+                        unit += 1;
+                    }
+                }
+                unreachable!("code unit index out of range")
+            }
+        }
+    }
+
+    pub fn to_units(&self, heap: &Heap) -> Vec<u16> {
+        match self.encoding(heap) {
+            Encoding::Latin1 => self.bytes(heap).iter().map(|&b| b as u16).collect(),
+            Encoding::Utf16 => self.units(heap).to_vec(),
+            Encoding::Utf8 => core::str::from_utf8(self.bytes(heap))
+                .expect("external UTF-8 string holds valid UTF-8")
+                .encode_utf16()
+                .collect(),
+        }
+    }
+
+    pub fn to_rust_string(&self, heap: &Heap) -> String {
+        match self.encoding(heap) {
+            Encoding::Latin1 => self.bytes(heap).iter().map(|&b| b as char).collect(),
+            Encoding::Utf16 => String::from_utf16_lossy(self.units(heap)),
+            Encoding::Utf8 => String::from_utf8_lossy(self.bytes(heap)).into_owned(),
+        }
+    }
+
+    /// Payload bytes when the encoding is UTF-8 or ASCII-only Latin-1.
+    pub fn utf8_bytes<'s>(&'s self, heap: &Heap) -> Option<&'s [u8]> {
+        match self.encoding(heap) {
+            Encoding::Utf8 => Some(self.bytes(heap)),
+            Encoding::Latin1 => {
+                let bytes = self.bytes(heap);
+                bytes.is_ascii().then_some(bytes)
+            }
+            Encoding::Utf16 => None,
+        }
+    }
+
+    pub fn hash(&self, heap: &Heap) -> i64 {
+        let cached = self.hash.to_smi().value();
+        if cached != 0 {
+            return cached;
+        }
+        let hash = string_content_hash_units(&self.to_units(heap));
+        self.hash.set(heap, self.tagged(heap), Smi::new(hash));
+        hash
+    }
+}
+
+impl HeapObject for ExternalString {
+    const KIND: ObjectKind = ObjectKind::ExternalString;
+    type Init<'a> = ExternalStringInit<'a>;
+
+    fn layout_for(_config: &Self::Init<'_>) -> Layout {
+        Layout::new::<Self>()
+    }
+
+    fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
+        let host = self.tagged(heap);
+        let map = match config.encoding {
+            Encoding::Latin1 => heap.known().external_latin1_string_map.get(heap),
+            Encoding::Utf16 => heap.known().external_utf16_string_map.get(heap),
+            Encoding::Utf8 => heap.known().external_utf8_string_map.get(heap),
+        };
+        self.header.map.set(heap, host, map);
+        self.hash.set(heap, host, Smi::new(0));
+        self.unit_len
+            .set(heap, host, Smi::new(config.unit_len as i64));
+        self.len.set(heap, host, Smi::new(config.len as i64));
+        self.address.store_raw(config.address as u64);
+        match config.owner {
+            Some(owner) => self.owner.set(heap, host, owner),
+            None => self.owner.clear(heap),
+        }
+    }
+
+    fn header(&self) -> &Header {
+        &self.header
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::new::<Self>()
+    }
+}
+
+impl EdgeVisitable for ExternalString {
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        visitor.visit(self.header.map.as_raw());
+        visitor.visit(self.owner.as_raw());
     }
 }
 

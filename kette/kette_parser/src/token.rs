@@ -48,11 +48,13 @@ pub enum TokenKind {
     Let,
     If,
     Else,
+    While,
     SelfKw,
     Null,
     True,
     False,
     Return,
+    As,
 
     Count,
 }
@@ -110,11 +112,13 @@ const TOKEN_INFO: &[TokenInfo] = &[
     I::new("let", 0, I::F_KEYWORD),    // Let
     I::new("if", 0, I::F_KEYWORD),     // If
     I::new("else", 0, I::F_KEYWORD),   // Else
+    I::new("while", 0, I::F_KEYWORD),  // While
     I::new("self", 0, I::F_KEYWORD),   // SelfKw
     I::new("null", 0, I::F_KEYWORD),   // Null
     I::new("true", 0, I::F_KEYWORD),   // True
     I::new("false", 0, I::F_KEYWORD),  // False
     I::new("return", 0, I::F_KEYWORD), // Return
+    I::new("as", 0, I::F_KEYWORD),     // As
 ];
 
 const _: () = assert!(
@@ -135,10 +139,6 @@ impl TokenKind {
 
     pub fn precedence(self) -> u8 {
         self.info().precedence
-    }
-
-    pub fn is_binary_op(self) -> bool {
-        self.precedence() != 0
     }
 
     pub fn is_keyword(self) -> bool {

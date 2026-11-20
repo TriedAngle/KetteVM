@@ -144,6 +144,14 @@ pub enum Node {
         name: Symbol,
         init: NodeId,
     },
+    /// `let (a, b as c, ...) = expr`: bind every named field to a declaration.
+    LetMulti {
+        /// Field names read from `init`.
+        sources: NodeList,
+        /// Declared names, parallel to `sources`.
+        names: NodeList,
+        init: NodeId,
+    },
     ExprStmt {
         expr: NodeId,
     },
@@ -155,17 +163,13 @@ pub enum Node {
         then: NodeId,
         else_: Option<NodeId>,
     },
-}
 
-impl Node {
-    /// The statement list of an object body, if it is one.
-    pub fn body_stmts<'a>(&self, ast: &'a Ast) -> &'a [NodeId] {
-        match self {
-            Node::Object(parts) => ast.object_body_stmts(parts),
-            Node::StmtList { stmts } => ast.list_items(*stmts),
-            _ => &[],
-        }
-    }
+    /// `while cond { body }`; the body is a `StmtList` compiled inline and
+    /// the whole expression evaluates to null.
+    While {
+        cond: NodeId,
+        body: NodeId,
+    },
 }
 
 pub struct Ast {
@@ -261,10 +265,6 @@ impl Ast {
 
     pub fn symbol(&self, sym: Symbol) -> &[u8] {
         self.strings.get(sym)
-    }
-
-    pub fn symbol_count(&self) -> usize {
-        self.strings.len()
     }
 
     pub fn set_symbol_table(&mut self, strings: SymbolTable) {

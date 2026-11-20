@@ -1,0 +1,317 @@
+// Kette port of raylib's `textures_portal_window.c` example.
+// https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
+// Run: cargo run -q -p vm -- kette/examples/raylib/portal_window.ktt
+
+let (struct, void, bool, i32, u32, f32, f64, u8, CString) = FFI
+
+let path = if os.name == "macos" {
+        "/opt/homebrew/lib/libraylib.dylib"
+    } else if os.name == "windows" {
+        "raylib.dll"
+    } else {
+        "libraylib.so"
+    }
+
+let raylib = FFI.library(path)
+let libc = FFI.library(null)
+
+let Vector3 = struct({
+    x: f32,
+    y: f32,
+    z: f32
+})
+
+let Color = struct({
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+})
+
+let Texture2D = struct({
+    id: u32,
+    width: i32,
+    height: i32,
+    mipmaps: i32,
+    format: i32
+})
+
+let RenderTexture2D = struct({
+    id: u32,
+    texture: Texture2D,
+    depth: Texture2D
+})
+
+let Camera3D = struct({
+    position: Vector3,
+    target: Vector3,
+    up: Vector3,
+    fovy: f32,
+    projection: i32
+})
+
+let Matrix = FFI.array(f32, 16)
+let Float16 = FFI.array(f32, 16)
+
+// enums
+let CAMERA_FREE = 1
+let CAMERA_PERSPECTIVE = 0
+let RL_QUADS = 7
+let RL_PROJECTION = 5889
+let RL_MODELVIEW = 5888
+let PI = 3.14159265358979323846
+
+let BLACK = Color.new(0, 0, 0, 255)
+let GRAY = Color.new(130, 130, 130, 255)
+let DARKGRAY = Color.new(80, 80, 80, 255)
+let GOLD = Color.new(255, 203, 0, 255)
+let ORANGE = Color.new(255, 161, 0, 255)
+let MAROON = Color.new(190, 33, 55, 255)
+let LIME = Color.new(0, 158, 47, 255)
+let DARKGREEN = Color.new(0, 117, 44, 255)
+let PURPLE = Color.new(200, 122, 255, 255)
+let MAGENTA = Color.new(255, 0, 255, 255)
+let RAYWHITE = Color.new(245, 245, 245, 255)
+
+// window / timing
+let InitWindow = raylib.fn("InitWindow", [i32, i32, CString], void)
+let CloseWindow = raylib.fn("CloseWindow", [], void)
+let WindowShouldClose = raylib.fn("WindowShouldClose", [], bool)
+let SetTargetFPS = raylib.fn("SetTargetFPS", [i32], void)
+let DisableCursor = raylib.fn("DisableCursor", [], void)
+let GetTime = raylib.fn("GetTime", [], f64)
+
+// text
+let DrawText = raylib.fn("DrawText", [CString, i32, i32, i32, Color], void)
+
+// shapes
+let ClearBackground = raylib.fn("ClearBackground", [Color], void)
+let DrawGrid = raylib.fn("DrawGrid", [i32, f32], void)
+let DrawSphere = raylib.fn("DrawSphere", [Vector3, f32, Color], void)
+let DrawSphereWires = raylib.fn("DrawSphereWires", [Vector3, f32, i32, i32, Color], void)
+let DrawCube = raylib.fn("DrawCube", [Vector3, f32, f32, f32, Color], void)
+let DrawCubeWires = raylib.fn("DrawCubeWires", [Vector3, f32, f32, f32, Color], void)
+let DrawRectangle = raylib.fn("DrawRectangle", [i32, i32, i32, i32, Color], void)
+let DrawRectangleLines = raylib.fn("DrawRectangleLines", [i32, i32, i32, i32, Color], void)
+let Fade = raylib.fn("Fade", [Color, f32], Color)
+
+let BeginMode3D = raylib.fn("BeginMode3D", [Camera3D], void)
+let EndMode3D = raylib.fn("EndMode3D", [], void)
+let UpdateCamera = raylib.fn("UpdateCamera", [FFI.pointer(Camera3D), i32], void)
+let LoadRenderTexture = raylib.fn("LoadRenderTexture", [i32, i32], RenderTexture2D)
+let UnloadRenderTexture = raylib.fn("UnloadRenderTexture", [RenderTexture2D], void)
+let BeginTextureMode = raylib.fn("BeginTextureMode", [RenderTexture2D], void)
+let EndTextureMode = raylib.fn("EndTextureMode", [], void)
+let BeginDrawing = raylib.fn("BeginDrawing", [], void)
+let EndDrawing = raylib.fn("EndDrawing", [], void)
+
+// raymath
+let Vector3Add = raylib.fn("Vector3Add", [Vector3, Vector3], Vector3)
+let Vector3Subtract = raylib.fn("Vector3Subtract", [Vector3, Vector3], Vector3)
+let Vector3Normalize = raylib.fn("Vector3Normalize", [Vector3], Vector3)
+let Vector3CrossProduct = raylib.fn("Vector3CrossProduct", [Vector3, Vector3], Vector3)
+let Vector3DotProduct = raylib.fn("Vector3DotProduct", [Vector3, Vector3], f32)
+let MatrixFrustum = raylib.fn("MatrixFrustum", [f64, f64, f64, f64, f64, f64], Matrix)
+let MatrixLookAt = raylib.fn("MatrixLookAt", [Vector3, Vector3, Vector3], Matrix)
+let MatrixToFloatV = raylib.fn("MatrixToFloatV", [Matrix], Float16)
+
+// rlgl
+let rlSetTexture = raylib.fn("rlSetTexture", [u32], void)
+let rlBegin = raylib.fn("rlBegin", [i32], void)
+let rlEnd = raylib.fn("rlEnd", [], void)
+let rlColor4ub = raylib.fn("rlColor4ub", [u8, u8, u8, u8], void)
+let rlNormal3f = raylib.fn("rlNormal3f", [f32, f32, f32], void)
+let rlTexCoord2f = raylib.fn("rlTexCoord2f", [f32, f32], void)
+let rlVertex3f = raylib.fn("rlVertex3f", [f32, f32, f32], void)
+let rlDrawRenderBatchActive = raylib.fn("rlDrawRenderBatchActive", [], void)
+let rlMatrixMode = raylib.fn("rlMatrixMode", [i32], void)
+let rlPushMatrix = raylib.fn("rlPushMatrix", [], void)
+let rlPopMatrix = raylib.fn("rlPopMatrix", [], void)
+let rlLoadIdentity = raylib.fn("rlLoadIdentity", [], void)
+let rlMultMatrixf = raylib.fn("rlMultMatrixf", [FFI.pointer(f32)], void)
+let rlSetMatrixProjection = raylib.fn("rlSetMatrixProjection", [Matrix], void)
+let rlEnableDepthTest = raylib.fn("rlEnableDepthTest", [], void)
+let rlDisableDepthTest = raylib.fn("rlDisableDepthTest", [], void)
+
+// libc
+let sinf = libc.fn("sinf", [f32], f32)
+let cosf = libc.fn("cosf", [f32], f32)
+
+// Release the external storage of a group of C values.
+let freeAll = { |values|
+    let i = 0
+    while i < values.length {
+        values[i].free()
+        i = i + 1
+    }
+}
+
+let beginPortalMode3D = { |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPlane|
+    let bottomEdge = Vector3Subtract(bottomRight, bottomLeft)
+    let right = Vector3Normalize(bottomEdge)
+    let leftEdge = Vector3Subtract(topLeft, bottomLeft)
+    let up = Vector3Normalize(leftEdge)
+    let cross = Vector3CrossProduct(right, up)
+    let normal = Vector3Normalize(cross)
+
+    let toBL = Vector3Subtract(bottomLeft, eye)
+    let toBR = Vector3Subtract(bottomRight, eye)
+    let toTL = Vector3Subtract(topLeft, eye)
+
+    let dist = -Vector3DotProduct(toBL, normal)
+    if dist < 0.01 { dist = 0.01 }
+    let scale = nearPlane / dist
+
+    rlDrawRenderBatchActive()
+
+    rlMatrixMode(RL_PROJECTION)
+    rlPushMatrix()
+    let frustum = MatrixFrustum(
+        Vector3DotProduct(right, toBL) * scale,
+        Vector3DotProduct(right, toBR) * scale,
+        Vector3DotProduct(up, toBL) * scale,
+        Vector3DotProduct(up, toTL) * scale,
+        nearPlane,
+        farPlane)
+    rlSetMatrixProjection(frustum)
+
+    rlMatrixMode(RL_MODELVIEW)
+    rlLoadIdentity()
+    let target = Vector3Subtract(eye, normal)
+    let view = MatrixLookAt(eye, target, up)
+    let flat = MatrixToFloatV(view)
+    rlMultMatrixf(flat)
+
+    rlEnableDepthTest()
+
+    freeAll([
+        bottomEdge, right, leftEdge, up, cross, normal, toBL, toBR, toTL,
+        frustum, target, view, flat
+    ])
+}
+
+let endPortalMode3D = {
+    rlDrawRenderBatchActive()
+    rlMatrixMode(RL_PROJECTION)
+    rlPopMatrix()
+    rlMatrixMode(RL_MODELVIEW)
+    rlLoadIdentity()
+    rlDisableDepthTest()
+}
+
+InitWindow(800, 450, "raylib [textures] example - portal window")
+
+let camera = Camera3D.new()
+camera.position = Vector3.new(0, 2.5, 7)
+camera.target = Vector3.new(0, 1.8, 0)
+camera.up = Vector3.new(0, 1, 0)
+camera.fovy = 45
+camera.projection = CAMERA_PERSPECTIVE
+
+// The archway opening, in Dimension A world space.
+let archBottomLeft = Vector3.new(-1.5, 0, 0)
+let archBottomRight = Vector3.new(1.5, 0, 0)
+let archTopLeft = Vector3.new(-1.5, 4, 0)
+
+// The archway sits at portalA and looks out onto portalB, far away.
+let portalA = Vector3.new(0, 0, 0)
+let portalB = Vector3.new(0, 0, -60)
+let offset = Vector3Subtract(portalB, portalA)
+let rtPortalView = LoadRenderTexture(480, 640)
+let portalTextureId = rtPortalView.texture.id
+
+DisableCursor()
+SetTargetFPS(60)
+
+let hudBackground = Fade(BLACK, 0.75)
+let portalBackground = Color.new(10, 5, 20, 255)
+let pillarA = Vector3.new(-3.5, 2, 0)
+let pillarB = Vector3.new(3.5, 2, 0)
+let archCenter = Vector3.new(0, 2, 0)
+let archBase = Vector3.new(0, 0.05, 0)
+let archWall = Vector3.new(0, 2, -0.05)
+
+while !WindowShouldClose() {
+    UpdateCamera(camera, CAMERA_FREE)
+    let time = GetTime()
+
+    // Shift the eye and window corners into Dimension B.
+    let eyeInB = Vector3Add(camera.position, offset)
+    let blInB = Vector3Add(archBottomLeft, offset)
+    let brInB = Vector3Add(archBottomRight, offset)
+    let tlInB = Vector3Add(archTopLeft, offset)
+
+    BeginTextureMode(rtPortalView)
+    ClearBackground(portalBackground)
+    beginPortalMode3D(eyeInB, blInB, brInB, tlInB, 0.05, 100)
+    freeAll([eyeInB, blInB, brInB, tlInB])
+
+    DrawGrid(30, 0.8)
+
+    let coreOffset = Vector3.new(0, 2 + sinf(time * 2.5) * 0.4, -4)
+    let corePos = Vector3Add(portalB, coreOffset)
+    DrawSphere(corePos, 1.2, PURPLE)
+    DrawSphereWires(corePos, 1.25, 16, 16, MAGENTA)
+    freeAll([coreOffset, corePos])
+
+    let i = 0
+    while i < 4 {
+        let angle = time * 1.5 + i * (PI / 2)
+        let posOffset = Vector3.new(
+            sinf(angle) * 2.5,
+            2 + cosf(time * 3 + i) * 0.5,
+            -4 + cosf(angle) * 2.5)
+        let pos = Vector3Add(portalB, posOffset)
+        DrawCube(pos, 0.5, 0.5, 0.5, LIME)
+        DrawCubeWires(pos, 0.52, 0.52, 0.52, DARKGREEN)
+        freeAll([posOffset, pos])
+        i = i + 1
+    }
+
+    endPortalMode3D()
+    EndTextureMode()
+
+    BeginDrawing()
+    ClearBackground(RAYWHITE)
+    BeginMode3D(camera)
+    DrawGrid(20, 1)
+
+    DrawCube(pillarA, 0.8, 4, 0.8, DARKGRAY)
+    DrawCubeWires(pillarA, 0.8, 4, 0.8, ORANGE)
+    DrawCube(pillarB, 0.8, 4, 0.8, DARKGRAY)
+    DrawCubeWires(pillarB, 0.8, 4, 0.8, ORANGE)
+
+    DrawCubeWires(archCenter, 3.2, 4.2, 0.2, GOLD)
+    DrawCube(archBase, 3.4, 0.1, 0.6, MAROON)
+    DrawCube(archWall, 3.1, 4.1, 0.05, MAROON)
+
+    rlSetTexture(portalTextureId)
+    rlBegin(RL_QUADS)
+    rlColor4ub(255, 255, 255, 255)
+    rlNormal3f(0, 0, 1)
+    rlTexCoord2f(0, 0)
+    rlVertex3f(archBottomLeft.x, archBottomLeft.y, archBottomLeft.z)
+    rlTexCoord2f(1, 0)
+    rlVertex3f(archBottomRight.x, archBottomRight.y, archBottomRight.z)
+    rlTexCoord2f(1, 1)
+    rlVertex3f(archBottomRight.x, 4, archBottomRight.z)
+    rlTexCoord2f(0, 1)
+    rlVertex3f(archTopLeft.x, archTopLeft.y, archTopLeft.z)
+    rlEnd()
+    rlSetTexture(0)
+
+    EndMode3D()
+
+    DrawRectangle(15, 15, 520, 100, hudBackground)
+    DrawRectangleLines(15, 15, 520, 100, GOLD)
+    DrawText("PORTAL WINDOW", 28, 25, 20, GOLD)
+    DrawText("Look through the golden arch into Dimension B", 28, 52, 20, RAYWHITE)
+    DrawText("Controls: Mouse to look | WASD to move", 28, 80, 20, GRAY)
+
+    EndDrawing()
+}
+
+UnloadRenderTexture(rtPortalView)
+freeAll([rtPortalView, camera])
+CloseWindow()
+print("done")

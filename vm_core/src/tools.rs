@@ -1,6 +1,10 @@
+use std::path::Path;
+
+use crate::materialize::Materialize;
 use crate::{
-    Args, CallInfo, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, StringInterner, Tagged, Value, WellKnown,
+    Args, CallInfo, Errors, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
+    NativeIndex, Object, PropertyDescriptor, StringInterner, StringRef, Tagged, ThreadState, VM,
+    Value, VmError, WellKnown, eval_global_context, raise_runtime,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -42,12 +46,92 @@ impl KetteTools {
         vm.known().exception.get(heap).erase()
     }
 
+    /// Indirect eval: compile `source` as `language` in a fresh lexical
+    /// scope. Free names resolve through the global environment; only
+    /// explicit `globalThis` writes persist.
+    pub fn eval<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+        let HostCtx {
+            vm, heap, state, ..
+        } = ctx;
+        if args.len() < 2 {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "eval expects (language, source)",
+            );
+        }
+        let Some(language) = string_arg(heap, args, 0) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "eval expects a language string",
+            );
+        };
+        let Some(source) = string_arg(heap, args, 1) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "eval expects a source string",
+            );
+        };
+        eval_source(vm, heap, state, &language, &source)
+    }
+
+    /// Read `path` and run it as indirect eval, inferring the language from
+    /// the `.ktt` / `.js` extension.
+    pub fn eval_file<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+        let HostCtx {
+            vm, heap, state, ..
+        } = ctx;
+        let Some(path) = string_arg(heap, args, 0) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "evalFile expects a path string",
+            );
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::EvalError,
+                    &format!("cannot read {path}: {error}"),
+                );
+            }
+        };
+        let language = match Path::new(&path).extension().and_then(|ext| ext.to_str()) {
+            Some("ktt") => "kette",
+            Some("js") => "js",
+            _ => {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::EvalError,
+                    &format!("evalFile expects a .ktt or .js file: {path}"),
+                );
+            }
+        };
+        eval_source(vm, heap, state, language, &source)
+    }
+
     pub fn install(
         heap: &mut Heap,
         roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
-        natives: [NativeIndex; 3],
+        natives: [NativeIndex; 5],
     ) {
         let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
@@ -61,10 +145,12 @@ impl KetteTools {
         );
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
-        let methods: [(&str, NativeIndex); 3] = [
+        let methods: [(&str, NativeIndex); 5] = [
             ("forceMinorGC", natives[0]),
             ("forceMajorGC", natives[1]),
             ("shutdown", natives[2]),
+            ("eval", natives[3]),
+            ("evalFile", natives[4]),
         ];
         for (name, index) in methods {
             let method = Object::native_function(heap, scope, index, 0);
@@ -91,4 +177,52 @@ impl KetteTools {
         )
         .expect("install KetteTools global");
     }
+}
+
+fn string_arg(heap: &Heap, args: Args, index: usize) -> Option<String> {
+    StringRef::try_from(heap, args.get_handle(heap, index).as_tagged(heap))
+        .map(|text| text.to_rust_string(heap))
+}
+
+fn eval_source<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    language: &str,
+    source: &str,
+) -> Tagged<'a, Value> {
+    let Some(info) = vm.eval_language(language) else {
+        return Errors::raise_with(
+            vm,
+            heap,
+            state,
+            VmError::EvalError,
+            &format!("unknown eval language '{language}'"),
+        );
+    };
+    let compile = info.compile;
+    let runtime = info.runtime;
+    let program = match compile(vm, source, bytecode::SourceMode::EvalGlobal) {
+        Ok(program) => program,
+        Err(error) => {
+            return Errors::raise_with(vm, heap, state, VmError::EvalError, &error.to_string());
+        }
+    };
+    state.handle_scope(|scope| {
+        let context = eval_global_context(vm, heap, &scope);
+        let closure = Materialize::closure_vm(vm, heap, state, &scope, &program, runtime, context);
+        match HostCtx::enter(
+            vm,
+            vm.runtime_by_id(runtime),
+            heap,
+            state,
+            closure.erase(),
+            HandleSlice::EMPTY,
+            None,
+        ) {
+            Ok(value) => scope.handle(value),
+            Err(thrown) => return raise_runtime(heap, thrown),
+        }
+        .as_tagged(heap)
+    })
 }
