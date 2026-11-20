@@ -159,6 +159,10 @@ impl Continuation {
             unsafe { (sp as *mut u64).write(entry) };
             self.regs.rsp = sp as u64;
             self.regs.r12 = arg as usize as u64;
+            // Safety: stmxcsr writes one u32 to a valid, aligned operand.
+            unsafe {
+                core::arch::asm!("stmxcsr [{}]", in(reg) &mut self.regs.mxcsr, options(nostack, preserves_flags))
+            };
         }
     }
 
