@@ -195,6 +195,8 @@ define_opcodes! {
     LoadNamedProperty { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
     LoadKeyedProperty { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // reg (obj) idx (feedback); key in acc -> acc
 
+    LoadIndexed { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] },
+
     /// new.target of the current frame (undefined for plain calls)
     LoadNewTarget { operands: [], acc: writes, indices: [] }, // -> acc
 
@@ -215,6 +217,8 @@ define_opcodes! {
 
     StoreKeyedProperty { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] }, // acc -> reg (obj) reg (key) idx (feedback)
     StoreKeyedPropertyNoShadow { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
+
+    StoreIndexed { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
 
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)

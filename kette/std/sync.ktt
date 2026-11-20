@@ -1,8 +1,3 @@
-// Userspace synchronization primitives built on atomics and park/unpark.
-//
-// Run before a program that uses them:
-//   cargo run -q -p vm -- kette/std/sync.ktt program.ktt
-
 // A FIFO queue of parked threads. Items need a `next` field.
 let WaitQueue = {
     head: 0

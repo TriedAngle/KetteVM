@@ -12,12 +12,22 @@ let Error = {
     }
 }
 
-let RangeError = {
+let ElementDoesNotExist = {
+    parent*: Error
+    |message|
+    {
+        parent*: self.errorProto
+        name: "ElementDoesNotExist"
+        message: message
+    }
+}
+
+let IndexOutOfBounds = {
     parent*: Error
     |message, index, length|
     {
         parent*: self.errorProto
-        name: "RangeError"
+        name: "IndexOutOfBounds"
         message: message
         index: index
         length: length

@@ -409,6 +409,66 @@ fn op_load_keyed_property(frame: Frame) {
     tail!(slow_keyed_load)
 }
 
+#[handler(LoadIndexed)]
+fn op_load_indexed(frame: Frame) {
+    let mut element_index = None;
+    {
+        let heap = frame.ctx().heap();
+        let recv = frame.regs().get(frame.signed::<0>(), heap);
+        let fb = frame.unsigned::<1>();
+        if let Some(idx) = frame.acc().to_i64()
+            && idx >= 0
+        {
+            element_index = Some(idx as usize);
+            if let Some(obj) = recv.as_heap_object()
+                && !obj.as_ref().map(heap).kind().is_arguments()
+                && let Some(v) = obj.as_ref().element_value_dense(heap, idx as usize)
+            {
+                frame.set_acc(v);
+                next!()
+            }
+            if let Some(ElementHit::Value(v)) = InlineCache::try_load_element(
+                heap,
+                frame.ctx().feedback_ref(heap),
+                fb,
+                recv,
+                idx as usize,
+            ) {
+                frame.set_acc(v);
+                next!()
+            }
+        }
+    }
+    if let Some(index) = element_index {
+        let pc = frame.pc();
+        let vm = frame.ctx().vm();
+        let state = frame.ctx().state();
+        let fb = frame.unsigned::<1>();
+        let v = state.handle_scope(|scope| {
+            let heap = frame.ctx().heap();
+            let recv = frame.regs().get(frame.signed::<0>(), heap);
+            let key = frame.acc();
+            let method = InlineCache::try_load_index_method(
+                heap,
+                frame.ctx().feedback_ref(heap),
+                fb,
+                recv,
+                index,
+            )?;
+            let recv = scope.handle(recv);
+            let key = scope.handle(key);
+            let method = scope.handle(method);
+            let heap = frame.ctx().heap_mut();
+            Some(call_index_get(vm, heap, state, &scope, recv, key, method))
+        });
+        if let Some(v) = v {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+    }
+    tail!(slow_indexed_load)
+}
+
 #[handler(LoadKeyedPropertyReg)]
 fn op_load_keyed_property_reg(frame: Frame) {
     let heap = frame.ctx().heap();
@@ -519,6 +579,69 @@ fn op_store_keyed_property(frame: Frame) {
         }
     }
     tail!(slow_keyed_store)
+}
+
+#[handler(StoreIndexed)]
+fn op_store_indexed(frame: Frame) {
+    let mut element_index = None;
+    {
+        let heap = frame.ctx().heap();
+        let recv = frame.regs().get(frame.signed::<0>(), heap);
+        let key = frame.regs().get(frame.signed::<1>(), heap);
+        let fb = frame.unsigned::<2>();
+        if let Some(idx) = key.to_i64()
+            && idx >= 0
+        {
+            let idx = idx as usize;
+            element_index = Some(idx);
+            if recv.store_array_element_in_place(heap, idx, frame.acc()) {
+                next!()
+            }
+            if let Some(v) = InlineCache::try_store_element(
+                heap,
+                frame.ctx().feedback_ref(heap),
+                fb,
+                recv,
+                idx,
+                frame.acc(),
+            ) {
+                frame.set_acc(v);
+                next!()
+            }
+        }
+    }
+    if let Some(index) = element_index {
+        let pc = frame.pc();
+        let vm = frame.ctx().vm();
+        let state = frame.ctx().state();
+        let fb = frame.unsigned::<2>();
+        let v = state.handle_scope(|scope| {
+            let heap = frame.ctx().heap();
+            let recv = frame.regs().get(frame.signed::<0>(), heap);
+            let key = frame.regs().get(frame.signed::<1>(), heap);
+            let value = frame.acc();
+            let method = InlineCache::try_store_index_method(
+                heap,
+                frame.ctx().feedback_ref(heap),
+                fb,
+                recv,
+                index,
+            )?;
+            let recv = scope.handle(recv);
+            let key = scope.handle(key);
+            let value = scope.handle(value);
+            let method = scope.handle(method);
+            let heap = frame.ctx().heap_mut();
+            Some(call_index_set(
+                vm, heap, state, &scope, recv, key, value, method,
+            ))
+        });
+        if let Some(v) = v {
+            frame.set_acc(v);
+            reenter!(pc)
+        }
+    }
+    tail!(slow_indexed_store)
 }
 
 #[handler(StoreKeyedPropertyNoShadow)]

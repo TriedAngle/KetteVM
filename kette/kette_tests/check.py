@@ -48,6 +48,7 @@ def main() -> None:
     std = [
         root / "std" / "error.ktt",
         root / "std" / "collection.ktt",
+        root / "std" / "functional.ktt",
         root / "std" / "sync.ktt",
     ]
 

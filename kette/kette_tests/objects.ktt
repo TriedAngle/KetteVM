@@ -49,3 +49,11 @@ let reverse = {
 }
 reverse.value = 3
 Test.assert(reverse.value, 3)
+
+let question = {
+    present?: { true }
+}
+Test.assert(question.present?(), true)
+
+let value? = |x| { x }
+Test.assert(value?(7), 7)

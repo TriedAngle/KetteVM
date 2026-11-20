@@ -41,6 +41,8 @@ const KIND_GLOBAL_LEXICAL: i64 = 11;
 /// Native accessor getter: `data[0]` is the `AccessorInfo`; the load handler
 /// reads the getter index from it and calls the native directly.
 const KIND_NATIVE_GETTER: i64 = 12;
+const KIND_INDEX_GET: i64 = 13;
+const KIND_INDEX_SET: i64 = 14;
 const GLOBAL_LEXICAL_INFO_SHIFT: i64 = 32;
 const GLOBAL_LEXICAL_SLOT_MASK: i64 = 0xffff_ffff;
 
@@ -322,6 +324,25 @@ fn probe_element_smi<'a>(
     Some((obj, map, kind, payload))
 }
 
+fn probe_index_method<'a>(
+    heap: &'a Heap,
+    vector: Option<Tagged<'a, FeedbackVector>>,
+    slot: usize,
+    receiver: Tagged<'a, Value>,
+    kind: i64,
+) -> Option<Tagged<'a, Value>> {
+    let vector = vector?;
+    let site = read_site_snapshot(vector, heap, slot);
+    let obj = receiver.as_heap_object()?;
+    let map = obj.map(heap);
+    let handler = probe(heap, site, map)?;
+    if !handler.is_ptr() || handler.is_weak_ptr() {
+        return None;
+    }
+    let handler = handler.as_strong()?.get_as::<DataHandler>(heap)?;
+    apply_index_method(heap, handler, kind)
+}
+
 /// Whether `map`'s published chain validity cell is still valid — the
 /// guard for handler payload bits that promise a chain property (holes
 /// resolve to `undefined`, hole stores are plain).
@@ -416,7 +437,14 @@ fn has_parents(heap: &Heap, map: Tagged<'_, Map>) -> bool {
 
 /// Whether a prototype-chain object contributes no index-keyed lookups:
 /// no integer-named descriptors and (for arrays) no non-hole elements.
-fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
+fn object_has_no_elements(heap: &Heap, word: Tagged<'_, Value>) -> bool {
+    object_has_no_elements_at(heap, word, 64)
+}
+
+fn object_has_no_elements_at(heap: &Heap, word: Tagged<'_, Value>, depth: usize) -> bool {
+    if depth == 0 {
+        return false;
+    }
     let Some(obj) = word.get_as::<Object>(heap) else {
         return false;
     };
@@ -445,6 +473,18 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
             }
         }
     }
+    let proto = map.prototype.get(heap);
+    if let Some(pairs) = proto.get_as::<FixedArray>(heap) {
+        let mut i = 1;
+        while i < pairs.len() {
+            if !object_has_no_elements_at(heap, pairs.at(heap, i), depth - 1) {
+                return false;
+            }
+            i += 2;
+        }
+    } else if has_parents(heap, map) && !object_has_no_elements_at(heap, proto, depth - 1) {
+        return false;
+    }
     true
 }
 
@@ -452,14 +492,14 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
 /// index-keyed properties, so element misses may resolve to
 /// `undefined` without walking it. Install-time decision; staleness is
 /// guarded by the chain validity cell attached to the handler.
-fn chain_elements_clean(heap: &Heap, map: Tagged<'_, Map>) -> bool {
+fn chain_has_no_elements(heap: &Heap, map: Tagged<'_, Map>) -> bool {
     let mut current = map;
     loop {
         let proto = current.prototype.get(heap);
         if let Some(pairs) = proto.get_as::<FixedArray>(heap) {
             let mut i = 1;
             while i < pairs.len() {
-                if !chain_object_elements_clean(heap, pairs.at(heap, i)) {
+                if !object_has_no_elements(heap, pairs.at(heap, i)) {
                     return false;
                 }
                 i += 2;
@@ -469,7 +509,7 @@ fn chain_elements_clean(heap: &Heap, map: Tagged<'_, Map>) -> bool {
         if !has_parents(heap, current) {
             return true;
         }
-        if !chain_object_elements_clean(heap, proto) {
+        if !object_has_no_elements(heap, proto) {
             return false;
         }
         let Some(obj) = proto.get_as::<Object>(heap) else {
@@ -617,6 +657,30 @@ fn analyze_load<'s>(
     }
 }
 
+fn index_method_handler<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    receiver: Handle<'_, Object>,
+    name: Handle<'_, SlotName>,
+    kind: i64,
+) -> Option<Handler<'s>> {
+    let plan = analyze_load(heap, scope, receiver.as_tagged(heap), name.as_tagged(heap));
+    if !matches!(plan.kind, PlanKind::Field) {
+        return None;
+    }
+    if !chain_has_no_elements(heap, plan.receiver_map.as_tagged(heap)) {
+        return None;
+    }
+    let holder = plan.holder?;
+    Some(guarded(
+        heap,
+        scope,
+        &plan.receiver_map,
+        kind_smi(kind, plan.offset as i64),
+        &[holder.erase()],
+    ))
+}
+
 #[inline(always)]
 fn check_prototype_validity_cell(heap: &Heap, handler: Tagged<'_, DataHandler>) -> bool {
     match handler.validity_cell(heap).as_strong() {
@@ -658,6 +722,23 @@ fn apply_parent_handler<'a>(
         .get(heap)
         .get_as::<FixedArray>(heap)?;
     Some(LoadHit::Value(pairs.at(heap, payload as usize)))
+}
+
+#[inline(always)]
+fn apply_index_method<'a>(
+    heap: &'a Heap,
+    handler: Tagged<'a, DataHandler>,
+    kind: i64,
+) -> Option<Tagged<'a, Value>> {
+    if !check_prototype_validity_cell(heap, handler) {
+        return None;
+    }
+    let (actual, payload) = decode_handler_smi(handler.smi_handler(heap))?;
+    if actual != kind {
+        return None;
+    }
+    let holder = handler_holder(heap, handler)?;
+    Some(holder.slot(heap, payload as usize).get(heap))
 }
 
 #[inline(always)]
@@ -1104,6 +1185,36 @@ impl InlineCache {
     }
 
     #[inline]
+    pub fn try_load_index_method<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+        receiver: Tagged<'a, Value>,
+        index: usize,
+    ) -> Option<Tagged<'a, Value>> {
+        let obj = receiver.as_heap_object()?;
+        if obj.element_value(heap, index).is_some() {
+            return None;
+        }
+        probe_index_method(heap, vector, slot, receiver, KIND_INDEX_GET)
+    }
+
+    #[inline]
+    pub fn try_store_index_method<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+        receiver: Tagged<'a, Value>,
+        index: usize,
+    ) -> Option<Tagged<'a, Value>> {
+        let obj = receiver.as_heap_object()?;
+        if obj.element_value(heap, index).is_some() {
+            return None;
+        }
+        probe_index_method(heap, vector, slot, receiver, KIND_INDEX_SET)
+    }
+
+    #[inline]
     pub fn try_store_element<'a>(
         heap: &'a Heap,
         vector: Option<Tagged<'a, FeedbackVector>>,
@@ -1188,7 +1299,7 @@ impl InlineCache {
             }
             let string_prototype = heap.known().string_prototype.get(heap);
             let proto_map = scope.handle(string_prototype.map(heap));
-            let clean = chain_elements_clean(heap, proto_map.as_tagged(heap));
+            let clean = chain_has_no_elements(heap, proto_map.as_tagged(heap));
             if index >= s.len() && !clean {
                 return;
             }
@@ -1224,7 +1335,7 @@ impl InlineCache {
                         && elements.at(heap, index) == heap.known().the_hole.get(heap)
                 });
             if (index >= len || hole_miss)
-                && chain_elements_clean(heap, map.as_tagged(heap))
+                && chain_has_no_elements(heap, map.as_tagged(heap))
                 && attach_chain_cell(heap, scope, &map)
             {
                 payload |= ELEMENT_ALLOW_OOB;
@@ -1233,6 +1344,59 @@ impl InlineCache {
         } else {
             return;
         };
+        update_site(heap, scope, vector, slot, &map, &handler);
+    }
+
+    pub fn update_load_indexed(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        vector: Option<Handle<'_, FeedbackVector>>,
+        slot: usize,
+        receiver: Option<Handle<'_, Value>>,
+        index: usize,
+    ) {
+        let Some(vector) = vector else { return };
+        let Some(receiver) = receiver else { return };
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
+        let recv = scope.handle(receiver.as_tagged(heap));
+        let Some(obj) = recv.as_tagged(heap).as_heap_object() else {
+            return;
+        };
+        if recv.as_tagged(heap).get_as::<DenseString>(heap).is_some() || obj.is_array_exotic(heap) {
+            Self::update_load_element(heap, scope, Some(vector), slot, Some(receiver), index);
+            return;
+        }
+        let obj = scope.handle(obj);
+        let name = heap.known().strings.index_get.get_handle(heap, scope);
+        let Some(handler) = index_method_handler(heap, scope, obj, name, KIND_INDEX_GET) else {
+            return;
+        };
+        let map = scope.handle(obj.as_tagged(heap).map(heap));
+        update_site(heap, scope, vector, slot, &map, &handler);
+    }
+
+    pub fn update_store_indexed(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        vector: Option<Handle<'_, FeedbackVector>>,
+        slot: usize,
+        receiver: Handle<'_, Value>,
+    ) {
+        let Some(vector) = vector else { return };
+        debug_assert!(slot + 1 < vector.as_tagged(heap).len());
+        let recv = scope.handle(receiver.as_tagged(heap));
+        let Some(obj) = recv.as_tagged(heap).as_heap_object() else {
+            return;
+        };
+        if obj.is_array_exotic(heap) {
+            return;
+        }
+        let obj = scope.handle(obj);
+        let name = heap.known().strings.index_set.get_handle(heap, scope);
+        let Some(handler) = index_method_handler(heap, scope, obj, name, KIND_INDEX_SET) else {
+            return;
+        };
+        let map = scope.handle(obj.as_tagged(heap).map(heap));
         update_site(heap, scope, vector, slot, &map, &handler);
     }
 
@@ -1263,7 +1427,8 @@ impl InlineCache {
         if map.as_tagged(heap).kind().is_holey() {
             payload |= STORE_HOLEY;
         }
-        if chain_elements_clean(heap, map.as_tagged(heap)) && attach_chain_cell(heap, scope, &map) {
+        if chain_has_no_elements(heap, map.as_tagged(heap)) && attach_chain_cell(heap, scope, &map)
+        {
             payload |= STORE_CHAIN_CLEAN;
             if grew {
                 payload |= STORE_GROW;

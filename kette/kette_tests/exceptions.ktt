@@ -28,11 +28,19 @@ Test.assert(plain_error.name, "Error")
 Test.assert(plain_error.message, "plain")
 Test.assert(plain_error.toString(), "Error: plain")
 
-let range_error = RangeError("range", 3, 10)
-Test.assert(range_error.name, "RangeError")
-Test.assert(range_error.index, 3)
-Test.assert(range_error.length, 10)
-Test.assert(range_error.toString(), "RangeError: range")
+let missing_element = ElementDoesNotExist("missing")
+Test.assert(missing_element.name, "ElementDoesNotExist")
+Test.assert(missing_element.message, "missing")
+Test.assert(missing_element.toString(), "ElementDoesNotExist: missing")
+
+let out_of_bounds = IndexOutOfBounds("out of bounds", 3, 10)
+Test.assert(out_of_bounds.name, "IndexOutOfBounds")
+Test.assert(out_of_bounds.index, 3)
+Test.assert(out_of_bounds.length, 10)
+Test.assert(out_of_bounds.toString(), "IndexOutOfBounds: out of bounds")
+
+Test.assert(None, null)
+Test.assert(None == null, true)
 
 let nested = try {
     try {

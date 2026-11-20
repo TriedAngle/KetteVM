@@ -649,6 +649,10 @@ impl FnBuilder {
         self.emit_tracked(Opcode::LoadKeyedProperty, &[obj.operand(), fb.0]);
     }
 
+    pub fn load_indexed(&mut self, obj: Reg, fb: Feedback) {
+        self.emit_tracked(Opcode::LoadIndexed, &[obj.operand(), fb.0]);
+    }
+
     /// Keyed read with the key already in a register.
     pub fn load_keyed_property_reg(&mut self, obj: Reg, key: Reg, fb: Feedback) {
         self.emit_tracked(
@@ -701,6 +705,10 @@ impl FnBuilder {
             Opcode::StoreKeyedPropertyNoShadow,
             &[obj.operand(), key.operand(), fb.0],
         );
+    }
+
+    pub fn store_indexed(&mut self, obj: Reg, key: Reg, fb: Feedback) {
+        self.emit_tracked(Opcode::StoreIndexed, &[obj.operand(), key.operand(), fb.0]);
     }
 
     /// `dst <- src` (the `Move` opcode takes the destination first).

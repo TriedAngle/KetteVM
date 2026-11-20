@@ -17,14 +17,15 @@ use crate::{
     match_op_less_than_or_equal, match_op_load, match_op_load_constant, match_op_load_context,
     match_op_load_context_slot, match_op_load_current_closure, match_op_load_element_imm,
     match_op_load_false, match_op_load_global, match_op_load_global_no_throw, match_op_load_hole,
-    match_op_load_keyed_property, match_op_load_keyed_property_reg, match_op_load_named_property,
-    match_op_load_new_target, match_op_load_null, match_op_load_smi, match_op_load_true,
-    match_op_load_undefined, match_op_load_zero, match_op_mod, match_op_mod_immediate,
-    match_op_move, match_op_mul, match_op_mul_immediate, match_op_negate, match_op_pop_context,
-    match_op_push_context, match_op_shift_left, match_op_shift_left_immediate,
-    match_op_shift_right, match_op_shift_right_immediate, match_op_shift_right_logical,
-    match_op_shift_right_logical_immediate, match_op_store, match_op_store_context_slot,
-    match_op_store_global, match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
+    match_op_load_indexed, match_op_load_keyed_property, match_op_load_keyed_property_reg,
+    match_op_load_named_property, match_op_load_new_target, match_op_load_null, match_op_load_smi,
+    match_op_load_true, match_op_load_undefined, match_op_load_zero, match_op_mod,
+    match_op_mod_immediate, match_op_move, match_op_mul, match_op_mul_immediate, match_op_negate,
+    match_op_pop_context, match_op_push_context, match_op_shift_left,
+    match_op_shift_left_immediate, match_op_shift_right, match_op_shift_right_immediate,
+    match_op_shift_right_logical, match_op_shift_right_logical_immediate, match_op_store,
+    match_op_store_context_slot, match_op_store_global, match_op_store_indexed,
+    match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
     match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
     match_op_sub_immediate, match_op_sub_loc, match_op_test_reference_equal, match_op_test_typeof,
     match_op_throw, match_op_throw_reference_error_if_hole, slow::match_slow_construct,
@@ -442,6 +443,7 @@ fn step<'h, const STRIDE: usize>(
         Opcode::LoadKeyedProperty => {
             match_op_load_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
+        Opcode::LoadIndexed => match_op_load_indexed::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadKeyedPropertyReg => {
             match_op_load_keyed_property_reg::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
@@ -455,6 +457,7 @@ fn step<'h, const STRIDE: usize>(
         Opcode::StoreKeyedProperty => {
             match_op_store_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }
+        Opcode::StoreIndexed => match_op_store_indexed::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::StoreNamedPropertyNoShadow => {
             match_op_store_named_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
         }

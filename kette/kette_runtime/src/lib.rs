@@ -60,6 +60,20 @@ impl Runtime for KetteRuntime {
             )
             .expect("install console global");
 
+            let none_name = scope.handle(thread.intern(&scope, "None").as_tagged(thread.heap()));
+            let none = {
+                let heap = thread.heap();
+                heap.known().null.get_handle(heap, &scope).erase()
+            };
+            Object::define_own_property_ordinary(
+                thread.heap(),
+                &scope,
+                global,
+                none_name,
+                PropertyDescriptor::data(none),
+            )
+            .expect("install None global");
+
             // `os.name` reports the host OS for platform-specific paths.
             let os = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
             let name = scope.handle(thread.intern(&scope, "name").as_tagged(thread.heap()));

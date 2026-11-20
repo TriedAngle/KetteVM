@@ -738,7 +738,7 @@ impl<'a> FunctionGen<'a> {
                 let obj = self.b.stage_acc(&temps);
                 self.expr(key)?;
                 let feedback = self.b.new_feedback();
-                self.b.load_keyed_property(obj, feedback);
+                self.b.load_indexed(obj, feedback);
                 Ok(())
             }
             Node::Send { recv, name, args } => self.emit_send(recv, name, args),
@@ -862,7 +862,7 @@ impl<'a> FunctionGen<'a> {
                 let key = self.b.stage_acc(&temps);
                 self.expr(value)?;
                 let feedback = self.b.new_feedback();
-                self.b.store_keyed_property(obj, key, feedback);
+                self.b.store_indexed(obj, key, feedback);
                 Ok(())
             }
             _ => self.err(target, "assignment target"),

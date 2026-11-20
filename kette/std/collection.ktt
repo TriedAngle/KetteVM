@@ -1,6 +1,9 @@
 let Collection = {
     size: { throw UnimplementedError("size") }
     forEach: |block| { throw UnimplementedError("forEach") }
+    forEachWithKey: |block| {
+        self.forEach(|value| { block(value, value) })
+    }
     isEmpty: { self.size() == 0 }
     nonEmpty: { self.size() > 0 }
     emptyCopy: { throw UnimplementedError("emptyCopy") }
@@ -41,7 +44,7 @@ let Collection = {
             }
         })
         if !found {
-            throw RangeError("element not found")
+            throw ElementDoesNotExist("element not found")
         }
         result
     }
@@ -59,6 +62,9 @@ let Collection = {
         } else {
             block()
         }
+    }
+    findFirst?: |predicate| {
+        self.findFirstOrElse(predicate, { None })
     }
     allSatisfy: |predicate| {
         let all = true
@@ -103,7 +109,7 @@ let Collection = {
             }
         })
         if !found {
-            throw RangeError("min of empty collection")
+            throw ElementDoesNotExist("min of empty collection")
         }
         result
     }
@@ -119,9 +125,23 @@ let Collection = {
             }
         })
         if !found {
-            throw RangeError("max of empty collection")
+            throw ElementDoesNotExist("max of empty collection")
         }
         result
+    }
+    min?: {
+        if self.isEmpty() {
+            None
+        } else {
+            self.min()
+        }
+    }
+    max?: {
+        if self.isEmpty() {
+            None
+        } else {
+            self.max()
+        }
     }
     copy: {
         let result = self.emptyCopy()
@@ -133,19 +153,25 @@ let Collection = {
         collection.forEach(|item| { result.add(item) })
         result
     }
-    map: |block| {
-        let result = self.emptyCopy()
-        self.forEach(|item| { result.add(block(item)) })
-        result
+    map: |into, block| {
+        self.forEachWithKey(|value, key| {
+            into.addWithKey(block(value, key), key)
+        })
+        into
     }
-    filter: |predicate| {
-        let result = self.emptyCopy()
-        self.forEach(|item| {
-            if predicate(item) {
-                result.add(item)
+    filter: |into, block| {
+        self.forEachWithKey(|value, key| {
+            if block(value, key) {
+                into.addWithKey(value, key)
             }
         })
-        result
+        into
+    }
+    copyMappedBy: |block| {
+        self.map(self.emptyCopy(), block)
+    }
+    copyFilteredBy: |block| {
+        self.filter(self.emptyCopy(), block)
     }
     asSequence: { Sequence.from(self) }
 }
@@ -153,6 +179,7 @@ let Collection = {
 let MutableCollection = {
     parent*: Collection
     add: |value| { throw UnimplementedError("add") }
+    addWithKey: |value, key| { self.add(value) }
     remove: |value| { throw UnimplementedError("remove") }
     removeIfPresent: |value| { throw UnimplementedError("removeIfPresent") }
     clear: { throw UnimplementedError("clear") }
@@ -164,20 +191,53 @@ let MutableCollection = {
         collection.forEach(|item| { self.removeIfPresent(item) })
         self
     }
+    mapSelf: |block| {
+        let values = Sequence.new()
+        let keys = Sequence.new()
+        self.forEachWithKey(|value, key| {
+            values.add(value)
+            keys.add(key)
+        })
+        self.clear()
+        let i = 0
+        while i < values.size() {
+            self.addWithKey(block(values.get(i), keys.get(i)), keys.get(i))
+            i = i + 1
+        }
+        self
+    }
+    filterSelf: |block| {
+        let values = Sequence.new()
+        let keys = Sequence.new()
+        self.forEachWithKey(|value, key| {
+            values.add(value)
+            keys.add(key)
+        })
+        self.clear()
+        let i = 0
+        while i < values.size() {
+            if block(values.get(i), keys.get(i)) {
+                self.addWithKey(values.get(i), keys.get(i))
+            }
+            i = i + 1
+        }
+        self
+    }
 }
 
 let Indexable = {
     parent*: Collection
     get: |index| { throw UnimplementedError("get") }
+    []: |index| { self.get(index) }
     first: {
         if self.size() == 0 {
-            throw RangeError("first of empty collection", 0, 0)
+            throw ElementDoesNotExist("first of empty collection")
         }
         self.get(0)
     }
     last: {
         if self.size() == 0 {
-            throw RangeError("last of empty collection", 0, 0)
+            throw ElementDoesNotExist("last of empty collection")
         }
         self.get(self.size() - 1)
     }
@@ -187,11 +247,17 @@ let Indexable = {
         }
         self.get(index)
     }
+    get?: |index| {
+        self.getOrElse(index, { None })
+    }
     firstOrElse: |block| {
         if self.size() == 0 {
             return block()
         }
         self.get(0)
+    }
+    first?: {
+        self.firstOrElse({ None })
     }
     lastOrElse: |block| {
         if self.size() == 0 {
@@ -199,11 +265,21 @@ let Indexable = {
         }
         self.get(self.size() - 1)
     }
+    last?: {
+        self.lastOrElse({ None })
+    }
     lastIndex: {
         if self.size() == 0 {
-            throw RangeError("lastIndex of empty collection", 0, 0)
+            throw ElementDoesNotExist("lastIndex of empty collection")
         }
         self.size() - 1
+    }
+    lastIndex?: {
+        if self.size() == 0 {
+            None
+        } else {
+            self.size() - 1
+        }
     }
     keys: {
         let result = Sequence.new()
@@ -225,7 +301,7 @@ let Indexable = {
             }
         }
         if !found {
-            throw RangeError("element not found")
+            throw ElementDoesNotExist("element not found")
         }
         i
     }
@@ -245,16 +321,34 @@ let Indexable = {
             block()
         }
     }
+    indexOf?: |value| {
+        self.indexOfOrElse(value, { None })
+    }
     soleElement: {
         if self.size() != 1 {
-            throw RangeError("collection does not have exactly one element", 0, self.size())
+            throw ElementDoesNotExist("collection does not have exactly one element")
         }
         self.get(0)
+    }
+    soleElement?: {
+        if self.size() != 1 {
+            None
+        } else {
+            self.get(0)
+        }
     }
     forEach: |block| {
         let i = 0
         while i < self.size() {
             block(self.get(i))
+            i = i + 1
+        }
+        self
+    }
+    forEachWithKey: |block| {
+        let i = 0
+        while i < self.size() {
+            block(self.get(i), i)
             i = i + 1
         }
         self
@@ -293,6 +387,8 @@ let Indexable = {
 let MutableIndexable = {
     parent*: Indexable
     setAt: |index, value| { throw UnimplementedError("setAt") }
+    []=: |index, value| { self.setAt(index, value) }
+    addWithKey: |value, key| { self.insert(self.size(), value) }
     insert: |index, value| { throw UnimplementedError("insert") }
     insertAll: |index, collection| {
         let at = index
@@ -303,6 +399,13 @@ let MutableIndexable = {
         self
     }
     removeAt: |index| { throw UnimplementedError("removeAt") }
+    removeAt?: |index| {
+        if index < 0 || index >= self.size() {
+            None
+        } else {
+            self.removeAt(index)
+        }
+    }
     remove: |value| {
         let i = 0
         let found = false
@@ -315,9 +418,25 @@ let MutableIndexable = {
             }
         }
         if !found {
-            throw RangeError("element not found")
+            throw ElementDoesNotExist("element not found")
         }
         self
+    }
+    remove?: |value| {
+        let i = 0
+        let found = false
+        while i < self.size() && !found {
+            if self.get(i) == value {
+                found = true
+            } else {
+                i = i + 1
+            }
+        }
+        if found {
+            self.removeAt(i)
+        } else {
+            None
+        }
     }
     removeIfPresent: |value| {
         let i = 0
@@ -331,6 +450,24 @@ let MutableIndexable = {
             }
         }
         found
+    }
+    mapSelf: |block| {
+        let i = 0
+        while i < self.size() {
+            self.setAt(i, block(self.get(i), i))
+            i = i + 1
+        }
+        self
+    }
+    filterSelf: |block| {
+        let i = self.size() - 1
+        while i >= 0 {
+            if !block(self.get(i), i) {
+                self.removeAt(i)
+            }
+            i = i - 1
+        }
+        self
     }
     fill: |value| {
         let i = 0
@@ -378,13 +515,13 @@ let Sequence = {
     size: { self.count }
     get: |index| {
         if index < 0 || index >= self.count {
-            throw RangeError("index out of range", index, self.size())
+            throw IndexOutOfBounds("index out of range", index, self.size())
         }
         self.items[self.start + index]
     }
     setAt: |index, value| {
         if index < 0 || index >= self.count {
-            throw RangeError("index out of range", index, self.size())
+            throw IndexOutOfBounds("index out of range", index, self.size())
         }
         self.items[self.start + index] = value
         value
@@ -415,7 +552,7 @@ let Sequence = {
     addAllLast: |collection| { self.addAll(collection) }
     removeFirst: {
         if self.count == 0 {
-            throw RangeError("removeFirst from empty sequence", 0, 0)
+            throw ElementDoesNotExist("removeFirst from empty sequence")
         }
         let value = self.items[self.start]
         self.items[self.start] = null
@@ -426,9 +563,16 @@ let Sequence = {
         }
         value
     }
+    removeFirst?: {
+        if self.count == 0 {
+            None
+        } else {
+            self.removeFirst()
+        }
+    }
     removeLast: {
         if self.count == 0 {
-            throw RangeError("removeLast from empty sequence", 0, 0)
+            throw ElementDoesNotExist("removeLast from empty sequence")
         }
         self.count = self.count - 1
         let value = self.items[self.start + self.count]
@@ -438,9 +582,16 @@ let Sequence = {
         }
         value
     }
+    removeLast?: {
+        if self.count == 0 {
+            None
+        } else {
+            self.removeLast()
+        }
+    }
     insert: |index, value| {
         if index < 0 || index > self.count {
-            throw RangeError("insert index out of range", index, self.count)
+            throw IndexOutOfBounds("insert index out of range", index, self.count)
         }
         if index == 0 {
             return self.addFirst(value)
@@ -460,7 +611,7 @@ let Sequence = {
     }
     removeAt: |index| {
         if index < 0 || index >= self.count {
-            throw RangeError("index out of range", index, self.size())
+            throw IndexOutOfBounds("index out of range", index, self.size())
         }
         if index == 0 {
             return self.removeFirst()
@@ -480,7 +631,7 @@ let Sequence = {
     }
     removeRange: |start, stop| {
         if start < 0 || stop < start || stop > self.count {
-            throw RangeError("range out of bounds", start, self.count)
+            throw IndexOutOfBounds("range out of bounds", start, self.count)
         }
         let count = stop - start
         let i = 0

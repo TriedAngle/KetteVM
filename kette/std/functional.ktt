@@ -1,0 +1,48 @@
+let Functional = {
+    identity: |x| { x }
+    constant: |x| { |y| { x } }
+    compose: |f, g| { |x| { f(g(x)) } }
+    pipe: |f, g| { |x| { g(f(x)) } }
+    composeAll: |functions| {
+        |x| {
+            let count = functions.length
+            if count == null {
+                count = functions.size()
+            }
+            let i = count - 1
+            let result = x
+            while i >= 0 {
+                result = functions[i](result)
+                i = i - 1
+            }
+            result
+        }
+    }
+    pipeAll: |functions| {
+        |x| {
+            let count = functions.length
+            if count == null {
+                count = functions.size()
+            }
+            let i = 0
+            let result = x
+            while i < count {
+                result = functions[i](result)
+                i = i + 1
+            }
+            result
+        }
+    }
+    flip: |f| { |a, b| { f(b, a) } }
+    curry: |f, a| {
+        if a == null {
+            |x| { |y| { f(x, y) } }
+        } else {
+            |y| { f(a, y) }
+        }
+    }
+    curry2: |f| { |a| { |b| { |c| { f(a, b, c) } } } }
+    uncurry: |f| { |a, b| { f(a)(b) } }
+    partial2: |f, a| { |b| { f(a, b) } }
+    partial3: |f, a| { |b, c| { f(a, b, c) } }
+}

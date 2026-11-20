@@ -222,8 +222,14 @@ impl<S: CharStream> Scanner<S> {
                 Action::Digit => self.scan_number(start)?,
                 Action::Quote => self.scan_string(c, start)?,
                 Action::Punct(kind) => {
-                    self.stream.advance();
-                    Token::new(kind, ByteSpan::new(start, self.stream.pos()))
+                    if kind == TokenKind::LBracket
+                        && let Some(token) = self.scan_bracket_slot(start)
+                    {
+                        token
+                    } else {
+                        self.stream.advance();
+                        Token::new(kind, ByteSpan::new(start, self.stream.pos()))
+                    }
                 }
                 Action::Special => self.scan_special(start)?,
             }
@@ -237,6 +243,37 @@ impl<S: CharStream> Scanner<S> {
         };
         tok.after_newline = after_newline;
         Ok(tok)
+    }
+
+    fn scan_bracket_slot(&mut self, start: u32) -> Option<Token> {
+        let save = self.stream.pos();
+        self.stream.advance();
+        if self.stream.peek() != Some(b']' as u32) {
+            self.stream.seek(save);
+            return None;
+        }
+        self.stream.advance();
+        let mut end = self.stream.pos();
+        let symbol = if self.stream.peek() == Some(b'=' as u32) {
+            self.stream.advance();
+            if self.stream.peek() != Some(b':' as u32) {
+                self.stream.seek(save);
+                return None;
+            }
+            end = self.stream.pos();
+            self.symbols.intern(b"[]=")
+        } else if self.stream.peek() == Some(b':' as u32) {
+            self.symbols.intern(b"[]")
+        } else {
+            self.stream.seek(save);
+            return None;
+        };
+        Some(Token {
+            kind: TokenKind::Identifier,
+            after_newline: false,
+            value: TokenValue::Symbol(symbol.0),
+            span: ByteSpan::new(start, end),
+        })
     }
 
     fn skip_trivia(&mut self) -> Result<(), ParseError> {
@@ -323,6 +360,9 @@ impl<S: CharStream> Scanner<S> {
             if !is_ident_continue(c) {
                 break;
             }
+            self.stream.advance();
+        }
+        if self.stream.peek() == Some(b'?' as u32) {
             self.stream.advance();
         }
         let span = ByteSpan::new(start, self.stream.pos());

@@ -9,7 +9,7 @@ use vm_core::{
     DenseString, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
     Object, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, StringRef,
     Tagged, ThreadState, VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind,
-    proxy::Proxy, raise, raise_runtime, rt_try,
+    lookup::Hit, lookup::Lookup, proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -787,26 +787,65 @@ fn load_keyed_body<'a>(
     fb: usize,
     recv: Handle<'_, Value>,
     key: Handle<'_, Value>,
+    fallback: bool,
 ) -> Tagged<'a, Value> {
     {
         let recv = scope.handle(recv.as_tagged(heap).erase());
         let key = scope.handle(key.as_tagged(heap).erase());
         if let Some(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) {
-            InlineCache::update_load_element(
-                heap,
-                scope,
-                state
-                    .stack()
-                    .frame_header(base)
-                    .feedback(heap)
-                    .map(|v| scope.handle(v)),
-                fb,
-                Some(recv),
-                i,
-            );
+            let feedback = state
+                .stack()
+                .frame_header(base)
+                .feedback(heap)
+                .map(|v| scope.handle(v));
+            if fallback {
+                InlineCache::update_load_indexed(heap, scope, feedback, fb, Some(recv), i);
+            } else {
+                InlineCache::update_load_element(heap, scope, feedback, fb, Some(recv), i);
+            }
             let name = scope.handle(key.as_tagged(heap).erase().as_name());
             if let Some(unit) = StringRef::index_element(heap, scope, recv, name) {
                 return scope.handle(unit).as_tagged(heap).erase();
+            }
+        }
+        if fallback {
+            let hit = Lookup::new(heap, scope, recv, key, false).next(heap, scope);
+            if matches!(hit, Hit::Miss) {
+                if recv
+                    .as_tagged(heap)
+                    .as_heap_object()
+                    .is_some_and(|obj| obj.is_array_exotic(heap))
+                {
+                    return heap.known().undefined.get(heap).erase();
+                }
+                let name = heap
+                    .known()
+                    .strings
+                    .index_get
+                    .get_handle(heap, scope)
+                    .erase();
+                let method = match Object::get_property(vm, heap, state, recv, recv, name, false) {
+                    Ok(v) => scope.handle(v),
+                    Err(e) => return raise_runtime(heap, e),
+                };
+                let undefined = heap.known().undefined.get_handle(heap, scope).erase();
+                if method.as_tagged(heap) != undefined.as_tagged(heap) {
+                    let args =
+                        scope.stage(&[recv.as_tagged(heap).erase(), key.as_tagged(heap).erase()]);
+                    return match HostCtx::enter(
+                        vm,
+                        state.runtime(vm, heap),
+                        heap,
+                        state,
+                        method,
+                        args,
+                        None,
+                    ) {
+                        Ok(v) => scope.handle(v).as_tagged(heap).erase(),
+                        Err(e) => raise_runtime(heap, e),
+                    };
+                }
+                return heap.known().undefined.get(heap).erase();
             }
         }
         let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
@@ -859,7 +898,54 @@ pub fn slow_keyed_load(frame: Frame) {
             heap,
             Object::to_property_key(vm, heap, state, raw_key)
         ));
-        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
+        load_keyed_body(
+            vm,
+            heap,
+            state,
+            roots,
+            &scope,
+            base,
+            fb,
+            recv,
+            key.erase(),
+            false,
+        )
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(LoadIndexed)]
+#[cold]
+pub fn slow_indexed_load(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<1>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        if recv.as_tagged(heap).is_nullish(heap) {
+            raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
+        }
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
+        load_keyed_body(
+            vm,
+            heap,
+            state,
+            roots,
+            &scope,
+            base,
+            fb,
+            recv,
+            key.erase(),
+            true,
+        )
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -885,7 +971,18 @@ pub fn slow_keyed_load_reg(frame: Frame) {
             heap,
             Object::to_property_key(vm, heap, state, raw_key)
         ));
-        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
+        load_keyed_body(
+            vm,
+            heap,
+            state,
+            roots,
+            &scope,
+            base,
+            fb,
+            recv,
+            key.erase(),
+            false,
+        )
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -904,7 +1001,18 @@ pub fn slow_keyed_load_imm(frame: Frame) {
         let heap = frame.ctx().heap_mut();
         let smi = Smi::new(idx as i64).into_tagged();
         let key = scope.handle(smi.as_name());
-        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
+        load_keyed_body(
+            vm,
+            heap,
+            state,
+            roots,
+            &scope,
+            base,
+            fb,
+            recv,
+            key.erase(),
+            false,
+        )
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -1150,6 +1258,7 @@ pub fn keyed_store_body<'a>(
     value: Handle<'_, Value>,
     semantics: StoreSemantics,
     mode: LanguageMode,
+    fallback: bool,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
         // PutValue's ToObject(base) runs before ToPropertyKey(key)
@@ -1160,6 +1269,56 @@ pub fn keyed_store_body<'a>(
             heap,
             Object::to_property_key(vm, heap, state, raw_key)
         ));
+        if fallback
+            && !recv
+                .as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|obj| obj.is_array_exotic(heap))
+        {
+            let hit = Lookup::new(heap, &scope, recv, key.erase(), false).next(heap, &scope);
+            if matches!(hit, Hit::Miss) {
+                let name = heap
+                    .known()
+                    .strings
+                    .index_set
+                    .get_handle(heap, &scope)
+                    .erase();
+                let method = match Object::get_property(vm, heap, state, recv, recv, name, false) {
+                    Ok(v) => scope.handle(v),
+                    Err(e) => return raise_runtime(heap, e),
+                };
+                let undefined = heap.known().undefined.get_handle(heap, &scope).erase();
+                if method.as_tagged(heap) != undefined.as_tagged(heap) {
+                    let args = scope.stage(&[
+                        recv.as_tagged(heap).erase(),
+                        key.as_tagged(heap).erase(),
+                        value.as_tagged(heap).erase(),
+                    ]);
+                    match HostCtx::enter(
+                        vm,
+                        state.runtime(vm, heap),
+                        heap,
+                        state,
+                        method,
+                        args,
+                        None,
+                    ) {
+                        Ok(_) => {
+                            if key.as_tagged(heap).as_index().is_some() {
+                                let feedback = state
+                                    .stack()
+                                    .frame_header(base)
+                                    .feedback(heap)
+                                    .map(|v| scope.handle(v));
+                                InlineCache::update_store_indexed(heap, &scope, feedback, fb, recv);
+                            }
+                            return value.as_tagged(heap).erase();
+                        }
+                        Err(e) => return raise_runtime(heap, e),
+                    }
+                }
+            }
+        }
         // Fresh array/list construction is the hot no-shadow case: a dense
         // array element can be stored directly without walking the chain.
         if semantics == StoreSemantics::WriteThrough
@@ -1255,6 +1414,38 @@ pub fn slow_keyed_store(frame: Frame) {
             value,
             StoreSemantics::Shadow,
             mode,
+            false,
+        )
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(StoreIndexed)]
+pub fn slow_indexed_store(frame: Frame) {
+    let mode = frame.ctx().language_mode();
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<2>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        keyed_store_body(
+            vm,
+            frame.ctx().heap_mut(),
+            state,
+            roots,
+            base,
+            fb,
+            recv,
+            raw_key,
+            value,
+            StoreSemantics::WriteThrough,
+            mode,
+            true,
         )
     });
     frame.set_acc(val);
@@ -1285,6 +1476,7 @@ pub fn slow_keyed_store_no_shadow(frame: Frame) {
             value,
             StoreSemantics::WriteThrough,
             mode,
+            false,
         )
     });
     frame.set_acc(val);
@@ -1302,6 +1494,46 @@ pub fn call_getter<'a>(
     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
     match HostCtx::enter(vm, state.runtime(vm, heap), heap, state, getter, args, None) {
         Ok(v) => scope.handle(v).as_tagged(heap).erase(),
+        Err(e) => raise_runtime(heap, e),
+    }
+}
+
+pub fn call_index_get<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    scope: &HandleScope<'_>,
+    receiver: Handle<'_, Value>,
+    key: Handle<'_, Value>,
+    method: Handle<'_, Value>,
+) -> Tagged<'a, Value> {
+    let args = scope.stage(&[
+        receiver.as_tagged(heap).erase(),
+        key.as_tagged(heap).erase(),
+    ]);
+    match HostCtx::enter(vm, state.runtime(vm, heap), heap, state, method, args, None) {
+        Ok(v) => scope.handle(v).as_tagged(heap).erase(),
+        Err(e) => raise_runtime(heap, e),
+    }
+}
+
+pub fn call_index_set<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    scope: &HandleScope<'_>,
+    receiver: Handle<'_, Value>,
+    key: Handle<'_, Value>,
+    value: Handle<'_, Value>,
+    method: Handle<'_, Value>,
+) -> Tagged<'a, Value> {
+    let args = scope.stage(&[
+        receiver.as_tagged(heap).erase(),
+        key.as_tagged(heap).erase(),
+        value.as_tagged(heap).erase(),
+    ]);
+    match HostCtx::enter(vm, state.runtime(vm, heap), heap, state, method, args, None) {
+        Ok(_) => value.as_tagged(heap).erase(),
         Err(e) => raise_runtime(heap, e),
     }
 }

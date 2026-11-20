@@ -204,6 +204,8 @@ macro_rules! define_well_known_strings {
 define_well_known_strings! {
     empty => "",
     length => "length",
+    index_get => "[]",
+    index_set => "[]=",
     name => "name",
     message => "message",
     cause => "cause",

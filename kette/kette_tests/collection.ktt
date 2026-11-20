@@ -20,13 +20,19 @@ Test.assert(empty.firstOrElse({ null }), null)
 Test.assert(empty.lastOrElse({ null }), null)
 Test.assert(empty.getOrElse(3, { null }), null)
 Test.assert(empty.firstOrElse({ "none" }), "none")
+Test.assert(empty.first?(), None)
+Test.assert(empty.last?(), None)
+Test.assert(empty.get?(3), None)
+Test.assert(empty.lastIndex?(), None)
+Test.assert(empty.min?(), None)
+Test.assert(empty.max?(), None)
 
 let empty_first = try {
     empty.first()
 } catch (error) {
     error.name
 }
-Test.assert(empty_first, "RangeError")
+Test.assert(empty_first, "ElementDoesNotExist")
 
 let s = Sequence.new()
 s.add(2)
@@ -44,6 +50,16 @@ Test.assert(s.includesAll(seq([2, 4])), true)
 Test.assert(s.includesAll(seq([2, 9])), false)
 Test.assert(s.occurrencesOf(3), 1)
 Test.assert(s.occurrencesOf(9), 0)
+Test.assert(s.get?(0), 2)
+Test.assert(s.get?(99), None)
+Test.assert(s.first?(), 2)
+Test.assert(s.last?(), 4)
+Test.assert(s.lastIndex?(), 2)
+Test.assert(s.indexOf?(4), 2)
+Test.assert(s.indexOf?(9), None)
+Test.assert(s.findFirst?(|value| { value > 2 }), 3)
+Test.assert(s.findFirst?(|value| { value > 9 }), None)
+Test.assert(s.soleElement?(), None)
 
 let t = Sequence.new()
 t.addAll(s)
@@ -67,6 +83,27 @@ s.add(3)
 s.remove(3)
 Test.assert(s.contains(3), false)
 Test.assert(s.size(), 2)
+
+Test.assert(s[0], 2)
+Test.assert(s[1], 4)
+s[1] = 40
+Test.assert(s.get(1), 40)
+Test.assert(s[1], 40)
+s[1] = 4
+
+let bracket_missing = try {
+    s[99]
+} catch (error) {
+    error.name
+}
+Test.assert(bracket_missing, "IndexOutOfBounds")
+
+let bracket_missing_set = try {
+    s[99] = 1
+} catch (error) {
+    error.name
+}
+Test.assert(bracket_missing_set, "IndexOutOfBounds")
 
 let total = 0
 s.forEach(|value| { total = total + value })
@@ -92,18 +129,19 @@ let missing = try {
 } catch (error) {
     error.name
 }
-Test.assert(missing, "RangeError")
+Test.assert(missing, "ElementDoesNotExist")
 
 let single = Sequence.new()
 single.add(7)
 Test.assert(single.soleElement(), 7)
+Test.assert(single.soleElement?(), 7)
 
 let not_single = try {
     s.soleElement()
 } catch (error) {
     error.name
 }
-Test.assert(not_single, "RangeError")
+Test.assert(not_single, "ElementDoesNotExist")
 
 let copied = s.copy()
 Test.assert(copied.size(), 2)
@@ -115,14 +153,32 @@ let copied_containing = s.copyContaining(seq([1, 2, 3]))
 Test.assert(copied_containing.size(), 3)
 Test.assert(copied_containing.get(2), 3)
 
-let mapped = s.map(|value| { value * 2 })
+let mapped = s.map(Sequence.new(), |value, key| { value + key })
 Test.assert(mapped.size(), 2)
-Test.assert(mapped.get(0), 4)
-Test.assert(mapped.get(1), 8)
+Test.assert(mapped.get(0), 2)
+Test.assert(mapped.get(1), 5)
 
-let filtered = s.filter(|value| { value > 2 })
+let filtered = s.filter(Sequence.new(), |value, key| { key == 1 })
 Test.assert(filtered.size(), 1)
 Test.assert(filtered.get(0), 4)
+
+let copied_mapped = s.copyMappedBy(|value, key| { value + key })
+Test.assert(copied_mapped.get(0), 2)
+Test.assert(copied_mapped.get(1), 5)
+
+let copied_filtered = s.copyFilteredBy(|value, key| { key == 0 })
+Test.assert(copied_filtered.size(), 1)
+Test.assert(copied_filtered.get(0), 2)
+
+let mapped_self = s.copy()
+mapped_self.mapSelf(|value, key| { value + key })
+Test.assert(mapped_self.get(0), 2)
+Test.assert(mapped_self.get(1), 5)
+
+let filtered_self = s.copy()
+filtered_self.filterSelf(|value, key| { key == 1 })
+Test.assert(filtered_self.size(), 1)
+Test.assert(filtered_self.get(0), 4)
 
 let reversed = s.copyReversed()
 Test.assert(reversed.get(0), 4)
@@ -157,7 +213,9 @@ let empty_remove = try {
 } catch (error) {
     error.name
 }
-Test.assert(empty_remove, "RangeError")
+Test.assert(empty_remove, "ElementDoesNotExist")
+Test.assert(q.removeFirst?(), None)
+Test.assert(q.removeLast?(), None)
 
 let filled = Sequence.new()
 filled.add(1)
@@ -223,14 +281,14 @@ let missing_remove = try {
 } catch (error) {
     error.name
 }
-Test.assert(missing_remove, "RangeError")
+Test.assert(missing_remove, "ElementDoesNotExist")
 
 let missing_get = try {
     s.get(99)
 } catch (error) {
     error
 }
-Test.assert(missing_get.name, "RangeError")
+Test.assert(missing_get.name, "IndexOutOfBounds")
 Test.assert(missing_get.index, 99)
 Test.assert(missing_get.length, 2)
 
@@ -239,21 +297,21 @@ let missing_set = try {
 } catch (error) {
     error.name
 }
-Test.assert(missing_set, "RangeError")
+Test.assert(missing_set, "IndexOutOfBounds")
 
 let missing_remove_at = try {
     s.removeAt(99)
 } catch (error) {
     error.name
 }
-Test.assert(missing_remove_at, "RangeError")
+Test.assert(missing_remove_at, "IndexOutOfBounds")
 
 let missing_insert = try {
     s.insert(99, 1)
 } catch (error) {
     error.name
 }
-Test.assert(missing_insert, "RangeError")
+Test.assert(missing_insert, "IndexOutOfBounds")
 
 Test.assert(s.lastIndex(), 1)
 
@@ -273,3 +331,65 @@ removed_present.addAll(seq([1, 2, 3]))
 Test.assert(removed_present.removeIfPresent(2), true)
 Test.assert(removed_present.removeIfPresent(2), false)
 Test.assert(removed_present.size(), 2)
+
+let removed_or_none = Sequence.new()
+removed_or_none.addAll(seq([1, 2, 3]))
+Test.assert(removed_or_none.removeAt?(99), None)
+Test.assert(removed_or_none.removeAt?(1), 2)
+Test.assert(removed_or_none.remove?(1), 1)
+Test.assert(removed_or_none.remove?(99), None)
+
+let bracket_array = [10, 20, 30]
+Test.assert(bracket_array[1], 20)
+bracket_array[1] = 21
+Test.assert(bracket_array[1], 21)
+Test.assert(bracket_array.length, 3)
+Test.assert(bracket_array["length"], 3)
+Test.assert("abc"[1], "b")
+
+let bracket_object = { x: 1; y: 2 }
+Test.assert(bracket_object["x"], 1)
+Test.assert(bracket_object["y"], 2)
+bracket_object["y"] = 20
+Test.assert(bracket_object.y, 20)
+
+let bracket_grow = {}
+bracket_grow[0] = "zero"
+bracket_grow[1] = "one"
+Test.assert(bracket_grow[0], "zero")
+Test.assert(bracket_grow[1], "one")
+
+let bracket_parent = { x: 1 }
+let bracket_child = { parent*: bracket_parent }
+Test.assert(bracket_child["x"], 1)
+bracket_child["x"] = 2
+Test.assert(bracket_parent.x, 2)
+Test.assert(bracket_child.x, 2)
+
+let bracket_box = {
+    values: [10, 20]
+    []: |index| { self.values[index] }
+    []=: |index, value| { self.values[index] = value }
+}
+Test.assert(bracket_box[1], 20)
+bracket_box[1] = 99
+Test.assert(bracket_box.values[1], 99)
+Test.assert(bracket_box["values"].length, 2)
+
+let bracket_precedence = {
+    x: 1
+    []: |key| { 99 }
+}
+Test.assert(bracket_precedence["x"], 1)
+Test.assert(bracket_precedence["missing"], 99)
+
+let bracket_set_precedence = {
+    x: 1
+    y: 0
+    []=: |key, value| { self.y = value }
+}
+bracket_set_precedence["x"] = 5
+Test.assert(bracket_set_precedence.x, 5)
+Test.assert(bracket_set_precedence.y, 0)
+bracket_set_precedence["z"] = 7
+Test.assert(bracket_set_precedence.y, 7)
