@@ -157,7 +157,7 @@ impl Continuation {
             let sp = top - 8;
             // Safety: the stack has at least one word and is writable.
             unsafe { (sp as *mut u64).write(entry) };
-            self.regs.sp = sp;
+            self.regs.rsp = sp as u64;
             self.regs.r12 = arg as usize as u64;
         }
     }
