@@ -222,6 +222,7 @@ pub(crate) struct TaskRun {
 struct ParkState {
     permit: bool,
     blocked: bool,
+    timed_out: bool,
 }
 
 pub(crate) struct TaskStart {
@@ -454,22 +455,55 @@ impl ThreadState {
         if !self.is_continuation_started() {
             return;
         }
-        thread.as_ref().set_state(ThreadStatus::Blocked);
         {
             let mut park = self.park_state.lock().unwrap();
-            park.blocked = true;
+            park.timed_out = false;
             if park.permit {
                 park.permit = false;
-                park.blocked = false;
-                drop(park);
-                thread.as_ref().set_state(ThreadStatus::Running);
                 return;
             }
+            park.blocked = true;
+            thread.as_ref().set_state(ThreadStatus::Blocked);
         }
         self.suspend(heap);
         let mut park = self.park_state.lock().unwrap();
         park.blocked = false;
         park.permit = false;
+        park.timed_out = false;
+    }
+
+    pub fn park_timed(&self, heap: &mut Heap, scheduler: &Scheduler, duration: Duration) -> bool {
+        let Some(thread) = self
+            .thread_object(heap)
+            .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+        else {
+            return false;
+        };
+        if !self.is_continuation_started() {
+            return false;
+        }
+        {
+            let mut park = self.park_state.lock().unwrap();
+            park.timed_out = false;
+            if park.permit {
+                park.permit = false;
+                return false;
+            }
+            if duration.is_zero() {
+                park.timed_out = true;
+                return true;
+            }
+            park.blocked = true;
+            thread.as_ref().set_state(ThreadStatus::Blocked);
+        }
+        scheduler.park_timeout(heap, thread, duration);
+        self.suspend(heap);
+        let mut park = self.park_state.lock().unwrap();
+        park.blocked = false;
+        park.permit = false;
+        let timed_out = park.timed_out;
+        park.timed_out = false;
+        timed_out
     }
 
     /// Returns true when a blocked task must be made runnable.
@@ -477,9 +511,25 @@ impl ThreadState {
         let mut park = self.park_state.lock().unwrap();
         if park.blocked {
             park.blocked = false;
+            park.timed_out = false;
             true
         } else {
             park.permit = true;
+            false
+        }
+    }
+
+    pub fn is_park_blocked(&self) -> bool {
+        self.park_state.lock().unwrap().blocked
+    }
+
+    pub fn complete_park_timeout(&self) -> bool {
+        let mut park = self.park_state.lock().unwrap();
+        if park.blocked {
+            park.blocked = false;
+            park.timed_out = true;
+            true
+        } else {
             false
         }
     }

@@ -64,9 +64,15 @@ impl Carrier {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimerKind {
+    Sleep,
+    Park,
+}
+
 struct SchedulerState {
     ready: VecDeque<AtomicOptionGcSlot<ThreadObject>>,
-    timers: Vec<(Instant, AtomicOptionGcSlot<ThreadObject>)>,
+    timers: Vec<(Instant, AtomicOptionGcSlot<ThreadObject>, TimerKind)>,
 }
 
 /// One cooperative scheduler instance.
@@ -156,7 +162,37 @@ impl Scheduler {
         // Safety: the slot starts as the hole and is visited as a root.
         let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
         slot.store(thread);
-        state.timers.push((Instant::now() + duration, slot));
+        state
+            .timers
+            .push((Instant::now() + duration, slot, TimerKind::Sleep));
+    }
+
+    pub fn park_timeout(&self, heap: &Heap, thread: Tagged<'_, ThreadObject>, duration: Duration) {
+        if thread.task(heap).is_none() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        if thread.state(heap) == ThreadStatus::Terminated
+            || !thread
+                .task(heap)
+                .is_some_and(|task| task.state().is_park_blocked())
+        {
+            return;
+        }
+        // Safety: the slot starts as the hole and is visited as a root.
+        let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
+        slot.store(thread);
+        state
+            .timers
+            .push((Instant::now() + duration, slot, TimerKind::Park));
+    }
+
+    pub fn cancel_park_timer(&self, heap: &Heap, thread: Tagged<'_, ThreadObject>) {
+        let raw = thread.raw().to_bits();
+        let mut state = self.state.lock().unwrap();
+        state
+            .timers
+            .retain(|(_, slot, kind)| *kind != TimerKind::Park || slot.load_word(heap) != raw);
     }
 
     /// Block `waiter` on `target`; false if the target already terminated.
@@ -185,13 +221,26 @@ impl Scheduler {
         let mut i = 0;
         while i < state.timers.len() {
             if state.timers[i].0 <= now {
-                let (_, slot) = state.timers.swap_remove(i);
+                let (_, slot, kind) = state.timers.swap_remove(i);
                 let Some(thread) = slot.load(heap) else {
                     continue;
                 };
-                if thread.state(heap) == ThreadStatus::Blocked {
-                    thread.set_state(ThreadStatus::Ready);
-                    state.ready.push_back(slot);
+                match kind {
+                    TimerKind::Sleep => {
+                        if thread.state(heap) == ThreadStatus::Blocked {
+                            thread.set_state(ThreadStatus::Ready);
+                            state.ready.push_back(slot);
+                        }
+                    }
+                    TimerKind::Park => {
+                        if thread
+                            .task(heap)
+                            .is_some_and(|task| task.state().complete_park_timeout())
+                        {
+                            thread.set_state(ThreadStatus::Ready);
+                            state.ready.push_back(slot);
+                        }
+                    }
                 }
             } else {
                 i += 1;
@@ -202,7 +251,7 @@ impl Scheduler {
     pub fn next_timeout(&self, heap: &Heap) -> Option<Duration> {
         let mut state = self.state.lock().unwrap();
         Self::wake_timers(&mut state, heap);
-        let next = state.timers.iter().map(|(at, _)| *at).min()?;
+        let next = state.timers.iter().map(|(at, _, _)| *at).min()?;
         Some(next.saturating_duration_since(Instant::now()))
     }
 
@@ -246,7 +295,9 @@ impl Scheduler {
             let mut state = self.state.lock().unwrap();
             let raw = thread.raw().to_bits();
             state.ready.retain(|slot| slot.load_word(heap) != raw);
-            state.timers.retain(|(_, slot)| slot.load_word(heap) != raw);
+            state
+                .timers
+                .retain(|(_, slot, _)| slot.load_word(heap) != raw);
             context.take_waiter_slots()
         };
         for slot in waiters {
@@ -278,7 +329,9 @@ impl Scheduler {
         };
         let mut state = self.state.lock().unwrap();
         let raw = thread.raw().to_bits();
-        state.timers.retain(|(_, slot)| slot.load_word(heap) != raw);
+        state
+            .timers
+            .retain(|(_, slot, _)| slot.load_word(heap) != raw);
         if let Some(target) = task.waiting_on(heap) {
             if let Some(target_task) = target.task(heap) {
                 target_task.remove_waiter(heap, thread);
@@ -320,7 +373,7 @@ impl Scheduler {
         for slot in &state.ready {
             visitor.visit(slot.as_raw());
         }
-        for (_, slot) in &state.timers {
+        for (_, slot, _) in &state.timers {
             visitor.visit(slot.as_raw());
         }
         drop(state);

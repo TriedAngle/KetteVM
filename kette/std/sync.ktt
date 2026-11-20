@@ -1,25 +1,33 @@
-// A FIFO queue of parked threads. Items need a `next` field.
 let WaitQueue = {
-    head: 0
-    tail: 0
-    guard: 0
+    head, tail, guard: undefined
     new: {
-        let queue = {
-            parent*: self
-            head: 0
-            tail: 0
-            guard: atomic.AtomicI64.new(0)
-        }
+        let queue = self.clone()
+        queue.head = 0
+        queue.tail = 0
+        queue.guard = atomic.AtomicI64.new(0)
         queue
     }
     lock: {
-        while self.guard.compareExchange(0, 1) != 0 {
-            Thread.yield()
+        let spins = 0
+        while true {
+            while self.guard.load() != 0 {
+                if spins < 64 {
+                    spins = spins + 1
+                } else {
+                    Thread.yield()
+                    spins = 0
+                }
+            }
+            if self.guard.compareExchange(0, 1) == 0 {
+                return 0
+            }
+            spins = 0
         }
     }
     unlock: { self.guard.store(0) }
     enqueue: { |item|
         self.lock()
+        item.granted.store(0)
         item.next = 0
         if self.head == 0 {
             self.head = item
@@ -38,6 +46,7 @@ let WaitQueue = {
             if self.head == 0 {
                 self.tail = 0
             }
+            item.granted.store(1)
         }
         self.unlock()
         item
@@ -46,8 +55,8 @@ let WaitQueue = {
         self.lock()
         let prev = 0
         let current = self.head
-        let done = false
-        while current != 0 && !done {
+        let removed = false
+        while current != 0 && !removed {
             if current == item {
                 if prev == 0 {
                     self.head = current.next
@@ -58,30 +67,26 @@ let WaitQueue = {
                     self.tail = prev
                 }
                 current.next = 0
-                done = true
+                removed = true
             } else {
                 prev = current
                 current = current.next
             }
         }
         self.unlock()
+        removed
     }
 }
 
-// A non-reentrant mutex. Unlock hands the lock directly to one waiter.
 let Mutex = {
-    locked: 0
-    waiters: 0
+    locked, waiters: undefined
     new: {
-        let mutex = {
-            parent*: self
-            locked: atomic.AtomicI64.new(0)
-            waiters: WaitQueue.new()
-        }
+        let mutex = self.clone()
+        mutex.locked = atomic.AtomicI64.new(0)
+        mutex.waiters = WaitQueue.new()
         mutex
     }
-    lock: {
-        let me = Thread.current()
+    waiterFor: |me| {
         let waiter = me.waiter
         if waiter == null {
             waiter = {
@@ -91,11 +96,15 @@ let Mutex = {
             }
             me.waiter = waiter
         }
+        waiter
+    }
+    lock: {
+        let me = Thread.current()
+        let waiter = self.waiterFor(me)
         while true {
             if self.locked.compareExchange(0, 1) == 0 {
                 return 0
             }
-            waiter.granted.store(0)
             self.waiters.enqueue(waiter)
             if self.locked.compareExchange(0, 1) == 0 {
                 self.waiters.remove(waiter)
@@ -105,16 +114,281 @@ let Mutex = {
             if waiter.granted.load() != 0 {
                 return 0
             }
-            self.waiters.remove(waiter)
+            if !self.waiters.remove(waiter) {
+                return 0
+            }
+        }
+    }
+    tryLock: {
+        self.tryLockNanos(0)
+    }
+    tryLockNanos: |nanos| {
+        if nanos <= 0 {
+            if self.locked.compareExchange(0, 1) == 0 {
+                return true
+            }
+            return false
+        }
+        let deadline = Thread.nanoTime() + nanos
+        let me = Thread.current()
+        let waiter = self.waiterFor(me)
+        while true {
+            if self.locked.compareExchange(0, 1) == 0 {
+                return true
+            }
+            let remaining = deadline - Thread.nanoTime()
+            if remaining <= 0 {
+                return false
+            }
+            self.waiters.enqueue(waiter)
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.waiters.remove(waiter)
+                return true
+            }
+            let timed_out = me.parkNanos(remaining)
+            if waiter.granted.load() != 0 {
+                return true
+            }
+            if timed_out {
+                if self.waiters.remove(waiter) {
+                    return false
+                }
+                return true
+            }
+            if !self.waiters.remove(waiter) {
+                return true
+            }
         }
     }
     unlock: {
         let waiter = self.waiters.dequeue()
         if waiter != 0 {
-            waiter.granted.store(1)
             waiter.thread.unpark()
         } else {
             self.locked.store(0)
         }
+    }
+    releaseAllForAwait: {
+        self.unlock()
+        1
+    }
+    acquireForAwait: |depth| {
+        let i = 0
+        while i < depth {
+            self.lock()
+            i = i + 1
+        }
+    }
+}
+
+let RecursiveMutex = {
+    locked, owner, recursions, waiters: undefined
+    new: {
+        let mutex = self.clone()
+        mutex.locked = atomic.AtomicI64.new(0)
+        mutex.owner = -1
+        mutex.recursions = 0
+        mutex.waiters = WaitQueue.new()
+        mutex
+    }
+    waiterFor: |me| {
+        let waiter = me.waiter
+        if waiter == null {
+            waiter = {
+                thread: me
+                granted: atomic.AtomicI64.new(0)
+                next: 0
+            }
+            me.waiter = waiter
+        }
+        waiter
+    }
+    lock: {
+        let me = Thread.current()
+        let me_id = me.threadId()
+        if self.owner == me_id {
+            self.recursions = self.recursions + 1
+            return 0
+        }
+        let waiter = self.waiterFor(me)
+        while true {
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.owner = me_id
+                self.recursions = 1
+                return 0
+            }
+            self.waiters.enqueue(waiter)
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.waiters.remove(waiter)
+                self.owner = me_id
+                self.recursions = 1
+                return 0
+            }
+            me.park()
+            if waiter.granted.load() != 0 {
+                self.owner = me_id
+                self.recursions = 1
+                return 0
+            }
+            if !self.waiters.remove(waiter) {
+                self.owner = me_id
+                self.recursions = 1
+                return 0
+            }
+        }
+    }
+    tryLock: {
+        self.tryLockNanos(0)
+    }
+    tryLockNanos: |nanos| {
+        let me = Thread.current()
+        let me_id = me.threadId()
+        if self.owner == me_id {
+            self.recursions = self.recursions + 1
+            return true
+        }
+        if nanos <= 0 {
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+            return false
+        }
+        let deadline = Thread.nanoTime() + nanos
+        let waiter = self.waiterFor(me)
+        while true {
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+            let remaining = deadline - Thread.nanoTime()
+            if remaining <= 0 {
+                return false
+            }
+            self.waiters.enqueue(waiter)
+            if self.locked.compareExchange(0, 1) == 0 {
+                self.waiters.remove(waiter)
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+            let timed_out = me.parkNanos(remaining)
+            if waiter.granted.load() != 0 {
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+            if timed_out {
+                if self.waiters.remove(waiter) {
+                    return false
+                }
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+            if !self.waiters.remove(waiter) {
+                self.owner = me_id
+                self.recursions = 1
+                return true
+            }
+        }
+    }
+    releaseLock: {
+        let waiter = self.waiters.dequeue()
+        if waiter != 0 {
+            waiter.thread.unpark()
+        } else {
+            self.locked.store(0)
+        }
+    }
+    unlock: {
+        let me_id = Thread.current().threadId()
+        if self.owner != me_id {
+            throw IllegalLockState("unlock by non-owner")
+        }
+        if self.recursions > 1 {
+            self.recursions = self.recursions - 1
+            return 0
+        }
+        self.owner = -1
+        self.recursions = 0
+        self.releaseLock()
+    }
+    releaseAllForAwait: {
+        let me_id = Thread.current().threadId()
+        if self.owner != me_id {
+            throw IllegalLockState("await without lock")
+        }
+        let depth = self.recursions
+        self.owner = -1
+        self.recursions = 0
+        self.releaseLock()
+        depth
+    }
+    acquireForAwait: |depth| {
+        let i = 0
+        while i < depth {
+            self.lock()
+            i = i + 1
+        }
+    }
+}
+
+let Condition = {
+    waiters: undefined
+    new: {
+        let condition = self.clone()
+        condition.waiters = WaitQueue.new()
+        condition
+    }
+    signal: {
+        let waiter = self.waiters.dequeue()
+        if waiter != 0 {
+            waiter.thread.unpark()
+        }
+    }
+    signalAll: {
+        while true {
+            let waiter = self.waiters.dequeue()
+            if waiter == 0 {
+                return 0
+            }
+            waiter.thread.unpark()
+        }
+    }
+    await: |mutex| {
+        self.awaitUntil(mutex, 0, false)
+    }
+    awaitNanos: |mutex, nanos| {
+        self.awaitUntil(mutex, Thread.nanoTime() + nanos, true)
+    }
+    awaitUntil: |mutex, deadline, timed| {
+        let me = Thread.current()
+        let waiter = {
+            thread: me
+            granted: atomic.AtomicI64.new(0)
+            next: 0
+        }
+        self.waiters.enqueue(waiter)
+        let depth = mutex.releaseAllForAwait()
+        let done = false
+        while !done && waiter.granted.load() == 0 {
+            if !timed {
+                me.park()
+            } else {
+                let remaining = deadline - Thread.nanoTime()
+                if remaining <= 0 {
+                    self.waiters.remove(waiter)
+                    done = true
+                } else if me.parkNanos(remaining) {
+                    self.waiters.remove(waiter)
+                    done = true
+                }
+            }
+        }
+        mutex.acquireForAwait(depth)
+        waiter.granted.load() != 0
     }
 }

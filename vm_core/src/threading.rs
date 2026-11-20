@@ -9,11 +9,13 @@ use crate::{
 };
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
+
+static NANO_TIME_ORIGIN: OnceLock<Instant> = OnceLock::new();
 
 /// Install the `Thread` and `Atomic` globals.
 pub fn install(vm: &mut VM) -> Result<(), SetupError> {
@@ -31,6 +33,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let thread_mount_index = vm.register_native(thread_mount);
     let thread_park_index = vm.register_native(thread_park);
     let thread_unpark_index = vm.register_native(thread_unpark);
+    let thread_nano_time_index = vm.register_native(thread_nano_time);
     let thread_is_ready_index = vm.register_native(thread_is_ready);
     let thread_sleep_index = vm.register_native(thread_sleep);
     let thread_yield_index = vm.register_native(thread_yield);
@@ -174,8 +177,24 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             thread,
             &scope,
             thread_prototype,
+            "parkNanos",
+            thread_park_index,
+            1,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
             "unpark",
             thread_unpark_index,
+            0,
+        );
+        Object::install_method(
+            thread,
+            &scope,
+            thread_prototype,
+            "nanoTime",
+            thread_nano_time_index,
             0,
         );
         Object::install_method(
@@ -817,7 +836,7 @@ fn thread_id<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a
     Smi::new(object.as_ref().tid(heap)).into_tagged()
 }
 
-fn thread_park<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+fn thread_park<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
@@ -828,8 +847,24 @@ fn thread_park<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged
     if !has_task || !state.is_continuation_started() {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
-    state.park(heap);
-    vm.known().undefined.get(heap).erase()
+    if args.is_empty() {
+        state.park(heap);
+        return vm.known().undefined.get(heap).erase();
+    }
+    let Some(nanos) = args.get(heap, 0).to_number(heap) else {
+        raise!(vm, heap, state, VmError::CannotConvertToNumber);
+    };
+    if nanos < 0.0 || !nanos.is_finite() {
+        raise!(vm, heap, state, VmError::InvalidTimeValue);
+    }
+    let scheduler = task_scheduler(vm, heap, state);
+    let timed_out = state.park_timed(heap, &scheduler, Duration::from_nanos(nanos as u64));
+    Convert::boolean(heap, timed_out)
+}
+
+fn thread_nano_time<'a>(_ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let origin = NANO_TIME_ORIGIN.get_or_init(Instant::now);
+    Smi::new(origin.elapsed().as_nanos() as i64).into_tagged()
 }
 
 fn thread_unpark<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
@@ -844,6 +879,12 @@ fn thread_unpark<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagge
     };
     let target_state = Arc::clone(task.as_ref().state());
     if target_state.unpark() {
+        if let Some(scheduler) = task.as_ref().scheduler(heap) {
+            scheduler
+                .as_ref()
+                .scheduler()
+                .cancel_park_timer(heap, target);
+        }
         if target_state.is_mounted_by_task() {
             target.as_ref().set_state(ThreadStatus::Ready);
         } else if let Some(scheduler) = task.as_ref().scheduler(heap) {

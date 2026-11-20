@@ -8,6 +8,12 @@ let AtomicI64 = atomic.AtomicI64
 Test.assert(Thread.name(), "main")
 Test.assert(Thread.isAlive(), true)
 Test.assert(Thread.current(), Thread)
+Test.assert(Thread.nanoTime() > 0, true)
+
+let main_thread = Thread.current()
+main_thread.unpark()
+Test.assert(main_thread.parkNanos(10000000), false)
+Test.assert(main_thread.parkNanos(1000000), true)
 
 // Platform thread.
 let counter = AtomicI64.new(0)
