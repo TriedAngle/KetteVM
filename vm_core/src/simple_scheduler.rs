@@ -1,31 +1,50 @@
 use crate::{
     AtomicOptionGcSlot, EdgeVisitable, Header, Heap, HeapObject, ObjectKind, Smi, Tagged,
-    ThreadObject, ThreadStatus, Visitor,
+    ThreadObject, ThreadStatus, Visitor, continuation::Continuation,
 };
 use core::alloc::Layout;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 /// Per-carrier roots.
 pub struct Carrier {
+    id: usize,
     current: AtomicOptionGcSlot<ThreadObject>,
+    continuation: UnsafeCell<Continuation>,
 }
+
+unsafe impl Send for Carrier {}
+unsafe impl Sync for Carrier {}
 
 impl Default for Carrier {
     fn default() -> Self {
         Self {
+            id: 0,
             current: AtomicOptionGcSlot::uninit(),
+            continuation: UnsafeCell::new(Continuation::zeroed()),
         }
     }
 }
 
 impl Carrier {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(id: usize) -> Self {
+        Self {
+            id,
+            current: AtomicOptionGcSlot::uninit(),
+            continuation: UnsafeCell::new(Continuation::zeroed()),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     pub fn set_current(&self, thread: Tagged<'_, ThreadObject>) {
@@ -39,6 +58,10 @@ impl Carrier {
     pub fn current<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ThreadObject>> {
         self.current.load(heap)
     }
+
+    pub fn continuation_ptr(&self) -> *mut Continuation {
+        self.continuation.get()
+    }
 }
 
 struct SchedulerState {
@@ -50,6 +73,7 @@ struct SchedulerState {
 pub struct Scheduler {
     state: Mutex<SchedulerState>,
     carriers: Mutex<Vec<Arc<Carrier>>>,
+    next_carrier: AtomicUsize,
 }
 
 impl Default for Scheduler {
@@ -60,6 +84,7 @@ impl Default for Scheduler {
                 timers: Vec::new(),
             }),
             carriers: Mutex::new(Vec::new()),
+            next_carrier: AtomicUsize::new(1),
         }
     }
 }
@@ -70,7 +95,8 @@ impl Scheduler {
     }
 
     pub fn register_carrier(&self) -> Arc<Carrier> {
-        let carrier = Arc::new(Carrier::new());
+        let id = self.next_carrier.fetch_add(1, Ordering::Relaxed);
+        let carrier = Arc::new(Carrier::new(id));
         self.carriers.lock().unwrap().push(Arc::clone(&carrier));
         carrier
     }
@@ -167,12 +193,24 @@ impl Scheduler {
     pub fn next<'a>(&self, heap: &'a Heap, carrier: &Carrier) -> Option<Tagged<'a, ThreadObject>> {
         let mut state = self.state.lock().unwrap();
         Self::wake_timers(&mut state, heap);
-        while let Some(slot) = state.ready.pop_front() {
+        let pending = state.ready.len();
+        for _ in 0..pending {
+            let Some(slot) = state.ready.pop_front() else {
+                break;
+            };
             let Some(thread) = slot.load(heap) else {
                 continue;
             };
-            if thread.task(heap).is_none() {
+            let Some(task) = thread.task(heap) else {
                 continue;
+            };
+            let bound = task.carrier();
+            if bound != 0 && bound != carrier.id() {
+                state.ready.push_back(slot);
+                continue;
+            }
+            if bound == 0 {
+                task.set_carrier(carrier.id());
             }
             if thread.state(heap) != ThreadStatus::Ready {
                 continue;

@@ -458,6 +458,7 @@ fn thread_new_virtual<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> 
                 .erase()
         };
         let vm_state = Arc::new(ThreadState::new(heap));
+        vm.register_thread_state(&vm_state);
         let context = heap.allocate_handle::<TaskStateObject>(
             TaskStateObjectInit {
                 state: Arc::clone(&vm_state),
@@ -476,9 +477,6 @@ fn thread_new_virtual<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> 
             },
             &scope,
         );
-        context
-            .as_tagged(heap)
-            .set_thread(heap, object.as_tagged(heap));
         context
             .as_tagged(heap)
             .set_scheduler(heap, scheduler.as_tagged(heap));
@@ -528,13 +526,23 @@ fn thread_start<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
                 .scheduler(heap)
                 .map(|scheduler| Arc::clone(scheduler.as_ref().scheduler()))
                 .unwrap_or_else(|| default_scheduler(vm, heap));
+            let current_scheduler = task_scheduler(vm, heap, state);
+            let carrier_id = state.carrier_id();
+            if carrier_id != 0 && Arc::ptr_eq(&target_scheduler, &current_scheduler) {
+                context.as_ref().set_carrier(carrier_id);
+            }
             target_scheduler.push_ready(heap, object.as_tagged(heap));
+            let mut suspend = false;
             if let Some(current) = state.thread_object(heap)
                 && let Some(current) = current.erase().get_as::<ThreadObject>(heap)
+                && current.as_ref().task(heap).is_some()
             {
-                task_scheduler(vm, heap, state).yield_current(heap, current);
+                current_scheduler.yield_current(heap, current);
+                suspend = true;
             }
-            state.request_suspend();
+            if suspend {
+                state.suspend(heap);
+            }
             return vm.known().undefined.get(heap).erase();
         }
         let target = object.as_tagged(heap).target(heap);
@@ -651,7 +659,22 @@ fn thread_join<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
                 .map(|scheduler| Arc::clone(scheduler.as_ref().scheduler()))
                 .unwrap_or_else(|| default_scheduler(vm, heap));
             if target_scheduler.add_waiter_and_block(heap, object.as_tagged(heap), current) {
-                state.request_suspend();
+                state.suspend(heap);
+                if let Some(task) = state
+                    .thread_object(heap)
+                    .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
+                    .and_then(|object| object.task(heap))
+                {
+                    task.as_ref().clear_waiting_on(heap);
+                }
+                if object.as_tagged(heap).state(heap) == ThreadStatus::Terminated
+                    && let Some(task) = object.as_tagged(heap).task(heap)
+                    && let Some(exception) = task.as_ref().exception(heap)
+                {
+                    let exception = scope.handle(exception);
+                    state.set_pending_exception(exception.as_tagged(heap).erase());
+                    return raise_runtime(heap, Thrown);
+                }
             } else if let Some(exception) = context.as_ref().exception(heap) {
                 let exception = scope.handle(exception);
                 state.set_pending_exception(exception.as_tagged(heap).erase());
@@ -858,7 +881,7 @@ fn thread_sleep<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
         } else {
             scheduler.sleep_current(heap, current, total);
         }
-        state.request_suspend();
+        state.suspend(heap);
         return vm.known().undefined.get(heap).erase();
     }
     let start = Instant::now();
@@ -897,7 +920,7 @@ fn thread_yield<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagge
         && current.as_ref().task(heap).is_some()
     {
         task_scheduler(vm, heap, state).yield_current(heap, current);
-        state.request_suspend();
+        state.suspend(heap);
     } else {
         std::thread::yield_now();
     }

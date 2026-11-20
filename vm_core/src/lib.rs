@@ -1,6 +1,9 @@
 use crate::simple_scheduler::{Carrier, Scheduler, SchedulerObject};
 use crate::threading::ThreadRegistry;
-use core::{cell::Cell as StdCell, ptr::NonNull};
+use core::{
+    cell::{Cell as StdCell, UnsafeCell},
+    ptr::NonNull,
+};
 use std::time::Duration;
 use std::{
     sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
@@ -11,6 +14,10 @@ pub mod access;
 pub mod api;
 pub mod bootstrap;
 pub mod compare;
+pub mod continuation;
+
+/// Native stack reserved for one task.
+pub const TASK_STACK_SIZE: usize = 2 * 1024 * 1024;
 pub mod convert;
 pub mod errors;
 pub mod ffi;
@@ -41,7 +48,7 @@ pub use objects::string;
 pub use ffi::FfiState;
 
 pub use access::{OwnProperty, OwnPropertyLocation, ShouldThrow, StoreSemantics};
-pub use api::{EntryFn, ErasedRuntimeState, Interpreter, ResumeFn, Runtime, RuntimeId};
+pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime, RuntimeId};
 pub use bootstrap::{
     WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
     smi_slot,
@@ -193,25 +200,81 @@ pub struct SharedVM {
     /// Interpreter entry ([[Call]]/[[Construct]] on bytecode callables);
     /// set once at construction from the `I: Interpreter` type parameter.
     execute: EntryFn,
-    /// Resume a suspended top-level task at `ThreadState::resume_pc`.
-    resume: ResumeFn,
 }
 
 pub struct VM {
     shared: Arc<SharedVM>,
 }
 
+/// First-run data carried into a task's stack.
+pub(crate) struct TaskRun {
+    vm: VM,
+    heap: *mut Heap,
+    state: *const ThreadState,
+    callable: Value,
+    args: Vec<Value>,
+    runtime: RuntimeId,
+    outcome: Option<Result<Value, Thrown>>,
+}
+
+pub(crate) struct TaskStart {
+    callable: Value,
+    args: Vec<Value>,
+    runtime: RuntimeId,
+}
+
+pub(crate) enum ResumeOutcome {
+    Suspended,
+    Finished(Result<Value, Thrown>),
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn kette_task_entry(arg: *mut ()) -> ! {
+    let run = unsafe { &mut *(arg as *mut TaskRun) };
+    let state = unsafe { &*run.state };
+    let heap = unsafe { &mut *run.heap };
+    let outcome = state.handle_scope(|scope| {
+        // Safety: the callable and arguments are rooted by the caller or
+        // by the task's thread object; no collection ran since they were
+        // copied.
+        let callable = unsafe { Tagged::<Value>::from_value_unchecked(run.callable) };
+        let Some(callable) = callable.get_as::<Object>(heap) else {
+            return Err(Thrown);
+        };
+        let callable = scope.handle(callable);
+        let args = scope.stage(
+            &run.args
+                .iter()
+                .map(|value| unsafe { Tagged::<Value>::from_value_unchecked(*value) })
+                .collect::<Vec<_>>(),
+        );
+        let runtime = run.vm.runtime_by_id(run.runtime);
+        run.vm
+            .execute(runtime, heap, state, callable, args, None)
+            .map(|value| value.raw())
+    });
+    run.outcome = Some(if state.termination().is_some() {
+        Ok(run.vm.known().undefined.get(heap).raw())
+    } else {
+        outcome
+    });
+    // Safety: the carrier continuation is the active target.
+    unsafe { continuation::switch(state.continuation_ptr(), state.carrier_continuation()) };
+    unreachable!()
+}
+
 pub struct ThreadState {
     handles: HandleData,
     stack: Stack,
-    /// Saved resume pc inside the current frame.
-    resume_pc: StdCell<usize>,
-    /// Root frame base for a top-level task execution.
-    entry_base: StdCell<usize>,
-    /// Set by a native that needs to return to the carrier loop.
-    suspend_requested: StdCell<bool>,
-    /// Set by the interpreter after saving a suspension point.
-    suspended: StdCell<bool>,
+    /// Saved registers and stack of this task.
+    continuation: UnsafeCell<continuation::Continuation>,
+    continuation_started: StdCell<bool>,
+    /// Carrier continuation used by `suspend`.
+    carrier_continuation: StdCell<*const continuation::Continuation>,
+    /// First-run data while the task is alive.
+    task_run: StdCell<*mut TaskRun>,
+    /// Carrier that owns this execution.
+    carrier_id: StdCell<usize>,
     /// The current (innermost) interpreter frame's anchor. Frames are
     /// self-describing (see [`Stack`]): this cell is the only shadow
     /// state, written by push/pop/unwind frame switches.
@@ -241,6 +304,8 @@ pub struct ThreadState {
     construct_cache: Register,
     /// The guest `Thread` object mounted on this execution context.
     thread_object: Register,
+    /// Tasks blocked on this thread's join.
+    waiters: Mutex<Vec<AtomicOptionGcSlot<ThreadObject>>>,
 }
 
 impl ThreadState {
@@ -251,10 +316,11 @@ impl ThreadState {
         Self {
             handles: HandleData::new(the_hole),
             stack: Stack::new(STACK_SLOTS, undefined),
-            resume_pc: StdCell::new(0),
-            entry_base: StdCell::new(0),
-            suspend_requested: StdCell::new(false),
-            suspended: StdCell::new(false),
+            continuation: UnsafeCell::new(continuation::Continuation::zeroed()),
+            continuation_started: StdCell::new(false),
+            carrier_continuation: StdCell::new(core::ptr::null()),
+            task_run: StdCell::new(core::ptr::null_mut()),
+            carrier_id: StdCell::new(0),
             frame_base: StdCell::new(0),
             frame_active: StdCell::new(false),
             acc: unsafe { Register::from_value(undefined) },
@@ -265,6 +331,7 @@ impl ThreadState {
             rust_stack_base: StdCell::new(0),
             construct_cache: unsafe { Register::from_value(the_hole) },
             thread_object: unsafe { Register::from_value(the_hole) },
+            waiters: Mutex::new(Vec::new()),
         }
     }
 
@@ -274,57 +341,105 @@ impl ThreadState {
     }
 
     #[inline(always)]
-    pub fn resume_pc(&self) -> usize {
-        self.resume_pc.get()
+    pub fn continuation_ptr(&self) -> *mut continuation::Continuation {
+        self.continuation.get()
     }
 
     #[inline(always)]
-    pub fn set_resume_pc(&self, pc: usize) {
-        self.resume_pc.set(pc);
+    pub fn is_continuation_started(&self) -> bool {
+        self.continuation_started.get()
+    }
+
+    pub fn start_continuation(&self, arg: *mut ()) {
+        let continuation = unsafe { &mut *self.continuation.get() };
+        if continuation.stack_size() == 0 {
+            let Some((base, size)) = continuation::allocate_stack(TASK_STACK_SIZE) else {
+                panic!("cannot allocate task stack");
+            };
+            continuation.prepare(base, size, arg);
+            self.rust_stack_base.set(base as usize + size);
+        } else {
+            continuation.prepare(continuation.stack_base(), continuation.stack_size(), arg);
+        }
+        self.continuation_started.set(true);
+    }
+
+    pub fn release_continuation(&self) {
+        let continuation = unsafe { &mut *self.continuation.get() };
+        continuation::free_stack(continuation.stack_base(), continuation.stack_size());
+        continuation.reset();
+        self.continuation_started.set(false);
+        self.rust_stack_base.set(0);
     }
 
     #[inline(always)]
-    pub fn entry_base(&self) -> usize {
-        self.entry_base.get()
+    pub fn set_carrier_continuation(&self, carrier: *const continuation::Continuation) {
+        self.carrier_continuation.set(carrier);
     }
 
     #[inline(always)]
-    pub fn set_entry_base(&self, base: usize) {
-        self.entry_base.set(base);
+    pub fn carrier_continuation(&self) -> *const continuation::Continuation {
+        self.carrier_continuation.get()
+    }
+
+    pub fn add_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
+        // The queue lives off-heap and is scanned from `visit_edges` every
+        // collection, so its slots need no generational barrier.
+        let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
+        slot.store(waiter);
+        self.waiters.lock().unwrap().push(slot);
+    }
+
+    pub fn take_waiter_slots(&self) -> Vec<AtomicOptionGcSlot<ThreadObject>> {
+        core::mem::take(&mut *self.waiters.lock().unwrap())
+    }
+
+    pub fn remove_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
+        let raw = waiter.raw().to_bits();
+        let mut waiters = self.waiters.lock().unwrap();
+        let mut i = 0;
+        while i < waiters.len() {
+            if waiters[i].load_word(heap) == raw {
+                waiters.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     #[inline(always)]
-    pub fn request_suspend(&self) {
-        self.suspend_requested.set(true);
+    pub fn carrier_id(&self) -> usize {
+        self.carrier_id.get()
     }
 
     #[inline(always)]
-    pub fn take_suspend_request(&self) -> bool {
-        self.suspend_requested.replace(false)
+    pub fn set_carrier_id(&self, id: usize) {
+        self.carrier_id.set(id);
     }
 
     #[inline(always)]
-    pub fn is_suspended(&self) -> bool {
-        self.suspended.get()
+    pub(crate) fn task_run(&self) -> *mut TaskRun {
+        self.task_run.get()
     }
 
     #[inline(always)]
-    pub fn take_suspended(&self) -> bool {
-        self.suspended.replace(false)
+    pub(crate) fn set_task_run(&self, run: *mut TaskRun) {
+        self.task_run.set(run);
     }
 
-    pub fn mark_suspended(&self, acc: Tagged<'_, Value>, resume_pc: usize) {
-        self.acc_slot().store(acc);
-        self.set_resume_pc(resume_pc);
-        self.suspended.set(true);
+    #[inline(always)]
+    pub(crate) fn take_task_run(&self) -> *mut TaskRun {
+        self.task_run.replace(core::ptr::null_mut())
     }
 
-    /// Clear a completed top-level task's VM execution stack.
-    pub fn complete_execution(&self) {
-        self.stack.set_top(0);
-        self.set_frame_base(0);
-        self.set_frame_active(false);
-        self.suspended.set(false);
+    /// Suspend the current task until the carrier resumes it.
+    #[inline]
+    pub fn suspend(&self, _heap: &mut Heap) {
+        let carrier = self.carrier_continuation();
+        debug_assert!(!carrier.is_null(), "suspend without a carrier");
+        // Safety: the carrier is the active switch target and the task has
+        // a prepared continuation.
+        unsafe { continuation::switch(self.continuation_ptr(), carrier) };
     }
 
     #[inline(always)]
@@ -642,6 +757,9 @@ impl EdgeVisitable for ThreadState {
         visitor.visit(self.pending_exception.as_raw());
         visitor.visit(self.construct_cache.as_raw());
         visitor.visit(self.thread_object.as_raw());
+        for waiter in self.waiters.lock().unwrap().iter() {
+            visitor.visit(waiter.as_raw());
+        }
     }
 }
 
@@ -704,8 +822,7 @@ impl Thread {
         let _ = self.state.take_pending_exception();
         self.state.clear_termination();
         let _ = self.heap.take_cancel();
-        let _ = self.state.take_suspended();
-        let _ = self.state.take_suspend_request();
+        Self::release_task(&self.state);
 
         let main_state = Arc::clone(&self.state);
         let scheduler = {
@@ -730,14 +847,14 @@ impl Thread {
                 }
             };
             let is_virtual = object.as_tagged(&self.heap).is_virtual(&self.heap);
-            let context = if is_virtual {
-                let context = object
+            let task = if is_virtual {
+                let task = object
                     .as_tagged(&self.heap)
                     .task(&self.heap)
-                    .expect("virtual thread without execution context");
-                scope.handle(context)
+                    .expect("virtual thread without task state");
+                scope.handle(task)
             } else {
-                let context = self.heap.allocate_handle::<TaskStateObject>(
+                let task = self.heap.allocate_handle::<TaskStateObject>(
                     TaskStateObjectInit {
                         state: Arc::clone(&main_state),
                     },
@@ -745,117 +862,134 @@ impl Thread {
                 );
                 object
                     .as_tagged(&self.heap)
-                    .set_task(&self.heap, context.as_tagged(&self.heap));
-                context
-                    .as_tagged(&self.heap)
-                    .set_thread(&self.heap, object.as_tagged(&self.heap));
-                context
-                    .as_tagged(&self.heap)
+                    .set_task(&self.heap, task.as_tagged(&self.heap));
+                task.as_tagged(&self.heap)
                     .set_scheduler(&self.heap, scheduler_object.as_tagged(&self.heap));
-                context
+                task
             };
-            context.as_tagged(&self.heap).set_runtime(runtime);
+            task.as_tagged(&self.heap).set_runtime(runtime);
+            object
+                .as_tagged(&self.heap)
+                .set_state(ThreadStatus::Running);
+            task.as_tagged(&self.heap).set_carrier(carrier.id());
             carrier.set_current(object.as_tagged(&self.heap));
 
-            let result = self.run_fresh_task(Arc::clone(&main_state), callable, args, runtime);
-            if main_state.is_suspended() {
-                if object.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Running {
-                    scheduler.yield_current(&self.heap, object.as_tagged(&self.heap));
+            let start = TaskStart {
+                callable: callable.raw(),
+                args: args.to_vec(),
+                runtime,
+            };
+            match self.resume_task(&carrier, Some(start)) {
+                ResumeOutcome::Finished(result) => {
+                    let keep_exception = result.is_err();
+                    self.finish_task(
+                        &scheduler,
+                        object.as_tagged(&self.heap),
+                        task.as_tagged(&self.heap),
+                        &main_state,
+                        &result,
+                        !keep_exception,
+                    );
+                    self.state = Arc::clone(&main_state);
+                    carrier.clear_current();
+                    if !is_virtual {
+                        object.as_tagged(&self.heap).clear_task(&self.heap);
+                    }
+                    if self.state.termination().is_some() {
+                        let _ = self.state.take_pending_exception();
+                        let heap = &self.heap;
+                        return Ok(self.vm.known().undefined.get(heap).raw());
+                    }
+                    result
                 }
-                let result = self.run_scheduler(&scheduler, &carrier, object, context);
-                self.state = Arc::clone(&main_state);
-                carrier.clear_current();
-                if !is_virtual {
-                    object.as_tagged(&self.heap).clear_task(&self.heap);
+                ResumeOutcome::Suspended => {
+                    if object.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Running {
+                        scheduler.yield_current(&self.heap, object.as_tagged(&self.heap));
+                    }
+                    let result = self.run_scheduler(&scheduler, &carrier, object, task);
+                    self.state = Arc::clone(&main_state);
+                    carrier.clear_current();
+                    if !is_virtual {
+                        object.as_tagged(&self.heap).clear_task(&self.heap);
+                    }
+                    result
                 }
-                return result;
             }
-
-            let keep_exception = result.is_err();
-            self.finish_task(
-                &scheduler,
-                object.as_tagged(&self.heap),
-                context.as_tagged(&self.heap),
-                &main_state,
-                &result,
-                !keep_exception,
-            );
-            self.state = Arc::clone(&main_state);
-            carrier.clear_current();
-            if !is_virtual {
-                object.as_tagged(&self.heap).clear_task(&self.heap);
-            }
-            if self.state.termination().is_some() {
-                let _ = self.state.take_pending_exception();
-                let heap = &self.heap;
-                return Ok(self.vm.known().undefined.get(heap).raw());
-            }
-            result
         });
         scheduler.unregister_carrier(&carrier);
         result
     }
 
-    fn run_fresh_task(
-        &mut self,
-        state: Arc<ThreadState>,
-        callable: Handle<'_, Object>,
-        args: &[Value],
-        runtime: RuntimeId,
-    ) -> Result<Value, Thrown> {
-        self.state = state;
-        let state = Arc::clone(&self.state);
-        let _ = state.take_suspended();
-        let _ = state.take_suspend_request();
-        let result = state.handle_scope(|scope| {
-            let args = scope.stage(
-                &args
-                    .iter()
-                    .map(|v| unsafe { Tagged::<Value>::from_value_unchecked(*v) })
-                    .collect::<Vec<_>>(),
-            );
-            let runtime = self.vm.runtime_by_id(runtime);
-            (self.vm.shared.execute)(
-                &self.vm,
-                runtime,
-                &mut self.heap,
-                &state,
-                callable,
-                args,
-                None,
-            )
-            .map(|value| value.raw())
-        });
-        if state.termination().is_some() {
-            let _ = state.take_pending_exception();
-            let heap = &self.heap;
-            return Ok(self.vm.known().undefined.get(heap).raw());
+    fn resume_task(&mut self, carrier: &Carrier, start: Option<TaskStart>) -> ResumeOutcome {
+        let state = {
+            let Some(thread) = carrier.current(&self.heap) else {
+                let heap = &self.heap;
+                return ResumeOutcome::Finished(Ok(self.vm.known().undefined.get(heap).raw()));
+            };
+            let Some(task) = thread.task(&self.heap) else {
+                let heap = &self.heap;
+                return ResumeOutcome::Finished(Ok(self.vm.known().undefined.get(heap).raw()));
+            };
+            let state = Arc::clone(task.state());
+            state.set_thread_object(thread);
+            state
+        };
+        self.state = Arc::clone(&state);
+        state.set_carrier_id(carrier.id());
+        state.set_carrier_continuation(carrier.continuation_ptr());
+
+        if !state.is_continuation_started() {
+            let start = start.expect("fresh task without start data");
+            let run = Box::new(TaskRun {
+                vm: self.vm.clone(),
+                heap: &mut self.heap as *mut Heap,
+                state: &*state as *const ThreadState,
+                callable: start.callable,
+                args: start.args,
+                runtime: start.runtime,
+                outcome: None,
+            });
+            let run = Box::into_raw(run);
+            state.set_task_run(run);
+            state.start_continuation(run as *mut ());
         }
-        result
+
+        // Safety: the carrier yields its heap borrow until the task
+        // suspends or finishes.
+        unsafe { continuation::switch(carrier.continuation_ptr(), state.continuation_ptr()) };
+
+        let run = state.task_run();
+        if run.is_null() {
+            return ResumeOutcome::Suspended;
+        }
+        let outcome = unsafe { (*run).outcome.take() };
+        match outcome {
+            Some(result) => {
+                let run = state.take_task_run();
+                if !run.is_null() {
+                    // Safety: the task finished and will not resume.
+                    unsafe { drop(Box::from_raw(run)) };
+                }
+                ResumeOutcome::Finished(result)
+            }
+            None => ResumeOutcome::Suspended,
+        }
     }
 
-    fn run_resume_task(&mut self, state: Arc<ThreadState>) -> Result<Value, Thrown> {
-        self.state = state;
-        let state = Arc::clone(&self.state);
-        let _ = state.take_suspended();
-        let result = state.handle_scope(|_| {
-            self.vm
-                .resume(&mut self.heap, &state)
-                .map(|value| value.raw())
-        });
-        if state.termination().is_some() {
-            let _ = state.take_pending_exception();
-            let heap = &self.heap;
-            return Ok(self.vm.known().undefined.get(heap).raw());
+    fn release_task(state: &ThreadState) {
+        let run = state.take_task_run();
+        if !run.is_null() {
+            // Safety: the task is finished and will not resume.
+            unsafe { drop(Box::from_raw(run)) };
         }
-        result
+        state.release_continuation();
     }
 
     fn finish_task(
         &self,
         scheduler: &Scheduler,
         thread: Tagged<'_, ThreadObject>,
-        context: Tagged<'_, TaskStateObject>,
+        task: Tagged<'_, TaskStateObject>,
         state: &ThreadState,
         result: &Result<Value, Thrown>,
         take_exception: bool,
@@ -863,17 +997,18 @@ impl Thread {
         if thread.is_virtual(&self.heap) {
             if take_exception {
                 if let Some(exception) = state.take_pending_exception_tagged(&self.heap) {
-                    context.set_exception(&self.heap, exception);
+                    task.set_exception(&self.heap, exception);
                 } else if let Ok(value) = result {
                     // Safety: no collection can run between the guest
                     // returning and this store; the slot roots it after.
                     let value = unsafe { Tagged::<Value>::from_value_unchecked(*value) };
-                    context.set_result(&self.heap, value);
+                    task.set_result(&self.heap, value);
                 }
             }
             thread.set_state(ThreadStatus::Terminated);
         }
         scheduler.terminate(&self.heap, thread);
+        Self::release_task(state);
     }
 
     fn run_scheduler(
@@ -881,18 +1016,18 @@ impl Thread {
         scheduler: &Scheduler,
         carrier: &Carrier,
         main: Handle<'_, ThreadObject>,
-        main_context: Handle<'_, TaskStateObject>,
+        main_task: Handle<'_, TaskStateObject>,
     ) -> Result<Value, Thrown> {
         loop {
             if main.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Terminated {
-                let state = Arc::clone(main_context.as_tagged(&self.heap).state());
+                let state = Arc::clone(main_task.as_tagged(&self.heap).state());
                 self.state = state;
-                if let Some(exception) = main_context.as_tagged(&self.heap).exception(&self.heap) {
+                if let Some(exception) = main_task.as_tagged(&self.heap).exception(&self.heap) {
                     self.state.set_pending_exception(exception);
                     return Err(Thrown);
                 }
                 let heap = &self.heap;
-                let result = main_context
+                let result = main_task
                     .as_tagged(heap)
                     .result(heap)
                     .map(|value| value.raw())
@@ -905,56 +1040,49 @@ impl Thread {
                     self.heap.block_on(|| std::thread::sleep(timeout));
                     continue;
                 }
-                self.state = Arc::clone(main_context.as_tagged(&self.heap).state());
+                Self::release_task(main_task.as_tagged(&self.heap).state());
+                self.state = Arc::clone(main_task.as_tagged(&self.heap).state());
                 let heap = &self.heap;
                 return Ok(self.vm.known().undefined.get(heap).raw());
             };
-            let Some(context) = thread.task(&self.heap) else {
+            let Some(task) = thread.task(&self.heap) else {
                 carrier.clear_current();
                 continue;
             };
-            let state = Arc::clone(context.state());
-            self.state = Arc::clone(&state);
-            state.set_thread_object(thread);
-            let fresh = state.entry_base() == 0;
-            let runtime = context.runtime().unwrap_or(RuntimeId(0));
-            let result = if fresh {
-                let target = thread.target(&self.heap).raw();
-                state.handle_scope(|scope| {
-                    // Safety: the thread is rooted by the carrier's current
-                    // slot, and no collection can run before it is rooted.
-                    let target = unsafe { Tagged::<Value>::from_value_unchecked(target) };
-                    let Some(target) = target.get_as::<Object>(&self.heap) else {
-                        return Ok(self.vm.known().undefined.get(&self.heap).raw());
-                    };
-                    let target = scope.handle(target);
-                    self.run_fresh_task(Arc::clone(&state), target, &[], runtime)
-                })
-            } else {
-                self.run_resume_task(Arc::clone(&state))
-            };
+            let state = Arc::clone(task.state());
+            let fresh = !state.is_continuation_started();
+            let start = fresh.then(|| TaskStart {
+                callable: thread.target(&self.heap).raw(),
+                args: Vec::new(),
+                runtime: task.runtime().unwrap_or(RuntimeId(0)),
+            });
+            let outcome = self.resume_task(carrier, start);
 
             let Some(thread) = carrier.current(&self.heap) else {
                 continue;
             };
-            let Some(context) = thread.task(&self.heap) else {
+            let Some(task) = thread.task(&self.heap) else {
                 carrier.clear_current();
                 continue;
             };
-            if state.is_suspended() {
-                if thread.state(&self.heap) == ThreadStatus::Running {
-                    scheduler.yield_current(&self.heap, thread);
+            match outcome {
+                ResumeOutcome::Suspended => {
+                    if thread.state(&self.heap) == ThreadStatus::Running {
+                        scheduler.yield_current(&self.heap, thread);
+                    }
+                    carrier.clear_current();
                 }
-                carrier.clear_current();
-                continue;
-            }
-
-            let is_main = thread.raw() == main.as_tagged(&self.heap).raw();
-            let take_exception = !(is_main && result.is_err());
-            self.finish_task(scheduler, thread, context, &state, &result, take_exception);
-            carrier.clear_current();
-            if is_main {
-                return result;
+                ResumeOutcome::Finished(result) => {
+                    let is_main = thread.raw() == main.as_tagged(&self.heap).raw();
+                    let take_exception = !(is_main && result.is_err());
+                    let state = Arc::clone(task.state());
+                    self.finish_task(scheduler, thread, task, &state, &result, take_exception);
+                    carrier.clear_current();
+                    if is_main {
+                        self.state = Arc::clone(main_task.as_tagged(&self.heap).state());
+                        return result;
+                    }
+                }
             }
         }
     }
@@ -1044,7 +1172,6 @@ impl VM {
             thread_event_lock: Mutex::new(()),
             thread_event: Condvar::new(),
             execute: I::EXECUTE,
-            resume: I::RESUME,
         });
         shared.heap.set_host(shared.gc_host());
         let mut local = shared
@@ -1158,14 +1285,6 @@ impl VM {
         (self.shared.execute)(self, runtime, heap, state, callable, args, new_target)
     }
 
-    pub fn resume<'h>(
-        &self,
-        heap: &'h mut Heap,
-        state: &'h ThreadState,
-    ) -> Result<Tagged<'h, Value>> {
-        (self.shared.resume)(self, heap, state)
-    }
-
     #[inline]
     pub fn native(&self, index: NativeIndex) -> NativeFn {
         self.shared
@@ -1207,15 +1326,18 @@ impl VM {
             .heap
             .new_local(&self.shared.known, &self.shared.prototype_registry);
         let state = Arc::new(ThreadState::new(&heap));
-        let mut thread_states = self.shared.thread_states.lock().unwrap();
-        // TODO: should we really call this every attach() ?
-        thread_states.retain(|t| t.strong_count() > 0);
-        thread_states.push(Arc::downgrade(&state));
+        self.register_thread_state(&state);
         Thread {
             vm: self.clone(),
             heap,
             state,
         }
+    }
+
+    pub fn register_thread_state(&self, state: &Arc<ThreadState>) {
+        let mut thread_states = self.shared.thread_states.lock().unwrap();
+        thread_states.retain(|t| t.strong_count() > 0);
+        thread_states.push(Arc::downgrade(state));
     }
 
     /// Run `R`'s setup (native-fn registration + global installation) and

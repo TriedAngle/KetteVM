@@ -119,6 +119,15 @@ vs.start()
 vs.join()
 Test.assert(child_scheduler, scheduler)
 
+// Suspension inside a nested VM entry (KetteTools.eval).
+let eval_result = 0
+let ve = Thread.newVirtual("ve", {
+    eval_result = KetteTools.eval("kette", "Thread.yield()\n7")
+})
+ve.start()
+ve.join()
+Test.assert(eval_result, 7)
+
 // Interrupts wake sleeping and joining virtual threads.
 let vsleep = Thread.newVirtual("vsleep", scheduler, {
     Thread.sleep(10000)
@@ -149,3 +158,34 @@ psleep.start()
 psleep.interrupt()
 psleep.join()
 Test.assert(psleep.isInterrupted(), true)
+
+// C callbacks suspend on the task stack and return through C frames.
+let (void, i32, u64) = FFI
+let libc = FFI.library(null)
+let Comparator = FFI.fn([FFI.pointer(void), FFI.pointer(void)], i32)
+let qsort = libc.fn(
+    "qsort",
+    [FFI.pointer(i32), u64, u64, FFI.pointer(Comparator)],
+    void,
+)
+let compare = Comparator.callback({ |left, right|
+    Thread.yield()
+    let a = left.cast(i32).get(0)
+    let b = right.cast(i32).get(0)
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        0
+    }
+})
+let ffi_values = FFI.array(i32, 4).new()
+ffi_values.set(0, 3)
+ffi_values.set(1, 1)
+ffi_values.set(2, 2)
+ffi_values.set(3, 0)
+qsort(ffi_values, 4, 4, compare)
+Test.assert(ffi_values.get(0), 0)
+Test.assert(ffi_values.get(3), 3)
+ffi_values.free()

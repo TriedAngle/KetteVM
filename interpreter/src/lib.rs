@@ -1310,7 +1310,7 @@ fn op_call_native(frame: Frame) {
         .window(frame.ctx().frame_base(), base, count);
     let v = frame.ctx().call_native_direct(NativeIndex(rt), args);
     frame.set_acc(v);
-    reenter_call!(pc)
+    reenter!(pc)
 }
 
 #[handler(CreateClosure)]

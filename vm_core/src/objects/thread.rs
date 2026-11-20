@@ -5,8 +5,8 @@ use crate::{
 };
 use core::alloc::Layout;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Guest-visible thread kind.
 #[repr(i64)]
@@ -208,14 +208,14 @@ impl EdgeVisitable for ThreadObject {
 #[repr(C)]
 pub struct TaskStateObject {
     pub header: Header,
-    thread: AtomicOptionGcSlot<ThreadObject>,
     scheduler: AtomicOptionGcSlot<SchedulerObject>,
     waiting_on: AtomicOptionGcSlot<ThreadObject>,
+    /// Carrier that owns this task; 0 until bound.
+    carrier: AtomicUsize,
     state: MaybeUninit<Arc<ThreadState>>,
     runtime: AtomicU16,
     result: AtomicOptionGcSlot<Value>,
     exception: AtomicOptionGcSlot<Value>,
-    waiters: MaybeUninit<Mutex<Vec<AtomicOptionGcSlot<ThreadObject>>>>,
 }
 
 pub struct TaskStateObjectInit {
@@ -226,19 +226,6 @@ impl TaskStateObject {
     pub fn state(&self) -> &Arc<ThreadState> {
         // Safety: `init` writes the Arc before the object is published.
         unsafe { self.state.assume_init_ref() }
-    }
-
-    fn waiters(&self) -> &Mutex<Vec<AtomicOptionGcSlot<ThreadObject>>> {
-        // Safety: `init` writes the mutex before the object is published.
-        unsafe { self.waiters.assume_init_ref() }
-    }
-
-    pub fn thread<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, ThreadObject>> {
-        self.thread.load(heap)
-    }
-
-    pub fn set_thread(&self, heap: &Heap, thread: Tagged<'_, ThreadObject>) {
-        self.thread.set(heap, self.tagged(heap), thread);
     }
 
     pub fn scheduler<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, SchedulerObject>> {
@@ -261,17 +248,16 @@ impl TaskStateObject {
         self.waiting_on.clear(heap);
     }
 
+    pub fn carrier(&self) -> usize {
+        self.carrier.load(Ordering::Acquire)
+    }
+
+    pub fn set_carrier(&self, carrier: usize) {
+        self.carrier.store(carrier, Ordering::Release);
+    }
+
     pub fn remove_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
-        let raw = waiter.raw().to_bits();
-        let mut waiters = self.waiters().lock().unwrap();
-        let mut i = 0;
-        while i < waiters.len() {
-            if waiters[i].load_word(heap) == raw {
-                waiters.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
+        self.state().remove_waiter(heap, waiter);
     }
 
     pub fn runtime(&self) -> Option<RuntimeId> {
@@ -306,16 +292,12 @@ impl TaskStateObject {
     }
 
     pub fn add_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
-        // The vector lives off-heap, so its slots are root slots and need
-        // no generational barrier; they are visited from `visit_edges`.
-        let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
-        slot.store(waiter);
-        self.waiters().lock().unwrap().push(slot);
+        self.state().add_waiter(heap, waiter);
     }
 
     /// Move the waiter roots out.
     pub fn take_waiter_slots(&self) -> Vec<AtomicOptionGcSlot<ThreadObject>> {
-        core::mem::take(&mut *self.waiters().lock().unwrap())
+        self.state().take_waiter_slots()
     }
 }
 
@@ -330,18 +312,15 @@ impl HeapObject for TaskStateObject {
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let hole = heap.known().the_hole.raw();
         self.header.map.init(heap.known().task_state_map.get(heap));
-        self.thread = unsafe { AtomicOptionGcSlot::from_value(hole) };
         self.scheduler = unsafe { AtomicOptionGcSlot::from_value(hole) };
         self.waiting_on = unsafe { AtomicOptionGcSlot::from_value(hole) };
+        self.carrier = AtomicUsize::new(0);
         // Safety: the field is uninitialized heap storage; write without
         // dropping a previous `Arc`.
         unsafe { self.state.as_mut_ptr().write(Arc::clone(&config.state)) };
         self.runtime = AtomicU16::new(u16::MAX);
         self.result = unsafe { AtomicOptionGcSlot::from_value(hole) };
         self.exception = unsafe { AtomicOptionGcSlot::from_value(hole) };
-        unsafe {
-            self.waiters.as_mut_ptr().write(Mutex::new(Vec::new()));
-        }
     }
 
     fn header(&self) -> &Header {
@@ -356,14 +335,10 @@ impl HeapObject for TaskStateObject {
 impl EdgeVisitable for TaskStateObject {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.thread.as_raw());
         visitor.visit(self.scheduler.as_raw());
         visitor.visit(self.waiting_on.as_raw());
         self.state().visit_edges(visitor);
         visitor.visit(self.result.as_raw());
         visitor.visit(self.exception.as_raw());
-        for waiter in self.waiters().lock().unwrap().iter() {
-            visitor.visit(waiter.as_raw());
-        }
     }
 }
