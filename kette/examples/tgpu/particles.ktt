@@ -16,7 +16,7 @@ let FLOATS_PER_PARTICLE = 8
 let PARTICLE_BYTES = PARTICLE_COUNT * FLOATS_PER_PARTICLE * 4
 let SHADER_PATH = "kette/examples/tgpu/shader.slang"
 
-let ceil_div = { |value, divisor|
+let ceil_div = |value, divisor| {
     let adjusted = value + divisor - 1
     (adjusted - (adjusted % divisor)) / divisor
 }
@@ -37,7 +37,7 @@ let mouse = FFI.array(FFI.f32, 2).new()
 let window_size = FFI.array(FFI.i32, 2).new()
 let cursor_framebuffer = FFI.array(FFI.i32, 2).new()
 
-let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, { |window_handle, x, y|
+let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, |window_handle, x, y| {
     glfw.windowSize(window_handle, window_size.add(0), window_size.add(1))
     glfw.framebufferSize(window_handle, cursor_framebuffer.add(0), cursor_framebuffer.add(1))
     let window_width = window_size.get(0)
@@ -58,7 +58,7 @@ let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, { |window_handle
 })
 glfw.setCursorPosCallback(window, on_cursor)
 
-let on_key = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void, { |window_handle, key, scancode, action, mods|
+let on_key = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void, |window_handle, key, scancode, action, mods| {
     // GLFW_PRESS = 1, GLFW_KEY_ESCAPE = 256
     if action == 1 && key == 256 {
         glfw.setShouldClose(window_handle, 1)

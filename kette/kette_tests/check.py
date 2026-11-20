@@ -15,13 +15,13 @@ def run(root: Path, paths: list[Path]) -> subprocess.CompletedProcess:
     )
 
 
-def check_asserts(root: Path, f: Path, runner: Path) -> tuple[bool, str]:
+def check_asserts(root: Path, f: Path, runner: Path, std: list[Path]) -> tuple[bool, str]:
     source = f.read_text() + "\nTest.summary()\n"
     fd, tmp = tempfile.mkstemp(suffix=".ktt", text=True)
     try:
         with os.fdopen(fd, "w") as h:
             h.write(source)
-        proc = run(root, [runner, Path(tmp)])
+        proc = run(root, [runner, *std, Path(tmp)])
     finally:
         os.unlink(tmp)
     if proc.returncode != 0:
@@ -45,6 +45,11 @@ def main() -> None:
     root = here.parent
     files = [Path(a) for a in sys.argv[1:]] or sorted(here.glob("*.ktt"))
     runner = here / "test_runner.ktt"
+    std = [
+        root / "std" / "error.ktt",
+        root / "std" / "collection.ktt",
+        root / "std" / "sync.ktt",
+    ]
 
     checked = 0
     failures = 0
@@ -52,7 +57,7 @@ def main() -> None:
         if f.name == "test_runner.ktt":
             continue
         checked += 1
-        ok, detail = check_asserts(root, f, runner)
+        ok, detail = check_asserts(root, f, runner, std)
         if ok:
             print(f"ok    {f.name} {detail}")
         else:

@@ -9,7 +9,7 @@
 let guard = Mutex.new()
 
 let text = ""
-let append = { |part|
+let append = |part| {
     guard.lock()
     text = text + part
     guard.unlock()
@@ -19,7 +19,7 @@ let append = { |part|
 let queue = {}
 let head = 0
 let tail = 0
-let enqueue = { |thread|
+let enqueue = |thread| {
     queue[tail] = thread
     tail = tail + 1
 }

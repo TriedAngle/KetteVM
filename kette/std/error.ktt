@@ -1,0 +1,36 @@
+let Error = {
+    errorProto: {
+        name: "Error"
+        message: ""
+        toString: { self.name + ": " + self.message }
+    }
+    |message|
+    {
+        parent*: self.errorProto
+        name: "Error"
+        message: message
+    }
+}
+
+let RangeError = {
+    parent*: Error
+    |message, index, length|
+    {
+        parent*: self.errorProto
+        name: "RangeError"
+        message: message
+        index: index
+        length: length
+    }
+}
+
+let UnimplementedError = {
+    parent*: Error
+    |function_name|
+    {
+        parent*: self.errorProto
+        name: "UnimplementedError"
+        function: function_name
+        message: function_name
+    }
+}

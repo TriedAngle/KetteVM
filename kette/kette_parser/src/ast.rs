@@ -15,6 +15,10 @@ pub enum SlotKind {
     Named,
     /// `name*: value` (a parent / trait)
     Parent,
+    /// `name>> value` (a getter)
+    Getter,
+    /// `name<< value` (a setter)
+    Setter,
     /// `[i]: value`
     Element,
 }
@@ -82,6 +86,7 @@ pub enum Node {
     Bool(bool),
     Null,
     Self_,
+    SelfContext,
     Ident(Symbol),
 
     Object(ObjectParts),
@@ -139,6 +144,14 @@ pub enum Node {
     Return {
         value: NodeId,
     },
+    Throw {
+        value: NodeId,
+    },
+    Try {
+        body: NodeId,
+        param: NodeId,
+        handler: NodeId,
+    },
 
     Let {
         name: Symbol,
@@ -180,6 +193,8 @@ pub struct Ast {
     strings: SymbolTable,
     /// root `StmtList` of the parsed unit, set by the parser
     root: Option<NodeId>,
+    /// interned spelling of `self`, used for hidden self bindings
+    self_symbol: Option<Symbol>,
 }
 
 impl Default for Ast {
@@ -196,6 +211,7 @@ impl Ast {
             lists: Vec::new(),
             strings: SymbolTable::default(),
             root: None,
+            self_symbol: None,
         }
     }
 
@@ -205,6 +221,14 @@ impl Ast {
 
     pub fn root(&self) -> Option<NodeId> {
         self.root
+    }
+
+    pub fn self_symbol(&self) -> Option<Symbol> {
+        self.self_symbol
+    }
+
+    pub fn set_self_symbol(&mut self, symbol: Symbol) {
+        self.self_symbol = Some(symbol);
     }
 
     pub fn add(&mut self, node: Node, span: ByteSpan) -> NodeId {

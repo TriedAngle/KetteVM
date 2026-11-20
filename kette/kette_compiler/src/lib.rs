@@ -36,6 +36,7 @@ pub fn compile_ast(
     ast: &mut Ast,
     mode: SourceMode,
     declare_globals: NativeIndex,
+    install_accessor: NativeIndex,
 ) -> Result<Program, CompileError> {
     let _pipeline = trace::info_span!("kette::compile");
     let resolved = {
@@ -44,7 +45,7 @@ pub fn compile_ast(
     };
     {
         let _span = trace::info_span!("kette::codegen").entered();
-        codegen::generate(ast, &resolved, mode, declare_globals)
+        codegen::generate(ast, &resolved, mode, declare_globals, install_accessor)
     }
 }
 
@@ -54,6 +55,7 @@ pub fn compile_kette(
     source: &str,
     mode: SourceMode,
     declare_globals: NativeIndex,
+    install_accessor: NativeIndex,
 ) -> Result<Program, FrontendError> {
     if !matches!(
         mode,
@@ -68,5 +70,6 @@ pub fn compile_kette(
         .parse_script()
         .map_err(|e| FrontendError::syntax(e.to_string()))?;
     let mut ast = parser.into_ast();
-    compile_ast(&mut ast, mode, declare_globals).map_err(|e| FrontendError::compile(e.to_string()))
+    compile_ast(&mut ast, mode, declare_globals, install_accessor)
+        .map_err(|e| FrontendError::compile(e.to_string()))
 }

@@ -14,7 +14,7 @@ let qsort = libc.fn(
 )
 
 // The pointers arrive as `void *`, so cast them to `i32 *` before reading.
-let compare = Comparator.callback({ |left, right|
+let compare = Comparator.callback(|left, right| {
     let a = left.cast(i32).get(0)
     let b = right.cast(i32).get(0)
     if a < b {

@@ -94,12 +94,22 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             collect_objects(ast, *rhs, out);
         }
         Node::Return { value } => collect_objects(ast, *value, out),
+        Node::Throw { value } => collect_objects(ast, *value, out),
+        Node::Try {
+            body,
+            param: _,
+            handler,
+        } => {
+            collect_objects(ast, *body, out);
+            collect_objects(ast, *handler, out);
+        }
         Node::Slot { .. }
         | Node::Number(_)
         | Node::String(_)
         | Node::Bool(_)
         | Node::Null
         | Node::Self_
+        | Node::SelfContext
         | Node::Ident(_) => {}
     }
 }
@@ -117,15 +127,149 @@ fn collect_branch(ast: &Ast, branch: NodeId, out: &mut Vec<NodeId>) {
     }
 }
 
+/// Record names for callable object literals. A method slot names its
+/// closure after the slot; `name>>` / `name<<` use the JS `get `/`set `
+/// prefixes. A `let` binding names its function if the initializer is one.
+fn collect_object_names(
+    ast: &Ast,
+    node: NodeId,
+    names: &mut [Option<Box<[u8]>>],
+    inherited: Option<&[u8]>,
+) {
+    match ast.node(node) {
+        Node::Object(parts) => {
+            if ast.is_closure(node)
+                && let Some(name) = inherited
+                && names[node.0 as usize].is_none()
+            {
+                names[node.0 as usize] = Some(name.into());
+            }
+            for &slot in ast.list_items(parts.slots) {
+                if let Node::Slot { kind, key, value } = ast.node(slot) {
+                    if *kind == SlotKind::Element {
+                        collect_object_names(ast, *key, names, None);
+                    }
+                    let slot_name = match *kind {
+                        SlotKind::Named => match ast.node(*key) {
+                            Node::Ident(sym) => Some(ast.symbol(*sym).to_vec()),
+                            _ => None,
+                        },
+                        SlotKind::Getter | SlotKind::Setter => match ast.node(*key) {
+                            Node::Ident(sym) => {
+                                let prefix = if *kind == SlotKind::Getter {
+                                    &b"get "[..]
+                                } else {
+                                    &b"set "[..]
+                                };
+                                let mut name = prefix.to_vec();
+                                name.extend_from_slice(ast.symbol(*sym));
+                                Some(name)
+                            }
+                            _ => None,
+                        },
+                        SlotKind::Parent | SlotKind::Element => None,
+                    };
+                    if ast.is_closure(*value)
+                        && let Some(name) = slot_name.as_deref()
+                    {
+                        collect_object_names(ast, *value, names, Some(name));
+                    } else {
+                        collect_object_names(ast, *value, names, None);
+                    }
+                }
+            }
+            if let Node::StmtList { stmts } = ast.node(parts.body) {
+                for &stmt in ast.list_items(*stmts) {
+                    collect_object_names(ast, stmt, names, None);
+                }
+            }
+        }
+        Node::StmtList { stmts } => {
+            for &stmt in ast.list_items(*stmts) {
+                collect_object_names(ast, stmt, names, None);
+            }
+        }
+        Node::Let { name, init } => {
+            collect_object_names(ast, *init, names, Some(ast.symbol(*name)));
+        }
+        Node::LetMulti { init, .. } => collect_object_names(ast, *init, names, None),
+        Node::ExprStmt { expr } => collect_object_names(ast, *expr, names, None),
+        Node::If { cond, then, else_ } => {
+            collect_object_names(ast, *cond, names, None);
+            collect_object_names(ast, *then, names, None);
+            if let Some(else_) = else_ {
+                collect_object_names(ast, *else_, names, None);
+            }
+        }
+        Node::While { cond, body } => {
+            collect_object_names(ast, *cond, names, None);
+            collect_object_names(ast, *body, names, None);
+        }
+        Node::Array { elements } => {
+            for &element in ast.list_items(*elements) {
+                collect_object_names(ast, element, names, None);
+            }
+        }
+        Node::Get { recv, .. } => collect_object_names(ast, *recv, names, None),
+        Node::Index { recv, key } => {
+            collect_object_names(ast, *recv, names, None);
+            collect_object_names(ast, *key, names, None);
+        }
+        Node::Send { recv, args, .. } => {
+            collect_object_names(ast, *recv, names, None);
+            for &arg in ast.list_items(*args) {
+                collect_object_names(ast, arg, names, None);
+            }
+        }
+        Node::Call { callee, args } => {
+            collect_object_names(ast, *callee, names, None);
+            for &arg in ast.list_items(*args) {
+                collect_object_names(ast, arg, names, None);
+            }
+        }
+        Node::Assign { target, value } => {
+            collect_object_names(ast, *target, names, None);
+            collect_object_names(ast, *value, names, None);
+        }
+        Node::Unary { expr, .. } => collect_object_names(ast, *expr, names, None),
+        Node::Binary { lhs, rhs, .. } => {
+            collect_object_names(ast, *lhs, names, None);
+            collect_object_names(ast, *rhs, names, None);
+        }
+        Node::Return { value } | Node::Throw { value } => {
+            collect_object_names(ast, *value, names, None);
+        }
+        Node::Try {
+            body,
+            param: _,
+            handler,
+        } => {
+            collect_object_names(ast, *body, names, None);
+            collect_object_names(ast, *handler, names, None);
+        }
+        Node::Slot { .. }
+        | Node::Number(_)
+        | Node::String(_)
+        | Node::Bool(_)
+        | Node::Null
+        | Node::Self_
+        | Node::SelfContext
+        | Node::Ident(_) => {}
+    }
+}
+
 pub fn generate(
     ast: &Ast,
     resolved: &Resolved,
     mode: SourceMode,
     declare_globals: NativeIndex,
+    install_accessor: NativeIndex,
 ) -> Result<Program, CompileError> {
     let root = ast.root().expect("the parser sets a root");
     let mut objects = Vec::new();
     collect_objects(ast, root, &mut objects);
+    let mut object_names = vec![None; ast.node_count()];
+    collect_object_names(ast, root, &mut object_names, None);
 
     // Function ids are assigned in `objects` order (script, then objects
     // in pre-order), matching the `add_function` calls below.
@@ -147,6 +291,8 @@ pub fn generate(
             mode,
             &object_fids,
             declare_globals,
+            install_accessor,
+            None,
         );
         generator.generate()?;
         program.add_function(generator.finish());
@@ -172,6 +318,8 @@ pub fn generate(
             mode,
             &object_fids,
             declare_globals,
+            install_accessor,
+            object_names[object.0 as usize].take(),
         );
         generator.generate()?;
         program.add_function(generator.finish());
@@ -199,6 +347,10 @@ struct FunctionGen<'a> {
     object_fids: &'a [Option<u32>],
     /// id of the native that installs the top-level declarations
     declare_globals: NativeIndex,
+    /// id of the native that installs one accessor half
+    install_accessor: NativeIndex,
+    /// optional source name (method slot / let binding)
+    function_name: Option<Box<[u8]>>,
     b: FnBuilder,
     /// register holding the pushed-over context (prologue/epilogue)
     ctx_save: Reg,
@@ -220,6 +372,8 @@ impl<'a> FunctionGen<'a> {
         mode: SourceMode,
         object_fids: &'a [Option<u32>],
         declare_globals: NativeIndex,
+        install_accessor: NativeIndex,
+        function_name: Option<Box<[u8]>>,
     ) -> Self {
         let decls = resolved.scope(scope).decls.len();
         let mut captured = vec![false; decls];
@@ -267,6 +421,8 @@ impl<'a> FunctionGen<'a> {
             mode,
             object_fids,
             declare_globals,
+            install_accessor,
+            function_name,
             b,
             ctx_save,
             completion,
@@ -280,7 +436,7 @@ impl<'a> FunctionGen<'a> {
         // labels by construction
         self.b
             .finish(FunctionMeta {
-                name: None,
+                name: self.function_name,
                 kind: CallableKind::Method,
                 length: self.param_count as u32,
                 strict: true,
@@ -315,6 +471,16 @@ impl<'a> FunctionGen<'a> {
         } else {
             let reg = self.reg_of[decl].expect("uncaptured decl has a register");
             self.b.store(reg);
+        }
+    }
+
+    fn load_self(&mut self, node: NodeId) {
+        match self.resolved.resolution(node) {
+            Some(Resolution::Local { decl, .. }) => self.load_decl(decl as usize),
+            Some(Resolution::Capture { decl, depth, .. }) => {
+                self.b.load_context_slot(decl, depth);
+            }
+            Some(Resolution::Global) | None => self.b.load(self.b.this_reg()),
         }
     }
 
@@ -424,6 +590,10 @@ impl<'a> FunctionGen<'a> {
                 let reg = self.reg_of[i].expect("uncaptured decl has a register");
                 self.b.move_reg(reg, param);
             }
+        }
+        if let Some(decl) = self.resolved.self_decl(self.scope) {
+            self.b.load(self.b.this_reg());
+            self.store_decl(decl as usize);
         }
 
         self.emit_body(self.body, self.completion)?;
@@ -542,8 +712,11 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
             Node::Self_ => {
-                // `self` is the frame receiver, bound at send/call time
-                self.b.load(self.b.this_reg());
+                self.load_self(node);
+                Ok(())
+            }
+            Node::SelfContext => {
+                self.b.load_current_closure();
                 Ok(())
             }
             Node::Ident(_) => {
@@ -589,6 +762,16 @@ impl<'a> FunctionGen<'a> {
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
             Node::Slot { .. } => unreachable!("slots are only reachable through their object"),
+            Node::Throw { value } => {
+                self.expr(value)?;
+                self.b.throw();
+                Ok(())
+            }
+            Node::Try {
+                body,
+                param,
+                handler,
+            } => self.emit_try(node, body, param, handler),
             Node::StmtList { .. }
             | Node::Let { .. }
             | Node::LetMulti { .. }
@@ -754,6 +937,38 @@ impl<'a> FunctionGen<'a> {
                     // bare object
                     let feedback = self.b.new_feedback();
                     self.b.store_named_property(obj, name, feedback);
+                }
+                Node::Slot {
+                    kind: SlotKind::Getter,
+                    key,
+                    value,
+                }
+                | Node::Slot {
+                    kind: SlotKind::Setter,
+                    key,
+                    value,
+                } => {
+                    let Node::Ident(sym) = *self.ast.node(key) else {
+                        return self.err(key, "accessor slot name");
+                    };
+                    let is_getter = matches!(
+                        self.ast.node(slot),
+                        Node::Slot {
+                            kind: SlotKind::Getter,
+                            ..
+                        }
+                    );
+                    let name = self.name_constant(sym);
+                    self.expr(value)?;
+                    self.b.call_native_staged(
+                        self.install_accessor,
+                        &[
+                            RtArg::Reg(obj),
+                            RtArg::Const(name),
+                            RtArg::Acc,
+                            RtArg::Smi(u32::from(is_getter)),
+                        ],
+                    );
                 }
                 Node::Slot {
                     kind: SlotKind::Element,
@@ -948,6 +1163,45 @@ impl<'a> FunctionGen<'a> {
         }
         self.b.bind(end);
         self.b.load_null();
+        Ok(())
+    }
+
+    fn emit_try(
+        &mut self,
+        node: NodeId,
+        body: NodeId,
+        param: NodeId,
+        handler: NodeId,
+    ) -> Result<(), CompileError> {
+        let Some(Resolution::Local { decl, .. }) = self.resolved.resolution(param) else {
+            return self.err(param, "catch parameter");
+        };
+        let temps = self.b.temp_scope();
+        let result = temps.temp();
+        self.b.load_undefined();
+        self.b.store(result);
+        let t = self.b.begin_try();
+        // Keep the range non-empty for an empty try body; it also gives
+        // the expression an undefined result on that path.
+        self.b.load_undefined();
+        self.b.store(result);
+        self.emit_body(body, result)?;
+        self.b.end_try(t);
+        let end = self.b.new_label();
+        self.b.jump(end);
+
+        self.b.handler_entry(t);
+        self.store_decl(decl as usize);
+        // Skip any try-body lets codegen dropped as unreachable; handler
+        // declarations follow the catch parameter in source order.
+        self.next_let = decl as usize + 1;
+        self.emit_body(handler, result)?;
+        if let Some(next_let) = self.resolved.try_decl_end(node) {
+            self.next_let = next_let as usize;
+        }
+
+        self.b.bind(end);
+        self.b.load(result);
         Ok(())
     }
 

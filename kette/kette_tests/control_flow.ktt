@@ -59,3 +59,17 @@ Test.assert(outer, 0)
 // while in expression position evaluates to null
 let loop_value = while false { 1 }
 Test.assert(loop_value == null, true)
+
+// sibling branches may reuse a `let` name; each use resolves to the
+// declaration visible at that source position
+let pick = { |flag|
+    if flag {
+        let x = 1
+        x
+    } else {
+        let x = 2
+        x
+    }
+}
+Test.assert(pick(true), 1)
+Test.assert(pick(false), 2)

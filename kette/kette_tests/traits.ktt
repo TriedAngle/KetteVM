@@ -1,4 +1,4 @@
-// Traits: `parent*:` / `mixin*:` slots form a multi-parent lookup chain in
+// Traits: `name*:` slots form a multi-parent lookup chain in
 // declaration order. Methods get `self` from the send, so `Counter.count`
 // reads the receiver's `n`.
 //
@@ -15,8 +15,8 @@ let Counter = {
 }
 
 let Thing = {
-    parent*: Greeter
-    mixin*: Counter
+    greeter*: Greeter
+    counter*: Counter
     name: "thing"
     n: 41
 }
@@ -34,5 +34,5 @@ Test.assert(P.x, 9)
 // and parents are consulted in declaration order
 let P1 = { a: 1 }
 let P2 = { b: 2 }
-let D = { parent*: P1; parent*: P2 }
+let D = { p1*: P1; p2*: P2 }
 Test.assert(D.b, 2)

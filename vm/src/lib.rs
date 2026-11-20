@@ -46,8 +46,13 @@ impl Compiler for KetteCompiler {
         source: &str,
         mode: bytecode::SourceMode,
     ) -> Result<bytecode::Program, bytecode::FrontendError> {
-        let declare_globals = vm.runtime::<KetteRuntime>().declare_globals;
-        kette_compiler::compile_kette(source, mode, declare_globals)
+        let runtime = vm.runtime::<KetteRuntime>();
+        kette_compiler::compile_kette(
+            source,
+            mode,
+            runtime.declare_globals,
+            runtime.install_accessor,
+        )
     }
 
     const RUNTIME: RuntimeId = KetteRuntime::ID;

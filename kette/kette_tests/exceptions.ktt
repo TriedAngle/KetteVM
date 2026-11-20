@@ -1,0 +1,135 @@
+// try/catch/throw and assumed-method errors.
+// Run:  cargo run -q -p vm -- kette/std/error.ktt kette/std/collection.ktt kette/kette_tests/exceptions.ktt
+// Check: kette/kette_tests/check.py
+
+let caught = try {
+    throw "boom"
+} catch (error) {
+    error
+}
+Test.assert(caught, "boom")
+
+let normal = try {
+    1 + 2
+} catch (error) {
+    0
+}
+Test.assert(normal, 3)
+
+let message = try {
+    throw Error("bad")
+} catch (error) {
+    error.message
+}
+Test.assert(message, "bad")
+
+let plain_error = Error("plain")
+Test.assert(plain_error.name, "Error")
+Test.assert(plain_error.message, "plain")
+Test.assert(plain_error.toString(), "Error: plain")
+
+let range_error = RangeError("range", 3, 10)
+Test.assert(range_error.name, "RangeError")
+Test.assert(range_error.index, 3)
+Test.assert(range_error.length, 10)
+Test.assert(range_error.toString(), "RangeError: range")
+
+let nested = try {
+    try {
+        throw 1
+    } catch (error) {
+        throw error + 1
+    }
+} catch (error) {
+    error
+}
+Test.assert(nested, 2)
+
+let rethrown = { |value|
+    try {
+        throw value
+    } catch (error) {
+        throw error + 1
+    }
+}
+let r = try {
+    rethrown(4)
+} catch (error) {
+    error
+}
+Test.assert(r, 5)
+
+let with_lets = try {
+    let a = 1
+    throw a
+} catch (error) {
+    let b = error + 1
+    b
+}
+Test.assert(with_lets, 2)
+
+let early = { |take_early|
+    try {
+        if take_early {
+            return 1
+        }
+        let skipped = 2
+        skipped
+    } catch (error) {
+        let handler = 3
+        handler
+    }
+}
+Test.assert(early(true), 1)
+Test.assert(early(false), 2)
+
+let captured = try {
+    throw 5
+} catch (error) {
+    let add = { error + 1 }
+    add()
+}
+Test.assert(captured, 6)
+
+let assumed_size = try {
+    let collection = { parent*: Collection }
+    collection.size()
+} catch (error) {
+    error.message
+}
+Test.assert(assumed_size, "size")
+
+let assumed_forEach = try {
+    let collection = { parent*: Collection }
+    collection.forEach({ |value| value })
+} catch (error) {
+    error.message
+}
+Test.assert(assumed_forEach, "forEach")
+
+// A terminating catch body may skip later declarations; following
+// declarations still bind to their own slots.
+let after_handler = {
+    try {
+        1
+    } catch (error) {
+        return 2
+        let skipped = 3
+    }
+    let after = 4
+    after
+}
+Test.assert(after_handler(), 4)
+
+let unimplemented = try {
+    throw UnimplementedError("missingMethod")
+} catch (error) {
+    error
+}
+Test.assert(unimplemented.name, "UnimplementedError")
+Test.assert(unimplemented.function, "missingMethod")
+Test.assert(unimplemented.message, "missingMethod")
+
+let unimplemented_new = UnimplementedError("otherMethod")
+Test.assert(unimplemented_new.name, "UnimplementedError")
+Test.assert(unimplemented_new.function, "otherMethod")

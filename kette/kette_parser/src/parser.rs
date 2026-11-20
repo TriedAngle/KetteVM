@@ -71,10 +71,11 @@ pub struct Parser<S: CharStream> {
 
 impl<S: CharStream> Parser<S> {
     pub fn new(stream: S) -> Self {
-        Self {
-            scanner: Scanner::new(stream),
-            ast: Ast::new(),
-        }
+        let mut scanner = Scanner::new(stream);
+        let self_symbol = scanner.symbols_mut().intern(b"self");
+        let mut ast = Ast::new();
+        ast.set_self_symbol(self_symbol);
+        Self { scanner, ast }
     }
 
     pub fn ast(&self) -> &Ast {
@@ -271,7 +272,17 @@ impl<S: CharStream> Parser<S> {
     // -- expressions ---------------------------------------------------------
 
     fn parse_expression(&mut self) -> Result<NodeId, ParseError> {
+        if self.peek()?.kind == TokenKind::Throw {
+            return self.parse_throw();
+        }
         self.parse_assignment()
+    }
+
+    fn parse_throw(&mut self) -> Result<NodeId, ParseError> {
+        let kw = self.expect(TokenKind::Throw)?;
+        let value = self.parse_expression()?;
+        let span = ByteSpan::new(kw.span.start, self.ast.span(value).end);
+        Ok(self.ast.add(Node::Throw { value }, span))
     }
 
     fn parse_assignment(&mut self) -> Result<NodeId, ParseError> {
@@ -463,6 +474,10 @@ impl<S: CharStream> Parser<S> {
                 self.next()?;
                 self.name_primary(t)
             }
+            TokenKind::SelfContext => {
+                self.next()?;
+                Ok(self.ast.add(Node::SelfContext, t.span))
+            }
             TokenKind::Identifier => {
                 self.next()?;
                 self.name_primary(t)
@@ -475,8 +490,10 @@ impl<S: CharStream> Parser<S> {
             }
             TokenKind::LBrace => self.parse_object(),
             TokenKind::LBracket => self.parse_array(),
+            TokenKind::Pipe | TokenKind::OrOr => self.parse_prefixed_function(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
+            TokenKind::Try => self.parse_try(),
             _ => Err(ParseError::new(
                 t.span,
                 format!("expected an expression, found `{}`", t.kind.describe()),
@@ -553,12 +570,34 @@ impl<S: CharStream> Parser<S> {
         }
         // `if` / `return` parse as (odd) expressions; they are keywords,
         // so they can never begin a slot
-        if t.kind == TokenKind::If || t.kind == TokenKind::While || t.kind == TokenKind::Return {
+        if t.kind == TokenKind::If
+            || t.kind == TokenKind::While
+            || t.kind == TokenKind::Return
+            || t.kind == TokenKind::Try
+            || t.kind == TokenKind::Throw
+            || t.kind == TokenKind::SelfContext
+        {
             let expr = self.parse_expression()?;
             return Ok(Entry::Stmt(self.expr_stmt(expr)?));
         }
         if is_name_kind(t.kind) {
             let name_tok = self.next()?;
+            // `name >> value` / `name << value` — an accessor slot
+            let accessor = match self.peek()?.kind {
+                TokenKind::GtGt => Some(SlotKind::Getter),
+                TokenKind::LtLt => Some(SlotKind::Setter),
+                _ => None,
+            };
+            if let Some(kind) = accessor {
+                self.next()?;
+                let name = self.token_name(name_tok)?;
+                let key = self.ast.add(Node::Ident(name), name_tok.span);
+                let value = self.parse_expression()?;
+                let span = ByteSpan::new(name_tok.span.start, self.ast.span(value).end);
+                return Ok(Entry::Slot(
+                    self.ast.add(Node::Slot { kind, key, value }, span),
+                ));
+            }
             // `name :` — a named slot
             if self.peek()?.kind == TokenKind::Colon {
                 return Ok(Entry::Slot(self.name_slot(name_tok, SlotKind::Named)?));
@@ -711,6 +750,42 @@ impl<S: CharStream> Parser<S> {
         let body = self.parse_branch()?;
         let span = ByteSpan::new(kw.span.start, self.ast.span(body).end);
         Ok(self.ast.add(Node::While { cond, body }, span))
+    }
+
+    fn parse_prefixed_function(&mut self) -> Result<NodeId, ParseError> {
+        let start = self.peek()?.span.start;
+        let params = self.parse_params()?;
+        let body = self.parse_branch()?;
+        let slots = self.ast.list(&[]);
+        let span = ByteSpan::new(start, self.ast.span(body).end);
+        Ok(self.ast.add(
+            Node::Object(ObjectParts {
+                slots,
+                params: Some(params),
+                body,
+            }),
+            span,
+        ))
+    }
+
+    fn parse_try(&mut self) -> Result<NodeId, ParseError> {
+        let kw = self.expect(TokenKind::Try)?;
+        let body = self.parse_branch()?;
+        self.expect(TokenKind::Catch)?;
+        self.expect(TokenKind::LParen)?;
+        let param_tok = self.expect(TokenKind::Identifier)?;
+        let param = self.name_primary(param_tok)?;
+        self.expect(TokenKind::RParen)?;
+        let handler = self.parse_branch()?;
+        let span = ByteSpan::new(kw.span.start, self.ast.span(handler).end);
+        Ok(self.ast.add(
+            Node::Try {
+                body,
+                param,
+                handler,
+            },
+            span,
+        ))
     }
 
     /// `{ statements }` compiled inline: a plain statement list, not an

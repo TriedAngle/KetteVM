@@ -1,7 +1,7 @@
 use vm_core::{
     Args, CallInfo, DenseString, EdgeVisitable, HandleSlice, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Runtime, RuntimeId, SetupError, Tagged, VM, Value,
-    Visitor, intrinsics::declare_globals, raise_runtime,
+    NativeIndex, Object, PartialDescriptor, PropertyDescriptor, Runtime, RuntimeId, SetupError,
+    Tagged, VM, Value, Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime, rt_try,
 };
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
@@ -9,6 +9,8 @@ use vm_core::{
 pub struct KetteRuntime {
     /// Id of the native that installs the top-level declarations.
     pub declare_globals: NativeIndex,
+    /// Id of the native that installs one accessor half.
+    pub install_accessor: NativeIndex,
 }
 
 impl EdgeVisitable for KetteRuntime {
@@ -20,6 +22,7 @@ impl Runtime for KetteRuntime {
 
     fn setup(vm: &mut VM, state: &mut Self) -> Result<(), SetupError> {
         state.declare_globals = vm.register_native(declare_globals);
+        state.install_accessor = vm.register_native(install_accessor);
         let print = vm.register_native(console_print);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -81,6 +84,39 @@ impl Runtime for KetteRuntime {
             Ok(())
         })
     }
+}
+
+fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 0);
+    let raw_key = args.get_handle(heap, 1);
+    let closure = args.get_handle(heap, 2);
+    let flags = args.get(heap, 3).to_i64().unwrap_or(0) as u32;
+    state.handle_scope(|scope| {
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
+        let key = scope.handle(key);
+        if target.as_tagged(heap).is_primitive(heap) {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        }
+        if !closure.as_tagged(heap).is_callable(heap) {
+            raise!(vm, heap, state, VmError::NotCallable);
+        }
+        let is_getter = flags & 1 != 0;
+        let partial = PartialDescriptor {
+            get: is_getter.then_some(closure),
+            set: (!is_getter).then_some(closure),
+            enumerable: Some(true),
+            configurable: Some(true),
+            ..PartialDescriptor::default()
+        };
+        rt_try!(
+            heap,
+            Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
+        );
+        closure.as_tagged(heap)
+    })
 }
 
 fn console_print<'a>(nctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

@@ -35,6 +35,10 @@ fn keyword_kind(text: &[u8]) -> Option<TokenKind> {
         b"false" => False,
         b"return" => Return,
         b"as" => As,
+        b"selfContext" => SelfContext,
+        b"try" => Try,
+        b"catch" => Catch,
+        b"throw" => Throw,
         _ => return None,
     })
 }
@@ -114,8 +118,8 @@ fn special_ops(c: u8) -> Option<Suffixes> {
     Some(match c {
         b'=' => (&[("=", EqEq)], Assign),
         b'!' => (&[("=", NotEq)], Bang),
-        b'<' => (&[("=", LtEq)], Lt),
-        b'>' => (&[("=", GtEq)], Gt),
+        b'<' => (&[("=", LtEq), ("<", LtLt)], Lt),
+        b'>' => (&[("=", GtEq), (">", GtGt)], Gt),
         b'+' => (&[], Plus),
         b'-' => (&[], Minus),
         b'/' => (&[], Slash),

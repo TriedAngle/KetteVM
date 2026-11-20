@@ -114,3 +114,35 @@ Test.assert(mb_add()(), 7)
 // `as` renames the binding; the field is still read by the left name
 let (mb_src as mb_dst) = { mb_src: 5 }
 Test.assert(mb_dst, 5)
+
+// -- nested blocks capture the enclosing receiver -----------------------------
+
+let summer = {
+    total: 0
+    add: { |x| self.total = self.total + x }
+    addAll: { |collection|
+        collection.forEach({ |x| self.add(x) })
+        self
+    }
+}
+
+let source = {
+    forEach: { |block|
+        block(1)
+        block(2)
+        block(3)
+    }
+}
+summer.addAll(source)
+Test.assert(summer.total, 6)
+
+let nested = {
+    total: 0
+    run: {
+        let add = { |x| self.total = self.total + x }
+        add(5)
+        add(6)
+        self.total
+    }
+}
+Test.assert(nested.run(), 11)

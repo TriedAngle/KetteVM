@@ -5,7 +5,7 @@ use kette_compiler::compile_kette;
 use vm_core::NativeIndex;
 
 fn compile(src: &str, mode: SourceMode) -> Program {
-    compile_kette(src, mode, NativeIndex(0)).expect("compile")
+    compile_kette(src, mode, NativeIndex(0), NativeIndex(1)).expect("compile")
 }
 
 fn script_fn(program: &Program) -> &Function {

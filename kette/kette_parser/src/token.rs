@@ -41,6 +41,8 @@ pub enum TokenKind {
     Minus,   // -
     Slash,   // /
     Percent, // %
+    LtLt,    // << (setter slot)
+    GtGt,    // >> (getter slot)
 
     Bang, // ! (unary not)
 
@@ -55,6 +57,10 @@ pub enum TokenKind {
     False,
     Return,
     As,
+    SelfContext,
+    Try,
+    Catch,
+    Throw,
 
     Count,
 }
@@ -78,47 +84,53 @@ impl TokenInfo {
 }
 
 const TOKEN_INFO: &[TokenInfo] = &[
-    I::new("", 0, 0),                  // Eof
-    I::new("", 0, 0),                  // Illegal
-    I::new("", 0, 0),                  // Identifier
-    I::new("", 0, 0),                  // Number
-    I::new("", 0, 0),                  // String
-    I::new("(", 0, 0),                 // LParen
-    I::new(")", 0, 0),                 // RParen
-    I::new("{", 0, 0),                 // LBrace
-    I::new("}", 0, 0),                 // RBrace
-    I::new("[", 0, 0),                 // LBracket
-    I::new("]", 0, 0),                 // RBracket
-    I::new(",", 0, 0),                 // Comma
-    I::new(".", 0, 0),                 // Period
-    I::new(":", 0, 0),                 // Colon
-    I::new(";", 0, 0),                 // Semicolon
-    I::new("*", 6, 0),                 // Star
-    I::new("=", 0, 0),                 // Assign
-    I::new("|", 0, 0),                 // Pipe
-    I::new("||", 1, 0),                // OrOr
-    I::new("&&", 2, 0),                // AmpAmp
-    I::new("==", 3, 0),                // EqEq
-    I::new("!=", 3, 0),                // NotEq
-    I::new("<", 4, 0),                 // Lt
-    I::new(">", 4, 0),                 // Gt
-    I::new("<=", 4, 0),                // LtEq
-    I::new(">=", 4, 0),                // GtEq
-    I::new("+", 5, 0),                 // Plus
-    I::new("-", 5, 0),                 // Minus
-    I::new("/", 6, 0),                 // Slash
-    I::new("%", 6, 0),                 // Percent
-    I::new("!", 0, 0),                 // Bang
-    I::new("let", 0, I::F_KEYWORD),    // Let
-    I::new("if", 0, I::F_KEYWORD),     // If
-    I::new("else", 0, I::F_KEYWORD),   // Else
-    I::new("while", 0, I::F_KEYWORD),  // While
-    I::new("self", 0, I::F_KEYWORD),   // SelfKw
-    I::new("null", 0, I::F_KEYWORD),   // Null
-    I::new("true", 0, I::F_KEYWORD),   // True
-    I::new("false", 0, I::F_KEYWORD),  // False
-    I::new("return", 0, I::F_KEYWORD), // Return
-    I::new("as", 0, I::F_KEYWORD),     // As
+    I::new("", 0, 0),                       // Eof
+    I::new("", 0, 0),                       // Illegal
+    I::new("", 0, 0),                       // Identifier
+    I::new("", 0, 0),                       // Number
+    I::new("", 0, 0),                       // String
+    I::new("(", 0, 0),                      // LParen
+    I::new(")", 0, 0),                      // RParen
+    I::new("{", 0, 0),                      // LBrace
+    I::new("}", 0, 0),                      // RBrace
+    I::new("[", 0, 0),                      // LBracket
+    I::new("]", 0, 0),                      // RBracket
+    I::new(",", 0, 0),                      // Comma
+    I::new(".", 0, 0),                      // Period
+    I::new(":", 0, 0),                      // Colon
+    I::new(";", 0, 0),                      // Semicolon
+    I::new("*", 6, 0),                      // Star
+    I::new("=", 0, 0),                      // Assign
+    I::new("|", 0, 0),                      // Pipe
+    I::new("||", 1, 0),                     // OrOr
+    I::new("&&", 2, 0),                     // AmpAmp
+    I::new("==", 3, 0),                     // EqEq
+    I::new("!=", 3, 0),                     // NotEq
+    I::new("<", 4, 0),                      // Lt
+    I::new(">", 4, 0),                      // Gt
+    I::new("<=", 4, 0),                     // LtEq
+    I::new(">=", 4, 0),                     // GtEq
+    I::new("+", 5, 0),                      // Plus
+    I::new("-", 5, 0),                      // Minus
+    I::new("/", 6, 0),                      // Slash
+    I::new("%", 6, 0),                      // Percent
+    I::new("<<", 0, 0),                     // LtLt
+    I::new(">>", 0, 0),                     // GtGt
+    I::new("!", 0, 0),                      // Bang
+    I::new("let", 0, I::F_KEYWORD),         // Let
+    I::new("if", 0, I::F_KEYWORD),          // If
+    I::new("else", 0, I::F_KEYWORD),        // Else
+    I::new("while", 0, I::F_KEYWORD),       // While
+    I::new("self", 0, I::F_KEYWORD),        // SelfKw
+    I::new("null", 0, I::F_KEYWORD),        // Null
+    I::new("true", 0, I::F_KEYWORD),        // True
+    I::new("false", 0, I::F_KEYWORD),       // False
+    I::new("return", 0, I::F_KEYWORD),      // Return
+    I::new("as", 0, I::F_KEYWORD),          // As
+    I::new("selfContext", 0, I::F_KEYWORD), // SelfContext
+    I::new("try", 0, I::F_KEYWORD),         // Try
+    I::new("catch", 0, I::F_KEYWORD),       // Catch
+    I::new("throw", 0, I::F_KEYWORD),       // Throw
 ];
 
 const _: () = assert!(

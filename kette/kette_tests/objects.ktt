@@ -17,3 +17,35 @@ Test.assert(rgb[0] + rgb[1], 287)
 
 // host info: `os.name` is the OS string used to pick library paths
 Test.assert(os.name.length > 0, true)
+
+// accessor slots: `name>>` installs a getter, `name<<` a setter
+let accessor = {
+    _value: 1
+    value>> { self._value }
+    value<< { |v| self._value = v }
+}
+Test.assert(accessor.value, 1)
+accessor.value = 7
+Test.assert(accessor.value, 7)
+Test.assert(accessor._value, 7)
+
+let getter_only = {
+    answer>> { 42 }
+}
+Test.assert(getter_only.answer, 42)
+
+let setter_only = {
+    _stored: 0
+    stored<< { |v| self._stored = v }
+}
+setter_only.stored = 9
+Test.assert(setter_only._stored, 9)
+
+// accessor halves merge regardless of source order
+let reverse = {
+    _value: 0
+    value<< { |v| self._value = v }
+    value>> { self._value }
+}
+reverse.value = 3
+Test.assert(reverse.value, 3)

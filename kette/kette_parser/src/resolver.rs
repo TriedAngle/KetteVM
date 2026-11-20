@@ -21,6 +21,13 @@ pub struct ScopeInfo {
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>,
     pub decls: Vec<Declaration>,
+    /// Hidden `self` binding owned by this scope, if it is a method,
+    /// initializer, or the script root. Pure blocks do not own `self`;
+    /// they capture the nearest enclosing owner.
+    pub self_decl: Option<u32>,
+    /// Whether this scope has its own receiver (`self`). Methods,
+    /// initializers, and the script root do; pure blocks do not.
+    pub owns_self: bool,
     /// A direct `eval` can reach this scope's bindings by name, so they must
     /// live in a runtime context. Set on the eval site and all its ancestors.
     pub direct_eval: bool,
@@ -47,6 +54,7 @@ pub struct Resolved {
     resolutions: Vec<Option<Resolution>>,
     /// scope owned by a callable object / the root `StmtList` node
     node_scopes: Vec<Option<ScopeId>>,
+    try_decl_ends: Vec<Option<u32>>,
     scopes: Vec<ScopeInfo>,
     /// per scope: whether it pushes a runtime context
     creates_context: Vec<bool>,
@@ -71,6 +79,16 @@ impl Resolved {
     pub fn creates_context(&self, scope: ScopeId) -> bool {
         self.creates_context[scope.0 as usize]
     }
+
+    /// The hidden `self` declaration owned by this scope, if any.
+    pub fn self_decl(&self, scope: ScopeId) -> Option<u32> {
+        self.scopes[scope.0 as usize].self_decl
+    }
+
+    /// Declaration index just after a try's handler declarations.
+    pub fn try_decl_end(&self, node: NodeId) -> Option<u32> {
+        self.try_decl_ends[node.0 as usize]
+    }
 }
 
 pub fn resolve(ast: &Ast) -> Resolved {
@@ -79,6 +97,7 @@ pub fn resolve(ast: &Ast) -> Resolved {
         resolutions: vec![None; ast.node_count()],
         capture_scopes: vec![None; ast.node_count()],
         node_scopes: vec![None; ast.node_count()],
+        try_decl_ends: vec![None; ast.node_count()],
         scopes: Vec::new(),
         stack: Vec::new(),
     };
@@ -89,6 +108,7 @@ pub fn resolve(ast: &Ast) -> Resolved {
     Resolved {
         resolutions: resolver.resolutions,
         node_scopes: resolver.node_scopes,
+        try_decl_ends: resolver.try_decl_ends,
         scopes: resolver.scopes,
         creates_context,
     }
@@ -100,6 +120,7 @@ struct Resolver<'a> {
     /// the use-site scope of every capture, for the context-hop rewrite
     capture_scopes: Vec<Option<ScopeId>>,
     node_scopes: Vec<Option<ScopeId>>,
+    try_decl_ends: Vec<Option<u32>>,
     scopes: Vec<ScopeInfo>,
     /// innermost scope last
     stack: Vec<ScopeId>,
@@ -113,6 +134,8 @@ impl Resolver<'_> {
             kind,
             parent,
             decls: Vec::new(),
+            self_decl: None,
+            owns_self: false,
             direct_eval: false,
             force_context: false,
         });
@@ -135,9 +158,26 @@ impl Resolver<'_> {
             .push(Declaration { name, span });
     }
 
+    /// Append the hidden `self` binding to an owner scope after all user
+    /// declarations, so `next_let` in codegen keeps matching source `let`s.
+    fn declare_self_at(&mut self, scope: ScopeId) -> Option<u32> {
+        if let Some(decl) = self.scopes[scope.0 as usize].self_decl {
+            return Some(decl);
+        }
+        let name = self.ast.self_symbol()?;
+        let decl = self.scopes[scope.0 as usize].decls.len() as u32;
+        self.scopes[scope.0 as usize].decls.push(Declaration {
+            name,
+            span: ByteSpan::default(),
+        });
+        self.scopes[scope.0 as usize].self_decl = Some(decl);
+        Some(decl)
+    }
+
     fn resolve_root(&mut self, root: NodeId) {
         let scope = self.push_scope(ScopeKind::Script);
         self.scopes[scope.0 as usize].force_context = true;
+        self.scopes[scope.0 as usize].owns_self = true;
         self.node_scopes[root.0 as usize] = Some(scope);
         let stmts = match self.ast.node(root) {
             Node::StmtList { stmts } => *stmts,
@@ -233,6 +273,25 @@ impl Resolver<'_> {
                 self.collect_expr_decls(rhs);
             }
             Node::Return { value } => self.collect_expr_decls(value),
+            Node::Throw { value } => self.collect_expr_decls(value),
+            Node::Try {
+                body,
+                param,
+                handler,
+            } => {
+                self.collect_branch_decls(body);
+                let Node::Ident(name) = *self.ast.node(param) else {
+                    unreachable!("catch parameters are identifiers");
+                };
+                let span = self.ast.span(param);
+                self.declare(name, span);
+                let scope = self.current_scope();
+                let decl = self.scopes[scope.0 as usize].decls.len() as u32 - 1;
+                self.resolutions[param.0 as usize] = Some(Resolution::Local { scope, decl });
+                self.collect_branch_decls(handler);
+                let end = self.scopes[scope.0 as usize].decls.len() as u32;
+                self.try_decl_ends[node.0 as usize] = Some(end);
+            }
             _ => {}
         }
     }
@@ -252,7 +311,7 @@ impl Resolver<'_> {
     /// Enter a callable object's scope: params, then the body's `let`s;
     /// then walk the body. Slot values evaluate in the enclosing scope
     /// and are resolved before the scope is pushed.
-    fn resolve_closure(&mut self, object: NodeId) {
+    fn resolve_closure(&mut self, object: NodeId, own_self: bool) {
         let parts = match self.ast.node(object) {
             Node::Object(parts) => parts,
             _ => unreachable!("closure objects are Object nodes"),
@@ -262,10 +321,11 @@ impl Resolver<'_> {
                 if kind == SlotKind::Element {
                     self.resolve_node(key);
                 }
-                self.resolve_node(value);
+                self.resolve_slot_value(value);
             }
         }
         let scope = self.push_scope(ScopeKind::Block);
+        self.scopes[scope.0 as usize].owns_self = own_self;
         self.node_scopes[object.0 as usize] = Some(scope);
         if let Some(params) = parts.params {
             for &param in self.ast.list_items(params) {
@@ -285,6 +345,16 @@ impl Resolver<'_> {
         self.pop_scope();
     }
 
+    /// A slot value is method-position: a callable literal there owns
+    /// `self` even when it has no slots of its own.
+    fn resolve_slot_value(&mut self, node: NodeId) {
+        if self.ast.is_closure(node) && matches!(self.ast.node(node), Node::Object(_)) {
+            self.resolve_closure(node, true);
+        } else {
+            self.resolve_node(node);
+        }
+    }
+
     fn resolve_node(&mut self, node: NodeId) {
         let ast = self.ast;
         match ast.node(node) {
@@ -299,7 +369,11 @@ impl Resolver<'_> {
             Node::Ident(sym) => self.resolve_ident(node, *sym),
             Node::Object(_) => {
                 if ast.is_closure(node) {
-                    self.resolve_closure(node);
+                    let own_self = match ast.node(node) {
+                        Node::Object(parts) => !ast.list_items(parts.slots).is_empty(),
+                        _ => false,
+                    };
+                    self.resolve_closure(node, own_self);
                 } else {
                     let parts = match ast.node(node) {
                         Node::Object(parts) => parts,
@@ -310,7 +384,7 @@ impl Resolver<'_> {
                             if *kind == SlotKind::Element {
                                 self.resolve_node(*key);
                             }
-                            self.resolve_node(*value);
+                            self.resolve_slot_value(*value);
                         }
                     }
                 }
@@ -365,8 +439,18 @@ impl Resolver<'_> {
                 self.resolve_node(rhs);
             }
             Node::Return { value } => self.resolve_node(*value),
+            Node::Throw { value } => self.resolve_node(*value),
+            Node::Try {
+                body,
+                param: _,
+                handler,
+            } => {
+                self.resolve_node(*body);
+                self.resolve_node(*handler);
+            }
             Node::Slot { .. } => {}
-            Node::Number(_) | Node::String(_) | Node::Bool(_) | Node::Null | Node::Self_ => {}
+            Node::Self_ => self.resolve_self(node),
+            Node::Number(_) | Node::String(_) | Node::Bool(_) | Node::Null | Node::SelfContext => {}
         }
     }
 
@@ -436,12 +520,26 @@ impl Resolver<'_> {
 
     fn resolve_ident(&mut self, node: NodeId, sym: Symbol) {
         let top = self.stack.len() - 1;
+        let use_span = self.ast.span(node);
         let mut found = None;
         for (depth_from_root, &scope) in self.stack.iter().enumerate().rev() {
-            let decl = self.scopes[scope.0 as usize]
-                .decls
-                .iter()
-                .rposition(|d| d.name == sym);
+            let mut count = 0;
+            let mut last = None;
+            let mut before = None;
+            for (index, decl) in self.scopes[scope.0 as usize].decls.iter().enumerate() {
+                if decl.name != sym {
+                    continue;
+                }
+                count += 1;
+                last = Some(index);
+                if decl.span.end <= use_span.start {
+                    before = Some(index);
+                }
+            }
+            // A unique declaration keeps forward captures working. With
+            // sibling re-declarations, resolve to the last one visible at
+            // this source position; fall back to the last declaration.
+            let decl = if count <= 1 { last } else { before.or(last) };
             if let Some(decl) = decl {
                 found = Some((scope, decl as u32, (top - depth_from_root) as u32));
                 break;
@@ -454,6 +552,38 @@ impl Resolver<'_> {
                 Resolution::Capture { scope, decl, depth }
             }
             None => Resolution::Global,
+        });
+    }
+
+    fn resolve_self(&mut self, node: NodeId) {
+        let top = self.stack.len() - 1;
+        let current = self.current_scope();
+        let mut owner = None;
+        for (index, &scope) in self.stack.iter().enumerate().rev() {
+            if self.scopes[scope.0 as usize].owns_self {
+                owner = Some((index, scope));
+                break;
+            }
+        }
+        let Some((index, scope)) = owner else {
+            self.resolutions[node.0 as usize] = None;
+            return;
+        };
+        if scope == current {
+            // Direct use: the frame receiver already holds it.
+            self.resolutions[node.0 as usize] = None;
+            return;
+        }
+        if self.declare_self_at(scope).is_none() {
+            self.resolutions[node.0 as usize] = None;
+            return;
+        }
+        let depth = (top - index) as u32;
+        self.capture_scopes[node.0 as usize] = Some(current);
+        self.resolutions[node.0 as usize] = Some(Resolution::Capture {
+            scope,
+            decl: self.scopes[scope.0 as usize].self_decl.expect("self slot"),
+            depth,
         });
     }
 }
