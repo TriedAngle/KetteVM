@@ -1,0 +1,60 @@
+// Run: cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/std/ui/verify.ktt kette/std/ui/tests.ktt kette/examples/ui/demo.ktt
+
+let SHOW_OPS = 0
+// 0 off, 1 ascii, 2 ansi
+let TERMINAL = 2
+
+let space = Space.new(800, 600)
+
+let toolbar = Node.Row(8, 8, [
+    Node.Box(60, 44, rgb(200, 80, 80)),
+    Node.Box(0, 44, rgb(80, 160, 80)),
+])
+toolbar.children[1].wMode = SIZE_FILL
+
+let inspector = Node.Window("Inspector", 60, 60, 360, 200, toolbar)
+
+let transcriptBody = Node.Row(6, 6, [
+    Node.Box(120, 0, rgb(90, 90, 110)),
+    Node.Box(0, 0, rgb(60, 60, 90)),
+])
+transcriptBody.children[1].wMode = SIZE_FILL
+let transcript = Node.Window("Transcript", 240, 180, 380, 240, transcriptBody)
+
+space.root.addChild(inspector)
+space.root.addChild(transcript)
+
+let ops = Space.frame(space)
+print("ops: " + ops.length)
+
+let hit = Windows.press(space, 300, 220)
+print("hit transcript: " + (hit == transcriptBody.children[0]))
+print("transcript raised: " + (space.root.children[space.root.children.length - 1] == transcript))
+
+Windows.press(space, 100, 100)
+print("inspector raised: " + (space.root.children[space.root.children.length - 1] == inspector))
+
+Space.frame(space)
+let clean1 = Space.frame(space)
+let clean2 = Space.frame(space)
+print("reused list: " + (clean1 == clean2))
+
+toolbar.children[1].color = rgb(80, 200, 120)
+toolbar.children[1].markPaint()
+let repainted = Space.frame(space)
+print("repainted: " + (repainted != ops))
+
+toolbar.children[0].handler = |n, x, y| { print("clicked box w=" + n.w) }
+Windows.press(space, 80, 100)
+
+print("is node: " + Object.isType(inspector, Node))
+print("same type: " + Object.isType(inspector, transcript))
+print("is traits: " + Object.isType(inspector, NodeTraits))
+print("is number: " + Object.isType(inspector, 1))
+
+let finalOps = Space.frame(space)
+Dump.tree(space.root, 0, 0, 0)
+if TERMINAL > 0 { Term.render(finalOps, 800, 600, 80, 30, TERMINAL) }
+if SHOW_OPS == 1 { Dump.list(finalOps) }
+
+Tests.run()

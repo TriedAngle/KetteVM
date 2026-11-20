@@ -28,9 +28,10 @@ impl Runtime for KetteRuntime {
         state.clone = vm.register_native(object_clone);
         let clone = state.clone;
         let print = vm.register_native(console_print);
+        let is_type = vm.register_native(object_is_type);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
-            let (thread_vm, heap, _) = thread.split();
+            let (thread_vm, heap, thread_state) = thread.split();
             let object_prototype = heap.known().object_prototype.get_handle(heap, &scope);
             let map = heap.allocate_handle::<Map>(
                 MapInit {
@@ -56,6 +57,25 @@ impl Runtime for KetteRuntime {
             )
             .expect("install console global");
             Object::add_method(thread_vm, heap, &scope, object_prototype, "clone", clone, 0);
+
+            let object_key = thread_vm.interner().intern_str(heap, &scope, "Object");
+            let object_key = scope.handle(object_key.as_tagged(heap).erase());
+            let object_ctor = Object::get_property(
+                thread_vm,
+                heap,
+                thread_state,
+                global.erase(),
+                global.erase(),
+                object_key.erase(),
+                false,
+            );
+            if let Ok(object_ctor) = object_ctor {
+                let object_ctor = scope.handle(object_ctor);
+                if let Some(object_ctor) = object_ctor.as_tagged(heap).as_heap_object() {
+                    let object_ctor = scope.handle(object_ctor);
+                    Object::add_method(thread_vm, heap, &scope, object_ctor, "isType", is_type, 2);
+                }
+            }
 
             let none_name = scope.handle(
                 thread_vm
@@ -122,6 +142,23 @@ fn object_clone<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         };
         clone.as_tagged(heap).erase()
     })
+}
+
+/// `Object.isType(object, type)` — map identity, the VM's notion of type.
+fn object_is_type<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx { heap, .. } = ctx;
+    let object = args.get(heap, 0);
+    let ty = args.get(heap, 1);
+    let same = match (object.as_heap_object(), ty.as_heap_object()) {
+        (Some(object), Some(ty)) => object.map(heap).ptr_eq(ty.map(heap)),
+        _ => false,
+    };
+    let known = heap.known();
+    if same {
+        known.true_object.get(heap).erase()
+    } else {
+        known.false_object.get(heap).erase()
+    }
 }
 
 fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

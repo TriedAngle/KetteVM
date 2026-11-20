@@ -22,6 +22,16 @@ Example Run (Deltablue):
 
     cargo +nightly run --release --features fast -- benchmarks/octane/base.js benchmarks/octane/deltablue/deltablue.js benchmarks/octane/run.js
 
+UI sketch demo (layout tree, terminal preview, and checks):
+
+    cargo run -q -p vm -- \
+        kette/std/ui/sketch.ktt \
+        kette/std/ui/verify.ktt \
+        kette/std/ui/tests.ktt \
+        kette/examples/ui/demo.ktt
+
+See `kette/examples/README.md` for the terminal modes (`TERMINAL=0/1/2`).
+
 Minor-GC stress (collect on every allocation; much slower, catches GC bugs):
 
     cargo build --release -p vm --features stress-minor-gc

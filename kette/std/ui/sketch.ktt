@@ -1,0 +1,777 @@
+// Bloc-shaped UI core. Load: sketch, verify, tests, demo.
+// Run: cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/std/ui/verify.ktt kette/std/ui/tests.ktt kette/examples/ui/demo.ktt
+
+let K_BOX = 0
+let K_WINDOW = 1
+let K_TEXT = 2
+
+let L_NONE = 0
+let L_ROW = 1
+let L_COL = 2
+
+let SIZE_FIXED = 0
+let SIZE_FILL = 1
+let SIZE_FIT = 2
+let MAX_SIZE = 1000000
+
+let OP_RECT = 1
+let OP_CLIP = 2
+let OP_CLIP_POP = 3
+let OP_SHADOW = 4
+
+let rgb = |r, g, b| { r * 65536 + g * 256 + b }
+
+// One map for every node: Node is both prototype and type. Kind data lives in `data`.
+// Dirty roots: a boundary stops upward propagation, so one entry covers one subtree.
+let Dirty = {
+    layout: []
+    paint: []
+    needsFrame: 0
+}
+
+let Stats = {
+    measures: 0
+    paintNodes: 0
+}
+
+let NodeTraits = {
+    new: |kind| {
+        let n = self.clone()
+        n.children = []
+        n.kind = kind
+        n
+    }
+
+    Box: |w, h, color| {
+        let n = self.new(K_BOX)
+        n.w = w
+        n.h = h
+        n.color = color
+        n
+    }
+
+    Row: |pad, gap, children| {
+        let n = self.new(K_BOX)
+        n.layout = L_ROW
+        n.pad = pad
+        n.gap = gap
+        let i = 0
+        while i < children.length {
+            n.addChild(children[i])
+            i = i + 1
+        }
+        n
+    }
+
+    Text: |s, color| {
+        let n = self.new(K_TEXT)
+        n.wMode = SIZE_FIT
+        n.hMode = SIZE_FIT
+        n.color = color
+        n.data = { text: s, cw: 8, ch: 16 }
+        n
+    }
+
+    Window: |title, x, y, w, h, content| {
+        let n = self.new(K_WINDOW)
+        n.x = x
+        n.y = y
+        n.w = w
+        n.h = h
+        n.color = rgb(245, 245, 245)
+        n.shadow = 1
+        n.clip = 1
+        n.boundary = 1
+        n.paintBoundary = 1
+        n.data = { title: title }
+
+        let bar = self.Box(w, 24, rgb(62, 92, 140))
+        bar.data = { title: title }
+        n.addChild(bar)
+
+        content.x = 0
+        content.y = 24
+        content.w = w
+        content.h = h - 24
+        n.addChild(content)
+        n
+    }
+
+    addChild: |child| {
+        child.owner = self
+        self.children.push(child)
+        self.markLayout()
+        self.markPaint()
+        child
+    }
+
+    markLayout: {
+        let n = self
+        let top = null
+        let covered = 0
+        while n != null {
+            if n.dirtyLayout == 1 {
+                covered = 1
+                break
+            }
+            n.dirtyLayout = 1
+            n.mValid = 0
+            top = n
+            if n.boundary == 1 { break }
+            n = n.owner
+        }
+        if top != null && covered == 0 {
+            Dirty.layout.push(top)
+            Dirty.needsFrame = 1
+        }
+        self.markPaint()
+    }
+
+    markPaint: {
+        let n = self
+        let top = null
+        let covered = 0
+        while n != null {
+            if n.dirtyPaint == 1 {
+                covered = 1
+                break
+            }
+            n.dirtyPaint = 1
+            n.pValid = 0
+            top = n
+            if n.paintBoundary == 1 { break }
+            n = n.owner
+        }
+        if top != null && covered == 0 {
+            Dirty.paint.push(top)
+            Dirty.needsFrame = 1
+        }
+        self
+    }
+}
+
+let Node = {
+    traits*: NodeTraits
+    kind: K_BOX
+    owner: null
+    children: null
+    handler: null
+    data: null
+    x: 0
+    y: 0
+    w: 0
+    h: 0
+    mw: 0
+    mh: 0
+    minW: 0
+    minH: 0
+    maxW: MAX_SIZE
+    maxH: MAX_SIZE
+    wMode: SIZE_FIXED
+    hMode: SIZE_FIXED
+    pad: 0
+    gap: 0
+    layout: L_NONE
+    clip: 0
+    shadow: 0
+    color: 0
+    dirtyLayout: 1
+    dirtyPaint: 1
+    mValid: 0
+    mAw: 0
+    mAh: 0
+    boundary: 0
+    paintBoundary: 0
+    pList: null
+    pValid: 0
+    pX: 0
+    pY: 0
+}
+
+// measure sizes up; arrange places down. Modes: FIXED, FILL, FIT.
+let Layout = {
+    run: |root, w, h| {
+        self.measure(root, w, h)
+        self.arrange(root, 0, 0, w, h)
+        root
+    }
+
+    // intrinsic-size seam
+    pick: |mode, declared, content, avail| {
+        if mode == SIZE_FILL { avail }
+        else if mode == SIZE_FIT || declared == 0 { content }
+        else { declared }
+    }
+
+    measure: |n, aw, ah| {
+        if n.mValid == 1 && n.mAw == aw && n.mAh == ah { return n }
+        Stats.measures = Stats.measures + 1
+        if n.kind == K_TEXT {
+            let t = n.data
+            let natural = t.text.length * t.cw
+            let avail = aw - n.pad - n.pad
+            if avail < 1 { avail = 1 }
+            let width = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else if n.wMode == SIZE_FILL { avail } else if natural < avail { natural } else { avail }
+            if width < n.minW { width = n.minW }
+            if width > n.maxW { width = n.maxW }
+            if width < 1 { width = 1 }
+            let lines = Math.floor((natural + width - 1) / width)
+            n.mw = width
+            n.mh = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { lines * t.ch }
+        } else if n.layout == L_ROW {
+            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let innerW = baseW - n.pad - n.pad
+            let innerH = baseH - n.pad - n.pad
+            if innerW < 0 { innerW = 0 }
+            if innerH < 0 { innerH = 0 }
+            let contentW = 0
+            let contentH = 0
+            let hasFill = 0
+            let i = 0
+            while i < n.children.length {
+                let c = n.children[i]
+                self.measure(c, innerW, innerH)
+                if c.wMode == SIZE_FILL { hasFill = 1 } else { contentW = contentW + c.mw }
+                if c.mh > contentH { contentH = c.mh }
+                i = i + 1
+            }
+            if n.children.length > 1 {
+                contentW = contentW + n.gap * (n.children.length - 1)
+            }
+            if hasFill == 1 { contentW = innerW }
+            contentW = contentW + n.pad + n.pad
+            contentH = contentH + n.pad + n.pad
+            n.mw = self.pick(n.wMode, n.w, contentW, aw)
+            n.mh = self.pick(n.hMode, n.h, contentH, ah)
+        } else if n.layout == L_COL {
+            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let innerW = baseW - n.pad - n.pad
+            let innerH = baseH - n.pad - n.pad
+            if innerW < 0 { innerW = 0 }
+            if innerH < 0 { innerH = 0 }
+            let contentW = 0
+            let contentH = 0
+            let hasFill = 0
+            let i = 0
+            while i < n.children.length {
+                let c = n.children[i]
+                self.measure(c, innerW, innerH)
+                if c.mw > contentW { contentW = c.mw }
+                if c.hMode == SIZE_FILL { hasFill = 1 } else { contentH = contentH + c.mh }
+                i = i + 1
+            }
+            if n.children.length > 1 {
+                contentH = contentH + n.gap * (n.children.length - 1)
+            }
+            if hasFill == 1 { contentH = innerH }
+            contentW = contentW + n.pad + n.pad
+            contentH = contentH + n.pad + n.pad
+            n.mw = self.pick(n.wMode, n.w, contentW, aw)
+            n.mh = self.pick(n.hMode, n.h, contentH, ah)
+        } else {
+            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let innerW = baseW - n.pad - n.pad
+            let innerH = baseH - n.pad - n.pad
+            if innerW < 0 { innerW = 0 }
+            if innerH < 0 { innerH = 0 }
+            let contentW = 0
+            let contentH = 0
+            let i = 0
+            while i < n.children.length {
+                let c = n.children[i]
+                self.measure(c, innerW, innerH)
+                if c.x + c.mw > contentW { contentW = c.x + c.mw }
+                if c.y + c.mh > contentH { contentH = c.y + c.mh }
+                i = i + 1
+            }
+            contentW = contentW + n.pad + n.pad
+            contentH = contentH + n.pad + n.pad
+            n.mw = self.pick(n.wMode, n.w, contentW, aw)
+            n.mh = self.pick(n.hMode, n.h, contentH, ah)
+        }
+        if n.mw < 0 { n.mw = 0 }
+        if n.mh < 0 { n.mh = 0 }
+        if n.mw < n.minW { n.mw = n.minW }
+        if n.mw > n.maxW { n.mw = n.maxW }
+        if n.mh < n.minH { n.mh = n.minH }
+        if n.mh > n.maxH { n.mh = n.maxH }
+        n.mAw = aw
+        n.mAh = ah
+        n.mValid = 1
+        n
+    }
+
+    arrange: |n, x, y, w, h| {
+        n.x = x
+        n.y = y
+        n.w = w
+        n.h = h
+        if n.layout == L_ROW { self.arrangeRow(n) }
+        else if n.layout == L_COL { self.arrangeCol(n) }
+        else {
+            let i = 0
+            while i < n.children.length {
+                let c = n.children[i]
+                let cw = if c.w > 0 { c.w } else { c.mw }
+                let ch = if c.h > 0 { c.h } else { c.mh }
+                self.arrange(c, c.x, c.y, cw, ch)
+                i = i + 1
+            }
+        }
+        n
+    }
+
+    arrangeRow: |n| {
+        let innerW = n.w - n.pad - n.pad
+        let innerH = n.h - n.pad - n.pad
+        let count = n.children.length
+        let fixed = 0
+        let fills = 0
+        let i = 0
+        while i < count {
+            let c = n.children[i]
+            if c.wMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mw }
+            i = i + 1
+        }
+        let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
+        let remaining = innerW - fixed - gaps
+        let share = if fills > 0 { Math.floor(remaining / fills) } else { 0 }
+        let extra = if fills > 0 { remaining - share * fills } else { 0 }
+        let cx = n.pad
+        i = 0
+        while i < count {
+            let c = n.children[i]
+            let cw = if c.wMode == SIZE_FILL {
+                let v = share
+                if extra > 0 {
+                    extra = extra - 1
+                    v + 1
+                } else {
+                    v
+                }
+            } else {
+                c.mw
+            }
+            if c.wMode == SIZE_FILL { self.measure(c, cw, innerH) }
+            let ch = if c.hMode == SIZE_FIT { c.mh } else { innerH }
+            self.arrange(c, cx, n.pad, cw, ch)
+            cx = cx + cw + n.gap
+            i = i + 1
+        }
+        n
+    }
+
+    arrangeCol: |n| {
+        let innerW = n.w - n.pad - n.pad
+        let innerH = n.h - n.pad - n.pad
+        let count = n.children.length
+        let fixed = 0
+        let fills = 0
+        let i = 0
+        while i < count {
+            let c = n.children[i]
+            if c.hMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mh }
+            i = i + 1
+        }
+        let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
+        let remaining = innerH - fixed - gaps
+        let share = if fills > 0 { Math.floor(remaining / fills) } else { 0 }
+        let extra = if fills > 0 { remaining - share * fills } else { 0 }
+        let cy = n.pad
+        i = 0
+        while i < count {
+            let c = n.children[i]
+            let ch = if c.hMode == SIZE_FILL {
+                let v = share
+                if extra > 0 {
+                    extra = extra - 1
+                    v + 1
+                } else {
+                    v
+                }
+            } else {
+                c.mh
+            }
+            if c.hMode == SIZE_FILL { self.measure(c, innerW, ch) }
+            let cw = if c.wMode == SIZE_FIT { c.mw } else { innerW }
+            self.arrange(c, n.pad, cy, cw, ch)
+            cy = cy + ch + n.gap
+            i = i + 1
+        }
+        n
+    }
+}
+
+// Flat op stream in absolute coordinates.
+// rect: op x y w h color; clip: op x y w h; shadow: op x y w h color; pop: op
+let Paint = {
+    node: |n, ox, oy, list| {
+        let x = ox + n.x
+        let y = oy + n.y
+        n.dirtyPaint = 0
+        Stats.paintNodes = Stats.paintNodes + 1
+        if n.paintBoundary == 1 {
+            if n.pValid == 0 || n.pX != x || n.pY != y {
+                n.pList = []
+                self.body(n, x, y, n.pList)
+                n.pValid = 1
+                n.pX = x
+                n.pY = y
+            }
+            let i = 0
+            while i < n.pList.length {
+                list.push(n.pList[i])
+                i = i + 1
+            }
+        } else {
+            self.body(n, x, y, list)
+        }
+    }
+
+    body: |n, x, y, list| {
+        if n.shadow == 1 { self.shadow(list, x + 4, y + 4, n.w, n.h, rgb(0, 0, 0)) }
+        if n.color != 0 { self.rect(list, x, y, n.w, n.h, n.color) }
+        if n.clip == 1 { self.clip(list, x, y, n.w, n.h) }
+        let i = 0
+        while i < n.children.length {
+            self.node(n.children[i], x, y, list)
+            i = i + 1
+        }
+        if n.clip == 1 { list.push(OP_CLIP_POP) }
+    }
+
+    rect: |list, x, y, w, h, color| {
+        list.push(OP_RECT)
+        list.push(x)
+        list.push(y)
+        list.push(w)
+        list.push(h)
+        list.push(color)
+    }
+
+    shadow: |list, x, y, w, h, color| {
+        list.push(OP_SHADOW)
+        list.push(x)
+        list.push(y)
+        list.push(w)
+        list.push(h)
+        list.push(color)
+    }
+
+    clip: |list, x, y, w, h| {
+        list.push(OP_CLIP)
+        list.push(x)
+        list.push(y)
+        list.push(w)
+        list.push(h)
+    }
+}
+
+let Hit = {
+    test: |n, x, y| {
+        if x < 0 || y < 0 || x >= n.w || y >= n.h { return null }
+        let i = n.children.length - 1
+        while i >= 0 {
+            let c = n.children[i]
+            let hit = self.test(c, x - c.x, y - c.y)
+            if hit != null { return hit }
+            i = i - 1
+        }
+        n
+    }
+}
+
+let Windows = {
+    raise: |world, win| {
+        let out = []
+        let i = 0
+        while i < world.children.length {
+            if world.children[i] != win { out.push(world.children[i]) }
+            i = i + 1
+        }
+        out.push(win)
+        world.children = out
+        world.markPaint()
+        win
+    }
+
+    rootOf: |n| {
+        let w = n
+        while w != null && w.kind != K_WINDOW { w = w.owner }
+        w
+    }
+
+    press: |space, x, y| {
+        let n = Hit.test(space.root, x, y)
+        if n == null { return null }
+        let win = self.rootOf(n)
+        if win != null { self.raise(space.root, win) }
+        if n.handler { n.handler(n, x, y) }
+        n
+    }
+}
+
+let Space = {
+    new: |w, h| {
+        let root = Node.new(K_BOX)
+        root.w = w
+        root.h = h
+        root.color = rgb(32, 32, 36)
+        Dirty.layout.push(root)
+        Dirty.paint.push(root)
+        Dirty.needsFrame = 1
+        { root: root, list: [], time: 0 }
+    }
+
+    request: |s| {
+        Dirty.needsFrame = 1
+        s
+    }
+
+    tick: |s, ms| {
+        s.time = s.time + ms
+        s
+    }
+
+    clearLayout: |n| {
+        n.dirtyLayout = 0
+        let i = 0
+        while i < n.children.length {
+            self.clearLayout(n.children[i])
+            i = i + 1
+        }
+    }
+
+    frame: |s| {
+        if Dirty.needsFrame == 0 && Dirty.layout.length == 0 && Dirty.paint.length == 0 {
+            return s.list
+        }
+
+        let roots = Dirty.layout
+        Dirty.layout = []
+        let i = 0
+        while i < roots.length {
+            let r = roots[i]
+            if r.dirtyLayout == 1 {
+                if r == s.root {
+                    Layout.run(r, r.w, r.h)
+                } else {
+                    Layout.measure(r, r.w, r.h)
+                    Layout.arrange(r, r.x, r.y, r.w, r.h)
+                }
+                self.clearLayout(r)
+            }
+            i = i + 1
+        }
+
+        if Dirty.paint.length > 0 || s.root.dirtyPaint == 1 {
+            s.list = []
+            Paint.node(s.root, 0, 0, s.list)
+            s.root.dirtyPaint = 0
+            Dirty.paint = []
+        }
+
+        Dirty.needsFrame = 0
+        s.list
+    }
+}
+
+let Dump = {
+    tree: |n, depth, ox, oy| {
+        let pad = ""
+        let i = 0
+        while i < depth {
+            pad = pad + "  "
+            i = i + 1
+        }
+        let x = ox + n.x
+        let y = oy + n.y
+        print(pad + "k" + n.kind + " " + x + "," + y + " " + n.w + "x" + n.h + " m" + n.mw + "x" + n.mh)
+        i = 0
+        while i < n.children.length {
+            self.tree(n.children[i], depth + 1, x, y)
+            i = i + 1
+        }
+    }
+
+    list: |ops| {
+        let i = 0
+        while i < ops.length {
+            let op = ops[i]
+            if op == OP_RECT {
+                print("rect " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4] + " #" + ops[i + 5])
+                i = i + 6
+            } else if op == OP_SHADOW {
+                print("shadow " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
+                i = i + 6
+            } else if op == OP_CLIP {
+                print("clip " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
+                i = i + 5
+            } else if op == OP_CLIP_POP {
+                print("pop")
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+    }
+}
+
+let Term = {
+    ramp: [" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"]
+
+    new: |sceneW, sceneH, cols, rows, mode| {
+        let cells = []
+        let colors = []
+        let i = 0
+        while i < cols * rows {
+            cells.push(" ")
+            colors.push(rgb(0, 0, 0))
+            i = i + 1
+        }
+        {
+            sceneW: sceneW
+            sceneH: sceneH
+            cols: cols
+            rows: rows
+            mode: mode
+            cells: cells
+            colors: colors
+            stack: []
+            depth: 0
+            clipX: 0
+            clipY: 0
+            clipW: sceneW
+            clipH: sceneH
+        }
+    }
+
+    render: |ops, sceneW, sceneH, cols, rows, mode| {
+        let c = self.new(sceneW, sceneH, cols, rows, mode)
+        let i = 0
+        while i < ops.length {
+            let op = ops[i]
+            if op == OP_RECT {
+                self.rect(c, ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5])
+                i = i + 6
+            } else if op == OP_SHADOW {
+                i = i + 6
+            } else if op == OP_CLIP {
+                self.clip(c, ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4])
+                i = i + 5
+            } else if op == OP_CLIP_POP {
+                self.pop(c)
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+        self.dump(c)
+    }
+
+    rect: |c, x, y, w, h, color| {
+        let x0 = Math.floor(x * c.cols / c.sceneW)
+        let x1 = Math.floor((x + w) * c.cols / c.sceneW)
+        let y0 = Math.floor(y * c.rows / c.sceneH)
+        let y1 = Math.floor((y + h) * c.rows / c.sceneH)
+        let cx0 = Math.floor(c.clipX * c.cols / c.sceneW)
+        let cx1 = Math.floor((c.clipX + c.clipW) * c.cols / c.sceneW)
+        let cy0 = Math.floor(c.clipY * c.rows / c.sceneH)
+        let cy1 = Math.floor((c.clipY + c.clipH) * c.rows / c.sceneH)
+        if x0 < cx0 { x0 = cx0 }
+        if y0 < cy0 { y0 = cy0 }
+        if x1 > cx1 { x1 = cx1 }
+        if y1 > cy1 { y1 = cy1 }
+        if x1 == x0 { x1 = x0 + 1 }
+        if y1 == y0 { y1 = y0 + 1 }
+        if x0 < 0 { x0 = 0 }
+        if y0 < 0 { y0 = 0 }
+        if x1 > c.cols { x1 = c.cols }
+        if y1 > c.rows { y1 = c.rows }
+        if x1 > x0 && y1 > y0 {
+            let r = Math.floor(color / 65536)
+            let g = Math.floor(color / 256) - r * 256
+            let b = color - r * 65536 - g * 256
+            let lum = Math.floor((r * 30 + g * 59 + b * 11) / 100)
+            let idx = Math.floor(lum * 9 / 255)
+            if idx < 0 { idx = 0 }
+            if idx > 9 { idx = 9 }
+            let ch = self.ramp[idx]
+            let yy = y0
+            while yy < y1 {
+                let xx = x0
+                while xx < x1 {
+                    let at = yy * c.cols + xx
+                    c.cells[at] = ch
+                    c.colors[at] = color
+                    xx = xx + 1
+                }
+                yy = yy + 1
+            }
+        }
+    }
+
+    clip: |c, x, y, w, h| {
+        let at = c.depth * 4
+        c.stack[at] = c.clipX
+        c.stack[at + 1] = c.clipY
+        c.stack[at + 2] = c.clipW
+        c.stack[at + 3] = c.clipH
+        c.depth = c.depth + 1
+        let nx = if x > c.clipX { x } else { c.clipX }
+        let ny = if y > c.clipY { y } else { c.clipY }
+        let nr = if x + w < c.clipX + c.clipW { x + w } else { c.clipX + c.clipW }
+        let nb = if y + h < c.clipY + c.clipH { y + h } else { c.clipY + c.clipH }
+        c.clipX = nx
+        c.clipY = ny
+        c.clipW = if nr > nx { nr - nx } else { 0 }
+        c.clipH = if nb > ny { nb - ny } else { 0 }
+    }
+
+    pop: |c| {
+        if c.depth > 0 {
+            c.depth = c.depth - 1
+            let at = c.depth * 4
+            c.clipX = c.stack[at]
+            c.clipY = c.stack[at + 1]
+            c.clipW = c.stack[at + 2]
+            c.clipH = c.stack[at + 3]
+        }
+    }
+
+    dump: |c| {
+        if c.mode == 2 {
+            let y = 0
+            while y < c.rows {
+                let line = ""
+                let x = 0
+                while x < c.cols {
+                    let color = c.colors[y * c.cols + x]
+                    let r = Math.floor(color / 65536)
+                    let g = Math.floor(color / 256) - r * 256
+                    let b = color - r * 65536 - g * 256
+                    line = line + "\x1b[48;2;" + r + ";" + g + ";" + b + "m "
+                    x = x + 1
+                }
+                print(line + "\x1b[0m")
+                y = y + 1
+            }
+        } else {
+            let y = 0
+            while y < c.rows {
+                let line = ""
+                let x = 0
+                while x < c.cols {
+                    line = line + c.cells[y * c.cols + x]
+                    x = x + 1
+                }
+                print(line)
+                y = y + 1
+            }
+        }
+    }
+}
+

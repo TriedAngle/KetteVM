@@ -1,0 +1,207 @@
+let Expect = {
+    checks: 0
+    failures: 0
+
+    eq: |actual, expected, label| {
+        self.checks = self.checks + 1
+        if actual != expected {
+            self.failures = self.failures + 1
+            print("FAIL " + label + ": " + actual + " != " + expected)
+        }
+    }
+
+    rect: |n, x, y, w, h, label| {
+        let ax = 0
+        let ay = 0
+        let cur = n
+        while cur != null {
+            ax = ax + cur.x
+            ay = ay + cur.y
+            cur = cur.owner
+        }
+        self.eq(ax, x, label + ".x")
+        self.eq(ay, y, label + ".y")
+        self.eq(n.w, w, label + ".w")
+        self.eq(n.h, h, label + ".h")
+    }
+
+    layout: |errors, label| {
+        self.eq(errors.length, 0, "layout " + label)
+        let i = 0
+        while i < errors.length {
+            print("  " + errors[i])
+            i = i + 1
+        }
+    }
+
+    paint: |errors, label| {
+        self.eq(errors.length, 0, "paint " + label)
+        let i = 0
+        while i < errors.length {
+            print("  " + errors[i])
+            i = i + 1
+        }
+    }
+
+    summary: {
+        print("checks " + self.checks + " failures " + self.failures)
+        if self.failures == 0 { print("PASS") } else { print("FAIL") }
+    }
+}
+
+let LayoutCheck = {
+    space: |space| {
+        let out = []
+        self.node(space.root, "root", out)
+        out
+    }
+
+    node: |n, path, out| {
+        if n.w < 0 { out.push(path + " negative-width " + n.w) }
+        if n.h < 0 { out.push(path + " negative-height " + n.h) }
+        if n.pad + n.pad > n.w { out.push(path + " pad-width") }
+        if n.pad + n.pad > n.h { out.push(path + " pad-height") }
+        if n.layout == L_ROW { self.row(n, path, out) }
+        else if n.layout == L_COL { self.col(n, path, out) }
+        let i = 0
+        while i < n.children.length {
+            let c = n.children[i]
+            if c.owner != n { out.push(path + "." + i + " owner") }
+            self.node(c, path + "." + i, out)
+            i = i + 1
+        }
+    }
+
+    row: |n, path, out| {
+        let inner = n.w - n.pad - n.pad
+        let count = n.children.length
+        let sum = 0
+        let fills = 0
+        let i = 0
+        while i < count {
+            let c = n.children[i]
+            if c.y != n.pad { out.push(path + "." + i + " row-y " + c.y) }
+            let eh = if c.hMode == SIZE_FIT { c.mh } else { n.h - n.pad - n.pad }
+            if c.h != eh {
+                out.push(path + "." + i + " row-h " + c.h + " != " + eh)
+            }
+            if c.wMode != SIZE_FILL {
+                if c.w != c.mw {
+                    out.push(path + "." + i + " row-w " + c.w + " != " + c.mw)
+                }
+            }
+            if i > 0 {
+                let p = n.children[i - 1]
+                let expected = p.x + p.w + n.gap
+                if c.x != expected {
+                    out.push(path + "." + i + " row-x " + c.x + " != " + expected)
+                }
+            }
+            sum = sum + c.w
+            if c.wMode == SIZE_FILL { fills = fills + 1 }
+            i = i + 1
+        }
+        let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
+        if fills > 0 && sum + gaps != inner {
+            out.push(path + " row-sum " + (sum + gaps) + " != " + inner)
+        }
+        if fills == 0 && sum + gaps > inner {
+            out.push(path + " row-overflow")
+        }
+        if count > 0 {
+            if n.children[0].x != n.pad {
+                out.push(path + ".0 row-start")
+            }
+        }
+    }
+
+    col: |n, path, out| {
+        let inner = n.h - n.pad - n.pad
+        let count = n.children.length
+        let sum = 0
+        let fills = 0
+        let i = 0
+        while i < count {
+            let c = n.children[i]
+            if c.x != n.pad { out.push(path + "." + i + " col-x " + c.x) }
+            let ew = if c.wMode == SIZE_FIT { c.mw } else { n.w - n.pad - n.pad }
+            if c.w != ew {
+                out.push(path + "." + i + " col-w " + c.w + " != " + ew)
+            }
+            if c.hMode != SIZE_FILL {
+                if c.h != c.mh {
+                    out.push(path + "." + i + " col-h " + c.h + " != " + c.mh)
+                }
+            }
+            if i > 0 {
+                let p = n.children[i - 1]
+                let expected = p.y + p.h + n.gap
+                if c.y != expected {
+                    out.push(path + "." + i + " col-y " + c.y + " != " + expected)
+                }
+            }
+            sum = sum + c.h
+            if c.hMode == SIZE_FILL { fills = fills + 1 }
+            i = i + 1
+        }
+        let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
+        if fills > 0 && sum + gaps != inner {
+            out.push(path + " col-sum " + (sum + gaps) + " != " + inner)
+        }
+        if fills == 0 && sum + gaps > inner {
+            out.push(path + " col-overflow")
+        }
+        if count > 0 {
+            if n.children[0].y != n.pad {
+                out.push(path + ".0 col-start")
+            }
+        }
+    }
+}
+
+let PaintCheck = {
+    list: |ops| {
+        let out = []
+        let i = 0
+        let depth = 0
+        while i < ops.length {
+            let op = ops[i]
+            if op == OP_RECT {
+                if i + 5 >= ops.length {
+                    out.push("rect-truncated " + i)
+                    i = ops.length
+                } else {
+                    if ops[i + 3] < 0 || ops[i + 4] < 0 {
+                        out.push("rect-negative " + i)
+                    }
+                    i = i + 6
+                }
+            } else if op == OP_SHADOW {
+                if i + 5 >= ops.length {
+                    out.push("shadow-truncated " + i)
+                    i = ops.length
+                } else {
+                    i = i + 6
+                }
+            } else if op == OP_CLIP {
+                if i + 4 >= ops.length {
+                    out.push("clip-truncated " + i)
+                    i = ops.length
+                } else {
+                    depth = depth + 1
+                    i = i + 5
+                }
+            } else if op == OP_CLIP_POP {
+                depth = depth - 1
+                if depth < 0 { out.push("clip-underflow " + i) }
+                i = i + 1
+            } else {
+                out.push("unknown-op " + op + " at " + i)
+                i = i + 1
+            }
+        }
+        if depth != 0 { out.push("clip-unbalanced " + depth) }
+        out
+    }
+}
+

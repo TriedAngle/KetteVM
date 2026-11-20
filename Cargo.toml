@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# `cargo run` at the root picks the VM; `--workspace` still covers everything.
+default-members = ["vm"]
 members = [
     "bytecode",
     "collectors/dummy_heap",
