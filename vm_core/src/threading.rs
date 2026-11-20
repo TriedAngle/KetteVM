@@ -323,8 +323,10 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
                 .expect("main thread object")
         };
         {
-            let heap = thread.heap();
-            vm.threads().set_main(main.as_tagged(heap));
+            let (_, heap, state) = thread.split();
+            let main = main.as_tagged(heap);
+            vm.threads().set_main(main);
+            state.set_thread_object(main);
         }
         let atomic_i64 = make_prototype(thread);
         Object::install_method(thread, &scope, atomic_i64, "new", atomic_i64_new_index, 1);
@@ -386,6 +388,8 @@ pub struct ThreadRegistry {
     threads: Mutex<Vec<Arc<ThreadSlot>>>,
     next_name: AtomicUsize,
     main: AtomicOptionGcSlot<ThreadObject>,
+    /// Thread state attached by each host thread.
+    attached: Mutex<Vec<(std::thread::ThreadId, Arc<ThreadState>)>>,
 }
 
 impl Default for ThreadRegistry {
@@ -394,6 +398,7 @@ impl Default for ThreadRegistry {
             threads: Mutex::new(Vec::new()),
             next_name: AtomicUsize::new(0),
             main: AtomicOptionGcSlot::uninit(),
+            attached: Mutex::new(Vec::new()),
         }
     }
 }
@@ -420,6 +425,22 @@ impl ThreadRegistry {
 
     pub fn main<'a>(&self, heap: &'a Heap) -> Tagged<'a, ThreadObject> {
         self.main.load(heap).expect("main thread not installed")
+    }
+
+    pub fn attached_state(&self) -> Option<Arc<ThreadState>> {
+        let host = std::thread::current().id();
+        self.attached
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(id, state)| (*id == host).then(|| Arc::clone(state)))
+    }
+
+    pub fn remember_attached(&self, state: &Arc<ThreadState>) {
+        self.attached
+            .lock()
+            .unwrap()
+            .push((std::thread::current().id(), Arc::clone(state)));
     }
 
     pub fn visit_edges(&self, visitor: &mut dyn Visitor) {
@@ -791,9 +812,9 @@ fn thread_name<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<
     object.as_ref().name(heap)
 }
 
-/// Mount a guest `Thread` object on a thread the VM did not create.
-/// It is not joinable; `native` stays -1.
-pub fn attach_foreign_thread(vm: &VM, heap: &mut Heap, state: &ThreadState) {
+/// Create the guest `Thread` object for a native thread context.
+/// It is not joinable; `platform_slot` stays -1.
+pub fn create_thread_object(vm: &VM, heap: &mut Heap, state: &ThreadState) {
     state.handle_scope(|scope| {
         let id = vm.threads().next_name();
         let name = vm
@@ -815,15 +836,6 @@ pub fn attach_foreign_thread(vm: &VM, heap: &mut Heap, state: &ThreadState) {
         );
         state.set_thread_object(object.as_tagged(heap));
     });
-}
-
-/// Mark an attached C thread's guest object terminated.
-pub fn finish_foreign_thread(heap: &Heap, state: &ThreadState) {
-    if let Some(object) = state.thread_object(heap)
-        && let Some(thread) = object.erase().get_as::<ThreadObject>(heap)
-    {
-        thread.as_ref().set_state(ThreadStatus::Terminated);
-    }
 }
 
 fn thread_id<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
@@ -1038,9 +1050,11 @@ fn thread_current<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tag
     if let Some(object) = state.thread_object(heap) {
         return extend_lifetime!(heap, object.erase());
     }
-    let main = vm.threads().main(heap);
-    state.set_thread_object(main);
-    extend_lifetime!(heap, main.erase())
+    create_thread_object(vm, heap, state);
+    let object = state
+        .thread_object(heap)
+        .expect("thread object must be installed");
+    extend_lifetime!(heap, object.erase())
 }
 
 fn thread_sleep<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

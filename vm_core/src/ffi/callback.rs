@@ -4,7 +4,6 @@ use crate::ffi::{
     cif_for_signature,
 };
 
-use crate::threading::{attach_foreign_thread, finish_foreign_thread};
 use crate::{
     CValue, CValueFlags, CValueInit, CallTarget, ErasedRuntimeState, GcSlot, Handle, HandleScope,
     Heap, Object, RuntimeId, ThreadState, TypeInfo, VM, Value,
@@ -247,9 +246,7 @@ unsafe extern "C" fn closure_trampoline(
         let runtime = vm.runtime_by_id(RuntimeId(0));
         let mut ctx = CallbackCtx::new(vm, runtime, heap, state, ffi);
         ctx.enter();
-        attach_foreign_thread(vm, heap, state);
         invoke(entry, ffi, vm, runtime, state, heap, args, result);
-        finish_foreign_thread(heap, state);
         if state.callback_threw() {
             eprintln!("kettevm: uncaught exception in a C-thread callback");
         }

@@ -1,5 +1,5 @@
 use crate::simple_scheduler::{Carrier, Scheduler, SchedulerObject};
-use crate::threading::ThreadRegistry;
+use crate::threading::{ThreadRegistry, create_thread_object};
 use core::{
     cell::{Cell as StdCell, UnsafeCell},
     ptr::NonNull,
@@ -977,6 +977,9 @@ impl Thread {
         Self::release_task(&self.state);
 
         let main_state = Arc::clone(&self.state);
+        if main_state.thread_object(&self.heap).is_none() {
+            create_thread_object(&self.vm, &mut self.heap, &main_state);
+        }
         let scheduler = {
             let object = self.vm.default_scheduler(&self.heap);
             Arc::clone(object.as_ref().scheduler())
@@ -989,15 +992,9 @@ impl Thread {
             };
             let object = main_state
                 .thread_object(&self.heap)
-                .and_then(|object| object.erase().get_as::<ThreadObject>(&self.heap));
-            let object = match object {
-                Some(object) => scope.handle(object),
-                None => {
-                    let main = self.vm.threads().main(&self.heap);
-                    main_state.set_thread_object(main);
-                    scope.handle(main)
-                }
-            };
+                .and_then(|object| object.erase().get_as::<ThreadObject>(&self.heap))
+                .expect("thread object must be installed");
+            let object = scope.handle(object);
             let is_virtual = object.as_tagged(&self.heap).is_virtual(&self.heap);
             let task = if is_virtual {
                 let task = object
@@ -1438,8 +1435,15 @@ impl VM {
             .shared
             .heap
             .new_local(&self.shared.known, &self.shared.prototype_registry);
-        let state = Arc::new(ThreadState::new(&heap));
-        self.register_thread_state(&state);
+        let state = match self.shared.threads.attached_state() {
+            Some(state) => state,
+            None => {
+                let state = Arc::new(ThreadState::new(&heap));
+                self.register_thread_state(&state);
+                self.shared.threads.remember_attached(&state);
+                state
+            }
+        };
         Thread {
             vm: self.clone(),
             heap,
