@@ -47,7 +47,6 @@ fn native_ids() -> NativeIds {
         validate_eval_declarations: NativeIndex(0),
         declare_globals: NativeIndex(0),
         throw_const_assign: NativeIndex(0),
-        create_rest_parameter: NativeIndex(0),
         create_arguments: NativeIndex(0),
         super_get_property: NativeIndex(0),
         super_set_property: NativeIndex(0),

@@ -1598,6 +1598,27 @@ fn op_create_sized_array_literal(frame: Frame) {
     reenter!(pc)
 }
 
+#[handler(CreateRestParameter)]
+fn op_create_rest_parameter(frame: Frame) {
+    let first = frame.unsigned::<0>() as usize;
+    let base = frame.ctx().frame_base();
+    let state = frame.ctx().state();
+    let pc = frame.pc();
+    let val = state.handle_scope(|scope| {
+        let heap = frame.ctx().heap_mut();
+        let argc = state.stack().argc(base);
+        let count = argc.saturating_sub(1).saturating_sub(first);
+        let mut values = Vec::with_capacity(count);
+        for i in 0..count {
+            values.push(scope.handle(state.stack().reg(heap, base, (first + i + 1) as i32)));
+        }
+        let values = scope.stage_handles(&values);
+        heap.new_array(&scope, values).erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
 #[handler(CreateEmptyObjectLiteral)]
 fn op_create_empty_object_literal(frame: Frame) {
     if let Some(v) = frame.ctx().heap_mut().try_new_empty_object() {

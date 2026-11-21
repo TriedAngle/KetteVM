@@ -121,8 +121,7 @@ impl Prototype {
         Some(cell)
     }
 
-    /// Register `map` with its full parent closure; `false` if a parent
-    /// is untrackable.
+    /// Register `map` with its full parent closure.
     pub fn register_multi_parent_closure<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
@@ -510,8 +509,7 @@ fn invalidate_one_prototype_validity_cell(heap: &Heap, map: Tagged<'_, Map>) {
     }
 }
 
-/// Walk dependent maps; multi-parent maps are terminal because they cover
-/// their whole closure.
+/// Walk dependent maps; multi-parent maps are terminal.
 fn walk_dependent_maps(
     heap: &Heap,
     map: Tagged<'_, Map>,

@@ -346,6 +346,12 @@ impl Resolver<'_> {
                 }
             }
         }
+        if let Some(rest) = parts.rest
+            && let Node::Ident(sym) = self.ast.node(rest)
+        {
+            let (sym, span) = (*sym, self.ast.span(rest));
+            self.declare(sym, span);
+        }
         if let Node::StmtList { stmts } = self.ast.node(parts.body) {
             let stmts: Vec<NodeId> = self.ast.list_items(*stmts).to_vec();
             self.collect_stmt_decls(&stmts);

@@ -1,6 +1,3 @@
-// Each concrete sync type keeps its fields on the type object; `new` clones
-// that object so the instance keeps the type's map identity.
-
 let WaitQueueTraits = {
     new: {
         let queue = self.clone()

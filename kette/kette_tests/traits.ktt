@@ -37,7 +37,6 @@ let P2 = { b: 2 }
 let D = { p1*: P1; p2*: P2 }
 Test.assert(D.b, 2)
 
-// callables clone shallowly and keep the type map
 let CallableTraits = {
     get: { self.n }
 }
@@ -51,8 +50,6 @@ Test.assert(callable_copy(4), 7)
 Test.assert(callable_copy.get(), 3)
 Test.assert(Object.isType(callable_copy, Callable), true)
 
-// callability is inherited through parent lists; the call body is the
-// parent's, while `self` stays the receiver
 let CallableBase = {
     n: 2
     |x| x + self.n
@@ -62,13 +59,11 @@ Test.assert(CallableChild(3), 5)
 let CallableGrandchild = { parent*: CallableChild }
 Test.assert(CallableGrandchild(4), 6)
 
-// no callable ancestor still means not callable
 let PlainParent = { n: 1 }
 let PlainChild = { parent*: PlainParent }
 let plain_error = try { PlainChild() } catch (error) { error.name }
 Test.assert(plain_error, "TypeError")
 
-// a cached hit is invalidated when an earlier parent gains the property
 let Later = { b: 2 }
 let Earlier = { a: 1 }
 let Siblings = { p1*: Earlier; p2*: Later }
@@ -78,8 +73,6 @@ Earlier.b = 1
 Test.assert(read_b(Siblings), 1)
 Test.assert(read_b(Siblings), 1)
 
-// a cached miss through nested parent lists re-resolves after an ancestor
-// gains the property
 let Root = { a: 1 }
 let Mid = { parent*: Root }
 let Leaf = { parent*: Mid }

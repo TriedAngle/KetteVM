@@ -112,9 +112,6 @@ pub struct NativeIds {
     pub declare_globals: NativeIndex,
     /// () -> never -- assignment to a const binding
     pub throw_const_assign: NativeIndex,
-    /// (first) -> array -- a fresh array of the frame's arguments from
-    /// formal index `first` (a Smi)
-    pub create_rest_parameter: NativeIndex,
     /// (mapped, index0, slot0, ...) -> object -- the frame's arguments
     /// object (ES 10.4.4.6 / 10.4.4.7); `mapped` is a Smi flag and the
     /// pairs name argument indices bound to function-context slots

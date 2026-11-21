@@ -323,6 +323,7 @@ handler_table!(
     crate::op_create_function_context,
     crate::op_create_empty_array_literal,
     crate::op_create_sized_array_literal,
+    crate::op_create_rest_parameter,
     op_construct,
     crate::op_create_empty_object_literal,
     crate::op_create_block_context,

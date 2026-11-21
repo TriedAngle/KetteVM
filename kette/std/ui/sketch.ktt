@@ -19,7 +19,6 @@ let OP_SHADOW = 4
 
 let rgb = |r, g, b| { r * 65536 + g * 256 + b }
 
-// Node is the type; NodeTraits holds behavior. Kind data lives in `data`.
 let NodeTraits = {
     new: |kind| {
         let n = self.clone()

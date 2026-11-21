@@ -1,5 +1,3 @@
-// Stateless function combinators; there is no instance type here.
-
 let Functional = {
     identity: |x| { x }
     constant: |x| { |y| { x } }

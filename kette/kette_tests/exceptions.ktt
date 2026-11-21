@@ -157,3 +157,23 @@ Test.assert(unimplemented_new.name, "UnimplementedError")
 Test.assert(unimplemented_new.function, "otherMethod")
 Test.assert(Object.isType(unimplemented_new, UnimplementedError), true)
 Test.assert(Object.isType(unimplemented_new, Error), false)
+
+let error_from_array = Error.fromArray(["from array"])
+Test.assert(error_from_array.name, "Error")
+Test.assert(error_from_array.message, "from array")
+Test.assert(Object.isType(error_from_array, Error), true)
+
+let element_from_array = ElementDoesNotExist.fromArray(["missing"])
+Test.assert(element_from_array.name, "ElementDoesNotExist")
+Test.assert(element_from_array.message, "missing")
+
+let bounds_from_array = IndexOutOfBounds.fromArray(["bad bounds", 3, 10])
+Test.assert(bounds_from_array.name, "IndexOutOfBounds")
+Test.assert(bounds_from_array.message, "bad bounds")
+Test.assert(bounds_from_array.index, 3)
+Test.assert(bounds_from_array.length, 10)
+
+let unimplemented_from_array = UnimplementedError.fromArray(["fromArray"])
+Test.assert(unimplemented_from_array.name, "UnimplementedError")
+Test.assert(unimplemented_from_array.function, "fromArray")
+Test.assert(unimplemented_from_array.message, "fromArray")

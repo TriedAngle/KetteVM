@@ -846,6 +846,10 @@ impl FnBuilder {
         self.emit_tracked(Opcode::CreateSizedArrayLiteral, &[capacity]);
     }
 
+    pub fn create_rest_parameter(&mut self, first: u32) {
+        self.emit_tracked(Opcode::CreateRestParameter, &[first]);
+    }
+
     /// Create a closure from a [`Constant::Callable`] template in the pool.
     /// Each execution creates a fresh closure, so unlike
     /// [`FnBuilder::load_constant`] two calls never alias.

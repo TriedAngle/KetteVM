@@ -75,6 +75,8 @@ pub struct ObjectParts {
     /// `None` when there is no `|...|` marker (even `{ || body }` keeps
     /// `Some` with an empty list: it is callable)
     pub params: Option<NodeList>,
+    /// Trailing `...name` parameter.
+    pub rest: Option<NodeId>,
     /// always a `StmtList` node, possibly empty
     pub body: NodeId,
 }

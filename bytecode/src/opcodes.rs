@@ -263,6 +263,8 @@ define_opcodes! {
     /// operand capacity (filled with holes, `length` 0): literal element
     /// stores then append within headroom instead of reallocating.
     CreateSizedArrayLiteral { operands: [UImmediate], acc: writes, indices: [Unchecked] },
+    /// Collect frame arguments from `first` into a fresh array.
+    CreateRestParameter { operands: [UImmediate], acc: writes, indices: [Unchecked] },
 
     CreateClosure { operands: [Index], acc: writes, indices: [ConstantPool] }, // idx -> acc
 

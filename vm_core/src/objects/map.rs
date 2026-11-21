@@ -107,8 +107,7 @@ impl Map {
         }
     }
 
-    /// Set the callable-parent bit if the parent-pair list contains a
-    /// callable ancestor.
+    /// Set the callable-parent bit from the parent-pair list.
     pub fn sync_callable_parent(&self, heap: &Heap) {
         if !self.is_multi_parent() {
             return;
@@ -490,8 +489,7 @@ impl MapKind {
     pub const IMMUTABLE_PROTO: MapKind = MapKind(1 << 25);
     /// The prototype slot is a Self-style parent-pair list.
     pub const MULTI_PARENT: MapKind = MapKind(1 << 30);
-    /// Some parent in the parent list is callable (monotonic hint used by
-    /// call lookup; never cleared).
+    /// Some parent in the list is callable (monotonic).
     pub const CALLABLE_PARENT: MapKind = MapKind(1 << 31);
 
     pub const MAP: MapKind = MapKind(ObjectKind::Map as u64);

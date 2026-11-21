@@ -1,6 +1,3 @@
-// Abstract collection traits. Concrete types keep their data in the type
-// object and compose behavior through a `traits*` parent.
-
 let Collection = {
     size: { throw UnimplementedError("size") }
     forEach: |block| { throw UnimplementedError("forEach") }

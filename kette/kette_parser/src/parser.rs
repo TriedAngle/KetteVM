@@ -554,6 +554,7 @@ impl<S: CharStream> Parser<S> {
         let mut slots = Vec::new();
         let mut stmts = Vec::new();
         let mut params = None;
+        let mut rest = None;
         let mut saw_stmt = false;
         loop {
             let t = self.peek()?;
@@ -566,7 +567,9 @@ impl<S: CharStream> Parser<S> {
                 if saw_stmt || params.is_some() {
                     return Err(ParseError::new(t.span, "params must precede the body"));
                 }
-                params = Some(self.parse_params()?);
+                let (list, rest_param) = self.parse_params()?;
+                params = Some(list);
+                rest = rest_param;
                 continue;
             }
             if self.eat(TokenKind::Comma)? || self.eat(TokenKind::Semicolon)? {
@@ -599,6 +602,7 @@ impl<S: CharStream> Parser<S> {
             Node::Object(ObjectParts {
                 slots,
                 params,
+                rest,
                 body,
             }),
             span,
@@ -782,15 +786,31 @@ impl<S: CharStream> Parser<S> {
         ))
     }
 
-    /// `|a, b|` between the delimiting pipes; `||` is the empty list.
-    fn parse_params(&mut self) -> Result<NodeList, ParseError> {
+    /// Parse `|params|`; a trailing `...name` is the rest parameter.
+    fn parse_params(&mut self) -> Result<(NodeList, Option<NodeId>), ParseError> {
         if self.eat(TokenKind::OrOr)? {
-            return Ok(self.ast.list(&[]));
+            return Ok((self.ast.list(&[]), None));
         }
         self.expect(TokenKind::Pipe)?;
         let mut params = Vec::new();
+        let mut rest = None;
         if self.peek()?.kind != TokenKind::Pipe {
             loop {
+                if self.peek()?.kind == TokenKind::Period {
+                    for _ in 0..3 {
+                        self.expect(TokenKind::Period)?;
+                    }
+                    let t = self.expect(TokenKind::Identifier)?;
+                    let sym = Symbol(t.value.symbol().expect("identifier carries a symbol"));
+                    rest = Some(self.ast.add(Node::Ident(sym), t.span));
+                    if self.peek()?.kind != TokenKind::Pipe {
+                        return Err(ParseError::new(
+                            self.peek()?.span,
+                            "rest parameter must be last",
+                        ));
+                    }
+                    break;
+                }
                 let t = self.expect(TokenKind::Identifier)?;
                 let sym = Symbol(t.value.symbol().expect("identifier carries a symbol"));
                 params.push(self.ast.add(Node::Ident(sym), t.span));
@@ -800,7 +820,7 @@ impl<S: CharStream> Parser<S> {
             }
         }
         self.expect(TokenKind::Pipe)?;
-        Ok(self.ast.list(&params))
+        Ok((self.ast.list(&params), rest))
     }
 
     fn parse_array(&mut self) -> Result<NodeId, ParseError> {
@@ -855,7 +875,7 @@ impl<S: CharStream> Parser<S> {
 
     fn parse_prefixed_function(&mut self) -> Result<NodeId, ParseError> {
         let start = self.peek()?.span.start;
-        let params = self.parse_params()?;
+        let (params, rest) = self.parse_params()?;
         let body = self.parse_branch()?;
         let slots = self.ast.list(&[]);
         let span = ByteSpan::new(start, self.ast.span(body).end);
@@ -863,6 +883,7 @@ impl<S: CharStream> Parser<S> {
             Node::Object(ObjectParts {
                 slots,
                 params: Some(params),
+                rest,
                 body,
             }),
             span,

@@ -301,6 +301,7 @@ pub fn generate(
             root_scope,
             root,
             0,
+            false,
             mode,
             &object_fids,
             declare_globals,
@@ -328,6 +329,7 @@ pub fn generate(
             root_scope,
             parts.body,
             param_count,
+            parts.rest.is_some(),
             mode,
             &object_fids,
             declare_globals,
@@ -361,6 +363,8 @@ struct FunctionGen<'a> {
     /// whether the prologue pushes a context (captured bindings or eval)
     creates_context: bool,
     param_count: usize,
+    /// rest-parameter declaration, which follows the fixed parameters
+    rest_decl: Option<usize>,
     mode: SourceMode,
     /// `node -> function index` for closure creation
     object_fids: &'a [Option<u32>],
@@ -389,6 +393,7 @@ impl<'a> FunctionGen<'a> {
         root_scope: ScopeId,
         body: NodeId,
         param_count: usize,
+        has_rest: bool,
         mode: SourceMode,
         object_fids: &'a [Option<u32>],
         declare_globals: NativeIndex,
@@ -438,6 +443,7 @@ impl<'a> FunctionGen<'a> {
             reg_of,
             creates_context,
             param_count,
+            rest_decl: has_rest.then_some(param_count),
             mode,
             object_fids,
             declare_globals,
@@ -446,7 +452,7 @@ impl<'a> FunctionGen<'a> {
             b,
             ctx_save,
             completion,
-            next_let: param_count,
+            next_let: param_count + usize::from(has_rest),
             loops: Vec::new(),
         }
     }
@@ -611,6 +617,10 @@ impl<'a> FunctionGen<'a> {
                 let reg = self.reg_of[i].expect("uncaptured decl has a register");
                 self.b.move_reg(reg, param);
             }
+        }
+        if let Some(decl) = self.rest_decl {
+            self.b.create_rest_parameter(self.param_count as u32);
+            self.store_decl(decl);
         }
         if let Some(decl) = self.resolved.self_decl(self.scope) {
             self.b.load(self.b.this_reg());
@@ -814,8 +824,7 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
-    /// Emit `callee(args...)`. `None` means the callee is its own receiver
-    /// (Kette's `f(x)` send).
+    /// `None` makes the callee its own receiver.
     fn emit_call_args(
         &mut self,
         temps: &TempScope,
@@ -841,8 +850,7 @@ impl<'a> FunctionGen<'a> {
             }
             argc => {
                 let argc = argc as u32;
-                // window [recv, args...]: element 0 rides the top slot,
-                // argument i sits argc-1-i in; the callee rides above
+                // [recv, args...] with the callee above.
                 let args_base = temps.reserve(argc + 2);
                 let top = args_base.index() + argc as i32;
                 let window_callee = Reg::new(top + 1);

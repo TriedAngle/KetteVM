@@ -3,11 +3,11 @@ use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
     Args, ArgumentsCreate, CallInfo, ContextObject, Convert, DenseString, Errors, FixedArray,
-    Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object, ObjectSlotsInit,
-    PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics,
-    StringData, Symbol, Tagged, ThreadState, VM, Value, VmError, access::own_property_enumerable,
-    bail, extend_lifetime, frame_context_value, info_is_immutable, info_is_lexical, intrinsics,
-    materialize::Materialize, proxy::Proxy, raise, raise_runtime, rt_try,
+    Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object, PartialDescriptor,
+    PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics, StringData, Symbol, Tagged,
+    ThreadState, VM, Value, VmError, access::own_property_enumerable, bail, extend_lifetime,
+    frame_context_value, info_is_immutable, info_is_lexical, intrinsics, materialize::Materialize,
+    proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 mod for_in;
@@ -46,7 +46,6 @@ crate::register_natives! {
     validate_eval_declarations,
     declare_globals -> intrinsics::declare_globals,
     throw_const_assign -> throw_const_assign_error,
-    create_rest_parameter,
     create_arguments,
     super_get_property,
     super_set_property,
@@ -1412,42 +1411,6 @@ fn throw_const_assign_error<'a>(
         vm, heap, state, ..
     } = ctx;
     Errors::raise(vm, heap, state, VmError::ConstAssign)
-}
-
-/// A fresh array of the frame's arguments from formal index `first`:
-/// (first) -> array.
-fn create_rest_parameter<'a>(
-    ctx: HostCtx<'a>,
-    _call: CallInfo<'_>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let first = args.get(heap, 0).to_i64().map(|v| v as usize).unwrap_or(0);
-    state.handle_scope(|scope| {
-        if !state.is_frame_active() {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
-        let base = state.frame_base();
-        let argc = state.stack().argc(base); // receiver included
-        let count = argc.saturating_sub(1).saturating_sub(first);
-        let values: Vec<Handle<'_, Value>> = (0..count)
-            .map(|i| scope.handle(state.stack().reg(heap, base, (first + i + 1) as i32)))
-            .collect();
-        let elements = heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), &scope);
-        let map = vm.known().js_array_map.get_handle(heap, &scope);
-        heap.allocate_object(
-            &scope,
-            ObjectSlotsInit {
-                map,
-                values: HandleSlice::EMPTY,
-                elements,
-                length: values.len(),
-            },
-        )
-        .erase()
-    })
 }
 
 /// `CreateUnmappedArgumentsObject ( argList )`

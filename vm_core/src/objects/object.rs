@@ -1148,9 +1148,7 @@ impl Object {
     ) -> Option<Handle<'s, Object>> {
         let source = scope.handle(receiver.as_tagged(heap).as_heap_object()?);
         let kind = source.as_tagged(heap).map(heap).kind();
-        // Callable objects clone shallowly too: the copy shares its
-        // CallableInfo and Context, like copying a closure reference.
-        // Proxies, bound functions, and arguments keep their own semantics.
+        // Callables clone shallowly; proxies, bound functions, and arguments do not.
         if kind.is_proxy()
             || kind.is_bound()
             || kind.is_arguments()

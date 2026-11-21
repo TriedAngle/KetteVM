@@ -5151,8 +5151,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             for (i, (_, _, rest)) in params.iter().enumerate() {
                 if *rest {
                     let i = i as u32;
-                    self.b
-                        .call_native_staged(self.c.ids.create_rest_parameter, &[RtArg::Smi(i)]);
+                    self.b.create_rest_parameter(i);
                     self.b.store(Reg::new(staged_base.index() + i as i32));
                 }
             }
