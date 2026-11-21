@@ -65,6 +65,7 @@ pub fn compile_js(
             &semantic.semantic,
             match mode {
                 SourceMode::Script => analysis::Mode::Script,
+                SourceMode::File => analysis::Mode::File,
                 SourceMode::Eval => analysis::Mode::Eval,
                 SourceMode::EvalStrict => analysis::Mode::EvalStrict,
                 SourceMode::EvalGlobal => analysis::Mode::EvalGlobal,

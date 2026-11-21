@@ -1,5 +1,5 @@
 // Collection behavior and the growable Sequence.
-// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/error.ktt kette/std/collection.ktt kette/kette_tests/collection.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/collection.ktt kette/kette_tests/collection.ktt
 // Check: kette/kette_tests/check.py
 
 let seq = |values| {

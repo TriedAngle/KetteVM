@@ -1,0 +1,126 @@
+// Run: cargo run -q -p vm -- kette/std/startup.ktt \
+//      kette/examples/modules_live.ktt
+
+let math = ModuleRegistry.declare("math", |m| {
+    m.pi = 3.14159
+    m.square = |x| { x * x }
+})
+
+print("pi = " + math.pi)
+print("square(6) = " + math.square(6))
+print("same object after require:")
+print(math == ModuleRegistry.require("math"))
+print("generation = " + ModuleRegistry.generation(math))
+
+ModuleRegistry.declare("math", |m| {
+    m.pi = 3.14
+    m.square = |x| { x * x + 1 }
+})
+
+print("after reload pi = " + math.pi)
+print("after reload square(6) = " + math.square(6))
+print("same object after reload:")
+print(math == ModuleRegistry.require("math"))
+print("generation = " + ModuleRegistry.generation(math))
+
+math.tag = "live"
+
+ModuleRegistry.declare("math", |m| {
+    m.pi = 3
+    m.cube = |x| { x * x * x }
+})
+
+print("tag survives = " + math.tag)
+print("pi after second reload = " + math.pi)
+print("square removed:")
+print(math.square == undefined)
+print("cube(3) = " + math.cube(3))
+print("module keys:")
+for key, value in math {
+    print("  " + key)
+}
+
+ModuleRegistry.extend("math", "stats", |m| {
+    m.mean = |a, b| { (a + b) / 2 }
+})
+
+print("mean(2, 6) = " + math.mean(2, 6))
+print("pi owner = " + ModuleRegistry.owner(math, "pi"))
+print("mean owner = " + ModuleRegistry.owner(math, "mean"))
+
+ModuleRegistry.extend("math", "stats", |m| {
+    m.total = |a, b| { a + b }
+})
+
+print("mean removed:")
+print(math.mean == undefined)
+print("total(2, 6) = " + math.total(2, 6))
+print("pi still = " + math.pi)
+print("tag still = " + math.tag)
+
+ModuleRegistry.declare("math", |m| {
+    m.pi = 4
+    m.square = |x| { x * x }
+})
+
+print("base pi = " + math.pi)
+print("stats total = " + math.total(2, 6))
+print("square back = " + math.square(3))
+print("owners:")
+for key in ModuleRegistry.keys(math) {
+    print("  " + key + " -> " + ModuleRegistry.owner(math, key))
+}
+
+
+globalThis.LIVE_REVISION = 1
+let math_unit = ModuleRegistry.loadFile("kette/examples/modules/live_math.ktt")
+ModuleRegistry.loadFile("kette/examples/modules/live_stats.ktt")
+
+let live_math = ModuleRegistry.require("live.math")
+print("file revision = " + live_math.revision)
+print("stats saw revision = " + live_math.seen_revision)
+print("math unit declarations = " + math_unit.declarations.length)
+
+globalThis.LIVE_REVISION = 2
+ModuleRegistry.markDirty("kette/examples/modules/live_math.ktt")
+let flushed = ModuleRegistry.flushDirty()
+
+print("flushed units = " + flushed.length)
+print("file revision after flush = " + live_math.revision)
+print("stats saw revision after flush = " + live_math.seen_revision)
+
+
+let sandbox = ModuleRegistry.declare("sandbox", |m| {
+    m.a = 1
+    m.b = 2
+})
+ModuleRegistry.extend("sandbox", "tmp", |m| {
+    m.c = 3
+})
+sandbox.extra = 4
+
+print("removed facade = " + ModuleRegistry.remove(sandbox, "extra"))
+print("extra gone:")
+print(sandbox.extra == undefined)
+
+ModuleRegistry.reset("sandbox", |m| {
+    m.z = 9
+})
+
+print("reset z = " + sandbox.z)
+print("reset dropped a:")
+print(sandbox.a == undefined)
+print("reset dropped c:")
+print(sandbox.c == undefined)
+print("same sandbox object:")
+print(sandbox == ModuleRegistry.require("sandbox"))
+
+
+ModuleRegistry.declare("Demo.Math.Vector", |m| {
+    m.square = |x| { x * x }
+})
+
+print("registry path square(3) = " + Modules.Demo.Math.Vector.square(3))
+print("require path square(4) = " + ModuleRegistry.require("Demo.Math.Vector").square(4))
+print("same child object:")
+print(Modules.Demo.Math.Vector == ModuleRegistry.require("Demo.Math.Vector"))

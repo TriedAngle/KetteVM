@@ -88,8 +88,17 @@ fn main() {
     vm.arm_gc_stress();
     let mut thread = vm.attach();
 
-    for path in &files {
-        run_file(&mut thread, path);
+    let mut batches: Vec<(Language, Vec<String>)> = Vec::new();
+    for path in files {
+        let language = Language::of(&path).expect("file language was checked above");
+        match batches.last_mut() {
+            Some((last, paths)) if *last == language => paths.push(path),
+            _ => batches.push((language, vec![path])),
+        }
+    }
+
+    for (language, paths) in batches {
+        run_batch(&mut thread, language, &paths);
         if thread.vm().is_shutdown() {
             return;
         }
@@ -101,23 +110,38 @@ fn main() {
     }
 }
 
-// the frontend is chosen at the call site; the VM stays language-agnostic
-fn run_file(thread: &mut Thread, path: &str) {
-    let src = match std::fs::read_to_string(path) {
-        Ok(src) => src,
-        Err(e) => {
-            eprintln!("kettevm: cannot read {path}: {e}");
-            std::process::exit(1);
+fn run_batch(thread: &mut Thread, language: Language, paths: &[String]) {
+    let mut src = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("kettevm: cannot read {path}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if index != 0 {
+            src.push('\n');
         }
+        src.push_str(&text);
+        if !text.ends_with('\n') {
+            src.push('\n');
+        }
+    }
+    let label = if paths.len() == 1 {
+        paths[0].clone()
+    } else {
+        format!("{} (+{} files)", paths[0], paths.len() - 1)
     };
-    match Language::of(path) {
-        Some(Language::Kette) => run_with::<KetteCompiler>(thread, &src, path),
-        _ => run_with::<JavascriptCompiler>(thread, &src, path),
+    match language {
+        Language::Kette => run_with::<KetteCompiler>(thread, &src, &label),
+        Language::Javascript => run_with::<JavascriptCompiler>(thread, &src, &label),
+        Language::Infer => unreachable!("concrete language expected"),
     }
 }
 
 fn run_with<C: Compiler>(thread: &mut Thread, src: &str, path: &str) {
-    match thread.eval::<C>(src) {
+    match thread.eval_file::<C>(src) {
         Ok(_) => {
             if report_uncaught(thread) {
                 eprintln!("{path}: uncaught exception");

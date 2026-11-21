@@ -286,13 +286,14 @@ pub fn root_binding(
                 None
             }
         }
-        Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal => None,
+        Mode::File | Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal => None,
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Script,
+    File,
     Eval,
     EvalStrict,
     EvalGlobal,

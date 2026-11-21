@@ -1,0 +1,6 @@
+let math = ModuleRegistry.require("unit.math")
+
+ModuleRegistry.extend("unit.math", "unit.stats", |m| {
+    m.seen = math.revision
+    m.extra = 20
+})

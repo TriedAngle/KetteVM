@@ -1,0 +1,4 @@
+ModuleRegistry.declare("unit.math", |m| {
+    m.revision = globalThis.UNIT_REVISION
+    m.base = 10
+})

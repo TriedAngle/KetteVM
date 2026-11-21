@@ -4,17 +4,21 @@ Run any example with the release VM:
 
     cargo run -q -p vm -- <files...>
 
-Kette files share one global scope, so multi-file examples are passed in order.
+Consecutive files of the same language run as one isolated file unit: they
+share top-level bindings with each other, but not with `globalThis` or later
+units. Pass multi-file examples in order.
 
 ## Standard startup
 
 `kette/std/startup.ktt` installs the array-side `size()` and `iterator()`
-methods used by `for x in array` and array destructuring. It is not loaded
-automatically; pass it first when a script uses those:
+methods used by `for x in array` and array destructuring, plus the `Modules`
+namespace and `ModuleRegistry` manager. It also loads `std/sync.ktt` and
+`std/error.ktt`, and installs sync's `RecursiveMutex` as the module lock. It
+is not loaded automatically; pass it first when a script uses those:
 
     cargo run -q -p vm -- kette/std/startup.ktt <your-files...>
 
-Scripts that do not iterate arrays do not need it.
+Scripts that do not iterate arrays or use modules do not need it.
 
 ## UI sketch
 
@@ -46,7 +50,14 @@ Quick standalone scripts:
 
     cargo run -q -p vm -- kette/examples/qsort.ktt
     cargo run -q -p vm -- kette/examples/threads.ktt
-    cargo run -q -p vm -- kette/examples/user_scheduler.ktt
+    cargo run -q -p vm -- kette/std/startup.ktt \
+        kette/examples/user_scheduler.ktt
+
+The evolving module example covers base modules, extensions, ownership,
+file units, and lazy dependency flush:
+
+    cargo run -q -p vm -- kette/std/startup.ktt \
+        kette/examples/modules_live.ktt
 
 Window examples need the system libraries (GLFW, raylib):
 

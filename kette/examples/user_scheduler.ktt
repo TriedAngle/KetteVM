@@ -4,8 +4,9 @@
 // The main thread keeps running in parallel and appends to the same string
 // under a mutex from std/sync.ktt.
 //
-// Run: cargo run -q -p vm -- kette/std/sync.ktt kette/examples/user_scheduler.ktt
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/user_scheduler.ktt
 
+let Mutex = ModuleRegistry.require("Sync").Mutex
 let guard = Mutex.new()
 
 let text = ""

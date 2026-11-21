@@ -5046,7 +5046,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal
             ) && self.fid == Fid(0);
             let declaration = !(eval_root && !func.strict);
-            let script = func.kind == FnKind::Script && !eval_root;
+            let script =
+                func.kind == FnKind::Script && !eval_root && self.c.facts.mode != Mode::File;
             let mut flags = 0;
             if declaration {
                 flags |= SCOPE_DECLARATION;

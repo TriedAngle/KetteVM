@@ -80,11 +80,18 @@ impl KetteTools {
                 "eval expects a source string",
             );
         };
-        eval_source(vm, heap, state, &language, &source)
+        eval_source(
+            vm,
+            heap,
+            state,
+            &language,
+            &source,
+            bytecode::SourceMode::EvalGlobal,
+        )
     }
 
-    /// Read `path` and run it as indirect eval, inferring the language from
-    /// the `.ktt` / `.js` extension.
+    /// Read `path` and run it as an isolated file unit, inferring the
+    /// language from the `.ktt` / `.js` extension.
     pub fn eval_file<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
         let HostCtx {
             vm, heap, state, ..
@@ -123,7 +130,14 @@ impl KetteTools {
                 );
             }
         };
-        eval_source(vm, heap, state, language, &source)
+        eval_source(
+            vm,
+            heap,
+            state,
+            language,
+            &source,
+            bytecode::SourceMode::File,
+        )
     }
 
     pub fn install(
@@ -190,6 +204,7 @@ fn eval_source<'a>(
     state: &'a ThreadState,
     language: &str,
     source: &str,
+    mode: bytecode::SourceMode,
 ) -> Tagged<'a, Value> {
     let Some(info) = vm.eval_language(language) else {
         return Errors::raise_with(
@@ -202,7 +217,7 @@ fn eval_source<'a>(
     };
     let compile = info.compile;
     let runtime = info.runtime;
-    let program = match compile(vm, source, bytecode::SourceMode::EvalGlobal) {
+    let program = match compile(vm, source, mode) {
         Ok(program) => program,
         Err(error) => {
             return Errors::raise_with(vm, heap, state, VmError::EvalError, &error.to_string());

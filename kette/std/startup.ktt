@@ -1,32 +1,875 @@
 // Array iteration/destructuring helpers. Load explicitly; not auto-loaded.
-// The IIFE keeps re-running it from declaring globals.
-{
-    let ArrayTraits = {
-        size: { self.length }
+let _SYNC_PATH = "kette/std/sync.ktt"
+let _ERROR_PATH = "kette/std/error.ktt"
+
+globalThis.Modules = Object.create(null)
+
+Object.addParent(Array.prototype, "array", {
+    size: { self.length }
+    iterator: {
+        let array = self
+        let index = 0
+        {
+            hasNext: { index < array.length }
+            next: {
+                if index >= array.length {
+                    return undefined
+                }
+                let value = array[index]
+                index = index + 1
+                value
+            }
+            nextKeyed: {
+                if index >= array.length {
+                    return undefined
+                }
+                let key = index
+                let value = array[index]
+                index = index + 1
+                [key, value]
+            }
+        }
+    }
+})
+
+globalThis.ModuleRegistry = {
+    registry: Object.create(null)
+    units: Object.create(null)
+    _unitByThread: Object.create(null)
+    entryKey: Symbol.for("kette.modules.entry")
+    versionKey: Symbol.for("kette.modules.version")
+    traitsKey: Symbol.for("kette.modules.traits")
+    _lockBackend: null
+    _UNIT_NEW: "new"
+    _UNIT_LOADING: "loading"
+    _UNIT_LOADED: "loaded"
+    _UNIT_FAILED: "failed"
+    _BASE_OWNER: "base"
+    _BASE_MODE: "base"
+    _EXTEND_MODE: "extend"
+    _LINK_PREFIX: "@registry:"
+
+    _installLock: |lock| {
+        if self._lockBackend == null {
+            self._lockBackend = lock
+        }
+    }
+
+    _lock: {
+        self._lockBackend.lock()
+    }
+
+    _unlock: {
+        self._lockBackend.unlock()
+    }
+
+    _withLock: |block| {
+        self._lock()
+        let failed = false
+        let error = null
+        let result = null
+        try {
+            result = block()
+        } catch (e) {
+            failed = true
+            error = e
+        }
+        self._unlock()
+        if failed {
+            throw error
+        }
+        result
+    }
+
+    get: |name| {
+        self._withLock({
+            let module = self.registry[name]
+            if module == undefined {
+                null
+            } else {
+                self._recordRequire(name)
+                module
+            }
+        })
+    }
+
+    require: |name| {
+        self._withLock({
+            let module = self.registry[name]
+            if module == undefined || module == null {
+                throw "module not found: " + name
+            }
+            self._recordRequire(name)
+            module
+        })
+    }
+
+    declare: |name, initializer| {
+        self._withLock({
+            self._ensureParents(name)
+            let module = self._declare(name, initializer)
+            self._recordDeclaration(name, self._BASE_MODE, module[self.entryKey].baseOwner)
+            self._linkPath(name, module)
+            module
+        })
+    }
+
+    _declare: |name, initializer| {
+        let module = self.registry[name]
+        let entry = null
+        let created = false
+        if module == undefined || module == null {
+            module = Object.create(null)
+            entry = {
+                name: name
+                module: module
+                version: Object.create(null)
+                generation: 0
+                baseOwner: self._BASE_OWNER
+                owners: Object.create(null)
+                contributions: []
+            }
+            Object.defineProperty(module, self.entryKey, {
+                value: entry
+                writable: true
+                configurable: true
+            })
+            self.registry[name] = module
+            created = true
+        } else {
+            entry = module[self.entryKey]
+            if entry.baseOwner == undefined {
+                entry.baseOwner = self._BASE_OWNER
+            }
+        }
+
+        let failed = false
+        let error = null
+        try {
+            self._update(name, entry.baseOwner, initializer)
+        } catch (e) {
+            failed = true
+            error = e
+        }
+        if failed {
+            if created {
+                self.registry[name] = null
+            }
+            throw error
+        }
+
+        if created {
+            try {
+                Object.addParent(module, self.traitsKey, self.traits)
+            } catch (e) {
+                self.registry[name] = null
+                throw e
+            }
+        }
+        module
+    }
+
+    extend: |name, owner, initializer| {
+        self._withLock({
+            self._ensureParents(name)
+            let module = self._extend(name, owner, initializer)
+            self._recordDeclaration(name, self._EXTEND_MODE, owner)
+            self._linkPath(name, module)
+            module
+        })
+    }
+
+    _extend: |name, owner, initializer| {
+        let module = self.registry[name]
+        if module == undefined || module == null {
+            throw "module not found: " + name
+        }
+        if owner == undefined || owner == null || owner == self._BASE_OWNER {
+            throw "extend needs a non-base owner"
+        }
+        let entry = module[self.entryKey]
+        if entry == undefined {
+            throw "not a module: " + name
+        }
+        if entry.baseOwner == undefined {
+            entry.baseOwner = self._BASE_OWNER
+        }
+        self._update(name, owner, initializer)
+        module
+    }
+
+    _update: |name, owner, initializer| {
+        let module = self.registry[name]
+        let entry = module[self.entryKey]
+        let current = entry.version
+        let currentOwners = entry.owners
+
+        let version = Object.create(null)
+        let owners = Object.create(null)
+        let copied = Object.create(null)
+        let snapshot = Object.create(null)
+        let currentNames = Object.getOwnPropertyNames(current)
+        for key in currentNames {
+            let keyOwner = currentOwners[key]
+            if keyOwner == undefined {
+                keyOwner = entry.baseOwner
+            }
+            if keyOwner != owner {
+                let value = current[key]
+                version[key] = value
+                owners[key] = keyOwner
+                copied[key] = true
+                snapshot[key] = value
+            }
+        }
+
+        let failed = false
+        let error = null
+        try {
+            initializer(version)
+        } catch (e) {
+            failed = true
+            error = e
+        }
+        if failed {
+            throw error
+        }
+
+        let names = Object.getOwnPropertyNames(version)
+        for key in names {
+            if copied[key] == undefined || version[key] != snapshot[key] {
+                owners[key] = owner
+            }
+        }
+
+        let contributions = []
+        for key in names {
+            let keyOwner = owners[key]
+            let group = null
+            for candidate in contributions {
+                if candidate.owner == keyOwner {
+                    group = candidate
+                    break
+                }
+            }
+            if group == null {
+                group = { owner: keyOwner, names: [] }
+                contributions[contributions.length] = group
+            }
+            group.names[group.names.length] = key
+        }
+
+        let publish_failed = false
+        let publish_error = null
+        try {
+            Object.addParentUncached(module, self.versionKey, version)
+        } catch (e) {
+            publish_failed = true
+            publish_error = e
+        }
+        if publish_failed {
+            throw publish_error
+        }
+
+        entry.version = version
+        entry.owners = owners
+        entry.contributions = contributions
+        entry.generation = entry.generation + 1
+    }
+
+    _pathParts: |name| {
+        let parts = []
+        let part = ""
+        let i = 0
+        while i < name.length {
+            let ch = name[i]
+            if ch == "." {
+                if part == "" {
+                    throw "invalid module path: " + name
+                }
+                parts[parts.length] = part
+                part = ""
+            } else {
+                part = part + ch
+            }
+            i = i + 1
+        }
+        if part == "" {
+            throw "invalid module path: " + name
+        }
+        parts[parts.length] = part
+        parts
+    }
+
+    _namespaceModule: |name| {
+        let module = self.registry[name]
+        if module != undefined && module != null {
+            return module
+        }
+        module = Object.create(null)
+        let version = Object.create(null)
+        let entry = {
+            name: name
+            module: module
+            version: version
+            generation: 0
+            baseOwner: self._BASE_OWNER
+            owners: Object.create(null)
+            contributions: []
+        }
+        Object.defineProperty(module, self.entryKey, {
+            value: entry
+            writable: true
+            configurable: true
+        })
+        self.registry[name] = module
+        Object.addParentUncached(module, self.versionKey, version)
+        Object.addParent(module, self.traitsKey, self.traits)
+        module
+    }
+
+    _linkPath: |name, child| {
+        let parts = self._pathParts(name)
+        if parts.length == 1 {
+            globalThis.Modules[parts[0]] = child
+            return 0
+        }
+
+        let parent = ""
+        let i = 0
+        while i < parts.length - 1 {
+            if i != 0 {
+                parent = parent + "."
+            }
+            parent = parent + parts[i]
+            i = i + 1
+        }
+        let leaf = parts[parts.length - 1]
+        let parent_module = self.registry[parent]
+        let entry = parent_module[self.entryKey]
+        let owner = self._LINK_PREFIX + name
+        let existing_owner = entry.owners[leaf]
+        if existing_owner != undefined && existing_owner != owner {
+            return 0
+        }
+        let own = Object.getOwnPropertyDescriptor(parent_module, leaf)
+        if own != undefined {
+            return 0
+        }
+        self._update(parent, owner, |m| {
+            m[leaf] = child
+        })
+        0
+    }
+
+    _ensureParents: |name| {
+        let parts = self._pathParts(name)
+        if parts.length < 2 {
+            return 0
+        }
+        let prefix = parts[0]
+        let i = 1
+        while i < parts.length {
+            let module = self.registry[prefix]
+            if module == undefined || module == null {
+                module = self._namespaceModule(prefix)
+            }
+            self._linkPath(prefix, module)
+            if i == 1 {
+                globalThis.Modules[prefix] = module
+            }
+            if i + 1 < parts.length {
+                prefix = prefix + "." + parts[i]
+            }
+            i = i + 1
+        }
+        0
+    }
+
+    _relinkChildren: |parent_name| {
+        let parent_parts = self._pathParts(parent_name)
+        for name in Object.getOwnPropertyNames(self.registry) {
+            let parts = self._pathParts(name)
+            if parts.length == parent_parts.length + 1 {
+                let matches = true
+                let i = 0
+                while i < parent_parts.length {
+                    if parts[i] != parent_parts[i] {
+                        matches = false
+                        break
+                    }
+                    i = i + 1
+                }
+                if matches {
+                    self._linkPath(name, self.registry[name])
+                }
+            }
+        }
+        0
+    }
+
+    _currentUnit: {
+        let me = Thread.current().threadId()
+        let unit = self._unitByThread[me]
+        if unit == undefined || unit == null {
+            null
+        } else {
+            unit
+        }
+    }
+
+    _recordRequire: |name| {
+        let unit = self._currentUnit()
+        if unit != null && unit.state == self._UNIT_LOADING {
+            let found = false
+            for existing in unit.pendingRequires {
+                if existing == name {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                unit.pendingRequires[unit.pendingRequires.length] = name
+            }
+        }
+        0
+    }
+
+    _recordDeclaration: |name, mode, owner| {
+        let unit = self._currentUnit()
+        if unit != null && unit.state == self._UNIT_LOADING {
+            let found = false
+            for existing in unit.pendingDeclarations {
+                if existing.name == name && existing.mode == mode && existing.owner == owner {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                unit.pendingDeclarations[unit.pendingDeclarations.length] = {
+                    name: name
+                    mode: mode
+                    owner: owner
+                }
+            }
+        }
+        0
+    }
+
+    _resolveModule: |value| {
+        if value == null {
+            null
+        } else {
+            let entry = value[self.entryKey]
+            if entry != undefined {
+                value
+            } else {
+                let found = self.registry[value]
+                if found == undefined {
+                    null
+                } else {
+                    found
+                }
+            }
+        }
+    }
+
+    remove: |module, name| {
+        self._withLock({
+            let target = self._resolveModule(module)
+            if target == null {
+                throw "module not found"
+            }
+            let desc = Object.getOwnPropertyDescriptor(target, name)
+            if desc == undefined {
+                false
+            } else {
+                Object.deleteProperty(target, name)
+            }
+        })
+    }
+
+    reset: |module, initializer| {
+        self._withLock({
+            let target = self._resolveModule(module)
+            if target == null {
+                throw "module not found"
+            }
+            let entry = target[self.entryKey]
+            if entry == undefined {
+                throw "not a module"
+            }
+            if !Object.isExtensible(target) {
+                throw "cannot reset non-extensible module"
+            }
+            let own = Object.getOwnPropertyNames(target)
+            for key in own {
+                let desc = Object.getOwnPropertyDescriptor(target, key)
+                if desc != undefined && desc.configurable == false {
+                    throw "cannot reset sealed module property: " + key
+                }
+            }
+
+            let oldVersion = entry.version
+            let oldOwners = entry.owners
+            let oldContributions = entry.contributions
+            let oldGeneration = entry.generation
+
+            entry.version = Object.create(null)
+            entry.owners = Object.create(null)
+            entry.contributions = []
+
+            let failed = false
+            let error = null
+            try {
+                self._update(entry.name, entry.baseOwner, initializer)
+            } catch (e) {
+                failed = true
+                error = e
+            }
+            if failed {
+                entry.version = oldVersion
+                entry.owners = oldOwners
+                entry.contributions = oldContributions
+                entry.generation = oldGeneration
+                throw error
+            }
+
+            let freshOwn = Object.getOwnPropertyNames(target)
+            for key in freshOwn {
+                Object.deleteProperty(target, key)
+            }
+self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
+            self._linkPath(entry.name, target)
+            self._relinkChildren(entry.name)
+            target
+        })
+    }
+
+    unit: |id| {
+        self._withLock({
+            let unit = self.units[id]
+            if unit == undefined {
+                null
+            } else {
+                unit
+            }
+        })
+    }
+
+    loadFile: |path| {
+        self._withLock({
+            self._loadFile(path)
+        })
+    }
+
+    _loadFile: |path| {
+        let unit = self.units[path]
+        if unit == undefined || unit == null {
+            unit = {
+                id: path
+                path: path
+                state: self._UNIT_NEW
+                dirty: false
+                declarations: []
+                requires: []
+                pendingDeclarations: []
+                pendingRequires: []
+            }
+            self.units[path] = unit
+        }
+        self._evalUnit(unit)
+    }
+
+    reloadFile: |path| {
+        self._withLock({
+            let unit = self.units[path]
+            if unit == undefined || unit == null {
+                throw "unit not found: " + path
+            }
+            self._evalUnit(unit)
+        })
+    }
+
+    _evalUnit: |unit| {
+        let me = Thread.current().threadId()
+        let previous = self._unitByThread[me]
+        self._unitByThread[me] = unit
+        unit.state = self._UNIT_LOADING
+        unit.pendingDeclarations = []
+        unit.pendingRequires = []
+        let failed = false
+        let error = null
+                try {
+            KetteTools.evalFile(unit.path)
+        } catch (e) {
+            failed = true
+            error = e
+        }
+                self._unitByThread[me] = previous
+                if failed {
+            unit.state = self._UNIT_FAILED
+            unit.pendingDeclarations = []
+            unit.pendingRequires = []
+            throw error
+        }
+                unit.declarations = unit.pendingDeclarations
+        unit.requires = unit.pendingRequires
+                unit.pendingDeclarations = []
+        unit.pendingRequires = []
+        unit.state = self._UNIT_LOADED
+        unit.dirty = false
+        unit
+    }
+
+    markDirty: |id| {
+        self._withLock({
+            let unit = self.units[id]
+            if unit == undefined || unit == null {
+                null
+            } else {
+                unit.dirty = true
+                self._markDependentsDirty(unit, Object.create(null))
+                unit
+            }
+        })
+    }
+
+    _markDependentsDirty: |unit, seen| {
+        if seen[unit.id] == true {
+            return 0
+        }
+        seen[unit.id] = true
+        for decl in unit.declarations {
+            for id in Object.getOwnPropertyNames(self.units) {
+                let candidate = self.units[id]
+                if candidate != null && candidate.id != unit.id {
+                    for required in candidate.requires {
+                        if required == decl.name {
+                            if !candidate.dirty {
+                                candidate.dirty = true
+                                self._markDependentsDirty(candidate, seen)
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    _visitUnit: |id, dirty, providers, visited, visiting, order| {
+        if visited[id] == true || visiting[id] == true {
+            return 0
+        }
+        visiting[id] = true
+        let unit = self.units[id]
+        if unit != null {
+            for required in unit.requires {
+                let list = providers[required]
+                if list != undefined {
+                    for provider in list {
+                        if provider != id && dirty[provider] == true {
+                            self._visitUnit(provider, dirty, providers, visited, visiting, order)
+                        }
+                    }
+                }
+            }
+        }
+        visiting[id] = false
+        visited[id] = true
+        order[order.length] = id
+        0
+    }
+
+    flushDirty: {
+        self._withLock({
+            let dirty = Object.create(null)
+            let ids = Object.getOwnPropertyNames(self.units)
+            for id in ids {
+                let unit = self.units[id]
+                if unit != null && unit.dirty {
+                    dirty[id] = true
+                }
+            }
+            let providers = Object.create(null)
+            for id in ids {
+                let unit = self.units[id]
+                if unit != null {
+                    for decl in unit.declarations {
+                        let list = providers[decl.name]
+                        if list == undefined {
+                            list = []
+                            providers[decl.name] = list
+                        }
+                        list[list.length] = id
+                    }
+                }
+            }
+            let order = []
+            let visited = Object.create(null)
+            let visiting = Object.create(null)
+            for id in ids {
+                if dirty[id] == true {
+                    self._visitUnit(id, dirty, providers, visited, visiting, order)
+                }
+            }
+            for id in order {
+                let unit = self.units[id]
+                if unit != null {
+                    self._evalUnit(unit)
+                }
+            }
+            order
+        })
+    }
+
+    version: |module| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                null
+            } else {
+                entry.version
+            }
+        })
+    }
+
+    generation: |module| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                -1
+            } else {
+                entry.generation
+            }
+        })
+    }
+
+    name: |module| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                "?"
+            } else {
+                entry.name
+            }
+        })
+    }
+
+    owner: |module, name| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                null
+            } else {
+                entry.owners[name]
+            }
+        })
+    }
+
+    owners: |module| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                null
+            } else {
+                let result = {}
+                let names = Object.getOwnPropertyNames(entry.version)
+                for key in names {
+                    result[key] = entry.owners[key]
+                }
+                result
+            }
+        })
+    }
+
+    contributions: |module| {
+        self._withLock({
+            let entry = module[self.entryKey]
+            if entry == undefined {
+                null
+            } else {
+                entry.contributions
+            }
+        })
+    }
+
+    keys: |module| {
+        self._withLock({
+            let result = []
+            let seen = Object.create(null)
+            let own = Object.getOwnPropertyNames(module)
+            for key in own {
+                seen[key] = true
+                result[result.length] = key
+            }
+            let entry = module[self.entryKey]
+            if entry != undefined {
+                let exported = Object.getOwnPropertyNames(entry.version)
+                for key in exported {
+                    if seen[key] == undefined {
+                        seen[key] = true
+                        result[result.length] = key
+                    }
+                }
+            }
+            result
+        })
+    }
+
+    entries: |module| {
+        self._withLock({
+            let keys = self.keys(module)
+            let result = []
+            for key in keys {
+                result[result.length] = [key, module[key]]
+            }
+            result
+        })
+    }
+
+    isModule: |value| {
+        value != null && value[self.entryKey] != undefined
+    }
+
+    traits: {
+        keys: { globalThis.ModuleRegistry.keys(self) }
+        size: { globalThis.ModuleRegistry.keys(self).length }
         iterator: {
-            let array = self
+            let keys = globalThis.ModuleRegistry.keys(self)
             let index = 0
             {
-                hasNext: { index < array.length }
+                hasNext: { index < keys.length }
                 next: {
-                    if index >= array.length {
+                    if index >= keys.length {
                         return undefined
                     }
-                    let value = array[index]
+                    let value = self[keys[index]]
                     index = index + 1
                     value
                 }
                 nextKeyed: {
-                    if index >= array.length {
+                    if index >= keys.length {
                         return undefined
                     }
-                    let key = index
-                    let value = array[index]
+                    let key = keys[index]
+                    let value = self[key]
                     index = index + 1
                     [key, value]
                 }
             }
         }
+        toString: { "<module " + globalThis.ModuleRegistry.name(self) + ">" }
     }
-    Object.addParent(Array.prototype, "array", ArrayTraits)
-}()
+}
+
+if !Modules.Error {
+    ModuleRegistry._loadFile(_ERROR_PATH)
+}
+if !Modules.Sync {
+    ModuleRegistry._loadFile(_SYNC_PATH)
+}
+ModuleRegistry.require("Error")
+ModuleRegistry.require("Sync")

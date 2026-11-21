@@ -890,7 +890,7 @@ fn thread_park<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
 
 fn thread_nano_time<'a>(_ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let origin = NANO_TIME_ORIGIN.get_or_init(Instant::now);
-    Smi::new(origin.elapsed().as_nanos() as i64).into_tagged()
+    Smi::new(origin.elapsed().as_nanos().max(1) as i64).into_tagged()
 }
 
 fn thread_unpark<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {

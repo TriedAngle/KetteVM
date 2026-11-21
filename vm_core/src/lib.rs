@@ -1216,6 +1216,12 @@ impl Thread {
         self.run_program(program, C::RUNTIME)
     }
 
+    pub fn eval_file<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
+        let program = C::compile(self.vm(), src, bytecode::SourceMode::File)
+            .map_err(ScriptError::from_frontend)?;
+        self.run_program(program, C::RUNTIME)
+    }
+
     pub fn eval_repl<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
         let program = C::compile(self.vm(), src, bytecode::SourceMode::Repl)
             .map_err(ScriptError::from_frontend)?;

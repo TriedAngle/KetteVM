@@ -326,6 +326,38 @@ impl Transition {
         }
     }
 
+    fn fresh_prototype_target<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        parent: impl for<'a> Fn(&'a Heap) -> Tagged<'a, Map>,
+        change: SiblingChange<'s>,
+    ) -> Handle<'s, Map> {
+        let parent_ref = parent(heap);
+        let kind = change.kind(heap, parent_ref.kind());
+        let value_slot_count = parent_ref.value_slot_count();
+        let prototype = change.prototype(heap, scope, parent_ref);
+        let descriptors: Vec<(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>)> = parent_ref
+            .descriptors()
+            .iter()
+            .map(|d| {
+                (
+                    scope.handle(d.name(heap)),
+                    d.flags(),
+                    scope.handle(d.value.get(heap)),
+                )
+            })
+            .collect();
+        heap.allocate_handle::<Map>(
+            MapInit {
+                kind,
+                value_slot_count,
+                descriptors: &descriptors,
+                prototype,
+            },
+            scope,
+        )
+    }
+
     fn grow_slots_and_swap(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -853,7 +885,7 @@ impl Object {
         name: Handle<SlotName>,
         value: Handle<'_, Value>,
     ) -> Result<()> {
-        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, false)
+        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, false, true)
     }
 
     /// Like [`Object::add_parent`], but keeps the existing single prototype.
@@ -866,7 +898,20 @@ impl Object {
         name: Handle<SlotName>,
         value: Handle<'_, Value>,
     ) -> Result<()> {
-        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, true)
+        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, true, true)
+    }
+
+    /// Like [`Object::add_parent_preserving`], without a prototype transition.
+    pub fn add_parent_preserving_uncached(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        name: Handle<SlotName>,
+        value: Handle<'_, Value>,
+    ) -> Result<()> {
+        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, true, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -879,6 +924,7 @@ impl Object {
         name: Handle<SlotName>,
         value: Handle<'_, Value>,
         preserve_existing: bool,
+        cache_transition: bool,
     ) -> Result<()> {
         if !receiver.as_tagged(heap).is_extendable(heap) {
             bail!(vm, heap, state, VmError::NotExtensible);
@@ -924,7 +970,11 @@ impl Object {
             pairs.push(value);
         }
         let pairs = heap.allocate_handle::<FixedArray>(scope.stage_handles(&pairs), scope);
-        Self::set_prototype(vm, heap, state, scope, receiver, pairs.erase())
+        if cache_transition {
+            Self::set_prototype(vm, heap, state, scope, receiver, pairs.erase())
+        } else {
+            Self::set_prototype_uncached(vm, heap, state, scope, receiver, pairs.erase())
+        }
     }
 }
 
@@ -954,6 +1004,30 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: Handle<Object>,
         proto: Handle<Value>,
+    ) -> Result<()> {
+        Self::set_prototype_inner(vm, heap, state, scope, receiver, proto, true)
+    }
+
+    fn set_prototype_uncached(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        proto: Handle<Value>,
+    ) -> Result<()> {
+        Self::set_prototype_inner(vm, heap, state, scope, receiver, proto, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_prototype_inner(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        proto: Handle<Value>,
+        cache_transition: bool,
     ) -> Result<()> {
         let proto_word = proto.as_tagged(heap);
         let known = heap.known();
@@ -1028,12 +1102,21 @@ impl Object {
             }
         }
 
-        let target = Transition::sibling_target(
-            heap,
-            scope,
-            |heap| receiver.as_tagged(heap).map(heap),
-            SiblingChange::Prototype(proto),
-        );
+        let target = if cache_transition {
+            Transition::sibling_target(
+                heap,
+                scope,
+                |heap| receiver.as_tagged(heap).map(heap),
+                SiblingChange::Prototype(proto),
+            )
+        } else {
+            Transition::fresh_prototype_target(
+                heap,
+                scope,
+                |heap| receiver.as_tagged(heap).map(heap),
+                SiblingChange::Prototype(proto),
+            )
+        };
         target.as_tagged(heap).sync_callable_parent(heap);
         if target.as_tagged(heap).is_multi_parent() {
             Prototype::register_multi_parent_closure(heap, scope, target);

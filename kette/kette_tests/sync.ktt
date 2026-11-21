@@ -1,6 +1,12 @@
 // Mutex exclusion across platform threads.
-// Run:  cargo run -q -p vm -- kette/std/sync.ktt kette/kette_tests/sync.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/sync.ktt
 // Check: kette/kette_tests/check.py
+
+let sync = ModuleRegistry.require("Sync")
+let Mutex = sync.Mutex
+let WaitQueue = sync.WaitQueue
+let RecursiveMutex = sync.RecursiveMutex
+let Condition = sync.Condition
 
 Test.assert(Object.isType(Mutex.new(), Mutex), true)
 Test.assert(Object.isType(WaitQueue.new(), WaitQueue), true)

@@ -1,6 +1,13 @@
 // try/catch/throw and assumed-method errors.
-// Run:  cargo run -q -p vm -- kette/std/error.ktt kette/std/collection.ktt kette/kette_tests/exceptions.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/collection.ktt kette/kette_tests/exceptions.ktt
 // Check: kette/kette_tests/check.py
+
+let errors = ModuleRegistry.require("Error")
+let Error = errors.Error
+let ElementDoesNotExist = errors.ElementDoesNotExist
+let IndexOutOfBounds = errors.IndexOutOfBounds
+let IllegalLockState = errors.IllegalLockState
+let UnimplementedError = errors.UnimplementedError
 
 let caught = try {
     throw "boom"

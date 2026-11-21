@@ -14,6 +14,8 @@ impl FunctionId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceMode {
     Script,
+    /// Isolated file unit: local declarations, global fallback.
+    File,
     /// sloppy direct eval: unresolved names become dynamic lookups through
     /// the caller's context chain and top-level vars extend the caller.
     Eval,

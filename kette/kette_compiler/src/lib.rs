@@ -59,10 +59,10 @@ pub fn compile_kette(
 ) -> Result<Program, FrontendError> {
     if !matches!(
         mode,
-        SourceMode::Script | SourceMode::Repl | SourceMode::EvalGlobal
+        SourceMode::Script | SourceMode::File | SourceMode::Repl | SourceMode::EvalGlobal
     ) {
         return Err(FrontendError::compile(
-            "kette: only script, repl, and indirect eval mode are implemented",
+            "kette: only script, file, repl, and indirect eval mode are implemented",
         ));
     }
     let mut parser = Parser::new(Utf8SliceStream::new(source));

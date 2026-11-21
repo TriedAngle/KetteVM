@@ -1,3 +1,11 @@
+let errors = ModuleRegistry.require("Error")
+let ElementDoesNotExist = errors.ElementDoesNotExist
+let IndexOutOfBounds = errors.IndexOutOfBounds
+let UnimplementedError = errors.UnimplementedError
+let ConcurrentModificationError = errors.ConcurrentModificationError
+let NoSuchElementError = errors.NoSuchElementError
+let IllegalStateError = errors.IllegalStateError
+
 let Collection = {
     size: { throw UnimplementedError("size") }
     iterator: { Iter.newWithSource(self) }
@@ -805,3 +813,17 @@ let Iter = {
         it
     }
 }
+
+ModuleRegistry.declare("Collection", |m| {
+    m.Sequence = Sequence
+    m.Iter = Iter
+})
+
+ModuleRegistry.declare("Collection.Traits", |m| {
+    m.Collection = Collection
+    m.MutableCollection = MutableCollection
+    m.Indexable = Indexable
+    m.MutableIndexable = MutableIndexable
+    m.SequenceTraits = SequenceTraits
+    m.IteratorTraits = IteratorTraits
+})

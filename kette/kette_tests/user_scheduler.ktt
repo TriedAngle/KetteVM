@@ -1,6 +1,8 @@
 // A userspace scheduler on a platform thread, sharing data with main.
-// Run:  cargo run -q -p vm -- kette/std/sync.ktt kette/kette_tests/user_scheduler.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/user_scheduler.ktt
 // Check: kette/kette_tests/check.py
+
+let Mutex = ModuleRegistry.require("Sync").Mutex
 
 let guard = Mutex.new()
 

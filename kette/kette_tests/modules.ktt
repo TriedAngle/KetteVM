@@ -1,0 +1,110 @@
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/modules.ktt
+// Check: kette/kette_tests/check.py
+
+let ErrorTraits = ModuleRegistry.require("Error.Traits").ErrorTraits
+
+let math = ModuleRegistry.declare("math", |m| {
+    m.pi = 3
+    m.square = |x| { x * x }
+})
+
+Test.assert(ModuleRegistry.require("math") == math, true)
+Test.assert(math.pi, 3)
+
+ModuleRegistry.declare("math", |m| {
+    m.pi = 4
+    m.cube = |x| { x * x * x }
+})
+
+Test.assert(math.pi, 4)
+Test.assert(math.cube(3), 27)
+Test.assert(math.square == undefined, true)
+
+math.tag = "live"
+ModuleRegistry.declare("math", |m| {
+    m.pi = 5
+})
+Test.assert(math.tag, "live")
+
+ModuleRegistry.extend("math", "stats", |m| {
+    m.mean = |a, b| { (a + b) / 2 }
+})
+ModuleRegistry.declare("math", |m| {
+    m.pi = 6
+})
+Test.assert(math.mean(2, 6), 4)
+Test.assert(ModuleRegistry.owner(math, "mean"), "stats")
+
+ModuleRegistry.extend("math", "stats", |m| {
+    m.total = |a, b| { a + b }
+})
+Test.assert(math.mean == undefined, true)
+Test.assert(math.total(2, 6), 8)
+
+let mutable = ModuleRegistry.declare("mutable", |m| {
+    m.a = 1
+})
+mutable.extra = 2
+Test.assert(ModuleRegistry.remove(mutable, "extra"), true)
+Test.assert(mutable.extra == undefined, true)
+Test.assert(ModuleRegistry.remove(mutable, "extra"), false)
+
+ModuleRegistry.reset("mutable", |m| {
+    m.z = 9
+})
+Test.assert(mutable == ModuleRegistry.require("mutable"), true)
+Test.assert(mutable.a == undefined, true)
+Test.assert(mutable.z, 9)
+
+let base_path = "kette/kette_tests/units/base.ktt"
+let ext_path = "kette/kette_tests/units/ext.ktt"
+
+globalThis.UNIT_REVISION = 1
+ModuleRegistry.loadFile(base_path)
+ModuleRegistry.loadFile(ext_path)
+let unit_math = ModuleRegistry.require("unit.math")
+Test.assert(unit_math.revision, 1)
+Test.assert(unit_math.seen, 1)
+
+globalThis.UNIT_REVISION = 2
+ModuleRegistry.markDirty(base_path)
+let flushed = ModuleRegistry.flushDirty()
+Test.assert(flushed.length, 2)
+Test.assert(unit_math.revision, 2)
+Test.assert(unit_math.seen, 2)
+
+ModuleRegistry.declare("Auto.Math.Vector", |m| {
+    m.square = |x| { x * x }
+})
+Test.assert(Modules.Auto.Math.Vector.square(3), 9)
+Test.assert(
+    Modules.Auto.Math.Vector == ModuleRegistry.require("Auto.Math.Vector"),
+    true
+)
+
+ModuleRegistry.declare("Auto", |m| {
+    m.name = "auto"
+})
+Test.assert(Modules.Auto.Math.Vector.square(4), 16)
+
+ModuleRegistry.reset("Auto", |m| {
+    m.name = "auto-reset"
+})
+Test.assert(Modules.Auto.name, "auto-reset")
+Test.assert(Modules.Auto.Math.Vector.square(5), 25)
+
+ModuleRegistry.declare("get", |m| {
+    m.value = 1
+})
+Test.assert(Modules.get.value, 1)
+Test.assert(ModuleRegistry.get("get").value, 1)
+
+Test.assert(ModuleRegistry.require("Error.Traits").ErrorTraits, ErrorTraits)
+Test.assert(ModuleRegistry.require("Collection").Sequence, Sequence)
+Test.assert(ModuleRegistry.require("Collection.Traits").Collection, Collection)
+Test.assert(ModuleRegistry.require("Functional").Functional, Functional)
+Test.assert(ModuleRegistry.require("Sync").RecursiveMutex != undefined, true)
+Test.assert(Modules.Collection.Sequence, Sequence)
+Test.assert(Modules.Collection.Traits.Collection, Collection)
+Test.assert(Modules.Error.Traits.ErrorTraits, ErrorTraits)
+Test.assert(Modules.Functional.Functional, Functional)

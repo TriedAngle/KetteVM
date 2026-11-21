@@ -46,3 +46,7 @@ let Functional = {
     partial2: |f, a| { |b| { f(a, b) } }
     partial3: |f, a| { |b, c| { f(a, b, c) } }
 }
+
+ModuleRegistry.declare("Functional", |m| {
+    m.Functional = Functional
+})

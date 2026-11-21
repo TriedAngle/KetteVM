@@ -42,15 +42,14 @@ def check_asserts(root: Path, f: Path, runner: Path, std: list[Path]) -> tuple[b
 
 def main() -> None:
     here = Path(__file__).resolve().parent
-    root = here.parent
+    kette = here.parent
+    root = kette.parent
     files = [Path(a) for a in sys.argv[1:]] or sorted(here.glob("*.ktt"))
     runner = here / "test_runner.ktt"
     std = [
-        root / "std" / "startup.ktt",
-        root / "std" / "error.ktt",
-        root / "std" / "collection.ktt",
-        root / "std" / "functional.ktt",
-        root / "std" / "sync.ktt",
+        kette / "std" / "startup.ktt",
+        kette / "std" / "collection.ktt",
+        kette / "std" / "functional.ktt",
     ]
 
     checked = 0

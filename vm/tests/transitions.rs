@@ -62,6 +62,81 @@ fn transition_target<'a>(
 }
 
 #[test]
+fn uncached_parent_swap_does_not_record_pred() {
+    let mut thread = test_vm();
+
+    thread.handle_scope(|thread, scope| {
+        let name_version = intern_name(thread, &scope, "version");
+        let name_a = intern_name(thread, &scope, "a");
+        let root = thread.heap().known().object_initial_map.root_handle();
+
+        let obj = thread
+            .heap()
+            .new_object(&scope, root, HandleSlice::EMPTY)
+            .as_handle(&scope);
+        let p1 = thread
+            .heap()
+            .new_object(&scope, root, HandleSlice::EMPTY)
+            .as_handle(&scope);
+        let p2 = thread
+            .heap()
+            .new_object(&scope, root, HandleSlice::EMPTY)
+            .as_handle(&scope);
+        add_prop(thread, &scope, p1, name_a, 1);
+        add_prop(thread, &scope, p2, name_a, 2);
+
+        {
+            let (vm, heap, state) = thread.split();
+            Object::add_parent_preserving_uncached(
+                vm,
+                heap,
+                state,
+                &scope,
+                obj,
+                name_version,
+                p1.erase(),
+            )
+            .unwrap();
+        }
+        {
+            let heap = thread.heap();
+            let obj_ref = obj.as_tagged(heap);
+            assert!(
+                obj_ref.map(heap).pred(heap).is_none(),
+                "uncached parent swap must not chain maps through pred"
+            );
+            assert_eq!(
+                Object::get_data_property(heap, &scope, obj.erase(), name_a.erase()).to_i64(),
+                Some(1)
+            );
+        }
+
+        {
+            let (vm, heap, state) = thread.split();
+            Object::add_parent_preserving_uncached(
+                vm,
+                heap,
+                state,
+                &scope,
+                obj,
+                name_version,
+                p2.erase(),
+            )
+            .unwrap();
+        }
+        {
+            let heap = thread.heap();
+            let obj_ref = obj.as_tagged(heap);
+            assert!(obj_ref.map(heap).pred(heap).is_none());
+            assert_eq!(
+                Object::get_data_property(heap, &scope, obj.erase(), name_a.erase()).to_i64(),
+                Some(2)
+            );
+        }
+    });
+}
+
+#[test]
 fn append_records_pred_and_shares_transitions() {
     let mut thread = test_vm();
 

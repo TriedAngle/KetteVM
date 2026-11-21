@@ -13,6 +13,8 @@ pub struct KetteRuntime {
     pub install_accessor: NativeIndex,
     /// Id of the native that shallow-clones an object.
     pub clone: NativeIndex,
+    pub add_parent_uncached: NativeIndex,
+    pub delete_property: NativeIndex,
 }
 
 impl EdgeVisitable for KetteRuntime {
@@ -26,10 +28,14 @@ impl Runtime for KetteRuntime {
         state.declare_globals = vm.register_native(declare_globals);
         state.install_accessor = vm.register_native(install_accessor);
         state.clone = vm.register_native(object_clone);
+        state.add_parent_uncached = vm.register_native(object_add_parent_uncached);
+        state.delete_property = vm.register_native(object_delete_property);
         let clone = state.clone;
         let print = vm.register_native(console_print);
         let is_type = vm.register_native(object_is_type);
         let add_parent = vm.register_native(object_add_parent);
+        let add_parent_uncached = state.add_parent_uncached;
+        let delete_property = state.delete_property;
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let (thread_vm, heap, thread_state) = thread.split();
@@ -83,6 +89,24 @@ impl Runtime for KetteRuntime {
                         "addParent",
                         add_parent,
                         3,
+                    );
+                    Object::add_method(
+                        thread_vm,
+                        heap,
+                        &scope,
+                        object_ctor,
+                        "addParentUncached",
+                        add_parent_uncached,
+                        3,
+                    );
+                    Object::add_method(
+                        thread_vm,
+                        heap,
+                        &scope,
+                        object_ctor,
+                        "deleteProperty",
+                        delete_property,
+                        2,
                     );
                 }
             }
@@ -192,6 +216,63 @@ fn object_add_parent<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> T
             Object::add_parent_preserving(vm, heap, state, &scope, target, key, parent)
         );
         target.as_tagged(heap).erase()
+    })
+}
+
+/// `Object.addParentUncached(object, name, parent)`
+/// Replaces a parent without caching a prototype transition.
+fn object_add_parent_uncached<'a>(
+    ctx: HostCtx<'a>,
+    _call: CallInfo<'_>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 0);
+    let raw_key = args.get_handle(heap, 1);
+    let parent = args.get_handle(heap, 2);
+    state.handle_scope(|scope| {
+        let Some(target) = target.as_tagged(heap).as_heap_object() else {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        };
+        let target = scope.handle(target);
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
+        let key = scope.handle(key);
+        rt_try!(
+            heap,
+            Object::add_parent_preserving_uncached(vm, heap, state, &scope, target, key, parent)
+        );
+        target.as_tagged(heap).erase()
+    })
+}
+
+/// `Object.deleteProperty(object, name)`
+/// Ordinary `[[Delete]]`.
+fn object_delete_property<'a>(
+    ctx: HostCtx<'a>,
+    _call: CallInfo<'_>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 0);
+    let raw_key = args.get_handle(heap, 1);
+    state.handle_scope(|scope| {
+        let target = scope.handle(target.as_tagged(heap).erase());
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
+        let key = scope.handle(key);
+        let ok = rt_try!(
+            heap,
+            Object::delete_property(vm, heap, state, target.erase(), key.erase())
+        );
+        let known = heap.known();
+        if ok {
+            known.true_object.get(heap).erase()
+        } else {
+            known.false_object.get(heap).erase()
+        }
     })
 }
 
