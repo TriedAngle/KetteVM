@@ -109,7 +109,7 @@ pub use objects::{
     info_mode, object_kind, object_layout, string_content_hash, string_content_hash_units,
     visit_object,
 };
-pub use prototype::{Prototype, PrototypeRegistry};
+pub use prototype::{Prototype, PrototypeRegistry, ShapeChange};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};

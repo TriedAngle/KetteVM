@@ -35,12 +35,12 @@ fn script_register_count(src: &str) -> u32 {
 }
 
 #[test]
-fn array_literals_recycle_the_element_temp() {
-    // ctx save + completion + array + one index temp
+fn array_literals_need_no_index_register() {
+    // ctx save + completion + array; the element index is an immediate
     assert_eq!(
         script_register_count("[1, 2, 3, 4, 5, 6, 7, 8];"),
-        4,
-        "array elements reuse one index register"
+        3,
+        "array elements carry their index as an immediate"
     );
 }
 

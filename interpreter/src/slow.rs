@@ -1,5 +1,5 @@
 use crate::{FloatReg, Ops, Regs, RootsArg};
-use bytecode::Opcode;
+use bytecode::{Opcode, PropertyFlags};
 #[cfg(feature = "fast")]
 use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
@@ -7,9 +7,10 @@ use handler_derive::handler_match as handler;
 use vm_core::{
     AccessorInfo, AccessorPair, Args, CallInfo, Compare, ContextInit, ContextObject, Convert,
     DenseString, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
-    Object, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, StringRef,
-    Tagged, ThreadState, VM, Value, VmError, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind,
-    lookup::Hit, lookup::Lookup, proxy::Proxy, raise, raise_runtime, rt_try,
+    Object, PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi,
+    StoreSemantics, StringRef, Tagged, ThreadState, VM, Value, VmError, ic::InlineCache,
+    ic::StoreHit, ic::StoreOutcomeKind, lookup::Hit, lookup::Lookup, proxy::Proxy, raise,
+    raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -1656,6 +1657,189 @@ pub fn slow_store_named(frame: Frame) {
         )
     });
     frame.set_acc(v);
+    reenter!(pc)
+}
+
+fn define_descriptor<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    value: Handle<'_, Value>,
+    flags: u32,
+) -> PartialDescriptor<'s> {
+    let enumerable = flags & PropertyFlags::DontEnum.bits() == 0;
+    let configurable = flags & PropertyFlags::DontDelete.bits() == 0;
+    if flags & PropertyFlags::Accessor.bits() != 0 {
+        let pair = value
+            .as_tagged(heap)
+            .get_as::<AccessorPair>(heap)
+            .expect("accessor descriptor holds a pair");
+        PartialDescriptor {
+            value: None,
+            get: Some(scope.handle(pair.get.get(heap))),
+            set: Some(scope.handle(pair.set.get(heap))),
+            writable: None,
+            enumerable: Some(enumerable),
+            configurable: Some(configurable),
+        }
+    } else {
+        PartialDescriptor {
+            value: Some(scope.handle(value.as_tagged(heap))),
+            get: None,
+            set: None,
+            writable: Some(flags & PropertyFlags::ReadOnly.bits() == 0),
+            enumerable: Some(enumerable),
+            configurable: Some(configurable),
+        }
+    }
+}
+
+#[handler(DefineNamedOwnProperty)]
+#[cold]
+pub fn slow_define_named_own_property(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<1>();
+    let flags = frame.unsigned::<2>() as u32;
+    let fb = frame.unsigned::<3>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let name = scope.handle(
+            state
+                .stack()
+                .frame_header(base)
+                .constants(heap)
+                .at(heap, name_idx)
+                .erase()
+                .as_name(),
+        );
+        let feedback = state
+            .stack()
+            .frame_header(base)
+            .feedback(heap)
+            .map(|v| scope.handle(v));
+        if InlineCache::try_define_own(heap, &scope, feedback, fb, recv, name, value) {
+            return value.as_tagged(heap).erase();
+        }
+        let prev_map = recv
+            .as_tagged(heap)
+            .as_heap_object()
+            .map(|o| scope.handle(o.map(heap)));
+        let name_value = scope.handle(name.as_tagged(heap).erase());
+        let partial = define_descriptor(heap, &scope, value, flags);
+        if let Err(e) =
+            Object::define_property_or_throw(vm, heap, state, &scope, recv, name_value, partial)
+        {
+            return raise_runtime(heap, e);
+        }
+        if let Some(prev_map) = prev_map {
+            InlineCache::update_define_own(heap, &scope, feedback, fb, recv, name, prev_map);
+        }
+        value.as_tagged(heap).erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(DefineKeyedOwnProperty)]
+#[cold]
+pub fn slow_define_keyed_own_property(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let flags = frame.unsigned::<2>() as u32;
+    let fb = frame.unsigned::<3>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
+        let feedback = state
+            .stack()
+            .frame_header(base)
+            .feedback(heap)
+            .map(|v| scope.handle(v));
+        let (element_index, is_name) = match key.as_tagged(heap).erase().classify_key(heap) {
+            Some(Key::Element(index)) => (Some(index), false),
+            Some(Key::Name(_)) => (None, true),
+            None => (None, false),
+        };
+        let array_element = element_index.filter(|_| {
+            recv.as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|o| o.is_array_exotic(heap))
+        });
+        if is_name && InlineCache::try_define_own(heap, &scope, feedback, fb, recv, key, value) {
+            return value.as_tagged(heap).erase();
+        }
+        let prev_map = recv
+            .as_tagged(heap)
+            .as_heap_object()
+            .map(|o| scope.handle(o.map(heap)));
+        let grew = array_element.is_some_and(|index| {
+            recv.as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|o| index >= o.length())
+        });
+        let key_value = scope.handle(key.as_tagged(heap).erase());
+        let partial = define_descriptor(heap, &scope, value, flags);
+        if let Err(e) =
+            Object::define_property_or_throw(vm, heap, state, &scope, recv, key_value, partial)
+        {
+            return raise_runtime(heap, e);
+        }
+        if array_element.is_some() {
+            InlineCache::update_store_element(heap, &scope, feedback, fb, Some(recv), grew);
+        } else if is_name {
+            if let Some(prev_map) = prev_map {
+                InlineCache::update_define_own(heap, &scope, feedback, fb, recv, key, prev_map);
+            }
+        }
+        value.as_tagged(heap).erase()
+    });
+    frame.set_acc(val);
+    reenter!(pc)
+}
+
+#[handler(StoreInArrayLiteral)]
+#[cold]
+pub fn slow_store_in_array_literal(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let index = frame.unsigned::<1>();
+    let fb = frame.unsigned::<2>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let val = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let feedback = state
+            .stack()
+            .frame_header(base)
+            .feedback(heap)
+            .map(|v| scope.handle(v));
+        let grew = recv
+            .as_tagged(heap)
+            .as_heap_object()
+            .is_some_and(|o| o.is_array_exotic(heap) && index >= o.length());
+        let key = scope.handle(Smi::new(index as i64).into_tagged());
+        rt_try!(
+            heap,
+            Object::create_data_property_or_throw(vm, heap, state, &scope, recv, key, value)
+        );
+        InlineCache::update_store_element(heap, &scope, feedback, fb, Some(recv), grew);
+        value.as_tagged(heap).erase()
+    });
+    frame.set_acc(val);
     reenter!(pc)
 }
 

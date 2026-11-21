@@ -2,6 +2,11 @@
 // Run:  cargo run -q -p vm -- kette/std/sync.ktt kette/kette_tests/sync.ktt
 // Check: kette/kette_tests/check.py
 
+Test.assert(Object.isType(Mutex.new(), Mutex), true)
+Test.assert(Object.isType(WaitQueue.new(), WaitQueue), true)
+Test.assert(Object.isType(RecursiveMutex.new(), RecursiveMutex), true)
+Test.assert(Object.isType(Condition.new(), Condition), true)
+
 let m = Mutex.new()
 let counter = 0
 let worker = {

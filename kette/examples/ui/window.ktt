@@ -129,7 +129,7 @@ let transcript = Node.Window("Transcript", 240, 180, 380, 240, transcript_body)
 
 space.root.addChild(inspector)
 space.root.addChild(transcript)
-Space.frame(space)
+space.frame()
 
 let mouse = FFI.array(FFI.f32, 2).new()
 let window_size = FFI.array(FFI.i32, 2).new()
@@ -278,7 +278,7 @@ while glfw.shouldClose(window) == 0 {
         tgpu.swapchainExtent(swapchain, extent)
         tgpu.check()
 
-        let ops = Space.frame(space)
+        let ops = space.frame()
         let count = fill_instances(ops)
         if count > 0 {
             tgpu.bufferWrite(
@@ -321,7 +321,7 @@ while glfw.shouldClose(window) == 0 {
         tgpu.commandBufferDestroy(command)
         tgpu.check()
 
-        Space.tick(space, 16)
+        space.tick(16)
     }
 }
 

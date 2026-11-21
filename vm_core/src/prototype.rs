@@ -30,6 +30,20 @@ impl Default for PrototypeRegistry {
 
 pub struct Prototype;
 
+/// Registry work requested by a shape change.
+#[derive(Clone, Copy, Default)]
+pub struct ShapeChange {
+    /// Also propagate the callable-parent hint to dependent parent-list maps.
+    pub propagate_callable_parent: bool,
+}
+
+impl ShapeChange {
+    /// Invalidate cached handlers only.
+    pub const INVALIDATE_ONLY: Self = Self {
+        propagate_callable_parent: false,
+    };
+}
+
 impl Prototype {
     pub fn try_get_validity_cell_holder_map<'a>(
         heap: &'a Heap,
@@ -48,21 +62,17 @@ impl Prototype {
         scope: &'s HandleScope<'_>,
         map: Handle<'s, Map>,
     ) -> Option<Handle<'s, Cell>> {
-        // Self-style multiple parents: no single prototype to hang the cell
-        // on, so the receiver map owns the cell and every map in its parent
-        // closure is registered as a dependent of it.
-        if map
-            .as_tagged(heap)
-            .prototype
-            .get(heap)
-            .get_as::<FixedArray>(heap)
-            .is_some()
-        {
+        // Multi-parent maps own one cell covering the full parent closure.
+        if map.as_tagged(heap).is_multi_parent() {
             return Self::get_or_create_multi_parent_cell(heap, scope, map);
         }
         let holder = Self::try_get_validity_cell_holder_map(heap, map.as_tagged(heap))?;
         let holder = scope.handle(holder);
         holder.as_tagged(heap).mark_prototype(heap);
+        // Multi-parent holders keep one closure-wide cell.
+        if holder.as_tagged(heap).is_multi_parent() {
+            return Self::get_or_create_multi_parent_cell(heap, scope, holder);
+        }
         register_prototype_user_chain(heap, scope, holder);
 
         if let Some(cell) = holder.as_tagged(heap).published_validity_cell(heap)
@@ -83,19 +93,21 @@ impl Prototype {
         Some(cell)
     }
 
-    /// Validity cell for a map whose prototype is a Self-style parent list.
-    /// The cell is published on the receiver map itself and registered as a
-    /// dependent of *every* map in the receiver's transitive parent closure,
-    /// so any shape change anywhere in that closure clears it.
+    /// Validity cell for a multi-parent map, registered across its full
+    /// parent closure.
     fn get_or_create_multi_parent_cell<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         map: Handle<'s, Map>,
     ) -> Option<Handle<'s, Cell>> {
+        // Cells are only published after the full closure is registered.
         if let Some(cell) = map.as_tagged(heap).published_validity_cell(heap)
             && cell.is_valid(heap)
         {
             return Some(cell.as_handle(scope));
+        }
+        if !Self::register_multi_parent_closure(heap, scope, map) {
+            return None;
         }
 
         let cell = heap.allocate_handle::<Cell>(
@@ -104,10 +116,21 @@ impl Prototype {
             },
             scope,
         );
+        map.as_tagged(heap)
+            .set_validity_cell(heap, cell.as_tagged(heap));
+        Some(cell)
+    }
 
+    /// Register `map` with its full parent closure; `false` if a parent
+    /// is untrackable.
+    pub fn register_multi_parent_closure<'s>(
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        map: Handle<'s, Map>,
+    ) -> bool {
         let mut parents: Vec<Handle<'s, Map>> = Vec::new();
         if !collect_parent_maps(heap, scope, map.as_tagged(heap), &mut parents) {
-            return None;
+            return false;
         }
         let mut visited: Vec<usize> = Vec::new();
         let mut i = 0;
@@ -121,15 +144,12 @@ impl Prototype {
             visited.push(id);
             parent.as_tagged(heap).mark_prototype(heap);
             let info = Self::get_or_create_prototype_info(heap, scope, parent);
-            append_prototype_child(heap, scope, info, cell, PrototypeInfo::UNREGISTERED);
+            append_prototype_child(heap, scope, info, map, PrototypeInfo::UNREGISTERED);
             if !collect_parent_maps(heap, scope, parent.as_tagged(heap), &mut parents) {
-                return None;
+                return false;
             }
         }
-
-        map.as_tagged(heap)
-            .set_validity_cell(heap, cell.as_tagged(heap));
-        Some(cell)
+        true
     }
 
     pub fn ensure_store_transition_validity_cell<'s>(
@@ -175,11 +195,14 @@ impl Prototype {
         }
     }
 
-    pub fn shape_changed(heap: &Heap, old_map: Tagged<'_, Map>) {
+    pub fn shape_changed(heap: &Heap, old_map: Tagged<'_, Map>, change: ShapeChange) {
         if !old_map.is_prototype() {
             return;
         }
         invalidate_prototype_chains(heap, old_map);
+        if change.propagate_callable_parent {
+            propagate_callable_parent(heap, old_map);
+        }
     }
 
     #[inline]
@@ -230,7 +253,10 @@ fn collect_parent_maps<'s>(
     out: &mut Vec<Handle<'s, Map>>,
 ) -> bool {
     let proto = map.prototype.get(heap);
-    if let Some(pairs) = proto.get_as::<FixedArray>(heap) {
+    if map.is_multi_parent() {
+        let Some(pairs) = proto.get_as::<FixedArray>(heap) else {
+            return false;
+        };
         let mut i = 1;
         while i < pairs.len() {
             if !push_parent_map(heap, scope, pairs.at(heap, i), out) {
@@ -312,9 +338,8 @@ fn users_capacity_for(len: usize) -> usize {
     len + (len / 2).max(2)
 }
 
-/// Append `child` (a user map, or a validity cell for multi-parent maps) to
-/// `info`'s registry and return its slot. `hint` is the caller's cached slot,
-/// validated by identity.
+/// Append dependent map `child` to `info`'s registry and return its slot.
+/// `hint` is the caller's cached slot, validated by identity.
 ///
 /// The lock is never held across an allocation: a mutator waiting for it
 /// could not reach a safepoint.
@@ -485,39 +510,56 @@ fn invalidate_one_prototype_validity_cell(heap: &Heap, map: Tagged<'_, Map>) {
     }
 }
 
-fn invalidate_prototype_chains(heap: &Heap, map: Tagged<'_, Map>) {
-    let mut current = Some(map);
-    let mut next: Option<Tagged<'_, Map>> = None;
-    while let Some(m) = current {
-        invalidate_one_prototype_validity_cell(heap, m);
-
-        let Some(info) = m.try_get_prototype_info(heap) else {
-            return;
-        };
-        let Some(users) = info.prototype_users(heap) else {
-            return;
-        };
-        for i in 0..users.len() {
-            let Some(child) = users.element_slot(i).get(heap).as_strong() else {
-                continue;
-            };
-            // Multi-parent maps register their own validity cell (with an
-            // already-complete closure) instead of a map to recurse into.
-            if let Some(cell) = child.get_as::<Cell>(heap) {
-                if cell.is_valid(heap) {
-                    cell.clear();
-                }
-                continue;
-            }
-            let Some(user_map) = child.get_as::<Map>(heap) else {
-                continue;
-            };
-            if next.is_none() {
-                next = Some(user_map);
-            } else {
-                invalidate_prototype_chains(heap, user_map);
-            }
-        }
-        current = next.take();
+/// Walk dependent maps; multi-parent maps are terminal because they cover
+/// their whole closure.
+fn walk_dependent_maps(
+    heap: &Heap,
+    map: Tagged<'_, Map>,
+    path: &mut Vec<usize>,
+    visit: &mut impl FnMut(Tagged<'_, Map>, bool),
+) {
+    let id = map.raw_addr() as usize;
+    if path.contains(&id) {
+        return;
     }
+    let Some(info) = map.try_get_prototype_info(heap) else {
+        return;
+    };
+    let Some(users) = info.prototype_users(heap) else {
+        return;
+    };
+    path.push(id);
+    for i in 0..users.len() {
+        let Some(child) = users.element_slot(i).get(heap).as_strong() else {
+            continue;
+        };
+        let Some(user_map) = child.get_as::<Map>(heap) else {
+            continue;
+        };
+        let multi_parent = user_map.is_multi_parent();
+        visit(user_map, multi_parent);
+        if !multi_parent {
+            walk_dependent_maps(heap, user_map, path, visit);
+        }
+    }
+    path.pop();
+}
+
+fn invalidate_prototype_chains(heap: &Heap, map: Tagged<'_, Map>) {
+    invalidate_one_prototype_validity_cell(heap, map);
+    let mut path = Vec::new();
+    walk_dependent_maps(heap, map, &mut path, &mut |user_map, _multi_parent| {
+        // One clear per dependent map; a multi-parent cell covers its closure.
+        invalidate_one_prototype_validity_cell(heap, user_map);
+    });
+}
+
+/// Mark dependent parent-list maps after an ancestor becomes callable.
+fn propagate_callable_parent(heap: &Heap, map: Tagged<'_, Map>) {
+    let mut path = Vec::new();
+    walk_dependent_maps(heap, map, &mut path, &mut |user_map, multi_parent| {
+        if multi_parent {
+            user_map.mark_callable_parent(heap);
+        }
+    });
 }

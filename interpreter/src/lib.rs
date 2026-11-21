@@ -730,6 +730,100 @@ fn op_add_parent(frame: Frame) {
     tail!(slow_add_parent)
 }
 
+#[handler(DefineNamedOwnProperty)]
+fn op_define_named_own_property(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let name_idx = frame.unsigned::<1>();
+    let fb = frame.unsigned::<3>();
+    {
+        let heap = frame.ctx().heap();
+        let recv = frame.regs().get(frame.signed::<0>(), heap);
+        let name = frame.ctx().constants_ref(heap).at(heap, name_idx).as_name();
+        if InlineCache::try_store_fast(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            name,
+            frame.acc(),
+        ) {
+            next!()
+        }
+    }
+    let state = frame.ctx().state();
+    let (hit, val) = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let value = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let name = scope.handle(
+            state
+                .stack()
+                .frame_header(base)
+                .constants(heap)
+                .at(heap, name_idx)
+                .erase()
+                .as_name(),
+        );
+        let feedback = state
+            .stack()
+            .frame_header(base)
+            .feedback(heap)
+            .map(|v| scope.handle(v));
+        let hit = InlineCache::try_define_own(heap, &scope, feedback, fb, recv, name, value);
+        (hit, value.as_tagged(heap).erase())
+    });
+    frame.set_acc(val);
+    if hit {
+        reenter!(pc)
+    } else {
+        tail!(slow_define_named_own_property)
+    }
+}
+
+#[handler(DefineKeyedOwnProperty)]
+fn op_define_keyed_own_property(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let key = frame.regs().get(frame.signed::<1>(), heap);
+    let fb = frame.unsigned::<3>();
+    if let Some(index) = key.to_i64()
+        && index >= 0
+        && let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            index as usize,
+            frame.acc(),
+        )
+    {
+        frame.set_acc(v);
+        next!()
+    }
+    tail!(slow_define_keyed_own_property)
+}
+
+#[handler(StoreInArrayLiteral)]
+fn op_store_in_array_literal(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let array = frame.regs().get(frame.signed::<0>(), heap);
+    let index = frame.unsigned::<1>();
+    let fb = frame.unsigned::<2>();
+    if let Some(v) = InlineCache::try_store_element(
+        heap,
+        frame.ctx().feedback_ref(heap),
+        fb,
+        array,
+        index,
+        frame.acc(),
+    ) {
+        frame.set_acc(v);
+        next!()
+    }
+    tail!(slow_store_in_array_literal)
+}
+
 // --- arithmetic ---
 
 #[handler(Add)]

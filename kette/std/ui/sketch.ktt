@@ -19,7 +19,7 @@ let OP_SHADOW = 4
 
 let rgb = |r, g, b| { r * 65536 + g * 256 + b }
 
-// One map for every node: Node is both prototype and type. Kind data lives in `data`.
+// Node is the type; NodeTraits holds behavior. Kind data lives in `data`.
 let NodeTraits = {
     new: |kind| {
         let n = self.clone()
@@ -550,22 +550,22 @@ let Windows = {
     }
 }
 
-let Space = {
+let SpaceTraits = {
     new: |w, h| {
         let root = Node.new(K_BOX)
         root.w = w
         root.h = h
         root.color = rgb(32, 32, 36)
-        let s = {
-            root: root
-            list: []
-            time: 0
-            needsFrame: 1
-            layoutDirty: []
-            paintDirty: []
-            measures: 0
-            paintNodes: 0
-        }
+        let s = self.clone()
+        s.root = root
+        s.list = []
+        s.owner = Thread.current()
+        s.time = 0
+        s.needsFrame = 1
+        s.layoutDirty = []
+        s.paintDirty = []
+        s.measures = 0
+        s.paintNodes = 0
         root.space = s
         root.layoutQueued = 1
         root.paintQueued = 1
@@ -574,14 +574,14 @@ let Space = {
         s
     }
 
-    request: |s| {
-        s.needsFrame = 1
-        s
+    request: {
+        self.needsFrame = 1
+        self
     }
 
-    tick: |s, ms| {
-        s.time = s.time + ms
-        s
+    tick: |ms| {
+        self.time = self.time + ms
+        self
     }
 
     hasAncestorIn: |n, list| {
@@ -620,31 +620,31 @@ let Space = {
         }
     }
 
-    clearPaintQueue: |s| {
+    clearPaintQueue: {
         let i = 0
-        while i < s.paintDirty.length {
-            s.paintDirty[i].paintQueued = 0
+        while i < self.paintDirty.length {
+            self.paintDirty[i].paintQueued = 0
             i = i + 1
         }
-        s.paintDirty = []
+        self.paintDirty = []
     }
 
-    frame: |s| {
-        if s.needsFrame == 0 && s.layoutDirty.length == 0 && s.paintDirty.length == 0 {
-            return s.list
+    frame: {
+        if self.needsFrame == 0 && self.layoutDirty.length == 0 && self.paintDirty.length == 0 {
+            return self.list
         }
 
         let passes = 0
-        while s.layoutDirty.length > 0 && passes < 100 {
-            let queue = s.layoutDirty
-            s.layoutDirty = []
+        while self.layoutDirty.length > 0 && passes < 100 {
+            let queue = self.layoutDirty
+            self.layoutDirty = []
             let roots = self.extractRoots(queue)
             let i = 0
             while i < roots.length {
                 let r = roots[i]
                 r.layoutQueued = 0
                 if r.dirtyLayout == 1 {
-                    if r == s.root {
+                    if r == self.root {
                         Layout.run(r, r.w, r.h)
                     } else {
                         Layout.measure(r, r.w, r.h)
@@ -658,16 +658,29 @@ let Space = {
             if passes == 50 { print("ui: 50 layout passes") }
         }
 
-        if s.paintDirty.length > 0 || s.root.dirtyPaint == 1 {
-            s.list = []
-            Paint.node(s.root, 0, 0, s.list)
-            s.root.dirtyPaint = 0
-            self.clearPaintQueue(s)
+        if self.paintDirty.length > 0 || self.root.dirtyPaint == 1 {
+            self.list = []
+            Paint.node(self.root, 0, 0, self.list)
+            self.root.dirtyPaint = 0
+            self.clearPaintQueue()
         }
 
-        s.needsFrame = 0
-        s.list
+        self.needsFrame = 0
+        self.list
     }
+}
+
+let Space = {
+    traits*: SpaceTraits
+    root: null
+    list: null
+    owner: null
+    time: 0
+    needsFrame: 0
+    layoutDirty: null
+    paintDirty: null
+    measures: 0
+    paintNodes: 0
 }
 
 let Dump = {
@@ -711,33 +724,31 @@ let Dump = {
     }
 }
 
-let Term = {
+let TermTraits = {
     ramp: [" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"]
 
     new: |sceneW, sceneH, cols, rows, mode| {
-        let cells = []
-        let colors = []
+        let c = self.clone()
+        c.sceneW = sceneW
+        c.sceneH = sceneH
+        c.cols = cols
+        c.rows = rows
+        c.mode = mode
+        c.cells = []
+        c.colors = []
         let i = 0
         while i < cols * rows {
-            cells.push(" ")
-            colors.push(rgb(0, 0, 0))
+            c.cells.push(" ")
+            c.colors.push(rgb(0, 0, 0))
             i = i + 1
         }
-        {
-            sceneW: sceneW
-            sceneH: sceneH
-            cols: cols
-            rows: rows
-            mode: mode
-            cells: cells
-            colors: colors
-            stack: []
-            depth: 0
-            clipX: 0
-            clipY: 0
-            clipW: sceneW
-            clipH: sceneH
-        }
+        c.stack = []
+        c.depth = 0
+        c.clipX = 0
+        c.clipY = 0
+        c.clipW = sceneW
+        c.clipH = sceneH
+        c
     }
 
     render: |ops, sceneW, sceneH, cols, rows, mode| {
@@ -746,32 +757,32 @@ let Term = {
         while i < ops.length {
             let op = ops[i]
             if op == OP_RECT {
-                self.rect(c, ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5])
+                c.rect(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5])
                 i = i + 6
             } else if op == OP_SHADOW {
                 i = i + 6
             } else if op == OP_CLIP {
-                self.clip(c, ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4])
+                c.clip(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4])
                 i = i + 5
             } else if op == OP_CLIP_POP {
-                self.pop(c)
+                c.pop()
                 i = i + 1
             } else {
                 i = i + 1
             }
         }
-        self.dump(c)
+        c.dump()
     }
 
-    rect: |c, x, y, w, h, color| {
-        let x0 = Math.floor(x * c.cols / c.sceneW)
-        let x1 = Math.floor((x + w) * c.cols / c.sceneW)
-        let y0 = Math.floor(y * c.rows / c.sceneH)
-        let y1 = Math.floor((y + h) * c.rows / c.sceneH)
-        let cx0 = Math.floor(c.clipX * c.cols / c.sceneW)
-        let cx1 = Math.floor((c.clipX + c.clipW) * c.cols / c.sceneW)
-        let cy0 = Math.floor(c.clipY * c.rows / c.sceneH)
-        let cy1 = Math.floor((c.clipY + c.clipH) * c.rows / c.sceneH)
+    rect: |x, y, w, h, color| {
+        let x0 = Math.floor(x * self.cols / self.sceneW)
+        let x1 = Math.floor((x + w) * self.cols / self.sceneW)
+        let y0 = Math.floor(y * self.rows / self.sceneH)
+        let y1 = Math.floor((y + h) * self.rows / self.sceneH)
+        let cx0 = Math.floor(self.clipX * self.cols / self.sceneW)
+        let cx1 = Math.floor((self.clipX + self.clipW) * self.cols / self.sceneW)
+        let cy0 = Math.floor(self.clipY * self.rows / self.sceneH)
+        let cy1 = Math.floor((self.clipY + self.clipH) * self.rows / self.sceneH)
         if x0 < cx0 { x0 = cx0 }
         if y0 < cy0 { y0 = cy0 }
         if x1 > cx1 { x1 = cx1 }
@@ -780,8 +791,8 @@ let Term = {
         if y1 == y0 { y1 = y0 + 1 }
         if x0 < 0 { x0 = 0 }
         if y0 < 0 { y0 = 0 }
-        if x1 > c.cols { x1 = c.cols }
-        if y1 > c.rows { y1 = c.rows }
+        if x1 > self.cols { x1 = self.cols }
+        if y1 > self.rows { y1 = self.rows }
         if x1 > x0 && y1 > y0 {
             let r = Math.floor(color / 65536)
             let g = Math.floor(color / 256) - r * 256
@@ -795,9 +806,9 @@ let Term = {
             while yy < y1 {
                 let xx = x0
                 while xx < x1 {
-                    let at = yy * c.cols + xx
-                    c.cells[at] = ch
-                    c.colors[at] = color
+                    let at = yy * self.cols + xx
+                    self.cells[at] = ch
+                    self.colors[at] = color
                     xx = xx + 1
                 }
                 yy = yy + 1
@@ -805,42 +816,42 @@ let Term = {
         }
     }
 
-    clip: |c, x, y, w, h| {
-        let at = c.depth * 4
-        c.stack[at] = c.clipX
-        c.stack[at + 1] = c.clipY
-        c.stack[at + 2] = c.clipW
-        c.stack[at + 3] = c.clipH
-        c.depth = c.depth + 1
-        let nx = if x > c.clipX { x } else { c.clipX }
-        let ny = if y > c.clipY { y } else { c.clipY }
-        let nr = if x + w < c.clipX + c.clipW { x + w } else { c.clipX + c.clipW }
-        let nb = if y + h < c.clipY + c.clipH { y + h } else { c.clipY + c.clipH }
-        c.clipX = nx
-        c.clipY = ny
-        c.clipW = if nr > nx { nr - nx } else { 0 }
-        c.clipH = if nb > ny { nb - ny } else { 0 }
+    clip: |x, y, w, h| {
+        let at = self.depth * 4
+        self.stack[at] = self.clipX
+        self.stack[at + 1] = self.clipY
+        self.stack[at + 2] = self.clipW
+        self.stack[at + 3] = self.clipH
+        self.depth = self.depth + 1
+        let nx = if x > self.clipX { x } else { self.clipX }
+        let ny = if y > self.clipY { y } else { self.clipY }
+        let nr = if x + w < self.clipX + self.clipW { x + w } else { self.clipX + self.clipW }
+        let nb = if y + h < self.clipY + self.clipH { y + h } else { self.clipY + self.clipH }
+        self.clipX = nx
+        self.clipY = ny
+        self.clipW = if nr > nx { nr - nx } else { 0 }
+        self.clipH = if nb > ny { nb - ny } else { 0 }
     }
 
-    pop: |c| {
-        if c.depth > 0 {
-            c.depth = c.depth - 1
-            let at = c.depth * 4
-            c.clipX = c.stack[at]
-            c.clipY = c.stack[at + 1]
-            c.clipW = c.stack[at + 2]
-            c.clipH = c.stack[at + 3]
+    pop: {
+        if self.depth > 0 {
+            self.depth = self.depth - 1
+            let at = self.depth * 4
+            self.clipX = self.stack[at]
+            self.clipY = self.stack[at + 1]
+            self.clipW = self.stack[at + 2]
+            self.clipH = self.stack[at + 3]
         }
     }
 
-    dump: |c| {
-        if c.mode == 2 {
+    dump: {
+        if self.mode == 2 {
             let y = 0
-            while y < c.rows {
+            while y < self.rows {
                 let line = ""
                 let x = 0
-                while x < c.cols {
-                    let color = c.colors[y * c.cols + x]
+                while x < self.cols {
+                    let color = self.colors[y * self.cols + x]
                     let r = Math.floor(color / 65536)
                     let g = Math.floor(color / 256) - r * 256
                     let b = color - r * 65536 - g * 256
@@ -852,11 +863,11 @@ let Term = {
             }
         } else {
             let y = 0
-            while y < c.rows {
+            while y < self.rows {
                 let line = ""
                 let x = 0
-                while x < c.cols {
-                    line = line + c.cells[y * c.cols + x]
+                while x < self.cols {
+                    line = line + self.cells[y * self.cols + x]
                     x = x + 1
                 }
                 print(line)
@@ -864,5 +875,22 @@ let Term = {
             }
         }
     }
+}
+
+let Term = {
+    traits*: TermTraits
+    sceneW: 0
+    sceneH: 0
+    cols: 0
+    rows: 0
+    mode: 0
+    cells: null
+    colors: null
+    stack: null
+    depth: 0
+    clipX: 0
+    clipY: 0
+    clipW: 0
+    clipH: 0
 }
 

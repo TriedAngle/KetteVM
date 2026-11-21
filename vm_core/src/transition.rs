@@ -1,7 +1,7 @@
 use crate::{
     AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
-    Map, MapInit, MapKind, MaybeWeak, Object, Prototype, Result, SlotFlags, SlotName, Smi, Symbol,
-    Tagged, ThreadState, VM, Value, VmError, WeakFixedArray, WeakFixedArrayInit, bail,
+    Map, MapInit, MapKind, MaybeWeak, Object, Prototype, Result, ShapeChange, SlotFlags, SlotName,
+    Smi, Symbol, Tagged, ThreadState, VM, Value, VmError, WeakFixedArray, WeakFixedArrayInit, bail,
 };
 use core::alloc::Layout;
 
@@ -12,9 +12,17 @@ pub enum SiblingChange<'s> {
 }
 
 impl<'s> SiblingChange<'s> {
-    fn kind(&self, kind: MapKind) -> MapKind {
+    fn kind(&self, heap: &Heap, kind: MapKind) -> MapKind {
         match self {
-            Self::Prototype(_) => kind,
+            // Prototype transitions start with fresh parent metadata.
+            Self::Prototype(proto) => {
+                let kind = kind.without(MapKind::CALLABLE_PARENT);
+                if proto.as_tagged(heap).get_as::<FixedArray>(heap).is_some() {
+                    kind.union(MapKind::MULTI_PARENT)
+                } else {
+                    kind.without(MapKind::MULTI_PARENT)
+                }
+            }
             Self::Holey => kind.with_elements(ElementsKind::Holey),
             Self::Dictionary => kind.with_elements(ElementsKind::Dictionary),
         }
@@ -227,7 +235,11 @@ impl Transition {
             Change::Replace { index },
         );
         let host = receiver.as_tagged(heap).erase();
-        Prototype::shape_changed(heap, receiver.as_tagged(heap).map(heap));
+        Prototype::shape_changed(
+            heap,
+            receiver.as_tagged(heap).map(heap),
+            ShapeChange::INVALIDATE_ONLY,
+        );
         receiver
             .as_tagged(heap)
             .header
@@ -247,7 +259,7 @@ impl Transition {
             }
 
             let parent_ref = parent(heap);
-            let kind = change.kind(parent_ref.kind());
+            let kind = change.kind(heap, parent_ref.kind());
             let descriptor_count = parent_ref.descriptor_count();
             let value_slot_count = parent_ref.value_slot_count();
             let prototype = change.prototype(heap, scope, parent_ref);
@@ -353,7 +365,7 @@ impl Transition {
             receiver_ref
                 .slot(heap, offset)
                 .set(heap, host, value.as_tagged(heap));
-            Prototype::shape_changed(heap, receiver_ref.map(heap));
+            Prototype::shape_changed(heap, receiver_ref.map(heap), ShapeChange::INVALIDATE_ONLY);
             receiver_ref.header.set_map(heap, host, target);
             return;
         }
@@ -379,7 +391,7 @@ impl Transition {
         }
         let host = receiver_ref.erase();
         receiver_ref.slots.set(heap, host, slots.as_tagged(heap));
-        Prototype::shape_changed(heap, receiver_ref.map(heap));
+        Prototype::shape_changed(heap, receiver_ref.map(heap), ShapeChange::INVALIDATE_ONLY);
         receiver_ref.header.set_map(heap, host, target);
     }
 
@@ -396,7 +408,7 @@ impl Transition {
             .map(heap)
             .find_transition(heap, name.as_tagged(heap), flags, pair_values)
             .expect("transition recorded above");
-        Prototype::shape_changed(heap, receiver_ref.map(heap));
+        Prototype::shape_changed(heap, receiver_ref.map(heap), ShapeChange::INVALIDATE_ONLY);
         receiver_ref
             .header
             .map
@@ -500,7 +512,7 @@ impl Transition {
                         let slots = token.allocate::<FixedArray>(values);
                         let host = receiver.as_tagged(heap).erase();
                         obj.slots.set(heap, host, slots);
-                        Prototype::shape_changed(heap, obj.map(heap));
+                        Prototype::shape_changed(heap, obj.map(heap), ShapeChange::INVALIDATE_ONLY);
                         obj.header.set_map(heap, host, existing.as_tagged(heap));
                     },
                 );
@@ -557,7 +569,7 @@ impl Transition {
                     Ok(()) => {
                         let host = receiver.as_tagged(heap).erase();
                         obj.slots.set(heap, host, slots);
-                        Prototype::shape_changed(heap, obj.map(heap));
+                        Prototype::shape_changed(heap, obj.map(heap), ShapeChange::INVALIDATE_ONLY);
                         obj.header.set_map(heap, host, child);
                         Some(())
                     }
@@ -977,8 +989,21 @@ impl Object {
             |heap| receiver.as_tagged(heap).map(heap),
             SiblingChange::Prototype(proto),
         );
+        target.as_tagged(heap).sync_callable_parent(heap);
+        if target.as_tagged(heap).is_multi_parent() {
+            Prototype::register_multi_parent_closure(heap, scope, target);
+        }
+        let propagate_callable_parent = target.as_tagged(heap).kind().is_callable()
+            || target.as_tagged(heap).has_callable_parent();
+        let old_map = receiver.as_tagged(heap).map(heap);
+        Prototype::shape_changed(
+            heap,
+            old_map,
+            ShapeChange {
+                propagate_callable_parent,
+            },
+        );
         let host = receiver.as_tagged(heap).erase();
-        Prototype::shape_changed(heap, receiver.as_tagged(heap).map(heap));
         receiver
             .as_tagged(heap)
             .header

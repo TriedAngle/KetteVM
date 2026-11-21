@@ -3756,25 +3756,23 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // defines fail against the non-configurable ctor.prototype
         // proto.constructor → the class {w+, e−, c+}
         let ctor_name = self.b.name(b"constructor");
-        self.b.call_native_staged(
-            self.c.ids.define_own_property,
-            &[
-                RtArg::Reg(proto),
-                RtArg::Const(ctor_name),
-                RtArg::Reg(ctor),
-                RtArg::Smi(PropertyFlags::DontEnum.bits()),
-            ],
+        let define_fb = self.b.new_feedback();
+        self.b.load(ctor);
+        self.b.define_named_own_property(
+            proto,
+            ctor_name,
+            PropertyFlags::DontEnum.bits(),
+            define_fb,
         );
         // ctor.prototype → the prototype {w+, e−, c−}
         let proto_name = self.b.name(b"prototype");
-        self.b.call_native_staged(
-            self.c.ids.define_own_property,
-            &[
-                RtArg::Reg(ctor),
-                RtArg::Const(proto_name),
-                RtArg::Reg(proto),
-                RtArg::Smi(PropertyFlags::DontEnum.bits() | PropertyFlags::DontDelete.bits()),
-            ],
+        let define_fb = self.b.new_feedback();
+        self.b.load(proto);
+        self.b.define_named_own_property(
+            ctor,
+            proto_name,
+            PropertyFlags::DontEnum.bits() | PropertyFlags::DontDelete.bits(),
+            define_fb,
         );
         // the class itself inherits from the superclass constructor
         self.b.call_native_staged(
@@ -3892,20 +3890,22 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             };
             match kind {
                 MemberKind::Method => {
-                    // {w+, e−, c+}: runtime(obj, key, value = acc, flags)
-                    let key = match key_reg {
-                        Some(k) => RtArg::Reg(k),
-                        None => RtArg::Const(name_idx.unwrap()),
-                    };
-                    self.b.call_native_staged(
-                        self.c.ids.define_own_property,
-                        &[
-                            RtArg::Reg(target),
-                            key,
-                            RtArg::Acc,
-                            RtArg::Smi(PropertyFlags::DontEnum.bits()),
-                        ],
-                    );
+                    // {w+, e−, c+}: define the closure as an own property
+                    let define_fb = self.b.new_feedback();
+                    match key_reg {
+                        Some(k) => self.b.define_keyed_own_property(
+                            target,
+                            k,
+                            PropertyFlags::DontEnum.bits(),
+                            define_fb,
+                        ),
+                        None => self.b.define_named_own_property(
+                            target,
+                            name_idx.unwrap(),
+                            PropertyFlags::DontEnum.bits(),
+                            define_fb,
+                        ),
+                    }
                 }
                 MemberKind::Get | MemberKind::Set => {
                     // one accessor half; merges with an existing pair:
@@ -3951,16 +3951,15 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.load(*closure);
             let fb = self.b.new_feedback();
             self.b.call(*closure, RegList::new(ctor, 1), fb);
-            // runtime(obj = ctor, key, value = acc, flags 0)
-            let key = match (key_reg, name_idx) {
-                (Some(k), _) => RtArg::Reg(*k),
-                (None, Some(name_idx)) => RtArg::Const(*name_idx),
+            // define the field value as an own property on the constructor
+            let define_fb = self.b.new_feedback();
+            match (key_reg, name_idx) {
+                (Some(k), _) => self.b.define_keyed_own_property(ctor, *k, 0, define_fb),
+                (None, Some(name_idx)) => self
+                    .b
+                    .define_named_own_property(ctor, *name_idx, 0, define_fb),
                 (None, None) => unreachable!("static field keys are reg or const"),
             };
-            self.b.call_native_staged(
-                self.c.ids.define_own_property,
-                &[RtArg::Reg(ctor), key, RtArg::Acc, RtArg::Smi(0)],
-            );
         }
         // attach the instance field list to the constructor
         if let Some(arr) = fields_arr {
@@ -4015,13 +4014,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     return self.err(a.span, "spread in array literals");
                 }
                 other => {
-                    let elem_temps = self.b.temp_scope();
                     let x = other.as_expression().expect("elision/spread handled");
-                    self.b.load_smi(i as i32);
-                    let idx = self.b.stage_acc(&elem_temps);
                     self.expr(x)?;
                     let feedback = self.b.new_feedback();
-                    self.b.store_keyed_property_no_shadow(arr, idx, feedback);
+                    self.b.store_in_array_literal(arr, i, feedback);
                     i += 1;
                 }
             }
@@ -4088,24 +4084,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                             }
                             // literal properties are own data properties,
                             // never stores through an inherited setter
-                            self.b.call_native_staged(
-                                self.c.ids.define_own_property,
-                                &[
-                                    RtArg::Reg(obj),
-                                    RtArg::Const(name_idx),
-                                    RtArg::Acc,
-                                    RtArg::Smi(0),
-                                ],
-                            );
+                            let define_fb = self.b.new_feedback();
+                            self.b
+                                .define_named_own_property(obj, name_idx, 0, define_fb);
                         }
                         Some(k) => {
                             if self.is_anon_function(&p.value) {
                                 self.emit_set_name_by_reg(k, 0);
                             }
-                            self.b.call_native_staged(
-                                self.c.ids.define_own_property,
-                                &[RtArg::Reg(obj), RtArg::Reg(k), RtArg::Acc, RtArg::Smi(0)],
-                            );
+                            let define_fb = self.b.new_feedback();
+                            self.b.define_keyed_own_property(obj, k, 0, define_fb);
                         }
                     }
                 }
@@ -4115,21 +4103,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.expr(&p.value)?;
                     if let Some(k) = key_reg {
                         self.emit_set_name_by_reg(k, 0);
-                        self.b.call_native_staged(
-                            self.c.ids.define_own_property,
-                            &[RtArg::Reg(obj), RtArg::Reg(k), RtArg::Acc, RtArg::Smi(0)],
-                        );
+                        let define_fb = self.b.new_feedback();
+                        self.b.define_keyed_own_property(obj, k, 0, define_fb);
                     } else {
                         let name_idx = self.name_constant(&p.key)?;
-                        self.b.call_native_staged(
-                            self.c.ids.define_own_property,
-                            &[
-                                RtArg::Reg(obj),
-                                RtArg::Const(name_idx),
-                                RtArg::Acc,
-                                RtArg::Smi(0),
-                            ],
-                        );
+                        let define_fb = self.b.new_feedback();
+                        self.b
+                            .define_named_own_property(obj, name_idx, 0, define_fb);
                     }
                 }
                 PropertyKind::Get | PropertyKind::Set => {

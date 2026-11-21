@@ -10,7 +10,7 @@ let caseRow = {
     r.w = 300
     r.h = 100
     space.root.addChild(r)
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.rect(r, 0, 0, 300, 100, "row")
     Expect.rect(r.children[0], 8, 8, 60, 84, "row.a")
     Expect.rect(r.children[1], 76, 8, 216, 84, "row.b")
@@ -38,7 +38,7 @@ let caseNested = {
     bottom.h = 80
     outer.addChild(bottom)
 
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.rect(top, 10, 10, 380, 100, "nested.top")
     Expect.rect(bottom, 10, 116, 380, 80, "nested.bottom")
     Expect.rect(top.children[1], 68, 14, 318, 92, "nested.top.b")
@@ -53,7 +53,7 @@ let caseWindow = {
     content.children[1].wMode = SIZE_FILL
     let win = Node.Window("Inspector", 60, 60, 360, 200, content)
     space.root.addChild(win)
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.rect(win, 60, 60, 360, 200, "win")
     Expect.rect(win.children[0], 60, 60, 360, 24, "win.bar")
     Expect.rect(win.children[1], 60, 84, 360, 176, "win.body")
@@ -69,7 +69,7 @@ let caseWindows = {
     let b = Node.Window("B", 200, 120, 320, 220, Node.Box(320, 196, rgb(120, 120, 120)))
     space.root.addChild(a)
     space.root.addChild(b)
-    let ops = Space.frame(space)
+    let ops = space.frame()
 
     let hit = Windows.press(space, 250, 150)
     Expect.eq(hit == b.children[1], true, "window.hit-b")
@@ -92,7 +92,7 @@ let caseAspect = {
     wr.w = 800
     wr.h = 400
     wide.root.addChild(wr)
-    Space.frame(wide)
+    wide.frame()
     Expect.rect(wr.children[0], 0, 0, 400, 400, "aspect.wide.a")
     Expect.rect(wr.children[1], 400, 0, 400, 400, "aspect.wide.b")
     Expect.layout(LayoutCheck.space(wide), "aspect-wide")
@@ -111,7 +111,7 @@ let caseAspect = {
     tc.addChild(t1)
     tc.addChild(t2)
     tall.root.addChild(tc)
-    Space.frame(tall)
+    tall.frame()
     Expect.rect(t1, 0, 0, 400, 400, "aspect.tall.a")
     Expect.rect(t2, 0, 400, 400, 400, "aspect.tall.b")
     Expect.layout(LayoutCheck.space(tall), "aspect-tall")
@@ -123,7 +123,7 @@ let caseText = {
     r.w = 100
     r.h = 40
     space.root.addChild(r)
-    let ops = Space.frame(space)
+    let ops = space.frame()
     let t = r.children[0]
     Expect.eq(t.mw, 100, "text.mw")
     Expect.eq(t.mh, 32, "text.mh")
@@ -142,7 +142,7 @@ let caseTextFlex = {
     r.w = 100
     r.h = 80
     space.root.addChild(r)
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.eq(left.w, 50, "textflex.left.w")
     Expect.eq(left.h, 32, "textflex.left.h")
     Expect.eq(right.w, 50, "textflex.right.w")
@@ -180,7 +180,7 @@ let caseConstraints = {
     col.addChild(rb)
     space.root.addChild(col)
 
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.eq(a.mw, 80, "constraints.min")
     Expect.eq(a.mh, 16, "constraints.min.h")
     Expect.eq(b.mw, 40, "constraints.max")
@@ -202,7 +202,7 @@ let caseIncremental = {
     space.root.addChild(win1)
     space.root.addChild(win2)
 
-    Space.frame(space)
+    space.frame()
     let list2 = win2.pList
     space.measures = 0
     space.paintNodes = 0
@@ -215,7 +215,7 @@ let caseIncremental = {
     Expect.eq(space.paintDirty.length, 1, "incremental.paintQueue")
     Expect.eq(space.paintDirty[0] == win1, true, "incremental.paintBoundary")
 
-    let ops = Space.frame(space)
+    let ops = space.frame()
     Expect.eq(space.measures <= 2, true, "incremental.measures")
     Expect.eq(win2.pList == list2, true, "incremental.reuse")
     Expect.eq(space.layoutDirty.length, 0, "incremental.clean")
@@ -226,14 +226,14 @@ let caseIncremental = {
 
 let caseScheduling = {
     let space = Space.new(100, 100)
-    Space.frame(space)
+    space.frame()
     Expect.eq(space.needsFrame, 0, "sched.idle")
     let before = space.time
-    Space.tick(space, 16)
+    space.tick(16)
     Expect.eq(space.time, before + 16, "sched.tick")
-    Space.request(space)
+    space.request()
     Expect.eq(space.needsFrame, 1, "sched.request")
-    Space.frame(space)
+    space.frame()
     Expect.eq(space.needsFrame, 0, "sched.clear")
 }
 
@@ -246,22 +246,34 @@ let caseSplitter = {
     row.w = 300
     row.h = 100
     space.root.addChild(row)
-    Space.frame(space)
+    space.frame()
 
     Expect.rect(left, 0, 0, 100, 100, "split.left")
     Expect.rect(right, 106, 0, 194, 100, "split.right")
 
     Splitter.resize(row.children[1], 50)
-    Space.frame(space)
+    space.frame()
     Expect.rect(left, 0, 0, 150, 100, "split.left.moved")
     Expect.rect(right, 156, 0, 144, 100, "split.right.moved")
 
     Splitter.resize(row.children[1], -200)
-    Space.frame(space)
+    space.frame()
     Expect.rect(left, 0, 0, 40, 100, "split.left.min")
     Expect.rect(right, 46, 0, 254, 100, "split.right.min")
 
     Expect.layout(LayoutCheck.space(space), "splitter")
+}
+
+let caseTypes = {
+    let node = Node.Box(10, 10, rgb(1, 2, 3))
+    let space = Space.new(80, 40)
+    let term = Term.new(80, 40, 8, 4, 0)
+    Expect.eq(Object.isType(node, Node), true, "type.node")
+    Expect.eq(Object.isType(node, NodeTraits), false, "type.node.traits")
+    Expect.eq(Object.isType(space, Space), true, "type.space")
+    Expect.eq(Object.isType(space, SpaceTraits), false, "type.space.traits")
+    Expect.eq(Object.isType(term, Term), true, "type.term")
+    Expect.eq(Object.isType(term, TermTraits), false, "type.term.traits")
 }
 
 let Tests = {
@@ -290,6 +302,8 @@ let Tests = {
         caseScheduling()
         print("== splitter ==")
         caseSplitter()
+        print("== types ==")
+        caseTypes()
         Expect.summary()
     }
 }

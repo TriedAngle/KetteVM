@@ -220,6 +220,16 @@ define_opcodes! {
 
     StoreIndexed { operands: [Register, Register, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] },
 
+    /// Own data-property define for a constant-pool name. Literal slots
+    /// use this instead of `StoreNamedProperty`: inherited properties and
+    /// non-writable function metadata are redefined, never assigned.
+    DefineNamedOwnProperty { operands: [Register, Index, UImmediate, Index], acc: reads, indices: [Unchecked, ConstantPool, Unchecked, Feedback] }, // acc -> reg (obj) idx (name) uimm (flags) idx (feedback)
+    /// Own data-property define with the key in a register.
+    DefineKeyedOwnProperty { operands: [Register, Register, UImmediate, Index], acc: reads, indices: [Unchecked, Unchecked, Unchecked, Feedback] }, // acc -> reg (obj) reg (key) uimm (flags) idx (feedback)
+
+    /// Array-literal element define at a sequential immediate index.
+    StoreInArrayLiteral { operands: [Register, UImmediate, Index], acc: reads, indices: [Unchecked, Unchecked, Feedback] }, // acc -> reg (array) uimm (index) idx (feedback)
+
 
     Move { operands: [Register, Register], writes_reg: 0, indices: [Unchecked, Unchecked] }, // reg (dst) <- reg (src)
 

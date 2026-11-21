@@ -1,8 +1,8 @@
 use crate::{
     CallableInfoInit, CallableInfoObject, DenseString, Float, FunctionKind, Handle, HandleScope,
     HandleSlice, Heap, Map, MapInit, MapKind, NativeIndex, Object, PropertyDescriptor, Prototype,
-    Result, SlotFlags, SlotName, Smi, StringRef, Tagged, ThreadState, VM, Value, WellKnown,
-    mode_from_strict,
+    Result, ShapeChange, SlotFlags, SlotName, Smi, StringRef, Tagged, ThreadState, VM, Value,
+    WellKnown, mode_from_strict,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -95,7 +95,7 @@ impl Object {
             scope,
         );
         let old_map = obj.as_tagged(heap).map(heap);
-        Prototype::shape_changed(heap, old_map);
+        Prototype::shape_changed(heap, old_map, ShapeChange::INVALIDATE_ONLY);
         obj.as_tagged(heap).header.set_map(
             heap,
             obj.as_tagged(heap).erase(),

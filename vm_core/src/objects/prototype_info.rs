@@ -7,8 +7,8 @@ use core::alloc::Layout;
 #[repr(C)]
 pub struct PrototypeInfo {
     pub header: Header,
-    /// Users of this prototype: maps, or validity cells for multi-parent
-    /// maps. RCU-published, `users_len` entries are claimed.
+    /// Weak dependent maps; multi-parent maps are terminal in invalidation
+    /// walks. RCU-published, `users_len` entries are claimed.
     pub prototype_users: AtomicOptionGcSlot<WeakFixedArray>,
     /// Claimed entries in `prototype_users`, written under the registry lock.
     pub users_len: GcSlot<Smi>,

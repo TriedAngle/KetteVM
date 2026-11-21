@@ -1,8 +1,8 @@
 use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
-    Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SiteRead,
-    SlotName, Smi, Tagged, Value, WeakFixedArray, WeakFixedArrayInit, info_is_immutable,
+    Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, ShapeChange,
+    SiteRead, SlotName, Smi, Tagged, Value, WeakFixedArray, WeakFixedArrayInit, info_is_immutable,
 };
 
 /// Beyond this many live (map, handler) pairs a site goes megamorphic.
@@ -1270,7 +1270,7 @@ impl InlineCache {
                 .set(heap, obj.erase(), Smi::new((index + 1) as i64));
         }
         if map.kind().is_prototype() {
-            Prototype::shape_changed(heap, map);
+            Prototype::shape_changed(heap, map, ShapeChange::INVALIDATE_ONLY);
         }
         Some(value)
     }
@@ -1500,7 +1500,7 @@ impl InlineCache {
             }
             let host = recv.erase();
             recv.slot(heap, offset).set(heap, host, value);
-            Prototype::shape_changed(heap, recv.map(heap));
+            Prototype::shape_changed(heap, recv.map(heap), ShapeChange::INVALIDATE_ONLY);
             recv.header.set_map(heap, host, target);
             return true;
         }
@@ -1607,6 +1607,87 @@ impl InlineCache {
         let handler = store_handler(heap, scope, target, plan);
         update_site(heap, scope, vector, slot, &prev_map, &handler);
     }
+
+    /// Fast path for a define-own data property. A field handler writes
+    /// the cached slot; a transition handler migrates the receiver to the
+    /// map a previous define produced (growing slots when necessary).
+    pub fn try_define_own(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        vector: Option<Handle<'_, FeedbackVector>>,
+        slot: usize,
+        receiver: Handle<'_, Value>,
+        name: Handle<'_, SlotName>,
+        value: Handle<'_, Value>,
+    ) -> bool {
+        let Some(vector) = vector else {
+            return false;
+        };
+        let Some(recv) = ic_receiver(receiver.as_tagged(heap).erase(), heap) else {
+            return false;
+        };
+        let site = read_site_snapshot(vector.as_tagged(heap), heap, slot);
+        let handler = probe(heap, site, recv.map(heap));
+        let Some(handler) = handler else {
+            return false;
+        };
+        if !handler.is_ptr() {
+            let Some((KIND_FIELD, payload)) = decode_handler_smi(handler) else {
+                return false;
+            };
+            let host = recv.erase();
+            recv.slot(heap, payload as usize)
+                .set(heap, host, value.as_tagged(heap));
+            return true;
+        }
+        if handler.is_weak_ptr() {
+            let Some(target) = handler.as_strong().and_then(|m| m.get_as::<Map>(heap)) else {
+                return false;
+            };
+            let target = scope.handle(target);
+            return apply_transition(heap, scope, receiver, name, value, &target);
+        }
+        false
+    }
+
+    /// Record the map transition (or unchanged map + field offset) a
+    /// successful define produced.
+    pub fn update_define_own(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        vector: Option<Handle<'_, FeedbackVector>>,
+        slot: usize,
+        receiver: Handle<'_, Value>,
+        name: Handle<'_, SlotName>,
+        prev_map: Handle<'_, Map>,
+    ) {
+        let Some(vector) = vector else {
+            return;
+        };
+        let Some(recv) = ic_receiver(receiver.as_tagged(heap).erase(), heap) else {
+            return;
+        };
+        let final_map = scope.handle(recv.map(heap));
+        let final_map_ref = final_map.as_tagged(heap);
+        let Some(row) = final_map_ref
+            .descriptors()
+            .iter()
+            .find(|d| d.name(heap).ptr_eq(name.as_tagged(heap)) && !d.flags().is_accessor())
+        else {
+            return;
+        };
+        // A non-writable, non-configurable slot cannot take a different
+        // value on a later receiver; leave that case on the slow path.
+        if !row.flags().is_writable() && !row.flags().is_configurable() {
+            return;
+        }
+        let handler = if final_map.as_tagged(heap).ptr_eq(prev_map.as_tagged(heap)) {
+            Handler::Smi(kind_smi(KIND_FIELD, row.offset() as i64))
+        } else {
+            Handler::WeakMap(final_map)
+        };
+        update_site(heap, scope, vector, slot, &prev_map, &handler);
+    }
 }
 
 /// Migrate `receiver` to the cached transition target: verify the target
@@ -1644,7 +1725,7 @@ fn apply_transition(
         let host = recv.erase();
         recv.slot(heap, offset)
             .set(heap, host, value.as_tagged(heap));
-        Prototype::shape_changed(heap, recv.map(heap));
+        Prototype::shape_changed(heap, recv.map(heap), ShapeChange::INVALIDATE_ONLY);
         recv.header.set_map(heap, host, target.as_tagged(heap));
         return true;
     }
@@ -1669,7 +1750,7 @@ fn apply_transition(
         new.set(heap, offset, value.as_tagged(heap));
         let host = recv.erase();
         recv.slots.set(heap, host, new);
-        Prototype::shape_changed(heap, recv.map(heap));
+        Prototype::shape_changed(heap, recv.map(heap), ShapeChange::INVALIDATE_ONLY);
         recv.header.set_map(heap, host, target.as_tagged(heap));
     }
     true

@@ -29,7 +29,7 @@ fn native_ids() -> NativeIds {
         for_in_next: NativeIndex(0),
         set_function_name: NativeIndex(0),
         install_accessor: NativeIndex(0),
-        define_own_property: NativeIndex(0),
+
         set_prototype: NativeIndex(0),
         throw_if_not_constructor_or_null: NativeIndex(0),
         throw_if_not_object_or_null: NativeIndex(0),

@@ -4,8 +4,8 @@ use crate::{
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
     NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype, Result,
-    SiblingChange, SlotName, Smi, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value,
-    Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
+    ShapeChange, SiblingChange, SlotName, Smi, StringRef, Symbol, Tagged, ThreadState, Transition,
+    VM, Value, Visitor, VmError, WrapperKind, bail, errors::Errors, raise_runtime,
 };
 use core::alloc::Layout;
 
@@ -156,7 +156,7 @@ impl Object {
         let map = scope.handle(map);
         // the map swap must invalidate chains keyed on the old map:
         // later shape changes fire on the new map lineage only
-        Prototype::shape_changed(heap, map.as_tagged(heap));
+        Prototype::shape_changed(heap, map.as_tagged(heap), ShapeChange::INVALIDATE_ONLY);
         let target =
             Transition::sibling_target(heap, scope, |h| map.as_tagged(h), SiblingChange::Holey);
         let obj = receiver.as_tagged(heap);
@@ -364,7 +364,11 @@ impl<'a> Tagged<'a, Value> {
             });
         }
         if !kind.is_callable() {
-            return None;
+            if !obj.map(heap).has_callable_parent() {
+                return None;
+            }
+            let parent = obj.callable_parent(heap)?;
+            return parent.erase().call_target(heap);
         }
         if kind.kind() == ObjectKind::CValue {
             // Safety: the map kind is the type witness.
@@ -838,7 +842,7 @@ impl Object {
             dict = NumberDictionary::insert(heap, scope, &dict, *k, *v, DETAILS_DATA);
         }
         // the map swap must invalidate chains keyed on the old map
-        Prototype::shape_changed(heap, map.as_tagged(heap));
+        Prototype::shape_changed(heap, map.as_tagged(heap), ShapeChange::INVALIDATE_ONLY);
         let target = Transition::sibling_target(
             heap,
             scope,
@@ -878,7 +882,7 @@ impl Object {
         for (k, v) in &entries {
             elements.as_tagged(heap).set(heap, *k, v.as_tagged(heap));
         }
-        Prototype::shape_changed(heap, map.as_tagged(heap));
+        Prototype::shape_changed(heap, map.as_tagged(heap), ShapeChange::INVALIDATE_ONLY);
         let target =
             Transition::sibling_target(heap, scope, |h| map.as_tagged(h), SiblingChange::Holey);
         let obj = receiver.as_tagged(heap);
@@ -890,7 +894,70 @@ impl Object {
     }
 }
 
+fn parent_list_callable<'a>(
+    heap: &'a Heap,
+    list: Tagged<'a, Value>,
+    visited: &mut Vec<usize>,
+) -> Option<Tagged<'a, Object>> {
+    let pairs = list.get_as::<FixedArray>(heap)?;
+    let mut i = 1;
+    while i < pairs.len() {
+        let value = pairs.at(heap, i);
+        i += 2;
+        if let Some(found) = callable_value(heap, value, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn callable_value<'a>(
+    heap: &'a Heap,
+    value: Tagged<'a, Value>,
+    visited: &mut Vec<usize>,
+) -> Option<Tagged<'a, Object>> {
+    if !value.is_strong_ptr() {
+        return None;
+    }
+    if value.get_as::<FixedArray>(heap).is_some() {
+        return parent_list_callable(heap, value, visited);
+    }
+    let parent = value.as_heap_object()?;
+    let id = parent.raw_addr() as usize;
+    if visited.contains(&id) {
+        return None;
+    }
+    visited.push(id);
+    let map = parent.map(heap);
+    if map.kind().is_callable() {
+        return Some(parent);
+    }
+    if map.has_callable_parent() {
+        return parent.callable_parent_in(heap, visited);
+    }
+    None
+}
+
 impl<'a> Tagged<'a, Object> {
+    /// First callable object reachable through parent slots, in lookup order.
+    pub fn callable_parent(self, heap: &'a Heap) -> Option<Tagged<'a, Object>> {
+        let mut visited = vec![self.raw_addr() as usize];
+        self.callable_parent_in(heap, &mut visited)
+    }
+
+    fn callable_parent_in(
+        self,
+        heap: &'a Heap,
+        visited: &mut Vec<usize>,
+    ) -> Option<Tagged<'a, Object>> {
+        let map = self.map(heap);
+        let proto = map.prototype.get(heap);
+        if map.is_multi_parent() {
+            return parent_list_callable(heap, proto, visited);
+        }
+        callable_value(heap, proto, visited)
+    }
+
     /// `[[ParameterMap]]`: `None` for unmapped arguments objects.
     /// Layout of the internal map: `[context, index0, slot0, ...]`; deleted
     /// entries are holes (the map itself is never observable).
@@ -1081,8 +1148,11 @@ impl Object {
     ) -> Option<Handle<'s, Object>> {
         let source = scope.handle(receiver.as_tagged(heap).as_heap_object()?);
         let kind = source.as_tagged(heap).map(heap).kind();
+        // Callable objects clone shallowly too: the copy shares its
+        // CallableInfo and Context, like copying a closure reference.
+        // Proxies, bound functions, and arguments keep their own semantics.
         if kind.is_proxy()
-            || kind.is_callable()
+            || kind.is_bound()
             || kind.is_arguments()
             || !matches!(kind.kind(), ObjectKind::Object | ObjectKind::Array)
         {

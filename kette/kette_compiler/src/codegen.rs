@@ -14,7 +14,7 @@
 use crate::CompileError;
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, GlobalDeclarations,
-    Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
+    Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode, TempScope,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
@@ -814,6 +814,51 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
+    /// Emit `callee(args...)`. `None` means the callee is its own receiver
+    /// (Kette's `f(x)` send).
+    fn emit_call_args(
+        &mut self,
+        temps: &TempScope,
+        callee: Reg,
+        recv: Option<Reg>,
+        args: &[NodeId],
+    ) -> Result<(), CompileError> {
+        let recv = recv.unwrap_or(callee);
+        let fb = self.b.new_feedback();
+        match args.len() {
+            0 => self.b.call_method0(callee, recv, fb),
+            1 => {
+                self.expr(args[0])?;
+                let arg0 = self.b.stage_acc(temps);
+                self.b.call_method1(callee, recv, arg0, fb)
+            }
+            2 => {
+                self.expr(args[0])?;
+                let arg0 = self.b.stage_acc(temps);
+                self.expr(args[1])?;
+                let arg1 = self.b.stage_acc(temps);
+                self.b.call_method2(callee, recv, arg0, arg1, fb)
+            }
+            argc => {
+                let argc = argc as u32;
+                // window [recv, args...]: element 0 rides the top slot,
+                // argument i sits argc-1-i in; the callee rides above
+                let args_base = temps.reserve(argc + 2);
+                let top = args_base.index() + argc as i32;
+                let window_callee = Reg::new(top + 1);
+                self.b.move_reg(window_callee, callee);
+                self.b.move_reg(Reg::new(top), recv);
+                for (i, &arg) in args.iter().enumerate() {
+                    self.expr(arg)?;
+                    self.b.store(Reg::new(top - 1 - i as i32));
+                }
+                self.b
+                    .call(window_callee, RegList::new(args_base, argc + 1), fb)
+            }
+        }
+        Ok(())
+    }
+
     /// `recv.name(args...)`: the receiver is the first register of the
     /// argument window, the callee sits in a fixed slot above the args.
     fn emit_send(
@@ -823,51 +868,24 @@ impl<'a> FunctionGen<'a> {
         args: NodeList,
     ) -> Result<(), CompileError> {
         let args: Vec<NodeId> = self.ast.list_items(args).to_vec();
-        let argc = args.len() as u32;
         let temps = self.b.temp_scope();
         self.expr(recv)?;
         let recv_reg = self.b.stage_acc(&temps);
         let name = self.name_constant(name);
-        let feedback = self.b.new_feedback();
-        self.b.load_named_property(recv_reg, name, feedback);
-        // argument window [args_base .. args_base+argc]: element 0 (the
-        // receiver) rides the top slot, argument i sits argc-1-i in; the
-        // callee rides above
-        let args_base = temps.reserve(argc + 2);
-        let top = args_base.index() + argc as i32;
-        let callee_reg = Reg::new(top + 1);
-        self.b.store(callee_reg);
-        for (i, &arg) in args.iter().enumerate() {
-            self.expr(arg)?;
-            self.b.store(Reg::new(top - 1 - i as i32));
-        }
-        self.b.move_reg(Reg::new(top), recv_reg);
-        self.b
-            .call_no_feedback(callee_reg, RegList::new(args_base, argc + 1));
-        Ok(())
+        let load_feedback = self.b.new_feedback();
+        self.b.load_named_property(recv_reg, name, load_feedback);
+        let callee_reg = self.b.stage_acc(&temps);
+        self.emit_call_args(&temps, callee_reg, Some(recv_reg), &args)
     }
 
     /// `callee(args...)`: the callee itself is the receiver (`f(x)` is
     /// the `value` send), so `self` inside the body is the callee object.
     fn emit_call(&mut self, callee: NodeId, args: NodeList) -> Result<(), CompileError> {
         let args: Vec<NodeId> = self.ast.list_items(args).to_vec();
-        let argc = args.len() as u32;
         let temps = self.b.temp_scope();
         self.expr(callee)?;
-        // window [recv, args...]: element 0 rides the top slot, argument
-        // i sits argc-1-i in; the callee rides above and is its own recv
-        let args_base = temps.reserve(argc + 2);
-        let top = args_base.index() + argc as i32;
-        let callee_reg = Reg::new(top + 1);
-        self.b.store(callee_reg);
-        self.b.move_reg(Reg::new(top), callee_reg);
-        for (i, &arg) in args.iter().enumerate() {
-            self.expr(arg)?;
-            self.b.store(Reg::new(top - 1 - i as i32));
-        }
-        self.b
-            .call_no_feedback(callee_reg, RegList::new(args_base, argc + 1));
-        Ok(())
+        let callee_reg = self.b.stage_acc(&temps);
+        self.emit_call_args(&temps, callee_reg, None, &args)
     }
 
     /// `=` never creates where the VM can write through: named slots use
@@ -967,11 +985,10 @@ impl<'a> FunctionGen<'a> {
                     };
                     let name = self.name_constant(sym);
                     self.expr(value)?;
-                    // literal slots are explicit layout: the defining
-                    // store (with transitions); the receiver is a fresh
-                    // bare object
+                    // literal slots are own data properties, never stores
+                    // through a parent or a read-only function metadata slot
                     let feedback = self.b.new_feedback();
-                    self.b.store_named_property(obj, name, feedback);
+                    self.b.define_named_own_property(obj, name, 0, feedback);
                 }
                 Node::SlotMulti {
                     kind: SlotKind::Named,
@@ -988,7 +1005,7 @@ impl<'a> FunctionGen<'a> {
                         let name = self.name_constant(sym);
                         self.b.load(value);
                         let feedback = self.b.new_feedback();
-                        self.b.store_named_property(obj, name, feedback);
+                        self.b.define_named_own_property(obj, name, 0, feedback);
                     }
                 }
                 Node::SlotMulti { .. } => unreachable!("only named multi slots exist"),
@@ -1034,7 +1051,7 @@ impl<'a> FunctionGen<'a> {
                     let key = self.b.stage_acc(&temps);
                     self.expr(value)?;
                     let feedback = self.b.new_feedback();
-                    self.b.store_keyed_property(obj, key, feedback);
+                    self.b.define_keyed_own_property(obj, key, 0, feedback);
                 }
                 _ => unreachable!("object slots are Slot nodes"),
             }
@@ -1045,16 +1062,16 @@ impl<'a> FunctionGen<'a> {
     fn emit_array(&mut self, elements: NodeList) -> Result<(), CompileError> {
         let elements: Vec<NodeId> = self.ast.list_items(elements).to_vec();
         let temps = self.b.temp_scope();
-        self.b.create_empty_array_literal();
+        if elements.is_empty() {
+            self.b.create_empty_array_literal();
+        } else {
+            self.b.create_sized_array_literal(elements.len() as u32);
+        }
         let array = self.b.stage_acc(&temps);
         for (i, &element) in elements.iter().enumerate() {
-            let elem_temps = self.b.temp_scope();
-            self.b.load_smi(i as i32);
-            let index = self.b.stage_acc(&elem_temps);
             self.expr(element)?;
-            // literal elements are explicit layout: the store may grow
             let feedback = self.b.new_feedback();
-            self.b.store_keyed_property(array, index, feedback);
+            self.b.store_in_array_literal(array, i as u32, feedback);
         }
         self.b.load(array);
         Ok(())

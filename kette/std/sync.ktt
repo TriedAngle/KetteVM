@@ -1,5 +1,7 @@
-let WaitQueue = {
-    head, tail, guard: undefined
+// Each concrete sync type keeps its fields on the type object; `new` clones
+// that object so the instance keeps the type's map identity.
+
+let WaitQueueTraits = {
     new: {
         let queue = self.clone()
         queue.head = 0
@@ -78,8 +80,12 @@ let WaitQueue = {
     }
 }
 
-let Mutex = {
-    locked, waiters: undefined
+let WaitQueue = {
+    traits*: WaitQueueTraits
+    head, tail, guard: undefined
+}
+
+let MutexTraits = {
     new: {
         let mutex = self.clone()
         mutex.locked = atomic.AtomicI64.new(0)
@@ -181,8 +187,12 @@ let Mutex = {
     }
 }
 
-let RecursiveMutex = {
-    locked, owner, recursions, waiters: undefined
+let Mutex = {
+    traits*: MutexTraits
+    locked, waiters: undefined
+}
+
+let RecursiveMutexTraits = {
     new: {
         let mutex = self.clone()
         mutex.locked = atomic.AtomicI64.new(0)
@@ -336,8 +346,12 @@ let RecursiveMutex = {
     }
 }
 
-let Condition = {
-    waiters: undefined
+let RecursiveMutex = {
+    traits*: RecursiveMutexTraits
+    locked, owner, recursions, waiters: undefined
+}
+
+let ConditionTraits = {
     new: {
         let condition = self.clone()
         condition.waiters = WaitQueue.new()
@@ -391,4 +405,9 @@ let Condition = {
         mutex.acquireForAwait(depth)
         waiter.granted.load() != 0
     }
+}
+
+let Condition = {
+    traits*: ConditionTraits
+    waiters: undefined
 }

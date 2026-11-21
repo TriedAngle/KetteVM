@@ -24,7 +24,7 @@ let transcript = Node.Window("Transcript", 240, 180, 380, 240, transcriptBody)
 space.root.addChild(inspector)
 space.root.addChild(transcript)
 
-let ops = Space.frame(space)
+let ops = space.frame()
 print("ops: " + ops.length)
 
 let hit = Windows.press(space, 300, 220)
@@ -34,14 +34,14 @@ print("transcript raised: " + (space.root.children[space.root.children.length - 
 Windows.press(space, 100, 100)
 print("inspector raised: " + (space.root.children[space.root.children.length - 1] == inspector))
 
-Space.frame(space)
-let clean1 = Space.frame(space)
-let clean2 = Space.frame(space)
+space.frame()
+let clean1 = space.frame()
+let clean2 = space.frame()
 print("reused list: " + (clean1 == clean2))
 
 toolbar.children[1].color = rgb(80, 200, 120)
 toolbar.children[1].markPaint()
-let repainted = Space.frame(space)
+let repainted = space.frame()
 print("repainted: " + (repainted != ops))
 
 toolbar.children[0].handler = |n, x, y| { print("clicked box w=" + n.w) }
@@ -52,7 +52,7 @@ print("same type: " + Object.isType(inspector, transcript))
 print("is traits: " + Object.isType(inspector, NodeTraits))
 print("is number: " + Object.isType(inspector, 1))
 
-let finalOps = Space.frame(space)
+let finalOps = space.frame()
 Dump.tree(space.root, 0, 0, 0)
 if TERMINAL > 0 { Term.render(finalOps, 800, 600, 80, 30, TERMINAL) }
 if SHOW_OPS == 1 { Dump.list(finalOps) }

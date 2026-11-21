@@ -2,13 +2,12 @@
 use crate::JSRuntime;
 use js_compiler::native::NativeIds;
 use vm_core::{
-    AccessorPair, Args, ArgumentsCreate, CallInfo, ContextObject, Convert, DenseString, Errors,
-    FixedArray, Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object,
-    ObjectSlotsInit, PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi,
-    StoreSemantics, StringData, Symbol, Tagged, ThreadState, VM, Value, VmError,
-    access::own_property_enumerable, bail, extend_lifetime, frame_context_value, info_is_immutable,
-    info_is_lexical, intrinsics, materialize::Materialize, proxy::Proxy, raise, raise_runtime,
-    rt_try,
+    Args, ArgumentsCreate, CallInfo, ContextObject, Convert, DenseString, Errors, FixedArray,
+    Handle, HandleScope, HandleSlice, Heap, HostCtx, Key, LanguageMode, Object, ObjectSlotsInit,
+    PartialDescriptor, PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics,
+    StringData, Symbol, Tagged, ThreadState, VM, Value, VmError, access::own_property_enumerable,
+    bail, extend_lifetime, frame_context_value, info_is_immutable, info_is_lexical, intrinsics,
+    materialize::Materialize, proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 mod for_in;
@@ -30,7 +29,6 @@ crate::register_natives! {
     delete_super_property,
     set_function_name,
     install_accessor,
-    define_own_property,
     set_prototype,
     throw_if_not_constructor_or_null,
     throw_if_not_object_or_null,
@@ -690,61 +688,6 @@ fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Ta
             Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
         );
         closure.as_tagged(heap)
-    })
-}
-
-/// [[DefineOwnProperty]] with exact attributes (class member
-/// installation): (obj, key, value, flags) -> obj. Define sites are
-/// strict-mode code: a rejected define throws a TypeError. flags are
-/// PropertyFlags bits (the Accessor bit: the value is an AccessorPair).
-fn define_own_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = ctx;
-    let target = args.get_handle(heap, 0);
-    let raw_key = args.get_handle(heap, 1);
-    let value = args.get_handle(heap, 2);
-    let flags = args.get(heap, 3).to_i64().map(|v| v as u32).unwrap_or(0);
-    // the key coercion allocates: target and value stay rooted in
-    // their argument handles across it
-    state.handle_scope(|scope| {
-        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
-        // root the name: the tagged result anchors the `&mut` borrow
-        let key = scope.handle(key);
-        // Type(O) must be Object (ES 20.1.2.4 [[DefineOwnProperty]])
-        if target.as_tagged(heap).is_primitive(heap) {
-            raise!(vm, heap, state, VmError::InvalidOperandType);
-        }
-        let enumerable = flags & bytecode::PropertyFlags::DontEnum.bits() == 0;
-        let configurable = flags & bytecode::PropertyFlags::DontDelete.bits() == 0;
-        let partial = if flags & bytecode::PropertyFlags::Accessor.bits() != 0 {
-            let pair = value
-                .as_tagged(heap)
-                .get_as::<AccessorPair>(heap)
-                .expect("accessor descriptor holds a pair");
-            PartialDescriptor {
-                value: None,
-                get: Some(scope.handle(pair.get.get(heap))),
-                set: Some(scope.handle(pair.set.get(heap))),
-                writable: None,
-                enumerable: Some(enumerable),
-                configurable: Some(configurable),
-            }
-        } else {
-            PartialDescriptor {
-                value: Some(scope.handle(value.as_tagged(heap))),
-                get: None,
-                set: None,
-                writable: Some(flags & bytecode::PropertyFlags::ReadOnly.bits() == 0),
-                enumerable: Some(enumerable),
-                configurable: Some(configurable),
-            }
-        };
-        rt_try!(
-            heap,
-            Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
-        );
-        target.as_tagged(heap)
     })
 }
 

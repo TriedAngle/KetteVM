@@ -62,11 +62,6 @@ pub struct NativeIds {
     /// (ES 14.3.10); flags bit 0 marks the getter half, PropertyFlags bits
     /// carry enumerability
     pub install_accessor: NativeIndex,
-    /// (obj, key, value, flags) -- [[DefineOwnProperty]] with exact
-    /// attributes (class member installation); define sites are
-    /// strict-mode code, so a rejected define throws TypeError. flags are
-    /// PropertyFlags bits (the Accessor bit: the value is an AccessorPair)
-    pub define_own_property: NativeIndex,
     /// (obj, proto) -> obj -- [[SetPrototypeOf]] (class prototype wiring)
     pub set_prototype: NativeIndex,
     /// (value) -> value -- TypeError unless the value is null or a

@@ -1,3 +1,6 @@
+// Abstract collection traits. Concrete types keep their data in the type
+// object and compose behavior through a `traits*` parent.
+
 let Collection = {
     size: { throw UnimplementedError("size") }
     forEach: |block| { throw UnimplementedError("forEach") }
@@ -493,10 +496,9 @@ let MutableIndexable = {
 }
 
 // A growable sequence: a vector with a movable start.
-let Sequence = {
+let SequenceTraits = {
     indexable*: MutableIndexable
     collection*: MutableCollection
-    items, start, count: undefined
     new: {
         self.newWithSize(0)
     }
@@ -744,4 +746,9 @@ let Sequence = {
         self.items = next
         self.start = new_start
     }
+}
+
+let Sequence = {
+    traits*: SequenceTraits
+    items, start, count: undefined
 }

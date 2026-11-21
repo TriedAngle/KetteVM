@@ -1,7 +1,8 @@
 use crate::{
     AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, Cell, Compare, DenseString,
-    EdgeVisitable, GcSlot, Handle, Header, Heap, HeapObject, MaybeWeak, NativeIndex, ObjectKind,
-    OptionGcSlot, PrototypeInfo, Smi, StringRef, Symbol, Tagged, Value, Visitor, WeakFixedArray,
+    EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, MaybeWeak, NativeIndex,
+    ObjectKind, OptionGcSlot, PrototypeInfo, Smi, StringRef, Symbol, Tagged, Value, Visitor,
+    WeakFixedArray,
 };
 use core::alloc::Layout;
 
@@ -78,6 +79,45 @@ impl Map {
                 Ok(_) => return,
                 Err(observed) => flags = observed,
             }
+        }
+    }
+
+    pub fn is_multi_parent(&self) -> bool {
+        self.kind().contains(MapKind::MULTI_PARENT)
+    }
+
+    pub fn has_callable_parent(&self) -> bool {
+        MapKind::new(self.flags.load_smi_acquire().value() as u64)
+            .contains(MapKind::CALLABLE_PARENT)
+    }
+
+    /// Mark this map as having a callable ancestor. Monotonic: never cleared.
+    pub fn mark_callable_parent(&self, _heap: &Heap) {
+        let mut flags = self.flags.load_smi_relaxed();
+        loop {
+            let kind = MapKind::new(flags.value() as u64);
+            if kind.contains(MapKind::CALLABLE_PARENT) {
+                return;
+            }
+            let new = Smi::new(kind.union(MapKind::CALLABLE_PARENT).bits() as i64);
+            match self.flags.compare_exchange_smi(flags, new) {
+                Ok(_) => return,
+                Err(observed) => flags = observed,
+            }
+        }
+    }
+
+    /// Set the callable-parent bit if the parent-pair list contains a
+    /// callable ancestor.
+    pub fn sync_callable_parent(&self, heap: &Heap) {
+        if !self.is_multi_parent() {
+            return;
+        }
+        let Some(pairs) = self.prototype.get(heap).get_as::<FixedArray>(heap) else {
+            return;
+        };
+        if list_has_callable_parent(heap, pairs) {
+            self.mark_callable_parent(heap);
         }
     }
 
@@ -265,6 +305,29 @@ impl Map {
         self.find_special_transition(heap, sentinel, |_| true)
     }
 }
+/// Whether any object in a parent-pair list is callable, directly or through
+/// its own parent chain.
+fn list_has_callable_parent(heap: &Heap, pairs: Tagged<'_, FixedArray>) -> bool {
+    let mut i = 1;
+    while i < pairs.len() {
+        let value = pairs.at(heap, i);
+        if value.is_strong_ptr() {
+            if let Some(nested) = value.get_as::<FixedArray>(heap) {
+                if list_has_callable_parent(heap, nested) {
+                    return true;
+                }
+            } else if let Some(parent) = value.as_heap_object() {
+                let map = parent.map(heap);
+                if map.kind().is_callable() || map.has_callable_parent() {
+                    return true;
+                }
+            }
+        }
+        i += 2;
+    }
+    false
+}
+
 pub struct MapInit<'a> {
     pub kind: MapKind,
     pub value_slot_count: usize,
@@ -295,9 +358,14 @@ impl HeapObject for Map {
             .init_tagged(Tagged::<Smi>::from(Smi::new(
                 config.descriptors.len() as i64
             )));
+        let prototype = config.prototype.as_tagged(heap);
+        debug_assert_eq!(
+            prototype.get_as::<FixedArray>(heap).is_some(),
+            config.kind.contains(MapKind::MULTI_PARENT),
+            "MULTI_PARENT must match the prototype storage"
+        );
         self.flags.store_smi(Smi::new(config.kind.bits() as i64));
-        self.prototype
-            .set(heap, host, config.prototype.as_tagged(heap));
+        self.prototype.set(heap, host, prototype);
         self.pred.clear(heap);
         self.transitions.clear(heap);
         if config.kind.is_js_receiver() {
@@ -420,6 +488,11 @@ impl MapKind {
     pub const ELEMENTS_MASK: u64 = 0xff << Self::ELEMENTS_SHIFT;
     pub const PROPERTIES_DICTIONARY: MapKind = MapKind(1 << 24);
     pub const IMMUTABLE_PROTO: MapKind = MapKind(1 << 25);
+    /// The prototype slot is a Self-style parent-pair list.
+    pub const MULTI_PARENT: MapKind = MapKind(1 << 30);
+    /// Some parent in the parent list is callable (monotonic hint used by
+    /// call lookup; never cleared).
+    pub const CALLABLE_PARENT: MapKind = MapKind(1 << 31);
 
     pub const MAP: MapKind = MapKind(ObjectKind::Map as u64);
     pub const FIXED_ARRAY: MapKind = MapKind(ObjectKind::FixedArray as u64);
@@ -467,6 +540,10 @@ impl MapKind {
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
     pub const fn contains(self, flags: Self) -> bool {

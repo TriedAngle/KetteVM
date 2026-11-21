@@ -13,6 +13,9 @@ let seq = |values| {
 }
 
 let empty = Sequence.new()
+Test.assert(Object.isType(empty, Sequence), true)
+Test.assert(Object.isType(empty, Collection), false)
+Test.assert(Object.isType(empty, Indexable), false)
 Test.assert(empty.size(), 0)
 Test.assert(empty.isEmpty(), true)
 Test.assert(empty.nonEmpty(), false)

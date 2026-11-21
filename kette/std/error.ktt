@@ -1,86 +1,75 @@
-let ErrorPrototype = {
-    name: "Error"
-    message: ""
+// Error types are pure data. Behavior and constructors live on trait
+// parents; inherited callability runs the trait body with the type object as
+// `self`, so `clone` keeps the type map identity.
+
+let ErrorTraits = {
     toString: { self.name + ": " + self.message }
+
+    new: |message| {
+        let error = self.clone()
+        error.message = message
+        error
+    }
+
+    |message| self.new(message)
 }
 
 let Error = {
-    errorProto: ErrorPrototype
-    errorObject: {
-        parent*: ErrorPrototype
-        name: "Error"
-        message: ""
-    }
-    new: |message| {
-        let error = self.errorObject.clone()
-        error.message = message
-        error
-    }
-    |message| self.new(message)
+    traits*: ErrorTraits
+    name: "Error"
+    message: ""
 }
 
 let ElementDoesNotExist = {
-    parent*: Error
-    errorObject: {
-        parent*: ErrorPrototype
-        name: "ElementDoesNotExist"
-        message: ""
-    }
-    new: |message| {
-        let error = self.errorObject.clone()
-        error.message = message
-        error
-    }
-    |message| self.new(message)
+    traits*: ErrorTraits
+    name: "ElementDoesNotExist"
+    message: ""
 }
 
-let IndexOutOfBounds = {
-    parent*: Error
-    errorObject: {
-        parent*: ErrorPrototype
-        name: "IndexOutOfBounds"
-        message: ""
-        index: 0
-        length: 0
-    }
+let IndexOutOfBoundsTraits = {
+    parent*: ErrorTraits
+
     new: |message, index, length| {
-        let error = self.errorObject.clone()
+        let error = self.clone()
         error.message = message
         error.index = index
         error.length = length
         error
     }
+
     |message, index, length| self.new(message, index, length)
 }
 
-let IllegalLockState = {
-    parent*: Error
-    errorObject: {
-        parent*: ErrorPrototype
-        name: "IllegalLockState"
-        message: ""
-    }
-    new: |message| {
-        let error = self.errorObject.clone()
-        error.message = message
-        error
-    }
-    |message| self.new(message)
+let IndexOutOfBounds = {
+    traits*: IndexOutOfBoundsTraits
+    name: "IndexOutOfBounds"
+    message: ""
+    index: 0
+    length: 0
 }
 
-let UnimplementedError = {
-    parent*: Error
-    errorObject: {
-        parent*: ErrorPrototype
-        name: "UnimplementedError"
-        message: ""
-        function: ""
-    }
+let IllegalLockState = {
+    traits*: ErrorTraits
+    name: "IllegalLockState"
+    message: ""
+}
+
+let UnimplementedErrorTraits = {
+    parent*: ErrorTraits
+
     new: |function_name| {
-        let error = self.errorObject.clone()
+        let error = self.clone()
         error.function = function_name
         error.message = function_name
         error
     }
+
     |function_name| self.new(function_name)
+}
+
+let UnimplementedError = {
+    traits*: UnimplementedErrorTraits
+    name: "UnimplementedError"
+    message: ""
+    function: ""
 }

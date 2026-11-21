@@ -700,6 +700,30 @@ impl FnBuilder {
         );
     }
 
+    pub fn define_named_own_property(
+        &mut self,
+        obj: Reg,
+        name: ConstIdx,
+        flags: u32,
+        fb: Feedback,
+    ) {
+        self.emit_tracked(
+            Opcode::DefineNamedOwnProperty,
+            &[obj.operand(), name.0, flags, fb.0],
+        );
+    }
+
+    pub fn define_keyed_own_property(&mut self, obj: Reg, key: Reg, flags: u32, fb: Feedback) {
+        self.emit_tracked(
+            Opcode::DefineKeyedOwnProperty,
+            &[obj.operand(), key.operand(), flags, fb.0],
+        );
+    }
+
+    pub fn store_in_array_literal(&mut self, array: Reg, index: u32, fb: Feedback) {
+        self.emit_tracked(Opcode::StoreInArrayLiteral, &[array.operand(), index, fb.0]);
+    }
+
     pub fn store_keyed_property_no_shadow(&mut self, obj: Reg, key: Reg, fb: Feedback) {
         self.emit_tracked(
             Opcode::StoreKeyedPropertyNoShadow,

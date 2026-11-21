@@ -1,8 +1,9 @@
 use crate::{
     Args, Compare, Convert, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject,
     HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty, PartialDescriptor,
-    PropertyDescriptor, Prototype, Result, SetApplied, ShouldThrow, SlotName, Smi, StoreSemantics,
-    StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor, VmError, bail,
+    PropertyDescriptor, Prototype, Result, SetApplied, ShapeChange, ShouldThrow, SlotName, Smi,
+    StoreSemantics, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    VmError, bail,
 };
 use core::alloc::Layout;
 
@@ -903,7 +904,7 @@ fn prevent_extensions_ordinary(heap: &mut Heap, scope: &HandleScope<'_>, obj: Ha
             descriptors: &rows,
             prototype,
         });
-        Prototype::shape_changed(heap, obj_ref.map(heap));
+        Prototype::shape_changed(heap, obj_ref.map(heap), ShapeChange::INVALIDATE_ONLY);
         obj_ref.header.set_map(heap, obj_ref.erase(), new_map);
     });
 }

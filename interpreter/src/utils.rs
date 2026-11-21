@@ -137,8 +137,10 @@ pub fn call_target_miss<'a>(
                 InlineCache::call_update(heap, feedback, fb, callee, CallRecord::Native(*rt));
             }
         }
-        Some(CallTarget::Bytecode { info, .. }) => {
-            if let Some(fb) = fb {
+        Some(CallTarget::Bytecode { target, info, .. }) => {
+            if let Some(fb) = fb
+                && target.erase().ptr_eq(callee)
+            {
                 InlineCache::call_update(heap, feedback, fb, callee, CallRecord::Bytecode(*info));
             }
         }
