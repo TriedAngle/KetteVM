@@ -1,5 +1,6 @@
 let Collection = {
     size: { throw UnimplementedError("size") }
+    iterator: { Iter.newWithSource(self) }
     forEach: |block| { throw UnimplementedError("forEach") }
     forEachWithKey: |block| {
         self.forEach(|value| { block(value, value) })
@@ -227,6 +228,7 @@ let MutableCollection = {
 
 let Indexable = {
     parent*: Collection
+    version>> { throw UnimplementedError("version") }
     get: |index| { throw UnimplementedError("get") }
     []: |index| { self.get(index) }
     first: {
@@ -284,42 +286,27 @@ let Indexable = {
     keys: {
         let result = Sequence.new()
         let i = 0
-        while i < self.size() {
+        for _ in self {
             result.add(i)
             i = i + 1
         }
         result
     }
     indexOf: |value| {
-        let i = 0
-        let found = false
-        while i < self.size() && !found {
-            if self.get(i) == value {
-                found = true
-            } else {
-                i = i + 1
+        for i, item in self {
+            if item == value {
+                return i
             }
         }
-        if !found {
-            throw ElementDoesNotExist("element not found")
-        }
-        i
+        throw ElementDoesNotExist("element not found")
     }
     indexOfOrElse: |value, block| {
-        let i = 0
-        let found = false
-        while i < self.size() && !found {
-            if self.get(i) == value {
-                found = true
-            } else {
-                i = i + 1
+        for i, item in self {
+            if item == value {
+                return i
             }
         }
-        if found {
-            i
-        } else {
-            block()
-        }
+        block()
     }
     indexOf?: |value| {
         self.indexOfOrElse(value, { None })
@@ -338,25 +325,37 @@ let Indexable = {
         }
     }
     forEach: |block| {
+        let expected = self.version
         let i = 0
         while i < self.size() {
             block(self.get(i))
+            if self.version != expected {
+                throw ConcurrentModificationError("collection modified during iteration")
+            }
             i = i + 1
         }
         self
     }
     forEachWithKey: |block| {
+        let expected = self.version
         let i = 0
         while i < self.size() {
             block(self.get(i), i)
+            if self.version != expected {
+                throw ConcurrentModificationError("collection modified during iteration")
+            }
             i = i + 1
         }
         self
     }
     forEachReverse: |block| {
+        let expected = self.version
         let i = self.size() - 1
         while i >= 0 {
             block(self.get(i))
+            if self.version != expected {
+                throw ConcurrentModificationError("collection modified during iteration")
+            }
             i = i - 1
         }
         self
@@ -366,10 +365,11 @@ let Indexable = {
         if other.size() < count {
             count = other.size()
         }
-        let i = 0
-        while i < count {
-            block(self.get(i), other.get(i))
-            i = i + 1
+        for i, value in self {
+            if i >= count {
+                break
+            }
+            block(value, other.get(i))
         }
         self
     }
@@ -452,10 +452,8 @@ let MutableIndexable = {
         found
     }
     mapSelf: |block| {
-        let i = 0
-        while i < self.size() {
-            self.setAt(i, block(self.get(i), i))
-            i = i + 1
+        for i, value in self {
+            self.setAt(i, block(value, i))
         }
         self
     }
@@ -471,7 +469,7 @@ let MutableIndexable = {
     }
     fill: |value| {
         let i = 0
-        while i < self.size() {
+        for _ in self {
             self.setAt(i, value)
             i = i + 1
         }
@@ -516,6 +514,7 @@ let SequenceTraits = {
         sequence.items = items
         sequence.start = 0
         sequence.count = size
+        sequence.version = 0
         sequence
     }
     from: |collection| {
@@ -545,12 +544,14 @@ let SequenceTraits = {
         self.start = self.start - 1
         self.items[self.start] = value
         self.count = self.count + 1
+        self.version = self.version + 1
         self
     }
     addLast: |value| {
         self.ensureTail(1)
         self.items[self.start + self.count] = value
         self.count = self.count + 1
+        self.version = self.version + 1
         self
     }
     addAllFirst: |collection| {
@@ -574,6 +575,7 @@ let SequenceTraits = {
         if self.count == 0 {
             self.start = 0
         }
+        self.version = self.version + 1
         value
     }
     removeFirst?: {
@@ -593,6 +595,7 @@ let SequenceTraits = {
         if self.count == 0 {
             self.start = 0
         }
+        self.version = self.version + 1
         value
     }
     removeLast?: {
@@ -620,6 +623,7 @@ let SequenceTraits = {
         }
         self.items[self.start + index] = value
         self.count = self.count + 1
+        self.version = self.version + 1
         self
     }
     removeAt: |index| {
@@ -640,6 +644,7 @@ let SequenceTraits = {
         }
         self.items[self.start + self.count - 1] = null
         self.count = self.count - 1
+        self.version = self.version + 1
         value
     }
     removeRange: |start, stop| {
@@ -662,6 +667,7 @@ let SequenceTraits = {
         }
         self.start = 0
         self.count = 0
+        self.version = self.version + 1
         self
     }
     compress: {
@@ -748,4 +754,54 @@ let SequenceTraits = {
 let Sequence = {
     traits*: SequenceTraits
     items, start, count: undefined
+    // Own slot: parent writes mutate the holder.
+    version: 0
+}
+
+// The built-in iterator; custom iterables only need hasNext/next.
+let IteratorTraits = {
+    hasNext: { self.index < self.source.size() }
+    next: {
+        if self.source.version != self.version {
+            throw ConcurrentModificationError("collection modified during iteration")
+        }
+        if self.index >= self.source.size() {
+            throw NoSuchElementError("iterator exhausted")
+        }
+        let value = self.source.get(self.index)
+        self.lastRet = self.index
+        self.index = self.index + 1
+        value
+    }
+    nextKeyed: {
+        let index = self.index
+        let value = self.next()
+        [index, value]
+    }
+    remove: {
+        if self.lastRet < 0 {
+            throw IllegalStateError("next() not called")
+        }
+        if self.source.version != self.version {
+            throw ConcurrentModificationError("collection modified during iteration")
+        }
+        let removed = self.source.removeAt(self.lastRet)
+        self.index = self.lastRet
+        self.lastRet = -1
+        self.version = self.source.version
+        removed
+    }
+}
+
+let Iter = {
+    traits*: IteratorTraits
+    source, index, lastRet, version: undefined
+    newWithSource: |source| {
+        let it = self.clone()
+        it.source = source
+        it.index = 0
+        it.lastRet = -1
+        it.version = source.version
+        it
+    }
 }

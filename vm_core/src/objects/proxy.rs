@@ -1,9 +1,9 @@
 use crate::{
-    Args, Compare, Convert, EdgeVisitable, GcSlot, Handle, HandleScope, Header, Heap, HeapObject,
-    HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty, PartialDescriptor,
-    PropertyDescriptor, Prototype, Result, SetApplied, ShapeChange, ShouldThrow, SlotName, Smi,
-    StoreSemantics, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
-    VmError, bail,
+    Args, Compare, Convert, EdgeVisitable, FixedArray, GcSlot, Handle, HandleScope, Header, Heap,
+    HeapObject, HostCtx, Key, LanguageMode, Map, Object, ObjectKind, OwnProperty,
+    PartialDescriptor, PropertyDescriptor, Prototype, Result, SetApplied, ShapeChange, ShouldThrow,
+    SlotName, Smi, StoreSemantics, StringRef, Symbol, Tagged, ThreadState, Transition, VM, Value,
+    Visitor, VmError, bail,
 };
 use core::alloc::Layout;
 
@@ -421,11 +421,20 @@ fn get_prototype_of_h<'a>(
     obj: &Handle<'_, Value>,
 ) -> Result<Tagged<'a, Value>> {
     if !Proxy::is_proxy(heap, obj.as_tagged(heap)) {
-        let proto = obj
+        let receiver = obj
             .as_tagged(heap)
             .as_heap_object()
-            .expect("[[GetPrototypeOf]] receiver is an object")
-            .prototype(heap);
+            .expect("[[GetPrototypeOf]] receiver is an object");
+        let proto = if receiver.map(heap).is_multi_parent() {
+            receiver
+                .prototype(heap)
+                .get_as::<FixedArray>(heap)
+                .filter(|pairs| pairs.len() >= 2)
+                .map(|pairs| pairs.at(heap, 1))
+                .unwrap_or_else(|| heap.known().null.get(heap).erase())
+        } else {
+            receiver.prototype(heap)
+        };
         let proto = scope.handle(proto);
         return Ok(proto.as_tagged(heap));
     }

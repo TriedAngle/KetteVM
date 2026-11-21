@@ -1,13 +1,11 @@
 // Collection behavior and the growable Sequence.
-// Run:  cargo run -q -p vm -- kette/std/error.ktt kette/std/collection.ktt kette/kette_tests/collection.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/error.ktt kette/std/collection.ktt kette/kette_tests/collection.ktt
 // Check: kette/kette_tests/check.py
 
 let seq = |values| {
     let result = Sequence.new()
-    let i = 0
-    while i < values.length {
-        result.add(values[i])
-        i = i + 1
+    for value in values {
+        result.add(value)
     }
     result
 }
@@ -424,3 +422,16 @@ Test.assert(bracket_set_precedence.x, 5)
 Test.assert(bracket_set_precedence.y, 0)
 bracket_set_precedence["z"] = 7
 Test.assert(bracket_set_precedence.y, 7)
+
+// Indexable iteration requires an explicit version.
+let NoVersion = {
+    traits*: Indexable
+    size: { 0 }
+    get: |index| { 0 }
+}
+let no_version = try {
+    NoVersion.forEach(|value| { value })
+} catch (error) {
+    error.name
+}
+Test.assert(no_version, "UnimplementedError")

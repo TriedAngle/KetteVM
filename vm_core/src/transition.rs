@@ -853,6 +853,33 @@ impl Object {
         name: Handle<SlotName>,
         value: Handle<'_, Value>,
     ) -> Result<()> {
+        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, false)
+    }
+
+    /// Like [`Object::add_parent`], but keeps the existing single prototype.
+    pub fn add_parent_preserving(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        name: Handle<SlotName>,
+        value: Handle<'_, Value>,
+    ) -> Result<()> {
+        Self::add_parent_inner(vm, heap, state, scope, receiver, name, value, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_parent_inner(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        name: Handle<SlotName>,
+        value: Handle<'_, Value>,
+        preserve_existing: bool,
+    ) -> Result<()> {
         if !receiver.as_tagged(heap).is_extendable(heap) {
             bail!(vm, heap, state, VmError::NotExtensible);
         }
@@ -868,16 +895,34 @@ impl Object {
             return Ok(());
         }
         let mut pairs: Vec<Handle<'_, Value>> = Vec::new();
-        {
-            let base = receiver.as_tagged(heap).prototype(heap);
-            if let Some(existing) = base.get_as::<FixedArray>(heap) {
-                for i in 0..existing.len() {
-                    pairs.push(scope.handle(existing.at(heap, i)));
+        let next_name = name.as_tagged(heap).erase();
+        let mut replaced = false;
+        let base = scope.handle(receiver.as_tagged(heap).prototype(heap));
+        if let Some(existing) = base.as_tagged(heap).get_as::<FixedArray>(heap) {
+            let mut i = 0;
+            while i < existing.len() {
+                let existing_name = existing.at(heap, i);
+                if !replaced && existing_name.ptr_eq(next_name) {
+                    pairs.push(name.erase());
+                    pairs.push(value);
+                    replaced = true;
+                } else {
+                    pairs.push(scope.handle(existing_name));
+                    pairs.push(scope.handle(existing.at(heap, i + 1)));
                 }
+                i += 2;
             }
+        } else if preserve_existing && base.as_tagged(heap).as_heap_object().is_some() {
+            // Converting a single-prototype object to multi-parent:
+            // keep the existing prototype as the first parent.
+            let label = vm.interner().intern_str(heap, scope, "[[Prototype]]");
+            pairs.push(label.erase());
+            pairs.push(base);
         }
-        pairs.push(name.erase());
-        pairs.push(value);
+        if !replaced {
+            pairs.push(name.erase());
+            pairs.push(value);
+        }
         let pairs = heap.allocate_handle::<FixedArray>(scope.stage_handles(&pairs), scope);
         Self::set_prototype(vm, heap, state, scope, receiver, pairs.erase())
     }

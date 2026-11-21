@@ -199,25 +199,42 @@ impl Resolver<'_> {
     fn collect_stmt_decls(&mut self, stmts: &[NodeId]) {
         for &stmt in stmts {
             match *self.ast.node(stmt) {
-                Node::Let { name, init } => {
+                Node::Let { pattern, init } => {
                     self.collect_expr_decls(init);
-                    let span = self.ast.span(stmt);
-                    self.declare(name, span);
-                }
-                Node::LetMulti { names, init, .. } => {
-                    self.collect_expr_decls(init);
-                    let span = self.ast.span(stmt);
-                    let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
-                    for name_node in names {
-                        let Node::Ident(name) = *self.ast.node(name_node) else {
-                            unreachable!("import names are identifiers");
-                        };
-                        self.declare(name, span);
-                    }
+                    self.collect_pattern_decls(pattern);
                 }
                 Node::ExprStmt { expr } => self.collect_expr_decls(expr),
                 _ => {}
             }
+        }
+    }
+
+    fn collect_pattern_decls(&mut self, pattern: NodeId) {
+        match *self.ast.node(pattern) {
+            Node::Ident(name) => {
+                let span = self.ast.span(pattern);
+                self.declare(name, span);
+            }
+            Node::PatternFields { names, .. } => {
+                let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
+                for name_node in names {
+                    let Node::Ident(name) = *self.ast.node(name_node) else {
+                        unreachable!("pattern bindings are identifiers");
+                    };
+                    let span = self.ast.span(name_node);
+                    self.declare(name, span);
+                }
+            }
+            Node::PatternArray { elements, rest } => {
+                let elements: Vec<NodeId> = self.ast.list_items(elements).to_vec();
+                for element in elements {
+                    self.collect_pattern_decls(element);
+                }
+                if let Some(rest) = rest {
+                    self.collect_pattern_decls(rest);
+                }
+            }
+            _ => unreachable!("binding patterns are names, field lists, or arrays"),
         }
     }
 
@@ -230,6 +247,16 @@ impl Resolver<'_> {
                 }
             }
             Node::While { body, .. } => self.collect_branch_decls(body),
+            Node::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
+                self.collect_expr_decls(iterable);
+                self.collect_pattern_decls(pattern);
+                self.collect_branch_decls(body);
+            }
             Node::Object(ref parts) => {
                 // slot values evaluate in the enclosing scope
                 for &slot in self.ast.list_items(parts.slots) {
@@ -381,7 +408,7 @@ impl Resolver<'_> {
                     self.resolve_node(stmt);
                 }
             }
-            Node::Let { init, .. } | Node::LetMulti { init, .. } => self.resolve_node(*init),
+            Node::Let { init, .. } => self.resolve_node(*init),
             Node::ExprStmt { expr } => self.resolve_node(*expr),
             Node::Ident(sym) => self.resolve_ident(node, *sym),
             Node::Object(_) => {
@@ -421,6 +448,11 @@ impl Resolver<'_> {
             Node::While { cond, body } => {
                 let (cond, body) = (*cond, *body);
                 self.resolve_node(cond);
+                self.resolve_branch(body);
+            }
+            Node::For { iterable, body, .. } => {
+                let (iterable, body) = (*iterable, *body);
+                self.resolve_node(iterable);
                 self.resolve_branch(body);
             }
             Node::Array { elements } => {
@@ -472,7 +504,7 @@ impl Resolver<'_> {
                 self.resolve_node(*body);
                 self.resolve_node(*handler);
             }
-            Node::Slot { .. } => {}
+            Node::Slot { .. } | Node::PatternFields { .. } | Node::PatternArray { .. } => {}
             Node::Self_ => self.resolve_self(node),
             Node::Number(_) | Node::String(_) | Node::Bool(_) | Node::Null | Node::SelfContext => {}
         }

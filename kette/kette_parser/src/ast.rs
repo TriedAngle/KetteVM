@@ -108,6 +108,18 @@ pub enum Node {
     Array {
         elements: NodeList,
     },
+    /// `(a, b as c, ...)` binding pattern: read each `sources` field and
+    /// bind it to the matching `names` entry.
+    PatternFields {
+        sources: NodeList,
+        names: NodeList,
+    },
+    /// `[a, b, ...tail]` binding pattern: bind positions, with an optional
+    /// fresh-array rest.
+    PatternArray {
+        elements: NodeList,
+        rest: Option<NodeId>,
+    },
     StmtList {
         stmts: NodeList,
     },
@@ -166,15 +178,7 @@ pub enum Node {
     },
 
     Let {
-        name: Symbol,
-        init: NodeId,
-    },
-    /// `let (a, b as c, ...) = expr`: bind every named field to a declaration.
-    LetMulti {
-        /// Field names read from `init`.
-        sources: NodeList,
-        /// Declared names, parallel to `sources`.
-        names: NodeList,
+        pattern: NodeId,
         init: NodeId,
     },
     ExprStmt {
@@ -195,6 +199,15 @@ pub enum Node {
         cond: NodeId,
         body: NodeId,
     },
+
+    /// `for binding in iterable { body }`; the binding is a pattern in the
+    /// enclosing scope and the body is a `StmtList` compiled inline.
+    For {
+        keyed: bool,
+        pattern: NodeId,
+        iterable: NodeId,
+        body: NodeId,
+    },
 }
 
 pub struct Ast {
@@ -207,6 +220,12 @@ pub struct Ast {
     root: Option<NodeId>,
     /// interned spelling of `self`, used for hidden self bindings
     self_symbol: Option<Symbol>,
+    /// protocol names interned by the parser for `for` lowering
+    iterator_symbol: Option<Symbol>,
+    has_next_symbol: Option<Symbol>,
+    next_symbol: Option<Symbol>,
+    next_keyed_symbol: Option<Symbol>,
+    size_symbol: Option<Symbol>,
 }
 
 impl Default for Ast {
@@ -224,6 +243,11 @@ impl Ast {
             strings: SymbolTable::default(),
             root: None,
             self_symbol: None,
+            iterator_symbol: None,
+            has_next_symbol: None,
+            next_symbol: None,
+            next_keyed_symbol: None,
+            size_symbol: None,
         }
     }
 
@@ -241,6 +265,46 @@ impl Ast {
 
     pub fn set_self_symbol(&mut self, symbol: Symbol) {
         self.self_symbol = Some(symbol);
+    }
+
+    pub fn set_iteration_symbols(
+        &mut self,
+        iterator: Symbol,
+        has_next: Symbol,
+        next: Symbol,
+        next_keyed: Symbol,
+        size: Symbol,
+    ) {
+        self.iterator_symbol = Some(iterator);
+        self.has_next_symbol = Some(has_next);
+        self.next_symbol = Some(next);
+        self.next_keyed_symbol = Some(next_keyed);
+        self.size_symbol = Some(size);
+    }
+
+    pub fn iterator_symbol(&self) -> Symbol {
+        self.iterator_symbol
+            .expect("parser interns the iteration protocol names")
+    }
+
+    pub fn has_next_symbol(&self) -> Symbol {
+        self.has_next_symbol
+            .expect("parser interns the iteration protocol names")
+    }
+
+    pub fn next_symbol(&self) -> Symbol {
+        self.next_symbol
+            .expect("parser interns the iteration protocol names")
+    }
+
+    pub fn next_keyed_symbol(&self) -> Symbol {
+        self.next_keyed_symbol
+            .expect("parser interns the iteration protocol names")
+    }
+
+    pub fn size_symbol(&self) -> Symbol {
+        self.size_symbol
+            .expect("parser interns the iteration protocol names")
     }
 
     pub fn add(&mut self, node: Node, span: ByteSpan) -> NodeId {

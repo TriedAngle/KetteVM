@@ -29,6 +29,8 @@ fn keyword_kind(text: &[u8]) -> Option<TokenKind> {
         b"if" => If,
         b"else" => Else,
         b"while" => While,
+        b"for" => For,
+        b"in" => In,
         b"self" => SelfKw,
         b"null" => Null,
         b"true" => True,

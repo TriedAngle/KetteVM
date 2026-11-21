@@ -46,6 +46,7 @@ def main() -> None:
     files = [Path(a) for a in sys.argv[1:]] or sorted(here.glob("*.ktt"))
     runner = here / "test_runner.ktt"
     std = [
+        root / "std" / "startup.ktt",
         root / "std" / "error.ktt",
         root / "std" / "collection.ktt",
         root / "std" / "functional.ktt",

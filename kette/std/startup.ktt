@@ -1,0 +1,32 @@
+// Array iteration/destructuring helpers. Load explicitly; not auto-loaded.
+// The IIFE keeps re-running it from declaring globals.
+{
+    let ArrayTraits = {
+        size: { self.length }
+        iterator: {
+            let array = self
+            let index = 0
+            {
+                hasNext: { index < array.length }
+                next: {
+                    if index >= array.length {
+                        return undefined
+                    }
+                    let value = array[index]
+                    index = index + 1
+                    value
+                }
+                nextKeyed: {
+                    if index >= array.length {
+                        return undefined
+                    }
+                    let key = index
+                    let value = array[index]
+                    index = index + 1
+                    [key, value]
+                }
+            }
+        }
+    }
+    Object.addParent(Array.prototype, "array", ArrayTraits)
+}()

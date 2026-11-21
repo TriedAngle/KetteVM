@@ -29,6 +29,7 @@ impl Runtime for KetteRuntime {
         let clone = state.clone;
         let print = vm.register_native(console_print);
         let is_type = vm.register_native(object_is_type);
+        let add_parent = vm.register_native(object_add_parent);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let (thread_vm, heap, thread_state) = thread.split();
@@ -74,6 +75,15 @@ impl Runtime for KetteRuntime {
                 if let Some(object_ctor) = object_ctor.as_tagged(heap).as_heap_object() {
                     let object_ctor = scope.handle(object_ctor);
                     Object::add_method(thread_vm, heap, &scope, object_ctor, "isType", is_type, 2);
+                    Object::add_method(
+                        thread_vm,
+                        heap,
+                        &scope,
+                        object_ctor,
+                        "addParent",
+                        add_parent,
+                        3,
+                    );
                 }
             }
 
@@ -159,6 +169,30 @@ fn object_is_type<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagg
     } else {
         known.false_object.get(heap).erase()
     }
+}
+
+/// `Object.addParent(object, name, parent)` — append or replace one
+/// Self-style parent on an existing object.
+fn object_add_parent<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let target = args.get_handle(heap, 0);
+    let raw_key = args.get_handle(heap, 1);
+    let parent = args.get_handle(heap, 2);
+    state.handle_scope(|scope| {
+        let Some(target) = target.as_tagged(heap).as_heap_object() else {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        };
+        let target = scope.handle(target);
+        let key = rt_try!(heap, Object::to_property_key(vm, heap, state, raw_key));
+        let key = scope.handle(key);
+        rt_try!(
+            heap,
+            Object::add_parent_preserving(vm, heap, state, &scope, target, key, parent)
+        );
+        target.as_tagged(heap).erase()
+    })
 }
 
 fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

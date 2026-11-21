@@ -71,3 +71,22 @@ let UnimplementedError = {
     message: ""
     function: ""
 }
+
+// Iteration protocol errors.
+let ConcurrentModificationError = {
+    traits*: ErrorTraits
+    name: "ConcurrentModificationError"
+    message: ""
+}
+
+let NoSuchElementError = {
+    traits*: ErrorTraits
+    name: "NoSuchElementError"
+    message: ""
+}
+
+let IllegalStateError = {
+    traits*: ErrorTraits
+    name: "IllegalStateError"
+    message: ""
+}

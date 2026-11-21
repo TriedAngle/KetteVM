@@ -96,3 +96,29 @@ fn break_outside_loop_is_rejected() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn for_loop_uses_the_iterator_protocol() {
+    let p = compile("for x in xs { x; }", SourceMode::Script);
+    let f = script_fn(&p);
+    assert!(
+        contains(&p, f, Opcode::LoadNamedProperty),
+        "the protocol steps are property loads"
+    );
+    assert!(
+        contains(&p, f, Opcode::CallMethod0),
+        "zero-argument protocol calls use the method form"
+    );
+    assert!(
+        contains(&p, f, Opcode::JumpLoop),
+        "the back edge polls safepoints"
+    );
+}
+
+#[test]
+fn nested_for_loops_compile() {
+    let p = compile("for x in xs { for y in ys { x + y; } }", SourceMode::Script);
+    let f = script_fn(&p);
+    assert!(contains(&p, f, Opcode::CallMethod0));
+    assert!(contains(&p, f, Opcode::JumpLoop));
+}

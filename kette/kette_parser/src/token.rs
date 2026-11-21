@@ -51,6 +51,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    For,
+    In,
     SelfKw,
     Null,
     True,
@@ -122,6 +124,8 @@ const TOKEN_INFO: &[TokenInfo] = &[
     I::new("if", 0, I::F_KEYWORD),          // If
     I::new("else", 0, I::F_KEYWORD),        // Else
     I::new("while", 0, I::F_KEYWORD),       // While
+    I::new("for", 0, I::F_KEYWORD),         // For
+    I::new("in", 0, I::F_KEYWORD),          // In
     I::new("self", 0, I::F_KEYWORD),        // SelfKw
     I::new("null", 0, I::F_KEYWORD),        // Null
     I::new("true", 0, I::F_KEYWORD),        // True

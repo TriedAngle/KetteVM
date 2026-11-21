@@ -53,7 +53,7 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
             }
         }
         Node::StmtList { stmts } => walk_stmts(ast, *stmts, out),
-        Node::Let { init, .. } | Node::LetMulti { init, .. } => collect_objects(ast, *init, out),
+        Node::Let { init, .. } => collect_objects(ast, *init, out),
         Node::ExprStmt { expr } => collect_objects(ast, *expr, out),
         Node::If { cond, then, else_ } => {
             collect_objects(ast, *cond, out);
@@ -64,6 +64,10 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
         }
         Node::While { cond, body } => {
             collect_objects(ast, *cond, out);
+            collect_branch(ast, *body, out);
+        }
+        Node::For { iterable, body, .. } => {
+            collect_objects(ast, *iterable, out);
             collect_branch(ast, *body, out);
         }
         Node::Array { elements } => {
@@ -111,6 +115,8 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
         }
         Node::Slot { .. }
         | Node::SlotMulti { .. }
+        | Node::PatternFields { .. }
+        | Node::PatternArray { .. }
         | Node::Number(_)
         | Node::String(_)
         | Node::Bool(_)
@@ -199,10 +205,13 @@ fn collect_object_names(
                 collect_object_names(ast, stmt, names, None);
             }
         }
-        Node::Let { name, init } => {
-            collect_object_names(ast, *init, names, Some(ast.symbol(*name)));
+        Node::Let { pattern, init } => {
+            let inherited = match *ast.node(*pattern) {
+                Node::Ident(sym) => Some(ast.symbol(sym)),
+                _ => None,
+            };
+            collect_object_names(ast, *init, names, inherited);
         }
-        Node::LetMulti { init, .. } => collect_object_names(ast, *init, names, None),
         Node::ExprStmt { expr } => collect_object_names(ast, *expr, names, None),
         Node::If { cond, then, else_ } => {
             collect_object_names(ast, *cond, names, None);
@@ -213,6 +222,10 @@ fn collect_object_names(
         }
         Node::While { cond, body } => {
             collect_object_names(ast, *cond, names, None);
+            collect_object_names(ast, *body, names, None);
+        }
+        Node::For { iterable, body, .. } => {
+            collect_object_names(ast, *iterable, names, None);
             collect_object_names(ast, *body, names, None);
         }
         Node::Array { elements } => {
@@ -261,6 +274,8 @@ fn collect_object_names(
         }
         Node::Slot { .. }
         | Node::SlotMulti { .. }
+        | Node::PatternFields { .. }
+        | Node::PatternArray { .. }
         | Node::Number(_)
         | Node::String(_)
         | Node::Bool(_)
@@ -501,6 +516,101 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
+    /// Bind `pattern` from the accumulator.
+    fn bind_pattern_acc(&mut self, pattern: NodeId) -> Result<(), CompileError> {
+        if matches!(self.ast.node(pattern), Node::Ident(_)) {
+            let decl = self.next_let;
+            self.next_let += 1;
+            self.store_decl(decl);
+            return Ok(());
+        }
+        let temps = self.b.temp_scope();
+        let value = self.b.stage_acc(&temps);
+        self.bind_pattern(pattern, value)
+    }
+
+    /// Bind `pattern` from an already-staged value.
+    fn bind_pattern(&mut self, pattern: NodeId, value: Reg) -> Result<(), CompileError> {
+        match *self.ast.node(pattern) {
+            Node::Ident(_) => {
+                let decl = self.next_let;
+                self.next_let += 1;
+                self.b.load(value);
+                self.store_decl(decl);
+            }
+            Node::PatternFields { sources, names } => {
+                let sources: Vec<NodeId> = self.ast.list_items(sources).to_vec();
+                let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
+                for (source_node, name_node) in sources.into_iter().zip(names) {
+                    let Node::Ident(source) = *self.ast.node(source_node) else {
+                        unreachable!("pattern sources are identifiers");
+                    };
+                    let Node::Ident(_) = *self.ast.node(name_node) else {
+                        unreachable!("pattern bindings are identifiers");
+                    };
+                    let field = self.name_constant(source);
+                    let feedback = self.b.new_feedback();
+                    self.b.load_named_property(value, field, feedback);
+                    let decl = self.next_let;
+                    self.next_let += 1;
+                    self.store_decl(decl);
+                }
+            }
+            Node::PatternArray { elements, rest } => {
+                let temps = self.b.temp_scope();
+                let size = self.emit_send_reg0(value, self.ast.size_symbol(), &temps)?;
+                let elements: Vec<NodeId> = self.ast.list_items(elements).to_vec();
+                for (index, element) in elements.iter().enumerate() {
+                    let missing = self.b.new_label();
+                    let have = self.b.new_label();
+                    self.b.load_smi(index as i32);
+                    self.b.less_than(size);
+                    self.b.jump_if_falsy(missing);
+                    self.b.load_smi(index as i32);
+                    let feedback = self.b.new_feedback();
+                    self.b.load_indexed(value, feedback);
+                    self.b.jump(have);
+                    self.b.bind(missing);
+                    self.b.load_undefined();
+                    self.b.bind(have);
+                    let element_value = self.b.stage_acc(&temps);
+                    self.bind_pattern(*element, element_value)?;
+                }
+                if let Some(rest) = rest {
+                    let tail = temps.temp();
+                    self.b.create_empty_array_literal();
+                    self.b.store(tail);
+                    let index = temps.temp();
+                    self.b.load_smi(elements.len() as i32);
+                    self.b.store(index);
+                    let loop_start = self.b.new_label();
+                    let loop_end = self.b.new_label();
+                    self.b.bind(loop_start);
+                    self.b.load(index);
+                    self.b.less_than(size);
+                    self.b.jump_if_falsy(loop_end);
+                    let key = temps.temp();
+                    self.b.load_smi(elements.len() as i32);
+                    self.b.sub(index);
+                    self.b.store(key);
+                    self.b.load(index);
+                    let load_feedback = self.b.new_feedback();
+                    self.b.load_indexed(value, load_feedback);
+                    let store_feedback = self.b.new_feedback();
+                    self.b.store_indexed(tail, key, store_feedback);
+                    self.b.load_smi(1);
+                    self.b.add(index);
+                    self.b.store(index);
+                    self.b.jump_loop(loop_start);
+                    self.b.bind(loop_end);
+                    self.bind_pattern(rest, tail)?;
+                }
+            }
+            _ => unreachable!("binding patterns are names, field lists, or arrays"),
+        }
+        Ok(())
+    }
+
     fn load_self(&mut self, node: NodeId) {
         match self.resolved.resolution(node) {
             Some(Resolution::Local { decl, .. }) => self.load_decl(decl as usize),
@@ -657,37 +767,9 @@ impl<'a> FunctionGen<'a> {
 
     fn emit_stmt(&mut self, stmt: NodeId, sink: Reg) -> Result<(), CompileError> {
         match *self.ast.node(stmt) {
-            Node::Let { init, .. } => {
+            Node::Let { pattern, init } => {
                 self.expr(init)?;
-                let decl = self.next_let;
-                self.next_let += 1;
-                self.store_decl(decl);
-                Ok(())
-            }
-            Node::LetMulti {
-                sources,
-                names,
-                init,
-            } => {
-                let temps = self.b.temp_scope();
-                self.expr(init)?;
-                let module = self.b.stage_acc(&temps);
-                let sources: Vec<NodeId> = self.ast.list_items(sources).to_vec();
-                let names: Vec<NodeId> = self.ast.list_items(names).to_vec();
-                for (source_node, name_node) in sources.into_iter().zip(names) {
-                    let Node::Ident(source) = *self.ast.node(source_node) else {
-                        unreachable!("import sources are identifiers");
-                    };
-                    let Node::Ident(_) = *self.ast.node(name_node) else {
-                        unreachable!("import names are identifiers");
-                    };
-                    let field = self.name_constant(source);
-                    let feedback = self.b.new_feedback();
-                    self.b.load_named_property(module, field, feedback);
-                    let decl = self.next_let;
-                    self.next_let += 1;
-                    self.store_decl(decl);
-                }
+                self.bind_pattern_acc(pattern)?;
                 Ok(())
             }
             Node::ExprStmt { expr } => {
@@ -802,10 +884,14 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
             Node::While { .. } => self.emit_while(node),
+            Node::For { .. } => self.emit_for(node),
             Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
             Node::Unary { op, expr } => self.emit_unary(op, expr),
-            Node::Slot { .. } | Node::SlotMulti { .. } => {
-                unreachable!("slots are only reachable through their object")
+            Node::Slot { .. }
+            | Node::SlotMulti { .. }
+            | Node::PatternFields { .. }
+            | Node::PatternArray { .. } => {
+                unreachable!("slots and patterns are only reachable through a binding")
             }
             Node::Throw { value } => {
                 self.expr(value)?;
@@ -817,10 +903,9 @@ impl<'a> FunctionGen<'a> {
                 param,
                 handler,
             } => self.emit_try(node, body, param, handler),
-            Node::StmtList { .. }
-            | Node::Let { .. }
-            | Node::LetMulti { .. }
-            | Node::ExprStmt { .. } => self.err(node, "statement in expression position"),
+            Node::StmtList { .. } | Node::Let { .. } | Node::ExprStmt { .. } => {
+                self.err(node, "statement in expression position")
+            }
         }
     }
 
@@ -894,6 +979,21 @@ impl<'a> FunctionGen<'a> {
         self.expr(callee)?;
         let callee_reg = self.b.stage_acc(&temps);
         self.emit_call_args(&temps, callee_reg, None, &args)
+    }
+
+    /// Zero-argument send; stages the result into a temp.
+    fn emit_send_reg0(
+        &mut self,
+        recv: Reg,
+        name: Symbol,
+        temps: &TempScope,
+    ) -> Result<Reg, CompileError> {
+        let name = self.name_constant(name);
+        let load_feedback = self.b.new_feedback();
+        self.b.load_named_property(recv, name, load_feedback);
+        let callee = self.b.stage_acc(temps);
+        self.emit_call_args(temps, callee, Some(recv), &[])?;
+        Ok(self.b.stage_acc(temps))
     }
 
     /// `=` never creates where the VM can write through: named slots use
@@ -1247,6 +1347,59 @@ impl<'a> FunctionGen<'a> {
         if self.b.is_live() {
             self.b.jump(start);
         }
+        self.loops.pop();
+        self.b.bind(end);
+        self.b.load(result);
+        Ok(())
+    }
+
+    /// Lowers `for` to `iterator()`/`hasNext()`/`next()`.
+    /// `for i, value in ...` uses `nextKeyed()` instead.
+    fn emit_for(&mut self, node: NodeId) -> Result<(), CompileError> {
+        let Node::For {
+            keyed,
+            pattern,
+            iterable,
+            body,
+        } = *self.ast.node(node)
+        else {
+            unreachable!("emit_for called on a For node");
+        };
+        let temps = self.b.temp_scope();
+        let sink = temps.temp();
+        let result = temps.temp();
+        let start = self.b.new_label();
+        let end = self.b.new_label();
+
+        self.expr(iterable)?;
+        let source = self.b.stage_acc(&temps);
+        let iterator = self.emit_send_reg0(source, self.ast.iterator_symbol(), &temps)?;
+
+        self.b.load_null();
+        self.b.store(result);
+        self.loops.push(LoopCtx {
+            break_label: end,
+            result,
+        });
+
+        self.b.bind(start);
+        let has_next = self.emit_send_reg0(iterator, self.ast.has_next_symbol(), &temps)?;
+        self.b.load(has_next);
+        self.b.jump_if_falsy(end);
+
+        let next_name = if keyed {
+            self.ast.next_keyed_symbol()
+        } else {
+            self.ast.next_symbol()
+        };
+        let next = self.emit_send_reg0(iterator, next_name, &temps)?;
+        self.bind_pattern(pattern, next)?;
+
+        self.emit_body(body, sink)?;
+        if self.b.is_live() {
+            self.b.jump_loop(start);
+        }
+
         self.loops.pop();
         self.b.bind(end);
         self.b.load(result);

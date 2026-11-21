@@ -6,6 +6,16 @@ Run any example with the release VM:
 
 Kette files share one global scope, so multi-file examples are passed in order.
 
+## Standard startup
+
+`kette/std/startup.ktt` installs the array-side `size()` and `iterator()`
+methods used by `for x in array` and array destructuring. It is not loaded
+automatically; pass it first when a script uses those:
+
+    cargo run -q -p vm -- kette/std/startup.ktt <your-files...>
+
+Scripts that do not iterate arrays do not need it.
+
 ## UI sketch
 
     cargo run -q -p vm -- \
