@@ -1,4 +1,4 @@
-// tgpu bindings. Load after sys.ktt; provides the `tgpu` module.
+// tgpu bindings. Load explicitly; provides the `vendor.tgpu` module.
 use ffi
 use os
 use sys
@@ -280,7 +280,7 @@ let record_handle = { |value, what|
 }
 
 
-mod tgpu {
+mod vendor.tgpu {
     export INVALID_HANDLE = invalid_handle
     export raw = raw
     export ImageView = ImageView

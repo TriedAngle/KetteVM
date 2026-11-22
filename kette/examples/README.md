@@ -13,8 +13,9 @@ batches. Pass multi-file examples in order.
 `kette/std/startup.ktt` installs the array-side `size()` and `iterator()`
 methods used by `for x in array` and array destructuring, plus the `Modules`
 namespace and `ModuleRegistry` manager. It also loads `std/sync.ktt`,
-`std/error.ktt`, `std/ffi.ktt`, `std/os.ktt`, `std/ui/ui.ktt`, and
-`std/ui/verify.ktt`, and installs sync's `RecursiveMutex` as the module lock.
+`std/error.ktt`, `std/ffi.ktt`, `std/os.ktt`, `std/sys.ktt`, `std/ui/ui.ktt`,
+and `std/ui/verify.ktt`, and installs sync's `RecursiveMutex` as the module
+lock.
 It is not loaded automatically; pass it first when a script uses those:
 
     cargo run -q -p vm -- kette/std/startup.ktt <your-files...>
@@ -24,13 +25,23 @@ no global `FFI` or `os` objects. Files are only evaluated when passed on the
 command line or loaded explicitly with `KetteTools.evalFile`.
 Scripts that do not iterate arrays or use modules do not need startup.
 
-Vendor bindings are explicit modules and are not loaded by startup:
+Vendor bindings live under `Modules.vendor` and are not loaded by startup:
 
 ```text
-kette/vendor/sys.ktt   -> sys
-kette/vendor/tgpu.ktt  -> tgpu  (load after sys)
-kette/vendor/glfw.ktt  -> glfw  (load after sys and tgpu)
+kette/vendor/tgpu.ktt   -> vendor.tgpu
+kette/vendor/glfw.ktt   -> vendor.glfw
+kette/vendor/raylib.ktt -> vendor.raylib
 ```
+
+Use whole modules where the API is large:
+
+```ktt
+use vendor.raylib as rb
+use vendor.tgpu
+use vendor.glfw
+```
+
+`glfw.tgpuWindow` needs `vendor.tgpu` at call time.
 
 ## UI sketch
 
@@ -74,6 +85,7 @@ Window examples need the system libraries (GLFW, raylib):
 
     cargo run -q -p vm -- kette/std/startup.ktt kette/examples/glfw/window_demo.ktt
     cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/window_demo.ktt
+    cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/portal_window.ktt
 
 The tgpu examples need `tgpu-native` built first, plus `slangc` and libglfw:
 

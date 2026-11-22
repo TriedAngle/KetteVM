@@ -3,12 +3,11 @@
 //   cargo run -q -p vm -- js/examples/particles.js
 
 KetteTools.evalFile("kette/std/startup.ktt");
-KetteTools.evalFile("kette/vendor/sys.ktt");
 KetteTools.evalFile("kette/vendor/tgpu.ktt");
 KetteTools.evalFile("kette/vendor/glfw.ktt");
 
-const tgpu = globalThis.Modules.tgpu;
-const glfw = globalThis.Modules.glfw;
+const tgpu = globalThis.Modules.vendor.tgpu;
+const glfw = globalThis.Modules.vendor.glfw;
 const sys = globalThis.Modules.sys;
 const FFI = globalThis.Modules.ffi;
 const Ptr = FFI.pointer(FFI.void);

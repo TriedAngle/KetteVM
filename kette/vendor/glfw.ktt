@@ -1,14 +1,21 @@
 // GLFW window bindings and tgpu.Window helpers.
-// Load after sys.ktt and tgpu.ktt with KetteTools.evalFile.
-// Provides the `glfw` module; raw bindings are `glfw.raw.<fn>`,
+// Load explicitly with KetteTools.evalFile.
+// Provides the `vendor.glfw` module; raw bindings are `glfw.raw.<fn>`,
 // `glfw.raw.lib`, and `glfw.raw.objc`.
+// `tgpuWindow` requires the `vendor.tgpu` module when it is called.
 
 use ffi
 use os
 use sys
-use tgpu
 let (void, i32, f64, CString) = ffi
 let Ptr = ffi.pointer(void)
+let Window = Ptr
+let KEY_ESCAPE = 256
+let PRESS = 1
+let RELEASE = 0
+let REPEAT = 2
+let CLIENT_API = 139265
+let NO_API = 0
 
 let glfw_path = if os.name == "macos" {
         "/opt/homebrew/lib/libglfw.dylib"
@@ -70,6 +77,8 @@ let raw = {
     window_hint: lib.fn("glfwWindowHint", [i32, i32], void),
     create_window: lib.fn("glfwCreateWindow", [i32, i32, CString, Ptr, Ptr], Ptr),
     destroy_window: lib.fn("glfwDestroyWindow", [Ptr], void),
+    make_context_current: lib.fn("glfwMakeContextCurrent", [Ptr], void),
+    swap_buffers: lib.fn("glfwSwapBuffers", [Ptr], void),
     should_close: lib.fn("glfwWindowShouldClose", [Ptr], i32),
     poll_events: lib.fn("glfwPollEvents", [], void),
     framebuffer_size: lib.fn("glfwGetFramebufferSize", [Ptr, Ptr, Ptr], void),
@@ -89,12 +98,22 @@ let raw = {
     objc_msgSend: objc_msgSend,
 }
 
-mod glfw {
+mod vendor.glfw {
+    export Window = Window
+    export KEY_ESCAPE = KEY_ESCAPE
+    export PRESS = PRESS
+    export RELEASE = RELEASE
+    export REPEAT = REPEAT
+    export CLIENT_API = CLIENT_API
+    export NO_API = NO_API
+
     export init = raw.init
     export terminate = raw.terminate
     export windowHint = raw.window_hint
     export createWindow = raw.create_window
     export destroyWindow = raw.destroy_window
+    export makeContextCurrent = raw.make_context_current
+    export swapBuffers = raw.swap_buffers
     export shouldClose = raw.should_close
     export pollEvents = raw.poll_events
     export framebufferSize = raw.framebuffer_size
@@ -112,8 +131,7 @@ mod glfw {
             print("glfwInit failed")
             sys.raw.exit(1)
         }
-        // 139265 is GLFW_CLIENT_API, paired with GLFW_NO_API.
-        raw.window_hint(139265, 0)
+        raw.window_hint(CLIENT_API, NO_API)
         let window = raw.create_window(width, height, title, null, null)
         if window == null {
             print("glfwCreateWindow failed")
@@ -123,7 +141,9 @@ mod glfw {
     }
 
     // Build the tgpu.Window desc for the current platform.
+    // The caller must load the `vendor.tgpu` module first.
     export tgpuWindow = { |window|
+        let tgpu = Modules.vendor.tgpu
         let result = tgpu.Window.new()
         if os.name == "macos" {
             result.kind = tgpu.WindowKind.APP_KIT

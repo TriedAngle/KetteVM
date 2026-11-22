@@ -1,4 +1,4 @@
-// libc bindings. Load explicitly with KetteTools.evalFile.
+// libc bindings. Loaded by startup.
 // Provides the `sys` module; use `sys.raw.<fn>` and `sys.raw.lib`.
 // These are not wrapped yet, so there is deliberately no `sys.fopen` etc.
 
@@ -19,6 +19,7 @@ let raw = {
     srand: lib.fn("srand", [u32], void),
     rand: lib.fn("rand", [], i32),
     sinf: lib.fn("sinf", [f32], f32),
+    cosf: lib.fn("cosf", [f32], f32),
     fabsf: lib.fn("fabsf", [f32], f32),
     exit: lib.fn("exit", [i32], void),
 }

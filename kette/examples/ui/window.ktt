@@ -4,14 +4,13 @@
 KetteTools.evalFile("kette/std/startup.ktt")
 
 use ui { Hit, K_SPLITTER, Node, OP_CLIP, OP_CLIP_POP, OP_RECT, OP_SHADOW, rgb, Space, Splitter, Windows }
-KetteTools.evalFile("kette/vendor/sys.ktt")
 KetteTools.evalFile("kette/vendor/tgpu.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")
 
 let FFI = Modules.ffi
 use sys
-use glfw
-use tgpu
+use vendor.glfw
+use vendor.tgpu
 let Ptr = FFI.pointer(FFI.void)
 let (struct, u32, f32) = FFI
 

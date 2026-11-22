@@ -1,0 +1,285 @@
+// raylib bindings. Load explicitly with KetteTools.evalFile.
+// Provides the `vendor.raylib` module. Requires libraylib.
+// raymath and rlgl helpers are included because they ship with raylib.
+
+use ffi
+use os
+let (struct, void, bool, i32, u32, f32, f64, u8, CString) = ffi
+let Ptr = ffi.pointer(void)
+
+let raylib_path = if os.name == "macos" {
+        "/opt/homebrew/lib/libraylib.dylib"
+    } else if os.name == "windows" {
+        "raylib.dll"
+    } else {
+        "libraylib.so"
+    }
+
+let lib = ffi.library(raylib_path)
+
+let Vector2 = struct({
+    x: f32,
+    y: f32,
+})
+
+let Vector3 = struct({
+    x: f32,
+    y: f32,
+    z: f32,
+})
+
+let Color = struct({
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+})
+
+let Rectangle = struct({
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+})
+
+let Texture2D = struct({
+    id: u32,
+    width: i32,
+    height: i32,
+    mipmaps: i32,
+    format: i32,
+})
+
+let RenderTexture2D = struct({
+    id: u32,
+    texture: Texture2D,
+    depth: Texture2D,
+})
+
+let Camera3D = struct({
+    position: Vector3,
+    target: Vector3,
+    up: Vector3,
+    fovy: f32,
+    projection: i32,
+})
+
+let Matrix = ffi.array(f32, 16)
+let Float16 = ffi.array(f32, 16)
+
+let CAMERA_CUSTOM = 0
+let CAMERA_FREE = 1
+let CAMERA_ORBITAL = 2
+let CAMERA_FIRST_PERSON = 3
+let CAMERA_THIRD_PERSON = 4
+let CAMERA_PERSPECTIVE = 0
+let CAMERA_ORTHOGRAPHIC = 1
+let RL_QUADS = 7
+let RL_PROJECTION = 5889
+let RL_MODELVIEW = 5888
+let PI = 3.14159265358979323846
+
+let LIGHTGRAY = Color.new(200, 200, 200, 255)
+let GRAY = Color.new(130, 130, 130, 255)
+let DARKGRAY = Color.new(80, 80, 80, 255)
+let YELLOW = Color.new(253, 249, 0, 255)
+let GOLD = Color.new(255, 203, 0, 255)
+let ORANGE = Color.new(255, 161, 0, 255)
+let PINK = Color.new(255, 109, 194, 255)
+let RED = Color.new(230, 41, 55, 255)
+let MAROON = Color.new(190, 33, 55, 255)
+let GREEN = Color.new(0, 228, 48, 255)
+let LIME = Color.new(0, 158, 47, 255)
+let DARKGREEN = Color.new(0, 117, 44, 255)
+let SKYBLUE = Color.new(102, 191, 255, 255)
+let BLUE = Color.new(0, 121, 241, 255)
+let DARKBLUE = Color.new(0, 82, 172, 255)
+let PURPLE = Color.new(200, 122, 255, 255)
+let VIOLET = Color.new(135, 60, 190, 255)
+let DARKPURPLE = Color.new(112, 31, 126, 255)
+let BEIGE = Color.new(211, 176, 131, 255)
+let BROWN = Color.new(127, 106, 79, 255)
+let DARKBROWN = Color.new(76, 63, 47, 255)
+let WHITE = Color.new(255, 255, 255, 255)
+let BLACK = Color.new(0, 0, 0, 255)
+let BLANK = Color.new(0, 0, 0, 0)
+let MAGENTA = Color.new(255, 0, 255, 255)
+let RAYWHITE = Color.new(245, 245, 245, 255)
+
+// window / timing
+let InitWindow = lib.fn("InitWindow", [i32, i32, CString], void)
+let CloseWindow = lib.fn("CloseWindow", [], void)
+let WindowShouldClose = lib.fn("WindowShouldClose", [], bool)
+let IsWindowReady = lib.fn("IsWindowReady", [], bool)
+let SetTargetFPS = lib.fn("SetTargetFPS", [i32], void)
+let GetFrameTime = lib.fn("GetFrameTime", [], f32)
+let GetTime = lib.fn("GetTime", [], f64)
+let GetFPS = lib.fn("GetFPS", [], i32)
+let GetScreenWidth = lib.fn("GetScreenWidth", [], i32)
+let GetScreenHeight = lib.fn("GetScreenHeight", [], i32)
+let DisableCursor = lib.fn("DisableCursor", [], void)
+let EnableCursor = lib.fn("EnableCursor", [], void)
+
+// drawing
+let BeginDrawing = lib.fn("BeginDrawing", [], void)
+let EndDrawing = lib.fn("EndDrawing", [], void)
+let ClearBackground = lib.fn("ClearBackground", [Color], void)
+let DrawText = lib.fn("DrawText", [CString, i32, i32, i32, Color], void)
+let DrawGrid = lib.fn("DrawGrid", [i32, f32], void)
+let DrawSphere = lib.fn("DrawSphere", [Vector3, f32, Color], void)
+let DrawSphereWires = lib.fn("DrawSphereWires", [Vector3, f32, i32, i32, Color], void)
+let DrawCube = lib.fn("DrawCube", [Vector3, f32, f32, f32, Color], void)
+let DrawCubeWires = lib.fn("DrawCubeWires", [Vector3, f32, f32, f32, Color], void)
+let DrawRectangle = lib.fn("DrawRectangle", [i32, i32, i32, i32, Color], void)
+let DrawRectangleLines = lib.fn("DrawRectangleLines", [i32, i32, i32, i32, Color], void)
+let Fade = lib.fn("Fade", [Color, f32], Color)
+
+// 3d / render textures
+let BeginMode3D = lib.fn("BeginMode3D", [Camera3D], void)
+let EndMode3D = lib.fn("EndMode3D", [], void)
+let UpdateCamera = lib.fn("UpdateCamera", [Ptr, i32], void)
+let LoadRenderTexture = lib.fn("LoadRenderTexture", [i32, i32], RenderTexture2D)
+let UnloadRenderTexture = lib.fn("UnloadRenderTexture", [RenderTexture2D], void)
+let BeginTextureMode = lib.fn("BeginTextureMode", [RenderTexture2D], void)
+let EndTextureMode = lib.fn("EndTextureMode", [], void)
+
+// raymath
+let Vector3Add = lib.fn("Vector3Add", [Vector3, Vector3], Vector3)
+let Vector3Subtract = lib.fn("Vector3Subtract", [Vector3, Vector3], Vector3)
+let Vector3Normalize = lib.fn("Vector3Normalize", [Vector3], Vector3)
+let Vector3CrossProduct = lib.fn("Vector3CrossProduct", [Vector3, Vector3], Vector3)
+let Vector3DotProduct = lib.fn("Vector3DotProduct", [Vector3, Vector3], f32)
+let MatrixFrustum = lib.fn("MatrixFrustum", [f64, f64, f64, f64, f64, f64], Matrix)
+let MatrixLookAt = lib.fn("MatrixLookAt", [Vector3, Vector3, Vector3], Matrix)
+let MatrixToFloatV = lib.fn("MatrixToFloatV", [Matrix], Float16)
+
+// rlgl
+let rlClearScreenBuffers = lib.fn("rlClearScreenBuffers", [], void)
+let rlSetTexture = lib.fn("rlSetTexture", [u32], void)
+let rlBegin = lib.fn("rlBegin", [i32], void)
+let rlEnd = lib.fn("rlEnd", [], void)
+let rlColor4ub = lib.fn("rlColor4ub", [u8, u8, u8, u8], void)
+let rlNormal3f = lib.fn("rlNormal3f", [f32, f32, f32], void)
+let rlTexCoord2f = lib.fn("rlTexCoord2f", [f32, f32], void)
+let rlVertex3f = lib.fn("rlVertex3f", [f32, f32, f32], void)
+let rlDrawRenderBatchActive = lib.fn("rlDrawRenderBatchActive", [], void)
+let rlMatrixMode = lib.fn("rlMatrixMode", [i32], void)
+let rlPushMatrix = lib.fn("rlPushMatrix", [], void)
+let rlPopMatrix = lib.fn("rlPopMatrix", [], void)
+let rlLoadIdentity = lib.fn("rlLoadIdentity", [], void)
+let rlMultMatrixf = lib.fn("rlMultMatrixf", [Ptr], void)
+let rlSetMatrixProjection = lib.fn("rlSetMatrixProjection", [Matrix], void)
+let rlEnableDepthTest = lib.fn("rlEnableDepthTest", [], void)
+let rlDisableDepthTest = lib.fn("rlDisableDepthTest", [], void)
+
+mod vendor.raylib {
+    export Vector2 = Vector2
+    export Vector3 = Vector3
+    export Color = Color
+    export Rectangle = Rectangle
+    export Texture2D = Texture2D
+    export RenderTexture2D = RenderTexture2D
+    export Camera3D = Camera3D
+    export Matrix = Matrix
+    export Float16 = Float16
+
+    export CAMERA_CUSTOM = CAMERA_CUSTOM
+    export CAMERA_FREE = CAMERA_FREE
+    export CAMERA_ORBITAL = CAMERA_ORBITAL
+    export CAMERA_FIRST_PERSON = CAMERA_FIRST_PERSON
+    export CAMERA_THIRD_PERSON = CAMERA_THIRD_PERSON
+    export CAMERA_PERSPECTIVE = CAMERA_PERSPECTIVE
+    export CAMERA_ORTHOGRAPHIC = CAMERA_ORTHOGRAPHIC
+    export RL_QUADS = RL_QUADS
+    export RL_PROJECTION = RL_PROJECTION
+    export RL_MODELVIEW = RL_MODELVIEW
+    export PI = PI
+
+    export LIGHTGRAY = LIGHTGRAY
+    export GRAY = GRAY
+    export DARKGRAY = DARKGRAY
+    export YELLOW = YELLOW
+    export GOLD = GOLD
+    export ORANGE = ORANGE
+    export PINK = PINK
+    export RED = RED
+    export MAROON = MAROON
+    export GREEN = GREEN
+    export LIME = LIME
+    export DARKGREEN = DARKGREEN
+    export SKYBLUE = SKYBLUE
+    export BLUE = BLUE
+    export DARKBLUE = DARKBLUE
+    export PURPLE = PURPLE
+    export VIOLET = VIOLET
+    export DARKPURPLE = DARKPURPLE
+    export BEIGE = BEIGE
+    export BROWN = BROWN
+    export DARKBROWN = DARKBROWN
+    export WHITE = WHITE
+    export BLACK = BLACK
+    export BLANK = BLANK
+    export MAGENTA = MAGENTA
+    export RAYWHITE = RAYWHITE
+
+    export InitWindow = InitWindow
+    export CloseWindow = CloseWindow
+    export WindowShouldClose = WindowShouldClose
+    export IsWindowReady = IsWindowReady
+    export SetTargetFPS = SetTargetFPS
+    export GetFrameTime = GetFrameTime
+    export GetTime = GetTime
+    export GetFPS = GetFPS
+    export GetScreenWidth = GetScreenWidth
+    export GetScreenHeight = GetScreenHeight
+    export DisableCursor = DisableCursor
+    export EnableCursor = EnableCursor
+
+    export BeginDrawing = BeginDrawing
+    export EndDrawing = EndDrawing
+    export ClearBackground = ClearBackground
+    export DrawText = DrawText
+    export DrawGrid = DrawGrid
+    export DrawSphere = DrawSphere
+    export DrawSphereWires = DrawSphereWires
+    export DrawCube = DrawCube
+    export DrawCubeWires = DrawCubeWires
+    export DrawRectangle = DrawRectangle
+    export DrawRectangleLines = DrawRectangleLines
+    export Fade = Fade
+
+    export BeginMode3D = BeginMode3D
+    export EndMode3D = EndMode3D
+    export UpdateCamera = UpdateCamera
+    export LoadRenderTexture = LoadRenderTexture
+    export UnloadRenderTexture = UnloadRenderTexture
+    export BeginTextureMode = BeginTextureMode
+    export EndTextureMode = EndTextureMode
+
+    export Vector3Add = Vector3Add
+    export Vector3Subtract = Vector3Subtract
+    export Vector3Normalize = Vector3Normalize
+    export Vector3CrossProduct = Vector3CrossProduct
+    export Vector3DotProduct = Vector3DotProduct
+    export MatrixFrustum = MatrixFrustum
+    export MatrixLookAt = MatrixLookAt
+    export MatrixToFloatV = MatrixToFloatV
+
+    export rlClearScreenBuffers = rlClearScreenBuffers
+    export rlSetTexture = rlSetTexture
+    export rlBegin = rlBegin
+    export rlEnd = rlEnd
+    export rlColor4ub = rlColor4ub
+    export rlNormal3f = rlNormal3f
+    export rlTexCoord2f = rlTexCoord2f
+    export rlVertex3f = rlVertex3f
+    export rlDrawRenderBatchActive = rlDrawRenderBatchActive
+    export rlMatrixMode = rlMatrixMode
+    export rlPushMatrix = rlPushMatrix
+    export rlPopMatrix = rlPopMatrix
+    export rlLoadIdentity = rlLoadIdentity
+    export rlMultMatrixf = rlMultMatrixf
+    export rlSetMatrixProjection = rlSetMatrixProjection
+    export rlEnableDepthTest = rlEnableDepthTest
+    export rlDisableDepthTest = rlDisableDepthTest
+}

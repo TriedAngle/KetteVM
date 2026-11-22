@@ -1,14 +1,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/vendor.ktt
 // Check: kette/kette_tests/check.py
 
-// Vendor modules are not loaded by startup.
-Test.assert(Modules.sys, undefined)
-Test.assert(Modules.tgpu, undefined)
-Test.assert(Modules.glfw, undefined)
-
-// sys only needs libc, so it is safe to test everywhere.
-KetteTools.evalFile("kette/vendor/sys.ktt")
-
+// sys is a std module loaded by startup.
 use sys { raw }
 
 Test.assert(Modules.sys.raw, raw)
@@ -16,6 +9,9 @@ Test.assert(raw.lib != null, true)
 
 raw.srand(1)
 Test.assert(raw.rand() >= 0, true)
+
+// Vendor modules are not loaded by startup.
+Test.assert(Modules.vendor, undefined)
 
 // Graphics vendor modules are optional: load them when their native
 // libraries are available, but don't make the suite depend on them.
@@ -28,19 +24,39 @@ try {
 }
 
 if tgpu_loaded {
-    Test.assert(Modules.tgpu.INVALID_HANDLE, 4294967295)
-    Test.assert(Modules.tgpu.instanceCreate != undefined, true)
+    Test.assert(Modules.vendor.tgpu.INVALID_HANDLE, 4294967295)
+    Test.assert(Modules.vendor.tgpu.instanceCreate != undefined, true)
+}
 
-    let glfw_loaded = false
-    try {
-        KetteTools.evalFile("kette/vendor/glfw.ktt")
-        glfw_loaded = true
-    } catch (e) {
-        glfw_loaded = false
-    }
+let glfw_loaded = false
+try {
+    KetteTools.evalFile("kette/vendor/glfw.ktt")
+    glfw_loaded = true
+} catch (e) {
+    glfw_loaded = false
+}
 
-    if glfw_loaded {
-        Test.assert(Modules.glfw.create != undefined, true)
-        Test.assert(Modules.glfw.raw.lib != null, true)
-    }
+if glfw_loaded {
+    Test.assert(Modules.vendor.glfw.create != undefined, true)
+    Test.assert(Modules.vendor.glfw.createWindow != undefined, true)
+    Test.assert(Modules.vendor.glfw.makeContextCurrent != undefined, true)
+    Test.assert(Modules.vendor.glfw.swapBuffers != undefined, true)
+    Test.assert(Modules.vendor.glfw.KEY_ESCAPE, 256)
+    Test.assert(Modules.vendor.glfw.raw.lib != null, true)
+}
+
+let raylib_loaded = false
+try {
+    KetteTools.evalFile("kette/vendor/raylib.ktt")
+    raylib_loaded = true
+} catch (e) {
+    raylib_loaded = false
+}
+
+if raylib_loaded {
+    Test.assert(Modules.vendor.raylib.InitWindow != undefined, true)
+    Test.assert(Modules.vendor.raylib.BeginDrawing != undefined, true)
+    Test.assert(Modules.vendor.raylib.Vector3.new != undefined, true)
+    Test.assert(Modules.vendor.raylib.CAMERA_PERSPECTIVE, 0)
+    Test.assert(Modules.vendor.raylib.RL_QUADS, 7)
 }

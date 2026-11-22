@@ -2,6 +2,7 @@ let SYNC_PATH = "kette/std/sync.ktt"
 let ERROR_PATH = "kette/std/error.ktt"
 let FFI_PATH = "kette/std/ffi.ktt"
 let OS_PATH = "kette/std/os.ktt"
+let SYS_PATH = "kette/std/sys.ktt"
 let UI_PATH = "kette/std/ui/ui.ktt"
 let UI_VERIFY_PATH = "kette/std/ui/verify.ktt"
 
@@ -393,6 +394,9 @@ if !Modules.ffi {
 }
 if !Modules.os {
     KetteTools.evalFile(OS_PATH)
+}
+if !Modules.sys {
+    KetteTools.evalFile(SYS_PATH)
 }
 if !Modules.ui {
     KetteTools.evalFile(UI_PATH)
