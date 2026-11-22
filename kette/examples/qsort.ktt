@@ -1,5 +1,7 @@
 // Guest callbacks into C: qsort with a Kette comparator.
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/qsort.ktt
+// Run: cargo run -- kette/examples/qsort.ktt
+
+KetteTools.evalFile("kette/std/startup.ktt")
 
 let FFI = Modules.ffi
 let (void, i32, u64) = FFI

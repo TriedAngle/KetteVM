@@ -1,4 +1,6 @@
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/ui/demo.ktt
+// Run: cargo run -- kette/examples/ui/demo.ktt
+
+KetteTools.evalFile("kette/std/startup.ktt")
 
 use ui { Dump, Node, NodeTraits, rgb, SIZE_FILL, Space, Term, Windows }
 

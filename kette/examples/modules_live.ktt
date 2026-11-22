@@ -1,5 +1,6 @@
-// Run: cargo run -q -p vm -- kette/std/startup.ktt \
-//      kette/examples/modules_live.ktt
+// Run: cargo run -- kette/examples/modules_live.ktt
+
+KetteTools.evalFile("kette/std/startup.ktt")
 
 mod greeting {
     export text = "hello"
