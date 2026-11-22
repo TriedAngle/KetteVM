@@ -227,6 +227,66 @@ impl Safepoint {
         }
     }
 
+    /// Like [`Self::stop_the_world`], but guarantees `work` runs even when a
+    /// collection is already in progress: wait for it, then stop the world.
+    pub fn stop_the_world_exclusive(&self, requester: Option<&LocalNode>, work: impl FnOnce()) {
+        let mut work = Some(work);
+        loop {
+            let collector = requester.map_or(ptr::null(), ptr::from_ref);
+            let mut state = self.lock();
+            if state.running {
+                drop(state);
+                match requester {
+                    Some(node) => {
+                        self.park_for_collection(node);
+                    }
+                    None => {
+                        let mut state = self.lock();
+                        while state.running {
+                            state = self.cv.wait(state).unwrap();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            state.epoch = state.epoch.wrapping_add(1);
+            state.running = true;
+            let epoch = state.epoch;
+            self.signal.store(epoch, Ordering::Release);
+            self.cv.notify_all();
+
+            loop {
+                let pending = state.nodes.iter().any(|&node| {
+                    // Safety: linked nodes outlive the safepoint link.
+                    let node = unsafe { &*node };
+                    !ptr::eq(node, collector)
+                        && !node.blocked()
+                        && node.parked.load(Ordering::Acquire) != epoch
+                });
+                if pending {
+                    state = self.cv.wait(state).unwrap();
+                    continue;
+                }
+                break;
+            }
+            drop(state);
+
+            let work = work.take().expect("exclusive work runs once");
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+
+            let mut state = self.lock();
+            state.running = false;
+            self.signal.store(0, Ordering::Release);
+            self.cv.notify_all();
+            drop(state);
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+            return;
+        }
+    }
+
     /// Request cancellation; mutators observe it at their next poll.
     pub fn cancel_executions(&self, requester: &LocalNode, protocol: impl FnOnce()) {
         let state = self.lock();

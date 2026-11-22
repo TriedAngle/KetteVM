@@ -1,110 +1,219 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/modules.ktt
 // Check: kette/kette_tests/check.py
 
-let ErrorTraits = ModuleRegistry.require("Error.Traits").ErrorTraits
-
+// A module is a stable object; require returns the same facade.
 let math = ModuleRegistry.declare("math", |m| {
-    m.pi = 3
+    m.value = 1
     m.square = |x| { x * x }
 })
 
-Test.assert(ModuleRegistry.require("math") == math, true)
-Test.assert(math.pi, 3)
+Test.assert(ModuleRegistry.require("math"), math)
+Test.assert(math.value, 1)
+Test.assert(math.square(4), 16)
+
+// Reloading updates the facade in place and drops undeclared base exports.
+math.note = "kept"
 
 ModuleRegistry.declare("math", |m| {
-    m.pi = 4
+    m.value = 2
     m.cube = |x| { x * x * x }
 })
 
-Test.assert(math.pi, 4)
+Test.assert(ModuleRegistry.require("math"), math)
+Test.assert(math.value, 2)
 Test.assert(math.cube(3), 27)
-Test.assert(math.square == undefined, true)
+Test.assert(math.square, undefined)
+Test.assert(math.note, "kept")
 
-math.tag = "live"
-ModuleRegistry.declare("math", |m| {
-    m.pi = 5
-})
-Test.assert(math.tag, "live")
-
+// Extensions own their exports and reload independently.
 ModuleRegistry.extend("math", "stats", |m| {
-    m.mean = |a, b| { (a + b) / 2 }
+    m.average = |a, b| { (a + b) / 2 }
 })
+
+Test.assert(math.average(2, 6), 4)
+Test.assert(ModuleRegistry.owner(math, "average"), "stats")
+
 ModuleRegistry.declare("math", |m| {
-    m.pi = 6
+    m.value = 3
 })
-Test.assert(math.mean(2, 6), 4)
-Test.assert(ModuleRegistry.owner(math, "mean"), "stats")
+
+Test.assert(math.value, 3)
+Test.assert(math.average(2, 6), 4)
 
 ModuleRegistry.extend("math", "stats", |m| {
     m.total = |a, b| { a + b }
 })
-Test.assert(math.mean == undefined, true)
+
+Test.assert(math.average, undefined)
 Test.assert(math.total(2, 6), 8)
+Test.assert(math.value, 3)
 
-let mutable = ModuleRegistry.declare("mutable", |m| {
+// Nested objects, arrays and functions transition in place.
+let state = { count: 1 }
+let items = [1, 2]
+let increment = |x| { x + 1 }
+
+ModuleRegistry.declare("live", |m| {
+    m.state = state
+    m.items = items
+    m.increment = increment
+})
+
+ModuleRegistry.declare("live", |m| {
+    m.state = { count: 2 }
+    m.items = [3, 4, 5]
+    m.increment = |x| { x + 10 }
+})
+
+Test.assert(Modules.live.state, state)
+Test.assert(state.count, 2)
+Test.assert(Modules.live.items, items)
+Test.assert(items.length, 3)
+Test.assert(items[2], 5)
+Test.assert(Modules.live.increment, increment)
+Test.assert(increment(1), 11)
+
+// Nested values keep unrelated properties.
+state.extra = "kept"
+items.extra = "kept"
+
+ModuleRegistry.declare("live", |m| {
+    m.state = { count: 3 }
+    m.items = [6]
+})
+
+Test.assert(state.count, 3)
+Test.assert(state.extra, "kept")
+Test.assert(items.length, 1)
+Test.assert(items[0], 6)
+Test.assert(items.extra, "kept")
+
+// A value can change layout, for example an object becoming an array.
+let box = { a: 1 }
+
+ModuleRegistry.declare("kind", |m| {
+    m.value = box
+})
+
+ModuleRegistry.declare("kind", |m| {
+    m.value = [10, 20]
+})
+
+Test.assert(Modules.kind.value, box)
+Test.assert(box.length, 2)
+Test.assert(box[1], 20)
+
+// Objects with parents keep identity while the parents change.
+let parent = { label: "old" }
+
+ModuleRegistry.declare("parents", |m| {
+    m.child = { own: 1, p*: parent }
+})
+
+let child = Modules.parents.child
+
+ModuleRegistry.declare("parents", |m| {
+    m.child = { own: 2, p*: { label: "new" } }
+})
+
+Test.assert(Modules.parents.child, child)
+Test.assert(child.own, 2)
+Test.assert(child.label, "new")
+
+// remove and reset operate on the stable facade.
+let sandbox = ModuleRegistry.declare("sandbox", |m| {
     m.a = 1
+    m.b = 2
 })
-mutable.extra = 2
-Test.assert(ModuleRegistry.remove(mutable, "extra"), true)
-Test.assert(mutable.extra == undefined, true)
-Test.assert(ModuleRegistry.remove(mutable, "extra"), false)
 
-ModuleRegistry.reset("mutable", |m| {
-    m.z = 9
+sandbox.extra = 3
+Test.assert(ModuleRegistry.remove(sandbox, "extra"), true)
+Test.assert(ModuleRegistry.remove(sandbox, "extra"), false)
+Test.assert(sandbox.extra, undefined)
+
+ModuleRegistry.reset("sandbox", |m| {
+    m.c = 3
 })
-Test.assert(mutable == ModuleRegistry.require("mutable"), true)
-Test.assert(mutable.a == undefined, true)
-Test.assert(mutable.z, 9)
 
-let base_path = "kette/kette_tests/units/base.ktt"
-let ext_path = "kette/kette_tests/units/ext.ktt"
+Test.assert(ModuleRegistry.require("sandbox"), sandbox)
+Test.assert(sandbox.a, undefined)
+Test.assert(sandbox.b, undefined)
+Test.assert(sandbox.c, 3)
 
-globalThis.UNIT_REVISION = 1
-ModuleRegistry.loadFile(base_path)
-ModuleRegistry.loadFile(ext_path)
-let unit_math = ModuleRegistry.require("unit.math")
-Test.assert(unit_math.revision, 1)
-Test.assert(unit_math.seen, 1)
-
-globalThis.UNIT_REVISION = 2
-ModuleRegistry.markDirty(base_path)
-let flushed = ModuleRegistry.flushDirty()
-Test.assert(flushed.length, 2)
-Test.assert(unit_math.revision, 2)
-Test.assert(unit_math.seen, 2)
-
-ModuleRegistry.declare("Auto.Math.Vector", |m| {
+// Dotted names build namespace modules that survive parent resets.
+ModuleRegistry.declare("Demo.Math.Vector", |m| {
     m.square = |x| { x * x }
 })
-Test.assert(Modules.Auto.Math.Vector.square(3), 9)
-Test.assert(
-    Modules.Auto.Math.Vector == ModuleRegistry.require("Auto.Math.Vector"),
-    true
-)
 
-ModuleRegistry.declare("Auto", |m| {
-    m.name = "auto"
+Test.assert(Modules.Demo.Math.Vector.square(3), 9)
+Test.assert(Modules.Demo.Math.Vector, ModuleRegistry.require("Demo.Math.Vector"))
+
+ModuleRegistry.declare("Demo", |m| {
+    m.name = "demo"
 })
-Test.assert(Modules.Auto.Math.Vector.square(4), 16)
 
-ModuleRegistry.reset("Auto", |m| {
-    m.name = "auto-reset"
+ModuleRegistry.reset("Demo", |m| {
+    m.name = "reset"
 })
-Test.assert(Modules.Auto.name, "auto-reset")
-Test.assert(Modules.Auto.Math.Vector.square(5), 25)
 
-ModuleRegistry.declare("get", |m| {
-    m.value = 1
+Test.assert(Modules.Demo.name, "reset")
+Test.assert(Modules.Demo.Math.Vector.square(4), 16)
+
+// File units reload in dependency order.
+let base_path = "kette/kette_tests/units/base.ktt"
+
+globalThis.UNIT_VALUE = 1
+ModuleRegistry.loadFile(base_path)
+ModuleRegistry.loadFile("kette/kette_tests/units/ext.ktt")
+
+let unit_math = ModuleRegistry.require("unit.math")
+let unit_nested = unit_math.nested
+
+Test.assert(unit_math.value, 1)
+Test.assert(unit_math.seen, 1)
+
+globalThis.UNIT_VALUE = 2
+ModuleRegistry.markDirty(base_path)
+let flushed = ModuleRegistry.flushDirty()
+
+Test.assert(flushed.length, 2)
+Test.assert(unit_math.value, 2)
+Test.assert(unit_math.seen, 2)
+Test.assert(unit_math.nested, unit_nested)
+Test.assert(unit_nested.value, 2)
+
+// Readers never observe a partially published reload.
+ModuleRegistry.declare("concurrent", |m| {
+    m.value = 0
+    m.state = { value: 0 }
 })
-Test.assert(Modules.get.value, 1)
-Test.assert(ModuleRegistry.get("get").value, 1)
 
-Test.assert(ModuleRegistry.require("Error.Traits").ErrorTraits, ErrorTraits)
-Test.assert(ModuleRegistry.require("Collection").Sequence, Sequence)
-Test.assert(ModuleRegistry.require("Collection.Traits").Collection, Collection)
-Test.assert(ModuleRegistry.require("Functional").Functional, Functional)
-Test.assert(ModuleRegistry.require("Sync").RecursiveMutex != undefined, true)
-Test.assert(Modules.Collection.Sequence, Sequence)
-Test.assert(Modules.Collection.Traits.Collection, Collection)
-Test.assert(Modules.Error.Traits.ErrorTraits, ErrorTraits)
-Test.assert(Modules.Functional.Functional, Functional)
+let stop = atomic.AtomicI64.new(0)
+let mismatches = atomic.AtomicI64.new(0)
+let reader = Thread.newPlatform("module-reader", {
+    while stop.load() == 0 {
+        let value = Modules.concurrent.value
+        let state = Modules.concurrent.state
+        if state.value != value {
+            mismatches.add(1)
+        }
+        Thread.yield()
+    }
+})
+
+reader.start()
+let value = 0
+while value < 50 {
+    value = value + 1
+    globalThis.MODULE_VALUE = value
+    ModuleRegistry.declare("concurrent", |m| {
+        m.value = globalThis.MODULE_VALUE
+        m.state = { value: globalThis.MODULE_VALUE }
+    })
+}
+stop.store(1)
+reader.join()
+
+Test.assert(mismatches.load(), 0)
+Test.assert(Modules.concurrent.value, 50)
+Test.assert(Modules.concurrent.state.value, 50)

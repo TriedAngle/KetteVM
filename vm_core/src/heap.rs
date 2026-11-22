@@ -903,6 +903,17 @@ impl Heap {
         self.local.collect_minor();
     }
 
+    /// Run `work` with every other mutator parked. `work` receives an
+    /// immutable heap borrow and must not allocate or enter the VM: only raw
+    /// heap updates and cache invalidation belong inside.
+    pub fn exclusive(&mut self, work: impl FnOnce(&Heap)) {
+        self.tlab.invalidate();
+        let heap: &Heap = self;
+        let mut work = Some(work);
+        self.local
+            .exclusive(&mut || (work.take().expect("exclusive work runs once"))(heap));
+    }
+
     /// Allocate a fresh `T`. The returned `Tagged` is anchored at this
     /// borrow: any further allocation (or anything else requiring
     /// `&mut Heap`) requires rooting it first.

@@ -249,6 +249,34 @@ impl CallableInfoObject {
         self.descriptor.set(heap, host, Smi::new(descriptor as i64));
     }
 
+    /// Replace this callable's code and metadata with `other`'s.
+    pub fn copy_from(&self, heap: &Heap, other: Tagged<CallableInfoObject>) {
+        let host = self.tagged(heap);
+        self.function_data
+            .set(heap, host, other.function_data.get(heap));
+        self.mode.set(heap, host, other.mode.get(heap));
+        self.constants.set(heap, host, other.constants.get(heap));
+        self.register_count
+            .set(heap, host, other.register_count.get(heap));
+        match other.handlers.get(heap) {
+            Some(handlers) => self.handlers.set(heap, host, handlers),
+            None => self.handlers.clear(heap),
+        }
+        match other.feedback.get(heap) {
+            Some(feedback) => self.feedback.set(heap, host, feedback),
+            None => self.feedback.clear(heap),
+        }
+        self.name.set(heap, host, other.name.get(heap));
+        self.formal_parameter_count
+            .set(heap, host, other.formal_parameter_count.get(heap));
+        self.descriptor.set(heap, host, other.descriptor.get(heap));
+        self.formal_length
+            .set(heap, host, other.formal_length.get(heap));
+        self.expected_slots
+            .set(heap, host, other.expected_slots.get(heap));
+        self.kind.set(heap, host, other.kind.get(heap));
+    }
+
     /// Attach the (already allocated) inline-cache state.
     pub fn set_feedback(&self, heap: &Heap, vector: Handle<'_, FeedbackVector>) {
         self.feedback

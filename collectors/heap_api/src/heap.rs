@@ -124,6 +124,9 @@ pub trait LocalHeap: Send {
     fn cancel_executions(&self, protocol: &dyn Fn());
     fn force_collect(&self);
     fn collect_minor(&self);
+    /// Stop other mutators and run `work` exclusively. `work` must not
+    /// allocate or enter the VM.
+    fn exclusive(&self, work: &mut dyn FnMut());
     fn gc_in_progress(&self) -> bool;
 }
 

@@ -67,6 +67,14 @@ struct SweepSignalState {
     marking: bool,
 }
 
+struct SweepPause<'a>(&'a SweepSignal);
+
+impl Drop for SweepPause<'_> {
+    fn drop(&mut self) {
+        self.0.resume();
+    }
+}
+
 impl SweepSignal {
     fn new() -> Self {
         Self {
@@ -336,6 +344,12 @@ impl MarkSweepState {
         self.update_young_limit(survivors, self.heap.chunk_size());
         self.minor_cycles.fetch_add(1, Ordering::Relaxed);
         false
+    }
+
+    fn pause_sweeping(&self) -> SweepPause<'_> {
+        self.sweep_signal.pause();
+        self.wait_for_chunk_boundary();
+        SweepPause(&self.sweep_signal)
     }
 
     fn collect_internal(&self, requester: Option<&MarkSweepLocal>) {
@@ -1029,6 +1043,13 @@ impl LocalHeap for MarkSweepLocal {
 
     fn collect_minor(&self) {
         self.collect_minor();
+    }
+
+    fn exclusive(&self, work: &mut dyn FnMut()) {
+        let _pause = self.state.pause_sweeping();
+        self.state
+            .safepoint
+            .stop_the_world_exclusive(Some(&self.node), || work());
     }
 
     fn gc_in_progress(&self) -> bool {

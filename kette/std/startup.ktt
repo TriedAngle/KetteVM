@@ -1,6 +1,5 @@
-// Array iteration/destructuring helpers. Load explicitly; not auto-loaded.
-let _SYNC_PATH = "kette/std/sync.ktt"
-let _ERROR_PATH = "kette/std/error.ktt"
+let SYNC_PATH = "kette/std/sync.ktt"
+let ERROR_PATH = "kette/std/error.ktt"
 
 globalThis.Modules = Object.create(null)
 
@@ -37,7 +36,6 @@ globalThis.ModuleRegistry = {
     units: Object.create(null)
     _unitByThread: Object.create(null)
     entryKey: Symbol.for("kette.modules.entry")
-    versionKey: Symbol.for("kette.modules.version")
     traitsKey: Symbol.for("kette.modules.traits")
     _lockBackend: null
     _UNIT_NEW: "new"
@@ -123,8 +121,6 @@ globalThis.ModuleRegistry = {
             entry = {
                 name: name
                 module: module
-                version: Object.create(null)
-                generation: 0
                 baseOwner: self._BASE_OWNER
                 owners: Object.create(null)
                 contributions: []
@@ -146,7 +142,10 @@ globalThis.ModuleRegistry = {
         let failed = false
         let error = null
         try {
-            self._update(name, entry.baseOwner, initializer)
+            if created {
+                Object.addParent(module, self.traitsKey, self.traits)
+            }
+            self._update(name, entry.baseOwner, initializer, true)
         } catch (e) {
             failed = true
             error = e
@@ -156,15 +155,6 @@ globalThis.ModuleRegistry = {
                 self.registry[name] = null
             }
             throw error
-        }
-
-        if created {
-            try {
-                Object.addParent(module, self.traitsKey, self.traits)
-            } catch (e) {
-                self.registry[name] = null
-                throw e
-            }
         }
         module
     }
@@ -194,29 +184,24 @@ globalThis.ModuleRegistry = {
         if entry.baseOwner == undefined {
             entry.baseOwner = self._BASE_OWNER
         }
-        self._update(name, owner, initializer)
+        self._update(name, owner, initializer, true)
         module
     }
 
-    _update: |name, owner, initializer| {
+    _update: |name, owner, initializer, preserveExtras| {
         let module = self.registry[name]
         let entry = module[self.entryKey]
-        let current = entry.version
         let currentOwners = entry.owners
 
-        let version = Object.create(null)
+        let next = Object.create(null)
         let owners = Object.create(null)
         let copied = Object.create(null)
         let snapshot = Object.create(null)
-        let currentNames = Object.getOwnPropertyNames(current)
-        for key in currentNames {
+        for key in Object.getOwnPropertyNames(module) {
             let keyOwner = currentOwners[key]
-            if keyOwner == undefined {
-                keyOwner = entry.baseOwner
-            }
-            if keyOwner != owner {
-                let value = current[key]
-                version[key] = value
+            if keyOwner != undefined && keyOwner != owner {
+                let value = module[key]
+                next[key] = value
                 owners[key] = keyOwner
                 copied[key] = true
                 snapshot[key] = value
@@ -226,7 +211,7 @@ globalThis.ModuleRegistry = {
         let failed = false
         let error = null
         try {
-            initializer(version)
+            initializer(next)
         } catch (e) {
             failed = true
             error = e
@@ -235,9 +220,9 @@ globalThis.ModuleRegistry = {
             throw error
         }
 
-        let names = Object.getOwnPropertyNames(version)
+        let names = Object.getOwnPropertyNames(next)
         for key in names {
-            if copied[key] == undefined || version[key] != snapshot[key] {
+            if copied[key] == undefined || next[key] != snapshot[key] {
                 owners[key] = owner
             }
         }
@@ -259,22 +244,17 @@ globalThis.ModuleRegistry = {
             group.names[group.names.length] = key
         }
 
-        let publish_failed = false
-        let publish_error = null
-        try {
-            Object.addParentUncached(module, self.versionKey, version)
-        } catch (e) {
-            publish_failed = true
-            publish_error = e
+        if !KetteTools.publishFlatModule(
+            module,
+            next,
+            entry,
+            currentOwners,
+            owners,
+            contributions,
+            preserveExtras
+        ) {
+            throw "module transition failed: " + name
         }
-        if publish_failed {
-            throw publish_error
-        }
-
-        entry.version = version
-        entry.owners = owners
-        entry.contributions = contributions
-        entry.generation = entry.generation + 1
     }
 
     _pathParts: |name| {
@@ -307,12 +287,9 @@ globalThis.ModuleRegistry = {
             return module
         }
         module = Object.create(null)
-        let version = Object.create(null)
         let entry = {
             name: name
             module: module
-            version: version
-            generation: 0
             baseOwner: self._BASE_OWNER
             owners: Object.create(null)
             contributions: []
@@ -323,7 +300,6 @@ globalThis.ModuleRegistry = {
             configurable: true
         })
         self.registry[name] = module
-        Object.addParentUncached(module, self.versionKey, version)
         Object.addParent(module, self.traitsKey, self.traits)
         module
     }
@@ -352,13 +328,16 @@ globalThis.ModuleRegistry = {
         if existing_owner != undefined && existing_owner != owner {
             return 0
         }
+        if existing_owner == owner && parent_module[leaf] == child {
+            return 0
+        }
         let own = Object.getOwnPropertyDescriptor(parent_module, leaf)
         if own != undefined {
             return 0
         }
         self._update(parent, owner, |m| {
             m[leaf] = child
-        })
+        }, true)
         0
     }
 
@@ -484,7 +463,31 @@ globalThis.ModuleRegistry = {
             if desc == undefined {
                 false
             } else {
-                Object.deleteProperty(target, name)
+                let removed = Object.deleteProperty(target, name)
+                if removed {
+                    let entry = target[self.entryKey]
+                    if entry != undefined {
+                        Object.deleteProperty(entry.owners, name)
+                        let grouped = []
+                        for key in Object.getOwnPropertyNames(entry.owners) {
+                            let keyOwner = entry.owners[key]
+                            let group = null
+                            for candidate in grouped {
+                                if candidate.owner == keyOwner {
+                                    group = candidate
+                                    break
+                                }
+                            }
+                            if group == null {
+                                group = { owner: keyOwner, names: [] }
+                                grouped[grouped.length] = group
+                            }
+                            group.names[group.names.length] = key
+                        }
+                        entry.contributions = grouped
+                    }
+                }
+                removed
             }
         })
     }
@@ -510,36 +513,27 @@ globalThis.ModuleRegistry = {
                 }
             }
 
-            let oldVersion = entry.version
             let oldOwners = entry.owners
             let oldContributions = entry.contributions
-            let oldGeneration = entry.generation
 
-            entry.version = Object.create(null)
             entry.owners = Object.create(null)
             entry.contributions = []
 
             let failed = false
             let error = null
             try {
-                self._update(entry.name, entry.baseOwner, initializer)
+                self._update(entry.name, entry.baseOwner, initializer, false)
             } catch (e) {
                 failed = true
                 error = e
             }
             if failed {
-                entry.version = oldVersion
                 entry.owners = oldOwners
                 entry.contributions = oldContributions
-                entry.generation = oldGeneration
                 throw error
             }
 
-            let freshOwn = Object.getOwnPropertyNames(target)
-            for key in freshOwn {
-                Object.deleteProperty(target, key)
-            }
-self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
+            self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
             self._linkPath(entry.name, target)
             self._relinkChildren(entry.name)
             target
@@ -725,28 +719,6 @@ self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
         })
     }
 
-    version: |module| {
-        self._withLock({
-            let entry = module[self.entryKey]
-            if entry == undefined {
-                null
-            } else {
-                entry.version
-            }
-        })
-    }
-
-    generation: |module| {
-        self._withLock({
-            let entry = module[self.entryKey]
-            if entry == undefined {
-                -1
-            } else {
-                entry.generation
-            }
-        })
-    }
-
     name: |module| {
         self._withLock({
             let entry = module[self.entryKey]
@@ -776,8 +748,7 @@ self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
                 null
             } else {
                 let result = {}
-                let names = Object.getOwnPropertyNames(entry.version)
-                for key in names {
+                for key in Object.getOwnPropertyNames(entry.owners) {
                     result[key] = entry.owners[key]
                 }
                 result
@@ -798,24 +769,7 @@ self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
 
     keys: |module| {
         self._withLock({
-            let result = []
-            let seen = Object.create(null)
-            let own = Object.getOwnPropertyNames(module)
-            for key in own {
-                seen[key] = true
-                result[result.length] = key
-            }
-            let entry = module[self.entryKey]
-            if entry != undefined {
-                let exported = Object.getOwnPropertyNames(entry.version)
-                for key in exported {
-                    if seen[key] == undefined {
-                        seen[key] = true
-                        result[result.length] = key
-                    }
-                }
-            }
-            result
+            Object.getOwnPropertyNames(module)
         })
     }
 
@@ -866,10 +820,10 @@ self._recordDeclaration(entry.name, self._BASE_MODE, entry.baseOwner)
 }
 
 if !Modules.Error {
-    ModuleRegistry._loadFile(_ERROR_PATH)
+    ModuleRegistry._loadFile(ERROR_PATH)
 }
 if !Modules.Sync {
-    ModuleRegistry._loadFile(_SYNC_PATH)
+    ModuleRegistry._loadFile(SYNC_PATH)
 }
 ModuleRegistry.require("Error")
 ModuleRegistry.require("Sync")

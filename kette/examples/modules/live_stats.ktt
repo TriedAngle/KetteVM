@@ -2,5 +2,5 @@ let math = ModuleRegistry.require("live.math")
 
 ModuleRegistry.extend("live.math", "stats", |m| {
     m.mean = |a, b| { (a + b) / 2 }
-    m.seen_revision = math.revision
+    m.seen = math.value
 })

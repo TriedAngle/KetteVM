@@ -1,126 +1,102 @@
 // Run: cargo run -q -p vm -- kette/std/startup.ktt \
 //      kette/examples/modules_live.ktt
 
-let math = ModuleRegistry.declare("math", |m| {
-    m.pi = 3.14159
-    m.square = |x| { x * x }
+// A module is a stable object: reloading updates it in place.
+let greeting = ModuleRegistry.declare("greeting", |m| {
+    m.text = "hello"
+    m.times = 1
+    m.double = { |x| x * 2 }
 })
 
-print("pi = " + math.pi)
-print("square(6) = " + math.square(6))
-print("same object after require:")
-print(math == ModuleRegistry.require("math"))
-print("generation = " + ModuleRegistry.generation(math))
+print("initial: " + greeting.text)
+print("double(4): " + greeting.double(4))
+print("same module:")
+print(greeting == ModuleRegistry.require("greeting"))
 
-ModuleRegistry.declare("math", |m| {
-    m.pi = 3.14
-    m.square = |x| { x * x + 1 }
+ModuleRegistry.declare("greeting", |m| {
+    m.text = "hi"
+    m.times = 2
+    m.double = { |x| x * 2 + 1 }
 })
 
-print("after reload pi = " + math.pi)
-print("after reload square(6) = " + math.square(6))
-print("same object after reload:")
-print(math == ModuleRegistry.require("math"))
-print("generation = " + ModuleRegistry.generation(math))
+print("reloaded: " + greeting.text)
+print("double(4): " + greeting.double(4))
 
-math.tag = "live"
+// External properties survive a reload.
+greeting.note = "kept"
 
-ModuleRegistry.declare("math", |m| {
-    m.pi = 3
-    m.cube = |x| { x * x * x }
+ModuleRegistry.declare("greeting", |m| {
+    m.text = "hey"
+    m.times = 3
+    m.double = { |x| x * 2 + 2 }
 })
 
-print("tag survives = " + math.tag)
-print("pi after second reload = " + math.pi)
-print("square removed:")
-print(math.square == undefined)
-print("cube(3) = " + math.cube(3))
-print("module keys:")
-for key, value in math {
-    print("  " + key)
-}
+print("external note: " + greeting.note)
 
-ModuleRegistry.extend("math", "stats", |m| {
-    m.mean = |a, b| { (a + b) / 2 }
+// Nested values keep their identity and are updated in place.
+let settings = { enabled: true, level: 1 }
+
+ModuleRegistry.declare("config", |m| {
+    m.settings = settings
 })
 
-print("mean(2, 6) = " + math.mean(2, 6))
-print("pi owner = " + ModuleRegistry.owner(math, "pi"))
-print("mean owner = " + ModuleRegistry.owner(math, "mean"))
-
-ModuleRegistry.extend("math", "stats", |m| {
-    m.total = |a, b| { a + b }
+ModuleRegistry.declare("config", |m| {
+    m.settings = { enabled: false, level: 2 }
 })
 
-print("mean removed:")
-print(math.mean == undefined)
-print("total(2, 6) = " + math.total(2, 6))
-print("pi still = " + math.pi)
-print("tag still = " + math.tag)
+print("same settings object:")
+print(Modules.config.settings == settings)
+print("settings level: " + settings.level)
 
-ModuleRegistry.declare("math", |m| {
-    m.pi = 4
-    m.square = |x| { x * x }
+// Extensions own their exports and reload independently.
+ModuleRegistry.extend("greeting", "stats", |m| {
+    m.total = m.times * 10
 })
 
-print("base pi = " + math.pi)
-print("stats total = " + math.total(2, 6))
-print("square back = " + math.square(3))
-print("owners:")
-for key in ModuleRegistry.keys(math) {
-    print("  " + key + " -> " + ModuleRegistry.owner(math, key))
-}
+print("stats total: " + greeting.total)
+print("stats owner: " + ModuleRegistry.owner(greeting, "total"))
 
+ModuleRegistry.extend("greeting", "stats", |m| {
+    m.double = m.times * 2
+})
 
-globalThis.LIVE_REVISION = 1
-let math_unit = ModuleRegistry.loadFile("kette/examples/modules/live_math.ktt")
+print("stats total removed:")
+print(greeting.total == undefined)
+print("stats double: " + greeting.double)
+
+// File units reload in dependency order.
+globalThis.LIVE_VALUE = 1
+ModuleRegistry.loadFile("kette/examples/modules/live_math.ktt")
 ModuleRegistry.loadFile("kette/examples/modules/live_stats.ktt")
 
-let live_math = ModuleRegistry.require("live.math")
-print("file revision = " + live_math.revision)
-print("stats saw revision = " + live_math.seen_revision)
-print("math unit declarations = " + math_unit.declarations.length)
+let math = ModuleRegistry.require("live.math")
+print("file value: " + math.value)
+print("stats saw: " + math.seen)
+print("square(5): " + math.square(5))
 
-globalThis.LIVE_REVISION = 2
+globalThis.LIVE_VALUE = 2
 ModuleRegistry.markDirty("kette/examples/modules/live_math.ktt")
 let flushed = ModuleRegistry.flushDirty()
 
-print("flushed units = " + flushed.length)
-print("file revision after flush = " + live_math.revision)
-print("stats saw revision after flush = " + live_math.seen_revision)
+print("flushed units: " + flushed.length)
+print("file value after flush: " + math.value)
+print("stats saw after flush: " + math.seen)
+print("same math module:")
+print(math == ModuleRegistry.require("live.math"))
 
-
-let sandbox = ModuleRegistry.declare("sandbox", |m| {
-    m.a = 1
-    m.b = 2
-})
-ModuleRegistry.extend("sandbox", "tmp", |m| {
-    m.c = 3
-})
-sandbox.extra = 4
-
-print("removed facade = " + ModuleRegistry.remove(sandbox, "extra"))
-print("extra gone:")
-print(sandbox.extra == undefined)
-
-ModuleRegistry.reset("sandbox", |m| {
-    m.z = 9
+// Reset rebuilds the exports on the same facade.
+ModuleRegistry.reset("greeting", |m| {
+    m.text = "reset"
+    m.times = 0
 })
 
-print("reset z = " + sandbox.z)
-print("reset dropped a:")
-print(sandbox.a == undefined)
-print("reset dropped c:")
-print(sandbox.c == undefined)
-print("same sandbox object:")
-print(sandbox == ModuleRegistry.require("sandbox"))
+print("reset: " + greeting.text)
+print("stats dropped:")
+print(greeting.double == undefined)
 
-
+// Dotted names build namespace modules.
 ModuleRegistry.declare("Demo.Math.Vector", |m| {
-    m.square = |x| { x * x }
+    m.dot = |x, y| { x * x + y * y }
 })
 
-print("registry path square(3) = " + Modules.Demo.Math.Vector.square(3))
-print("require path square(4) = " + ModuleRegistry.require("Demo.Math.Vector").square(4))
-print("same child object:")
-print(Modules.Demo.Math.Vector == ModuleRegistry.require("Demo.Math.Vector"))
+print("namespace dot: " + Modules.Demo.Math.Vector.dot(3, 4))

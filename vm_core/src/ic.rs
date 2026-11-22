@@ -1984,6 +1984,9 @@ impl InlineCache {
         if !state.ptr_eq(callee) {
             return CallProbe::Miss;
         }
+        if !callee.is_callable(heap) {
+            return CallProbe::Miss;
+        }
         let payload = site.handler;
         if let Some(tag) = payload.to_i64() {
             // runtime callee: index and shape come straight from the
@@ -2003,6 +2006,12 @@ impl InlineCache {
         let Some(target) = callee.as_heap_object() else {
             return CallProbe::Miss;
         };
+        let Some(target_info) = target.callable_info(heap) else {
+            return CallProbe::Miss;
+        };
+        if !target_info.ptr_eq(info) {
+            return CallProbe::Miss;
+        }
         let context_word = target.slot(heap, 1).get(heap);
         debug_assert!(context_word.get_as::<ContextObject>(heap).is_some());
         let context: Tagged<'a, ContextObject> = unsafe { context_word.cast() };

@@ -1,4 +1,5 @@
 ModuleRegistry.declare("unit.math", |m| {
-    m.revision = globalThis.UNIT_REVISION
+    m.value = globalThis.UNIT_VALUE
     m.base = 10
+    m.nested = { value: globalThis.UNIT_VALUE }
 })

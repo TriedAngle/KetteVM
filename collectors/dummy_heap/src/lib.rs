@@ -149,6 +149,10 @@ impl LocalHeap for DummyLocalHeap {
 
     fn collect_minor(&self) {}
 
+    fn exclusive(&self, work: &mut dyn FnMut()) {
+        work();
+    }
+
     fn gc_in_progress(&self) -> bool {
         false
     }

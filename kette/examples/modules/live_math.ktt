@@ -1,5 +1,4 @@
 ModuleRegistry.declare("live.math", |m| {
-    m.revision = globalThis.LIVE_REVISION
-    m.pi = 3.14
+    m.value = globalThis.LIVE_VALUE
     m.square = |x| { x * x }
 })
