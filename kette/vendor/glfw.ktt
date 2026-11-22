@@ -137,7 +137,7 @@ let framebuffer_coords = |handle, x, y| {
     result
 }
 
-let Window = {
+let WindowTraits = {
     disposable*: Disposable
 
     new: |title, width, height, options| {
@@ -336,7 +336,17 @@ let Window = {
     }
 }
 
+let Window = {
+    traits*: WindowTraits
+    handle: null
+    disposed: false
+    keyCallback: null
+    cursorCallback: null
+    mouseCallback: null
+}
+
 mod vendor.glfw {
+    export WindowTraits = WindowTraits
     export Window = Window
     export ClientApi = ClientApi
     export Key = Key
