@@ -1,6 +1,10 @@
 // C arrays, array element access, and pointer arithmetic/indexing.
-// Run:  cargo run -q -p vm -- kette/kette_tests/ffi_arrays.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/ffi_arrays.ktt
 // Check: kette/kette_tests/check.py
+
+let FFI = Modules.ffi
+Test.assert(FFI.pointer, KetteTools.primitives.ffi.pointer)
+Test.assert(globalThis.FFI, undefined)
 
 let (struct, i32, u64, CString) = FFI
 let I32x4 = FFI.array(i32, 4)

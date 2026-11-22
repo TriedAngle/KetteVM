@@ -1,102 +1,89 @@
 // Run: cargo run -q -p vm -- kette/std/startup.ktt \
 //      kette/examples/modules_live.ktt
 
-// A module is a stable object: reloading updates it in place.
-let greeting = ModuleRegistry.declare("greeting", |m| {
-    m.text = "hello"
-    m.times = 1
-    m.double = { |x| x * 2 }
-})
+mod greeting {
+    export text = "hello"
+    export times = 1
+    export double = |x| { x * 2 }
+}
+
+use greeting
 
 print("initial: " + greeting.text)
 print("double(4): " + greeting.double(4))
 print("same module:")
-print(greeting == ModuleRegistry.require("greeting"))
-
-ModuleRegistry.declare("greeting", |m| {
-    m.text = "hi"
-    m.times = 2
-    m.double = { |x| x * 2 + 1 }
-})
-
-print("reloaded: " + greeting.text)
-print("double(4): " + greeting.double(4))
+print(greeting == Modules.greeting)
 
 // External properties survive a reload.
 greeting.note = "kept"
 
-ModuleRegistry.declare("greeting", |m| {
-    m.text = "hey"
-    m.times = 3
-    m.double = { |x| x * 2 + 2 }
-})
+mod greeting {
+    export text = "hi"
+    export times = 2
+    export double = |x| { x * 2 + 1 }
+}
 
+print("reloaded: " + greeting.text)
+print("double(4): " + greeting.double(4))
 print("external note: " + greeting.note)
 
 // Nested values keep their identity and are updated in place.
-let settings = { enabled: true, level: 1 }
+let settings = { level: 1 }
 
-ModuleRegistry.declare("config", |m| {
-    m.settings = settings
-})
+mod config {
+    export settings = settings
+}
 
-ModuleRegistry.declare("config", |m| {
-    m.settings = { enabled: false, level: 2 }
-})
+mod config {
+    export settings = { level: 2 }
+}
 
 print("same settings object:")
 print(Modules.config.settings == settings)
 print("settings level: " + settings.level)
 
-// Extensions own their exports and reload independently.
-ModuleRegistry.extend("greeting", "stats", |m| {
-    m.total = m.times * 10
-})
+// Extensions are hidden parts of the module.
+mod greeting extend stats {
+    export total = greeting.times * 10
+}
 
 print("stats total: " + greeting.total)
-print("stats owner: " + ModuleRegistry.owner(greeting, "total"))
 
-ModuleRegistry.extend("greeting", "stats", |m| {
-    m.double = m.times * 2
-})
+mod greeting extend stats {
+    export twice = greeting.times * 2
+}
 
 print("stats total removed:")
 print(greeting.total == undefined)
-print("stats double: " + greeting.double)
+print("stats twice: " + greeting.twice)
 
-// File units reload in dependency order.
+use greeting { text as imported_text, double as imported_double }
+print("imported text: " + imported_text)
+print("imported double(4): " + imported_double(4))
+
+// Files are loaded explicitly; re-evaluating them updates modules in place.
 globalThis.LIVE_VALUE = 1
-ModuleRegistry.loadFile("kette/examples/modules/live_math.ktt")
-ModuleRegistry.loadFile("kette/examples/modules/live_stats.ktt")
+KetteTools.evalFile("kette/examples/modules/live_math.ktt")
+KetteTools.evalFile("kette/examples/modules/live_stats.ktt")
 
-let math = ModuleRegistry.require("live.math")
+use live.math as math
 print("file value: " + math.value)
 print("stats saw: " + math.seen)
 print("square(5): " + math.square(5))
 
 globalThis.LIVE_VALUE = 2
-ModuleRegistry.markDirty("kette/examples/modules/live_math.ktt")
-let flushed = ModuleRegistry.flushDirty()
+KetteTools.evalFile("kette/examples/modules/live_math.ktt")
+KetteTools.evalFile("kette/examples/modules/live_stats.ktt")
 
-print("flushed units: " + flushed.length)
-print("file value after flush: " + math.value)
-print("stats saw after flush: " + math.seen)
-print("same math module:")
-print(math == ModuleRegistry.require("live.math"))
+print("file value after reload: " + math.value)
+print("stats saw after reload: " + math.seen)
 
 // Reset rebuilds the exports on the same facade.
-ModuleRegistry.reset("greeting", |m| {
+ModuleRegistry.reset(greeting, |m| {
     m.text = "reset"
     m.times = 0
 })
 
 print("reset: " + greeting.text)
-print("stats dropped:")
-print(greeting.double == undefined)
-
-// Dotted names build namespace modules.
-ModuleRegistry.declare("Demo.Math.Vector", |m| {
-    m.dot = |x, y| { x * x + y * y }
-})
-
-print("namespace dot: " + Modules.Demo.Math.Vector.dot(3, 4))
+print("extensions dropped:")
+print(greeting.twice == undefined)

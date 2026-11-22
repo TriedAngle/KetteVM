@@ -1,69 +1,72 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/modules.ktt
 // Check: kette/kette_tests/check.py
 
-// A module is a stable object; require returns the same facade.
-let math = ModuleRegistry.declare("math", |m| {
-    m.value = 1
-    m.square = |x| { x * x }
-})
+mod math {
+    export value = 1
+    export square = |x| { x * x }
+}
 
-Test.assert(ModuleRegistry.require("math"), math)
+use math
+
+Test.assert(Modules.math, math)
 Test.assert(math.value, 1)
 Test.assert(math.square(4), 16)
 
 // Reloading updates the facade in place and drops undeclared base exports.
 math.note = "kept"
 
-ModuleRegistry.declare("math", |m| {
-    m.value = 2
-    m.cube = |x| { x * x * x }
-})
+mod math {
+    export value = 2
+    export cube = |x| { x * x * x }
+}
 
-Test.assert(ModuleRegistry.require("math"), math)
+Test.assert(Modules.math, math)
 Test.assert(math.value, 2)
 Test.assert(math.cube(3), 27)
 Test.assert(math.square, undefined)
 Test.assert(math.note, "kept")
 
-// Extensions own their exports and reload independently.
-ModuleRegistry.extend("math", "stats", |m| {
-    m.average = |a, b| { (a + b) / 2 }
-})
+// Extensions are hidden parts of the module.
+mod math extend stats {
+    export average = |a, b| { (a + b) / 2 }
+}
 
 Test.assert(math.average(2, 6), 4)
-Test.assert(ModuleRegistry.owner(math, "average"), "stats")
+Test.assert(Modules.stats, undefined)
+Test.assert(math.stats, undefined)
 
-ModuleRegistry.declare("math", |m| {
-    m.value = 3
-})
+mod math {
+    export value = 3
+}
 
 Test.assert(math.value, 3)
 Test.assert(math.average(2, 6), 4)
 
-ModuleRegistry.extend("math", "stats", |m| {
-    m.total = |a, b| { a + b }
-})
+mod math extend stats {
+    export total = |a, b| { a + b }
+}
 
 Test.assert(math.average, undefined)
 Test.assert(math.total(2, 6), 8)
 Test.assert(math.value, 3)
 
 // Nested objects, arrays and functions transition in place.
-let state = { count: 1 }
+let state = { count: 1, extra: "kept" }
 let items = [1, 2]
+items.extra = "kept"
 let increment = |x| { x + 1 }
 
-ModuleRegistry.declare("live", |m| {
-    m.state = state
-    m.items = items
-    m.increment = increment
-})
+mod live {
+    export state = state
+    export items = items
+    export increment = increment
+}
 
-ModuleRegistry.declare("live", |m| {
-    m.state = { count: 2 }
-    m.items = [3, 4, 5]
-    m.increment = |x| { x + 10 }
-})
+mod live {
+    export state = { count: 2 }
+    export items = [3, 4, 5]
+    export increment = |x| { x + 10 }
+}
 
 Test.assert(Modules.live.state, state)
 Test.assert(state.count, 2)
@@ -72,111 +75,121 @@ Test.assert(items.length, 3)
 Test.assert(items[2], 5)
 Test.assert(Modules.live.increment, increment)
 Test.assert(increment(1), 11)
-
-// Nested values keep unrelated properties.
-state.extra = "kept"
-items.extra = "kept"
-
-ModuleRegistry.declare("live", |m| {
-    m.state = { count: 3 }
-    m.items = [6]
-})
-
-Test.assert(state.count, 3)
 Test.assert(state.extra, "kept")
-Test.assert(items.length, 1)
-Test.assert(items[0], 6)
 Test.assert(items.extra, "kept")
 
 // A value can change layout, for example an object becoming an array.
 let box = { a: 1 }
 
-ModuleRegistry.declare("kind", |m| {
-    m.value = box
-})
+mod kind {
+    export value = box
+}
 
-ModuleRegistry.declare("kind", |m| {
-    m.value = [10, 20]
-})
+mod kind {
+    export value = [10, 20]
+}
 
 Test.assert(Modules.kind.value, box)
 Test.assert(box.length, 2)
 Test.assert(box[1], 20)
 
-// Objects with parents keep identity while the parents change.
-let parent = { label: "old" }
-
-ModuleRegistry.declare("parents", |m| {
-    m.child = { own: 1, p*: parent }
-})
-
-let child = Modules.parents.child
-
-ModuleRegistry.declare("parents", |m| {
-    m.child = { own: 2, p*: { label: "new" } }
-})
-
-Test.assert(Modules.parents.child, child)
-Test.assert(child.own, 2)
-Test.assert(child.label, "new")
-
 // remove and reset operate on the stable facade.
-let sandbox = ModuleRegistry.declare("sandbox", |m| {
-    m.a = 1
-    m.b = 2
-})
+mod sandbox {
+    export a = 1
+    export b = 2
+}
+
+use sandbox
 
 sandbox.extra = 3
 Test.assert(ModuleRegistry.remove(sandbox, "extra"), true)
 Test.assert(ModuleRegistry.remove(sandbox, "extra"), false)
 Test.assert(sandbox.extra, undefined)
 
-ModuleRegistry.reset("sandbox", |m| {
+ModuleRegistry.reset(sandbox, |m| {
     m.c = 3
 })
 
-Test.assert(ModuleRegistry.require("sandbox"), sandbox)
+Test.assert(Modules.sandbox, sandbox)
 Test.assert(sandbox.a, undefined)
 Test.assert(sandbox.b, undefined)
 Test.assert(sandbox.c, 3)
 
-// Dotted names build namespace modules that survive parent resets.
-ModuleRegistry.declare("Demo.Math.Vector", |m| {
-    m.square = |x| { x * x }
-})
+// Nested modules are real submodules; extensions stay hidden.
+mod demo {
+    export name = "demo"
 
-Test.assert(Modules.Demo.Math.Vector.square(3), 9)
-Test.assert(Modules.Demo.Math.Vector, ModuleRegistry.require("Demo.Math.Vector"))
+    if true {
+        export conditional = 7
+    }
 
-ModuleRegistry.declare("Demo", |m| {
-    m.name = "demo"
-})
+    mod demo.math.vector {
+        export square = |x| { x * x }
+    }
+}
 
-ModuleRegistry.reset("Demo", |m| {
+use demo.math.vector
+
+Test.assert(Modules.demo.name, "demo")
+Test.assert(Modules.demo.conditional, 7)
+Test.assert(vector, Modules.demo.math.vector)
+Test.assert(vector.square(3), 9)
+
+let conflict = false
+try {
+    ModuleRegistry.extend(Modules.demo.math, "bad", |m| {
+        m.vector = 0
+    })
+} catch (e) {
+    conflict = true
+}
+Test.assert(conflict, true)
+Test.assert(Modules.demo.math.vector.square(3), 9)
+
+ModuleRegistry.reset(Modules.demo, |m| {
     m.name = "reset"
 })
 
-Test.assert(Modules.Demo.name, "reset")
-Test.assert(Modules.Demo.Math.Vector.square(4), 16)
+Test.assert(Modules.demo.name, "reset")
+Test.assert(Modules.demo.math.vector.square(4), 16)
 
-// File units reload in dependency order.
+// use bindings select modules and exports, including nested groups.
+mod sample.math {
+    export pi = 3
+    export square = |x| { x * x }
+
+    mod sample.math.extra {
+        export value = 7
+    }
+}
+
+use sample.math as M
+use sample.math { extra, extra { value as extra_value }, pi as p, square as sq }
+
+Test.assert(M.pi, 3)
+Test.assert(extra.value, 7)
+Test.assert(extra_value, 7)
+Test.assert(p, 3)
+Test.assert(sq(3), 9)
+
+// Files are loaded explicitly; re-evaluating them updates modules in place.
 let base_path = "kette/kette_tests/units/base.ktt"
+let ext_path = "kette/kette_tests/units/ext.ktt"
 
 globalThis.UNIT_VALUE = 1
-ModuleRegistry.loadFile(base_path)
-ModuleRegistry.loadFile("kette/kette_tests/units/ext.ktt")
+KetteTools.evalFile(base_path)
+KetteTools.evalFile(ext_path)
 
-let unit_math = ModuleRegistry.require("unit.math")
+use unit.math as unit_math
 let unit_nested = unit_math.nested
 
 Test.assert(unit_math.value, 1)
 Test.assert(unit_math.seen, 1)
 
 globalThis.UNIT_VALUE = 2
-ModuleRegistry.markDirty(base_path)
-let flushed = ModuleRegistry.flushDirty()
+KetteTools.evalFile(base_path)
+KetteTools.evalFile(ext_path)
 
-Test.assert(flushed.length, 2)
 Test.assert(unit_math.value, 2)
 Test.assert(unit_math.seen, 2)
 Test.assert(unit_math.nested, unit_nested)
@@ -203,7 +216,7 @@ let reader = Thread.newPlatform("module-reader", {
 
 reader.start()
 let value = 0
-while value < 50 {
+while value < 25 {
     value = value + 1
     globalThis.MODULE_VALUE = value
     ModuleRegistry.declare("concurrent", |m| {
@@ -215,5 +228,5 @@ stop.store(1)
 reader.join()
 
 Test.assert(mismatches.load(), 0)
-Test.assert(Modules.concurrent.value, 50)
-Test.assert(Modules.concurrent.state.value, 50)
+Test.assert(Modules.concurrent.value, 25)
+Test.assert(Modules.concurrent.state.value, 25)

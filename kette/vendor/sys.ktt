@@ -1,11 +1,12 @@
-// libc bindings. Load first with KetteTools.evalFile.
-// Exports `globalThis.sys`; use `sys.raw.<fn>` and `sys.raw.lib`.
+// libc bindings. Load explicitly with KetteTools.evalFile.
+// Provides the `sys` module; use `sys.raw.<fn>` and `sys.raw.lib`.
 // These are not wrapped yet, so there is deliberately no `sys.fopen` etc.
 
-let (void, i32, u32, i64, f32, f64, u8, u64, CString) = FFI
+use ffi
+let (void, i32, u32, i64, f32, f64, u8, u64, CString) = ffi
 
-let lib = FFI.library(null)
-let Ptr = FFI.pointer(void)
+let lib = ffi.library(null)
+let Ptr = ffi.pointer(void)
 
 let raw = {
     lib: lib,
@@ -22,7 +23,6 @@ let raw = {
     exit: lib.fn("exit", [i32], void),
 }
 
-let sys = {
-    raw: raw,
+mod sys {
+    export raw = raw
 }
-globalThis.sys = sys

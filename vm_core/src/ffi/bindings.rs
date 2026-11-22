@@ -3,10 +3,11 @@ use crate::{
     AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
     PropertyDescriptor, SetupError, SlotName, Smi, StringRef, Tagged, ThreadState, Thrown,
-    TypeInfo, VM, Value, VmError, raise_runtime,
+    TypeInfo, VM, Value, VmError, raise_runtime, tools::KetteTools,
 };
 
-/// Install the `FFI` namespace and register the FFI natives.
+/// Install the FFI namespace under `KetteTools.primitives` and register the
+/// FFI natives.
 pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let ffi_call = vm.register_native(ffi_trampoline);
     let library = vm.register_native(ffi_library);
@@ -366,18 +367,18 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         )
         .expect("install FFI CString type");
 
-        let global = heap.known().global_object.get_handle(heap, &scope);
-        let value = scope.handle(namespace.as_tagged(heap).erase());
-        let name = thread_vm.interner().intern_str(heap, &scope, "FFI");
+        let primitives = KetteTools::primitives(heap, thread_vm.interner(), &scope)
+            .expect("KetteTools primitives are installed before the FFI bindings");
+        let name = thread_vm.interner().intern_str(heap, &scope, "ffi");
         let name = scope.handle(name.as_tagged(heap).erase().as_name());
         Object::define_own_property_ordinary(
             heap,
             &scope,
-            global,
+            primitives,
             name,
-            PropertyDescriptor::data(value),
+            PropertyDescriptor::data(scope.handle(namespace.as_tagged(heap).erase())),
         )
-        .expect("install FFI global");
+        .expect("install FFI primitive");
     });
     Ok(())
 }

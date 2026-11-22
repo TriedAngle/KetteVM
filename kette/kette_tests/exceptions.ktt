@@ -2,7 +2,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/collection.ktt kette/kette_tests/exceptions.ktt
 // Check: kette/kette_tests/check.py
 
-let errors = ModuleRegistry.require("Error")
+let errors = Modules.error
 let Error = errors.Error
 let ElementDoesNotExist = errors.ElementDoesNotExist
 let IndexOutOfBounds = errors.IndexOutOfBounds

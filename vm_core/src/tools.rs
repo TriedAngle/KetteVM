@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::materialize::Materialize;
 use crate::{
-    Args, CallInfo, Errors, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
+    Args, CallInfo, Errors, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
     NativeIndex, Object, PropertyDescriptor, StringInterner, StringRef, Tagged, ThreadState, VM,
     Value, VmError, WellKnown, eval_global_context, raise_runtime,
 };
@@ -158,6 +158,7 @@ impl KetteTools {
             scope,
         );
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
+        let primitives = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
         let methods: [(&str, NativeIndex); 5] = [
             ("forceMinorGC", natives[0]),
@@ -180,6 +181,17 @@ impl KetteTools {
             .expect("install tools method");
         }
 
+        let primitives_name = interner.intern_str(heap, scope, "primitives");
+        let primitives_name = scope.handle(primitives_name.as_tagged(heap));
+        Object::define_own_property_ordinary(
+            heap,
+            scope,
+            tools,
+            primitives_name,
+            PropertyDescriptor::data(primitives.erase()),
+        )
+        .expect("install KetteTools primitives");
+
         let name_str = interner.intern_str(heap, scope, "KetteTools");
         let name = scope.handle(name_str.as_tagged(heap));
         Object::define_own_property_ordinary(
@@ -190,6 +202,23 @@ impl KetteTools {
             PropertyDescriptor::data(tools.erase()),
         )
         .expect("install KetteTools global");
+    }
+
+    /// The object holding VM/runtime primitive namespaces.
+    pub fn primitives<'s>(
+        heap: &mut Heap,
+        interner: &StringInterner,
+        scope: &'s HandleScope<'_>,
+    ) -> Option<Handle<'s, Object>> {
+        let global = heap.known().global_object.get_handle(heap, scope);
+        let tools_name = interner.intern_str(heap, scope, "KetteTools");
+        let tools_name = scope.handle(tools_name.as_tagged(heap).erase());
+        let tools = Object::get_data_property(heap, scope, global.erase(), tools_name);
+        let tools = scope.handle(tools.as_heap_object()?);
+        let primitives_name = interner.intern_str(heap, scope, "primitives");
+        let primitives_name = scope.handle(primitives_name.as_tagged(heap).erase());
+        let primitives = Object::get_data_property(heap, scope, tools.erase(), primitives_name);
+        Some(scope.handle(primitives.as_heap_object()?))
     }
 }
 

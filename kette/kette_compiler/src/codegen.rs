@@ -781,6 +781,16 @@ impl<'a> FunctionGen<'a> {
                 }
                 Ok(())
             }
+            Node::StmtList { stmts } => {
+                let stmts = self.ast.list_items(stmts).to_vec();
+                for stmt in stmts {
+                    if !self.b.is_live() {
+                        break;
+                    }
+                    self.emit_stmt(stmt, sink)?;
+                }
+                Ok(())
+            }
             _ => self.err(stmt, "statement"),
         }
     }

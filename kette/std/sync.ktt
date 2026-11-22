@@ -1,4 +1,4 @@
-let IllegalLockState = Modules.Error.IllegalLockState
+let IllegalLockState = Modules.error.IllegalLockState
 
 let WaitQueueTraits = {
     new: {
@@ -411,15 +411,12 @@ let Condition = {
     waiters: undefined
 }
 
-let sync_module = ModuleRegistry._declare("Sync", |m| {
-    m.IllegalLockState = IllegalLockState
-    m.WaitQueue = WaitQueue
-    m.Mutex = Mutex
-    m.RecursiveMutex = RecursiveMutex
-    m.Condition = Condition
-})
-ModuleRegistry._linkPath("Sync", sync_module)
-
-if ModuleRegistry._lockBackend == null {
-    ModuleRegistry._installLock(RecursiveMutex.new())
+mod sync {
+    export IllegalLockState = IllegalLockState
+    export WaitQueue = WaitQueue
+    export Mutex = Mutex
+    export RecursiveMutex = RecursiveMutex
+    export Condition = Condition
 }
+
+ModuleRegistry._installLock(RecursiveMutex.new())

@@ -1,4 +1,4 @@
-let errors = ModuleRegistry.require("Error")
+let errors = Modules.error
 let ElementDoesNotExist = errors.ElementDoesNotExist
 let IndexOutOfBounds = errors.IndexOutOfBounds
 let UnimplementedError = errors.UnimplementedError
@@ -814,16 +814,16 @@ let Iter = {
     }
 }
 
-ModuleRegistry.declare("Collection", |m| {
-    m.Sequence = Sequence
-    m.Iter = Iter
-})
+mod collection {
+    export Sequence = Sequence
+    export Iter = Iter
 
-ModuleRegistry.declare("Collection.Traits", |m| {
-    m.Collection = Collection
-    m.MutableCollection = MutableCollection
-    m.Indexable = Indexable
-    m.MutableIndexable = MutableIndexable
-    m.SequenceTraits = SequenceTraits
-    m.IteratorTraits = IteratorTraits
-})
+    mod collection.traits {
+        export Collection = Collection
+        export MutableCollection = MutableCollection
+        export Indexable = Indexable
+        export MutableIndexable = MutableIndexable
+        export SequenceTraits = SequenceTraits
+        export IteratorTraits = IteratorTraits
+    }
+}

@@ -48,6 +48,7 @@ pub enum TokenKind {
 
     // keywords
     Let,
+    Mod,
     If,
     Else,
     While,
@@ -121,6 +122,7 @@ const TOKEN_INFO: &[TokenInfo] = &[
     I::new(">>", 0, 0),                     // GtGt
     I::new("!", 0, 0),                      // Bang
     I::new("let", 0, I::F_KEYWORD),         // Let
+    I::new("mod", 0, I::F_KEYWORD),         // Mod
     I::new("if", 0, I::F_KEYWORD),          // If
     I::new("else", 0, I::F_KEYWORD),        // Else
     I::new("while", 0, I::F_KEYWORD),       // While

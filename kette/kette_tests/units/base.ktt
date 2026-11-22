@@ -1,5 +1,4 @@
-ModuleRegistry.declare("unit.math", |m| {
-    m.value = globalThis.UNIT_VALUE
-    m.base = 10
-    m.nested = { value: globalThis.UNIT_VALUE }
-})
+mod unit.math {
+    export value = globalThis.UNIT_VALUE
+    export nested = { value: globalThis.UNIT_VALUE }
+}

@@ -1,11 +1,13 @@
 // Kette + raylib: open a window, draw a few frames, close.
-// Run: cargo run -q -p vm -- kette/examples/raylib/window_demo.ktt
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/window_demo.ktt
 
 // macOS does not search Homebrew's lib dir for bare library names.
+let FFI = Modules.ffi
+let OS = Modules.os
 let (void, i32, f32, CString) = FFI
-let path = if os.name == "macos" {
+let path = if OS.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"
-    } else if os.name == "windows" {
+    } else if OS.name == "windows" {
         "raylib.dll"
     } else {
         "libraylib.so"

@@ -1,5 +1,7 @@
-// Run:  cargo run -q -p vm -- kette/kette_tests/objects.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/objects.ktt
 // Check: kette/kette_tests/check.py
+
+let OS = Modules.os
 
 let rgb = {
     label: "red"
@@ -15,8 +17,10 @@ Test.assert(rgb.label, "crimson")
 Test.assert(rgb[1], 32)
 Test.assert(rgb[0] + rgb[1], 287)
 
-// host info: `os.name` is the OS string used to pick library paths
-Test.assert(os.name.length > 0, true)
+// host info: `OS.name` is the OS string used to pick library paths
+Test.assert(OS.name, KetteTools.primitives.os.name)
+Test.assert(OS.name.length > 0, true)
+Test.assert(globalThis.os, undefined)
 
 // accessor slots: `name>>` installs a getter, `name<<` a setter
 let accessor = {

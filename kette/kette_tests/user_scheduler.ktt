@@ -2,7 +2,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/user_scheduler.ktt
 // Check: kette/kette_tests/check.py
 
-let Mutex = ModuleRegistry.require("Sync").Mutex
+let Mutex = Modules.sync.Mutex
 
 let guard = Mutex.new()
 

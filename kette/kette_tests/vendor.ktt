@@ -1,0 +1,46 @@
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/vendor.ktt
+// Check: kette/kette_tests/check.py
+
+// Vendor modules are not loaded by startup.
+Test.assert(Modules.sys, undefined)
+Test.assert(Modules.tgpu, undefined)
+Test.assert(Modules.glfw, undefined)
+
+// sys only needs libc, so it is safe to test everywhere.
+KetteTools.evalFile("kette/vendor/sys.ktt")
+
+use sys { raw }
+
+Test.assert(Modules.sys.raw, raw)
+Test.assert(raw.lib != null, true)
+
+raw.srand(1)
+Test.assert(raw.rand() >= 0, true)
+
+// Graphics vendor modules are optional: load them when their native
+// libraries are available, but don't make the suite depend on them.
+let tgpu_loaded = false
+try {
+    KetteTools.evalFile("kette/vendor/tgpu.ktt")
+    tgpu_loaded = true
+} catch (e) {
+    tgpu_loaded = false
+}
+
+if tgpu_loaded {
+    Test.assert(Modules.tgpu.INVALID_HANDLE, 4294967295)
+    Test.assert(Modules.tgpu.instanceCreate != undefined, true)
+
+    let glfw_loaded = false
+    try {
+        KetteTools.evalFile("kette/vendor/glfw.ktt")
+        glfw_loaded = true
+    } catch (e) {
+        glfw_loaded = false
+    }
+
+    if glfw_loaded {
+        Test.assert(Modules.glfw.create != undefined, true)
+        Test.assert(Modules.glfw.raw.lib != null, true)
+    }
+}

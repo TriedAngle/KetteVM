@@ -1,12 +1,14 @@
 // GLFW window bindings and tgpu.Window helpers.
-// Load after sys.ktt and tgpu.ktt with KetteTools.evalFile;
-// exports `globalThis.glfw`.
-// Raw bindings: `glfw.raw.<fn>`, `glfw.raw.lib`, and `glfw.raw.objc`.
+// Load after sys.ktt and tgpu.ktt with KetteTools.evalFile.
+// Provides the `glfw` module; raw bindings are `glfw.raw.<fn>`,
+// `glfw.raw.lib`, and `glfw.raw.objc`.
 
-let (void, i32, f64, CString) = FFI
-let Ptr = FFI.pointer(void)
-let sys = globalThis.sys
-let tgpu = globalThis.tgpu
+use ffi
+use os
+use sys
+use tgpu
+let (void, i32, f64, CString) = ffi
+let Ptr = ffi.pointer(void)
 
 let glfw_path = if os.name == "macos" {
         "/opt/homebrew/lib/libglfw.dylib"
@@ -16,7 +18,7 @@ let glfw_path = if os.name == "macos" {
         "libglfw.so.3"
     }
 
-let lib = FFI.library(glfw_path)
+let lib = ffi.library(glfw_path)
 
 let glfwGetCocoaWindow = if os.name == "macos" {
         lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
@@ -43,7 +45,7 @@ let glfwGetWin32Window = if os.name == "windows" {
     }
 
 let objc = if os.name == "macos" {
-        FFI.library("/usr/lib/libobjc.A.dylib")
+        ffi.library("/usr/lib/libobjc.A.dylib")
     } else {
         null
     }
@@ -87,41 +89,41 @@ let raw = {
     objc_msgSend: objc_msgSend,
 }
 
-let glfw = {
-    init: raw.init,
-    terminate: raw.terminate,
-    windowHint: raw.window_hint,
-    createWindow: raw.create_window,
-    destroyWindow: raw.destroy_window,
-    shouldClose: raw.should_close,
-    pollEvents: raw.poll_events,
-    framebufferSize: raw.framebuffer_size,
-    windowSize: raw.window_size,
-    time: raw.time,
-    setCursorPosCallback: raw.set_cursor_pos_callback,
-    setMouseButtonCallback: raw.set_mouse_button_callback,
-    getCursorPos: raw.get_cursor_pos,
-    getMouseButton: raw.get_mouse_button,
-    setKeyCallback: raw.set_key_callback,
-    setShouldClose: raw.set_should_close,
+mod glfw {
+    export init = raw.init
+    export terminate = raw.terminate
+    export windowHint = raw.window_hint
+    export createWindow = raw.create_window
+    export destroyWindow = raw.destroy_window
+    export shouldClose = raw.should_close
+    export pollEvents = raw.poll_events
+    export framebufferSize = raw.framebuffer_size
+    export windowSize = raw.window_size
+    export time = raw.time
+    export setCursorPosCallback = raw.set_cursor_pos_callback
+    export setMouseButtonCallback = raw.set_mouse_button_callback
+    export getCursorPos = raw.get_cursor_pos
+    export getMouseButton = raw.get_mouse_button
+    export setKeyCallback = raw.set_key_callback
+    export setShouldClose = raw.set_should_close
 
-    create: { |title, width, height|
-        if self.init() == 0 {
+    export create = { |title, width, height|
+        if raw.init() == 0 {
             print("glfwInit failed")
             sys.raw.exit(1)
         }
         // 139265 is GLFW_CLIENT_API, paired with GLFW_NO_API.
-        self.windowHint(139265, 0)
-        let window = self.createWindow(width, height, title, null, null)
+        raw.window_hint(139265, 0)
+        let window = raw.create_window(width, height, title, null, null)
         if window == null {
             print("glfwCreateWindow failed")
             sys.raw.exit(1)
         }
         window
-    },
+    }
 
     // Build the tgpu.Window desc for the current platform.
-    tgpuWindow: { |window|
+    export tgpuWindow = { |window|
         let result = tgpu.Window.new()
         if os.name == "macos" {
             result.kind = tgpu.WindowKind.APP_KIT
@@ -138,9 +140,7 @@ let glfw = {
             result.window = raw.glfwGetWin32Window(window)
         }
         result
-    },
+    }
 
-    raw: raw,
+    export raw = raw
 }
-
-globalThis.glfw = glfw

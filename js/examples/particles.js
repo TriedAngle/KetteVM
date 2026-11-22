@@ -2,13 +2,15 @@
 // Run from the repository root:
 //   cargo run -q -p vm -- js/examples/particles.js
 
+KetteTools.evalFile("kette/std/startup.ktt");
 KetteTools.evalFile("kette/vendor/sys.ktt");
 KetteTools.evalFile("kette/vendor/tgpu.ktt");
 KetteTools.evalFile("kette/vendor/glfw.ktt");
 
-const tgpu = globalThis.tgpu;
-const glfw = globalThis.glfw;
-const sys = globalThis.sys;
+const tgpu = globalThis.Modules.tgpu;
+const glfw = globalThis.Modules.glfw;
+const sys = globalThis.Modules.sys;
+const FFI = globalThis.Modules.ffi;
 const Ptr = FFI.pointer(FFI.void);
 
 const PARTICLE_COUNT = 10000;

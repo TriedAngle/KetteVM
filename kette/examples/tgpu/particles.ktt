@@ -2,13 +2,15 @@
 // Run from the repository root:
 //   cargo run -q -p vm -- kette/examples/tgpu/particles.ktt
 
+KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/sys.ktt")
 KetteTools.evalFile("kette/vendor/tgpu.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")
 
-let sys = globalThis.sys
-let glfw = globalThis.glfw
-let tgpu = globalThis.tgpu
+let FFI = Modules.ffi
+use sys
+use glfw
+use tgpu
 let Ptr = FFI.pointer(FFI.void)
 
 let PARTICLE_COUNT = 10000

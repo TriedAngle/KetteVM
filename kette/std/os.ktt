@@ -1,0 +1,5 @@
+let os = KetteTools.primitives.os
+
+mod os {
+    export name = os.name
+}

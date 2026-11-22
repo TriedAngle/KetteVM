@@ -1990,7 +1990,7 @@ impl InlineCache {
         let payload = site.handler;
         if let Some(tag) = payload.to_i64() {
             // runtime callee: index and shape come straight from the
-            // payload — no object decode needed
+            // payload - no object decode needed
             return match decode_runtime_payload(tag) {
                 Some(rt) => CallProbe::Native(rt),
                 None => CallProbe::Miss,

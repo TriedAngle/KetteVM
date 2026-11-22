@@ -1,6 +1,5 @@
-let math = ModuleRegistry.require("unit.math")
+use unit.math
 
-ModuleRegistry.extend("unit.math", "unit.stats", |m| {
-    m.seen = math.value
-    m.extra = 20
-})
+mod unit.math extend stats {
+    export seen = math.value
+}

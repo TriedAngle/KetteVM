@@ -204,6 +204,10 @@ impl Resolver<'_> {
                     self.collect_pattern_decls(pattern);
                 }
                 Node::ExprStmt { expr } => self.collect_expr_decls(expr),
+                Node::StmtList { stmts } => {
+                    let stmts: Vec<NodeId> = self.ast.list_items(stmts).to_vec();
+                    self.collect_stmt_decls(&stmts);
+                }
                 _ => {}
             }
         }

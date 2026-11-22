@@ -1,6 +1,5 @@
-let math = ModuleRegistry.require("live.math")
+use live.math
 
-ModuleRegistry.extend("live.math", "stats", |m| {
-    m.mean = |a, b| { (a + b) / 2 }
-    m.seen = math.value
-})
+mod live.math extend stats {
+    export seen = math.value
+}

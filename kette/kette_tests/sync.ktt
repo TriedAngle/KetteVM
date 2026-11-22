@@ -2,7 +2,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/sync.ktt
 // Check: kette/kette_tests/check.py
 
-let sync = ModuleRegistry.require("Sync")
+let sync = Modules.sync
 let Mutex = sync.Mutex
 let WaitQueue = sync.WaitQueue
 let RecursiveMutex = sync.RecursiveMutex

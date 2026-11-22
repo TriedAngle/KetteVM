@@ -1,4 +1,11 @@
-// Run: cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/std/ui/verify.ktt kette/std/ui/tests.ktt kette/examples/ui/demo.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/ui.ktt
+// Check: kette/kette_tests/check.py
+
+use ui {
+    Hit, K_BOX, L_COL, Node, NodeTraits, rgb, SIZE_FILL, SIZE_FIT,
+    Space, SpaceTraits, Splitter, Term, TermTraits, Windows
+}
+use ui.verify { Expect, LayoutCheck, PaintCheck }
 
 let caseRow = {
     let space = Space.new(800, 600)
@@ -304,6 +311,9 @@ let Tests = {
         caseSplitter()
         print("== types ==")
         caseTypes()
-        Expect.summary()
     }
 }
+
+Tests.run()
+Test.assert(Expect.failures, 0)
+Test.assert(Expect.checks > 0, true)

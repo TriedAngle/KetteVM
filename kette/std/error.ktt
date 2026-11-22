@@ -91,21 +91,19 @@ let IllegalStateError = {
     message: ""
 }
 
-let error_module = ModuleRegistry._declare("Error", |m| {
-    m.Error = Error
-    m.ElementDoesNotExist = ElementDoesNotExist
-    m.IndexOutOfBounds = IndexOutOfBounds
-    m.IllegalLockState = IllegalLockState
-    m.UnimplementedError = UnimplementedError
-    m.ConcurrentModificationError = ConcurrentModificationError
-    m.NoSuchElementError = NoSuchElementError
-    m.IllegalStateError = IllegalStateError
-})
-ModuleRegistry._linkPath("Error", error_module)
+mod error {
+    export Error = Error
+    export ElementDoesNotExist = ElementDoesNotExist
+    export IndexOutOfBounds = IndexOutOfBounds
+    export IllegalLockState = IllegalLockState
+    export UnimplementedError = UnimplementedError
+    export ConcurrentModificationError = ConcurrentModificationError
+    export NoSuchElementError = NoSuchElementError
+    export IllegalStateError = IllegalStateError
 
-let error_traits_module = ModuleRegistry._declare("Error.Traits", |m| {
-    m.ErrorTraits = ErrorTraits
-    m.IndexOutOfBoundsTraits = IndexOutOfBoundsTraits
-    m.UnimplementedErrorTraits = UnimplementedErrorTraits
-})
-ModuleRegistry._linkPath("Error.Traits", error_traits_module)
+    mod error.traits {
+        export ErrorTraits = ErrorTraits
+        export IndexOutOfBoundsTraits = IndexOutOfBoundsTraits
+        export UnimplementedErrorTraits = UnimplementedErrorTraits
+    }
+}

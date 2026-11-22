@@ -26,6 +26,7 @@ fn keyword_kind(text: &[u8]) -> Option<TokenKind> {
     use TokenKind::*;
     Some(match text {
         b"let" => Let,
+        b"mod" => Mod,
         b"if" => If,
         b"else" => Else,
         b"while" => While,

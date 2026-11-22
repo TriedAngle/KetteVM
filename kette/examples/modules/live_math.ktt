@@ -1,4 +1,4 @@
-ModuleRegistry.declare("live.math", |m| {
-    m.value = globalThis.LIVE_VALUE
-    m.square = |x| { x * x }
-})
+mod live.math {
+    export value = globalThis.LIVE_VALUE
+    export square = |x| { x * x }
+}

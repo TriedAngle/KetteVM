@@ -1,0 +1,63 @@
+let ffi = KetteTools.primitives.ffi
+
+let void = ffi.void
+let bool = ffi.bool
+let char = ffi.char
+let char16 = ffi.char16
+let wchar = ffi.wchar
+let i8 = ffi.i8
+let u8 = ffi.u8
+let i16 = ffi.i16
+let u16 = ffi.u16
+let i32 = ffi.i32
+let u32 = ffi.u32
+let i64 = ffi.i64
+let u64 = ffi.u64
+let f32 = ffi.f32
+let f64 = ffi.f64
+let CString = ffi.CString
+
+let library = ffi.library
+let cstring = ffi.cstring
+let wstring = ffi.wstring
+let string_at = ffi.string_at
+let wstring_at = ffi.wstring_at
+let pointer = ffi.pointer
+let fn = ffi.fn
+let callback = ffi.callback
+let struct = ffi.struct
+let enum = ffi.enum
+let array = ffi.array
+let buffer = ffi.buffer
+
+mod ffi {
+    export void = void
+    export bool = bool
+    export char = char
+    export char16 = char16
+    export wchar = wchar
+    export i8 = i8
+    export u8 = u8
+    export i16 = i16
+    export u16 = u16
+    export i32 = i32
+    export u32 = u32
+    export i64 = i64
+    export u64 = u64
+    export f32 = f32
+    export f64 = f64
+    export CString = CString
+
+    export library = library
+    export cstring = cstring
+    export wstring = wstring
+    export string_at = string_at
+    export wstring_at = wstring_at
+    export pointer = pointer
+    export fn = fn
+    export callback = callback
+    export struct = struct
+    export enum = enum
+    export array = array
+    export buffer = buffer
+}

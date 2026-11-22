@@ -1,3 +1,5 @@
+use ui { L_ROW, L_COL, OP_RECT, OP_SHADOW, OP_CLIP, OP_CLIP_POP, SIZE_FIT, SIZE_FILL }
+
 let Expect = {
     checks: 0
     failures: 0
@@ -205,3 +207,9 @@ let PaintCheck = {
     }
 }
 
+
+mod ui.verify {
+    export Expect = Expect
+    export LayoutCheck = LayoutCheck
+    export PaintCheck = PaintCheck
+}

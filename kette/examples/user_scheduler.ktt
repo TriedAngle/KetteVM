@@ -6,7 +6,7 @@
 //
 // Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/user_scheduler.ktt
 
-let Mutex = ModuleRegistry.require("Sync").Mutex
+let Mutex = Modules.sync.Mutex
 let guard = Mutex.new()
 
 let text = ""

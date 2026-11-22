@@ -1,8 +1,9 @@
 // Threads, virtual scheduling, and atomic cells.
-// Run: cargo run -q -p vm -- kette/kette_tests/threading.ktt
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/threading.ktt
 // Check: kette/kette_tests/check.py
 
 let AtomicI64 = atomic.AtomicI64
+let FFI = Modules.ffi
 
 // Main thread surface.
 Test.assert(Thread.name(), "main")

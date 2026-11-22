@@ -1,4 +1,6 @@
-// Run: cargo run -q -p vm -- kette/std/ui/sketch.ktt kette/std/ui/verify.ktt kette/std/ui/tests.ktt kette/examples/ui/demo.ktt
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/ui/demo.ktt
+
+use ui { Dump, Node, NodeTraits, rgb, SIZE_FILL, Space, Term, Windows }
 
 let SHOW_OPS = 0
 // 0 off, 1 ascii, 2 ansi
@@ -56,5 +58,3 @@ let finalOps = space.frame()
 Dump.tree(space.root, 0, 0, 0)
 if TERMINAL > 0 { Term.render(finalOps, 800, 600, 80, 30, TERMINAL) }
 if SHOW_OPS == 1 { Dump.list(finalOps) }
-
-Tests.run()

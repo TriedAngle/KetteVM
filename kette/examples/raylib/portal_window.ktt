@@ -2,11 +2,13 @@
 // https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
 // Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/portal_window.ktt
 
+let FFI = Modules.ffi
+let OS = Modules.os
 let (struct, void, bool, i32, u32, f32, f64, u8, CString) = FFI
 
-let path = if os.name == "macos" {
+let path = if OS.name == "macos" {
         "/opt/homebrew/lib/libraylib.dylib"
-    } else if os.name == "windows" {
+    } else if OS.name == "windows" {
         "raylib.dll"
     } else {
         "libraylib.so"

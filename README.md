@@ -22,13 +22,13 @@ Example Run (Deltablue):
 
     cargo +nightly run --release --features fast -- benchmarks/octane/base.js benchmarks/octane/deltablue/deltablue.js benchmarks/octane/run.js
 
-UI sketch demo (layout tree, terminal preview, and checks):
+UI sketch demo (layout tree and terminal preview):
 
-    cargo run -q -p vm -- \
-        kette/std/ui/sketch.ktt \
-        kette/std/ui/verify.ktt \
-        kette/std/ui/tests.ktt \
-        kette/examples/ui/demo.ktt
+    cargo run -q -p vm -- kette/std/startup.ktt kette/examples/ui/demo.ktt
+
+The UI checks run with the normal Kette suite:
+
+    python3 kette/kette_tests/check.py kette/kette_tests/ui.ktt
 
 See `kette/examples/README.md` for the terminal modes (`TERMINAL=0/1/2`).
 

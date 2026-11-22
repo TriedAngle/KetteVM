@@ -893,3 +893,39 @@ let Term = {
     clipH: 0
 }
 
+
+mod ui {
+    export K_BOX = K_BOX
+    export K_WINDOW = K_WINDOW
+    export K_TEXT = K_TEXT
+    export K_SPLITTER = K_SPLITTER
+
+    export L_NONE = L_NONE
+    export L_ROW = L_ROW
+    export L_COL = L_COL
+
+    export SIZE_FIXED = SIZE_FIXED
+    export SIZE_FILL = SIZE_FILL
+    export SIZE_FIT = SIZE_FIT
+    export MAX_SIZE = MAX_SIZE
+
+    export OP_RECT = OP_RECT
+    export OP_CLIP = OP_CLIP
+    export OP_CLIP_POP = OP_CLIP_POP
+    export OP_SHADOW = OP_SHADOW
+
+    export rgb = rgb
+
+    export NodeTraits = NodeTraits
+    export Node = Node
+    export Splitter = Splitter
+    export Layout = Layout
+    export Paint = Paint
+    export Hit = Hit
+    export Windows = Windows
+    export SpaceTraits = SpaceTraits
+    export Space = Space
+    export Dump = Dump
+    export TermTraits = TermTraits
+    export Term = Term
+}

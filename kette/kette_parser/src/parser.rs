@@ -69,6 +69,15 @@ pub struct Parser<S: CharStream> {
     scanner: Scanner<S>,
     ast: Ast,
     buffer: VecDeque<Token>,
+    allow_mod: bool,
+    export_target: Option<Symbol>,
+    staging_symbol: Symbol,
+    module_registry_symbol: Symbol,
+    modules_symbol: Symbol,
+    declare_symbol: Symbol,
+    extend_symbol: Symbol,
+    export_symbol: Symbol,
+    use_symbol: Symbol,
 }
 
 impl<S: CharStream> Parser<S> {
@@ -80,6 +89,13 @@ impl<S: CharStream> Parser<S> {
         let next_symbol = scanner.symbols_mut().intern(b"next");
         let next_keyed_symbol = scanner.symbols_mut().intern(b"nextKeyed");
         let size_symbol = scanner.symbols_mut().intern(b"size");
+        let staging_symbol = scanner.symbols_mut().intern(b"$staging");
+        let module_registry_symbol = scanner.symbols_mut().intern(b"ModuleRegistry");
+        let modules_symbol = scanner.symbols_mut().intern(b"Modules");
+        let declare_symbol = scanner.symbols_mut().intern(b"declare");
+        let extend_symbol = scanner.symbols_mut().intern(b"extend");
+        let export_symbol = scanner.symbols_mut().intern(b"export");
+        let use_symbol = scanner.symbols_mut().intern(b"use");
         let mut ast = Ast::new();
         ast.set_self_symbol(self_symbol);
         ast.set_iteration_symbols(
@@ -93,6 +109,15 @@ impl<S: CharStream> Parser<S> {
             scanner,
             ast,
             buffer: VecDeque::new(),
+            allow_mod: true,
+            export_target: None,
+            staging_symbol,
+            module_registry_symbol,
+            modules_symbol,
+            declare_symbol,
+            extend_symbol,
+            export_symbol,
+            use_symbol,
         }
     }
 
@@ -242,13 +267,277 @@ impl<S: CharStream> Parser<S> {
     }
 
     fn parse_statement(&mut self) -> Result<NodeId, ParseError> {
-        if self.peek()?.kind == TokenKind::Let {
-            self.parse_let()
-        } else {
-            let expr = self.parse_expression()?;
-            let span = self.ast.span(expr);
-            Ok(self.ast.add(Node::ExprStmt { expr }, span))
+        if self.peek()?.kind == TokenKind::Mod {
+            if !self.allow_mod {
+                return Err(ParseError::new(
+                    self.peek()?.span,
+                    "`mod` is only allowed at the top level or directly inside another `mod`",
+                ));
+            }
+            return self.parse_mod();
         }
+        if self.peek()?.kind == TokenKind::Let {
+            return self.parse_let();
+        }
+        if self.at_word(self.use_symbol)? && self.next_is_name()? {
+            return self.parse_use();
+        }
+        if self.export_target.is_some() && self.at_word(self.export_symbol)? {
+            return self.parse_export();
+        }
+        let expr = self.parse_expression()?;
+        let span = self.ast.span(expr);
+        Ok(self.ast.add(Node::ExprStmt { expr }, span))
+    }
+
+    fn at_word(&mut self, word: Symbol) -> Result<bool, ParseError> {
+        let token = self.peek()?;
+        Ok(token.kind == TokenKind::Identifier && token.value.symbol() == Some(word.0))
+    }
+
+    fn next_is_name(&mut self) -> Result<bool, ParseError> {
+        Ok(is_name_kind(self.peek_nth(1)?.kind))
+    }
+
+    fn parse_module_path(&mut self) -> Result<(Vec<Symbol>, ByteSpan), ParseError> {
+        let first = self.next()?;
+        if !is_name_kind(first.kind) {
+            return Err(ParseError::new(first.span, "expected a module name"));
+        }
+        let start = first.span.start;
+        let mut end = first.span.end;
+        let mut parts = vec![self.token_name(first)?];
+        while self.eat(TokenKind::Period)? {
+            let token = self.next()?;
+            if !is_name_kind(token.kind) {
+                return Err(ParseError::new(token.span, "expected a module name"));
+            }
+            end = token.span.end;
+            parts.push(self.token_name(token)?);
+        }
+        Ok((parts, ByteSpan::new(start, end)))
+    }
+
+    fn module_name_symbol(&mut self, parts: &[Symbol]) -> Symbol {
+        let mut bytes = Vec::new();
+        for (index, part) in parts.iter().enumerate() {
+            if index != 0 {
+                bytes.push(b'.');
+            }
+            bytes.extend_from_slice(self.scanner.symbols().get(*part));
+        }
+        self.scanner.symbols_mut().intern(&bytes)
+    }
+
+    fn modules_path(&mut self, parts: &[Symbol], span: ByteSpan) -> NodeId {
+        let mut node = self.ast.add(Node::Ident(self.modules_symbol), span);
+        for part in parts {
+            node = self.ast.add(
+                Node::Get {
+                    recv: node,
+                    name: *part,
+                },
+                span,
+            );
+        }
+        node
+    }
+
+    fn parse_mod(&mut self) -> Result<NodeId, ParseError> {
+        let keyword = self.expect(TokenKind::Mod)?;
+        let (parts, path_span) = self.parse_module_path()?;
+        let extension = if self.at_word(self.extend_symbol)? {
+            self.next()?;
+            let token = self.next()?;
+            if !is_name_kind(token.kind) {
+                return Err(ParseError::new(token.span, "expected an extension name"));
+            }
+            let name = self.token_name(token)?;
+            Some((name, token.span))
+        } else {
+            None
+        };
+        let open = self.expect(TokenKind::LBrace)?;
+
+        let saved_export = self.export_target;
+        let saved_allow = self.allow_mod;
+        self.export_target = Some(self.staging_symbol);
+        self.allow_mod = false;
+
+        let mut body_stmts = Vec::new();
+        let mut nested = Vec::new();
+        loop {
+            if self.peek()?.kind == TokenKind::RBrace {
+                break;
+            }
+            if self.eat(TokenKind::Semicolon)? {
+                continue;
+            }
+            if self.peek()?.kind == TokenKind::Mod {
+                if extension.is_some() {
+                    return Err(ParseError::new(
+                        self.peek()?.span,
+                        "`mod` is not allowed inside an extension",
+                    ));
+                }
+                nested.push(self.parse_mod()?);
+                self.expect_semicolon()?;
+                continue;
+            }
+            body_stmts.push(self.parse_statement()?);
+            self.expect_semicolon()?;
+        }
+
+        self.export_target = saved_export;
+        self.allow_mod = saved_allow;
+        let close = self.expect(TokenKind::RBrace)?;
+
+        let body_span = ByteSpan::new(open.span.end, close.span.start);
+        let body_list = self.ast.list(&body_stmts);
+        let body = self.ast.add(Node::StmtList { stmts: body_list }, body_span);
+        let staging_ident = self.ast.add(Node::Ident(self.staging_symbol), path_span);
+        let params = self.ast.list(&[staging_ident]);
+        let slots = self.ast.list(&[]);
+        let closure = self.ast.add(
+            Node::Object(ObjectParts {
+                slots,
+                params: Some(params),
+                rest: None,
+                body,
+            }),
+            ByteSpan::new(open.span.start, close.span.end),
+        );
+
+        let registry = self
+            .ast
+            .add(Node::Ident(self.module_registry_symbol), path_span);
+        let expr = if let Some((extension_name, extension_span)) = extension {
+            let target = self.modules_path(&parts, path_span);
+            let extension_name = self.ast.add(Node::String(extension_name), extension_span);
+            let args = self.ast.list(&[target, extension_name, closure]);
+            self.ast.add(
+                Node::Send {
+                    recv: registry,
+                    name: self.extend_symbol,
+                    args,
+                },
+                path_span,
+            )
+        } else {
+            let name = self.module_name_symbol(&parts);
+            let name = self.ast.add(Node::String(name), path_span);
+            let args = self.ast.list(&[name, closure]);
+            self.ast.add(
+                Node::Send {
+                    recv: registry,
+                    name: self.declare_symbol,
+                    args,
+                },
+                path_span,
+            )
+        };
+
+        let span = ByteSpan::new(keyword.span.start, close.span.end);
+        let statement = self.ast.add(Node::ExprStmt { expr }, span);
+        nested.push(statement);
+        let stmts = self.ast.list(&nested);
+        Ok(self.ast.add(Node::StmtList { stmts }, span))
+    }
+
+    fn parse_export(&mut self) -> Result<NodeId, ParseError> {
+        let keyword = self.expect(TokenKind::Identifier)?;
+        let Some(staging) = self.export_target else {
+            return Err(ParseError::new(keyword.span, "`export` outside a module"));
+        };
+        let name_token = self.next()?;
+        if !is_name_kind(name_token.kind) {
+            return Err(ParseError::new(name_token.span, "expected an export name"));
+        }
+        let name = self.token_name(name_token)?;
+        self.expect(TokenKind::Assign)?;
+        let value = self.parse_expression()?;
+        let recv = self.ast.add(Node::Ident(staging), keyword.span);
+        let target = self.ast.add(Node::Get { recv, name }, name_token.span);
+        let span = ByteSpan::new(keyword.span.start, self.ast.span(value).end);
+        let assign = self.ast.add(Node::Assign { target, value }, span);
+        Ok(self.ast.add(Node::ExprStmt { expr: assign }, span))
+    }
+
+    fn parse_use(&mut self) -> Result<NodeId, ParseError> {
+        let keyword = self.expect(TokenKind::Identifier)?;
+        let (parts, path_span) = self.parse_module_path()?;
+        if self.peek()?.kind == TokenKind::LBrace {
+            let (stmts, tree_span) = self.parse_use_tree(&parts)?;
+            let list = self.ast.list(&stmts);
+            let span = ByteSpan::new(keyword.span.start, tree_span.end);
+            return Ok(self.ast.add(Node::StmtList { stmts: list }, span));
+        }
+        let alias = if self.eat(TokenKind::As)? {
+            let token = self.next()?;
+            if !is_name_kind(token.kind) {
+                return Err(ParseError::new(token.span, "expected a use alias"));
+            }
+            Some((self.token_name(token)?, token.span))
+        } else {
+            None
+        };
+        Ok(self.import_binding(&[], &parts, alias, path_span))
+    }
+
+    fn parse_use_tree(&mut self, parent: &[Symbol]) -> Result<(Vec<NodeId>, ByteSpan), ParseError> {
+        let open = self.expect(TokenKind::LBrace)?;
+        let mut stmts = Vec::new();
+        loop {
+            if self.peek()?.kind == TokenKind::RBrace {
+                break;
+            }
+            let (parts, path_span) = self.parse_module_path()?;
+            let alias = if self.eat(TokenKind::As)? {
+                let token = self.next()?;
+                if !is_name_kind(token.kind) {
+                    return Err(ParseError::new(token.span, "expected an import alias"));
+                }
+                Some((self.token_name(token)?, token.span))
+            } else {
+                None
+            };
+            if alias.is_none() && self.peek()?.kind == TokenKind::LBrace {
+                let mut full = parent.to_vec();
+                full.extend_from_slice(&parts);
+                let (mut nested, _) = self.parse_use_tree(&full)?;
+                stmts.append(&mut nested);
+            } else {
+                stmts.push(self.import_binding(parent, &parts, alias, path_span));
+            }
+            if !self.eat(TokenKind::Comma)? {
+                break;
+            }
+        }
+        let close = self.expect(TokenKind::RBrace)?;
+        if stmts.is_empty() {
+            return Err(ParseError::new(
+                close.span,
+                "expected at least one import name",
+            ));
+        }
+        Ok((stmts, ByteSpan::new(open.span.start, close.span.end)))
+    }
+
+    fn import_binding(
+        &mut self,
+        parent: &[Symbol],
+        parts: &[Symbol],
+        alias: Option<(Symbol, ByteSpan)>,
+        path_span: ByteSpan,
+    ) -> NodeId {
+        let mut full = parent.to_vec();
+        full.extend_from_slice(parts);
+        let (bound, bound_span) =
+            alias.unwrap_or_else(|| (*full.last().expect("module path has a segment"), path_span));
+        let pattern = self.ast.add(Node::Ident(bound), bound_span);
+        let init = self.modules_path(&full, path_span);
+        let span = ByteSpan::new(path_span.start, self.ast.span(init).end);
+        self.ast.add(Node::Let { pattern, init }, span)
     }
 
     fn parse_let(&mut self) -> Result<NodeId, ParseError> {
@@ -616,6 +905,8 @@ impl<S: CharStream> Parser<S> {
     /// `{ slots | params | body }`, single pass, entry by entry.
     fn parse_object(&mut self) -> Result<NodeId, ParseError> {
         let open = self.expect(TokenKind::LBrace)?;
+        let saved_export = self.export_target;
+        self.export_target = None;
         let mut slots = Vec::new();
         let mut stmts = Vec::new();
         let mut params = None;
@@ -662,6 +953,7 @@ impl<S: CharStream> Parser<S> {
         let body_list = self.ast.list(&stmts);
         let body = self.ast.add(Node::StmtList { stmts: body_list }, body_span);
         let slots = self.ast.list(&slots);
+        self.export_target = saved_export;
         let span = ByteSpan::new(open.span.start, close.span.end);
         Ok(self.ast.add(
             Node::Object(ObjectParts {
@@ -988,7 +1280,10 @@ impl<S: CharStream> Parser<S> {
     fn parse_prefixed_function(&mut self) -> Result<NodeId, ParseError> {
         let start = self.peek()?.span.start;
         let (params, rest) = self.parse_params()?;
+        let saved_export = self.export_target;
+        self.export_target = None;
         let body = self.parse_branch()?;
+        self.export_target = saved_export;
         let slots = self.ast.list(&[]);
         let span = ByteSpan::new(start, self.ast.span(body).end);
         Ok(self.ast.add(
@@ -1026,7 +1321,10 @@ impl<S: CharStream> Parser<S> {
     /// object. The leading `{` has not been eaten.
     fn parse_branch(&mut self) -> Result<NodeId, ParseError> {
         let open = self.expect(TokenKind::LBrace)?;
+        let saved = self.allow_mod;
+        self.allow_mod = false;
         let stmts = self.parse_statement_list(TokenKind::RBrace)?;
+        self.allow_mod = saved;
         let close = self.expect(TokenKind::RBrace)?;
         let list = self.ast.list(&stmts);
         Ok(self.ast.add(

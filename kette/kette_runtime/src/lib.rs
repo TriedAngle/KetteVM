@@ -3,7 +3,7 @@ use vm_core::{
     HandleSlice, Heap, HostCtx, Key, Map, MapInit, MapKind, NativeIndex, Object, ObjectKind,
     OwnProperty, OwnPropertyLocation, PartialDescriptor, PropertyDescriptor, Prototype, Runtime,
     RuntimeId, SetupError, ShapeChange, ShouldThrow, Smi, Symbol, Tagged, ThreadState, VM, Value,
-    Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime, rt_try,
+    Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime, rt_try, tools::KetteTools,
 };
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
@@ -162,7 +162,7 @@ impl Runtime for KetteRuntime {
                     tools,
                     "publishFlatModule",
                     publish_flat_module,
-                    7,
+                    6,
                 );
             }
 
@@ -183,6 +183,8 @@ impl Runtime for KetteRuntime {
             .expect("install None global");
 
             // `os.name` reports the host OS for platform-specific paths.
+            let primitives = KetteTools::primitives(heap, thread_vm.interner(), &scope)
+                .expect("KetteTools primitives are installed before the Kette runtime");
             let os = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
             let name = scope.handle(
                 thread_vm
@@ -210,11 +212,11 @@ impl Runtime for KetteRuntime {
             Object::define_own_property_ordinary(
                 heap,
                 &scope,
-                global,
+                primitives,
                 os_name,
                 PropertyDescriptor::data(os.erase()),
             )
-            .expect("install os global");
+            .expect("install os primitive");
             Ok(())
         })
     }
@@ -449,7 +451,7 @@ fn plan_write<'s>(
 }
 
 /// `KetteTools.publishFlatModule(module, staging, entry, oldOwners, owners,
-/// contributions, preserveExtras)`
+/// preserveExtras)`
 fn tools_publish_flat_module<'a>(
     ctx: HostCtx<'a>,
     _call: CallInfo<'_>,
@@ -463,15 +465,13 @@ fn tools_publish_flat_module<'a>(
     let entry = args.get_handle(heap, 2);
     let old_owners = args.get_handle(heap, 3);
     let owners = args.get_handle(heap, 4);
-    let contributions = args.get_handle(heap, 5);
-    let preserve_extras = args.get_handle(heap, 6);
+    let preserve_extras = args.get_handle(heap, 5);
     state.handle_scope(|scope| {
         let module = scope.handle(module.as_tagged(heap).erase());
         let staging = scope.handle(staging.as_tagged(heap).erase());
         let entry = scope.handle(entry.as_tagged(heap).erase());
         let old_owners = scope.handle(old_owners.as_tagged(heap).erase());
         let owners = scope.handle(owners.as_tagged(heap).erase());
-        let contributions = scope.handle(contributions.as_tagged(heap).erase());
 
         let Some(module_object) = definable_object(heap, module.as_tagged(heap).erase()) else {
             return heap.known().false_object.get(heap).erase();
@@ -612,12 +612,8 @@ fn tools_publish_flat_module<'a>(
 
         let owners_name = vm.interner().intern_str(heap, &scope, "owners");
         let owners_name = scope.handle(owners_name.as_tagged(heap).erase());
-        let contributions_name = vm.interner().intern_str(heap, &scope, "contributions");
-        let contributions_name = scope.handle(contributions_name.as_tagged(heap).erase());
-        for (key, value) in [(owners_name, owners), (contributions_name, contributions)] {
-            if plan_write(heap, &scope, entry_object, key, value, &mut plan).is_none() {
-                return heap.known().false_object.get(heap).erase();
-            }
+        if plan_write(heap, &scope, entry_object, owners_name, owners, &mut plan).is_none() {
+            return heap.known().false_object.get(heap).erase();
         }
 
         heap.exclusive(|heap| apply_plan(heap, &plan));
