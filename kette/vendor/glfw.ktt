@@ -1,15 +1,27 @@
 use ffi
 use os
-use sys
 let (void, i32, f64, CString) = ffi
 let Ptr = ffi.pointer(void)
-let Window = Ptr
 let KEY_ESCAPE = 256
 let PRESS = 1
 let RELEASE = 0
 let REPEAT = 2
 let CLIENT_API = 139265
 let NO_API = 0
+let OPENGL_API = 196609
+
+let ClientApi = {
+    OPENGL: 0,
+    NONE: 1,
+}
+let Key = {
+    ESCAPE: KEY_ESCAPE,
+}
+let Action = {
+    PRESS: PRESS,
+    RELEASE: RELEASE,
+    REPEAT: REPEAT,
+}
 
 let glfw_path = if os.name == "macos" {
         "/opt/homebrew/lib/libglfw.dylib"
@@ -66,14 +78,23 @@ let objc_msgSend = if os.name == "macos" {
 let raw = {
     lib: lib,
     objc: objc,
+    KEY_ESCAPE: KEY_ESCAPE,
+    PRESS: PRESS,
+    RELEASE: RELEASE,
+    REPEAT: REPEAT,
+    CLIENT_API: CLIENT_API,
+    NO_API: NO_API,
+    OPENGL_API: OPENGL_API,
     init: lib.fn("glfwInit", [], i32),
     terminate: lib.fn("glfwTerminate", [], void),
+    default_window_hints: lib.fn("glfwDefaultWindowHints", [], void),
     window_hint: lib.fn("glfwWindowHint", [i32, i32], void),
     create_window: lib.fn("glfwCreateWindow", [i32, i32, CString, Ptr, Ptr], Ptr),
     destroy_window: lib.fn("glfwDestroyWindow", [Ptr], void),
     make_context_current: lib.fn("glfwMakeContextCurrent", [Ptr], void),
     swap_buffers: lib.fn("glfwSwapBuffers", [Ptr], void),
     should_close: lib.fn("glfwWindowShouldClose", [Ptr], i32),
+    set_should_close: lib.fn("glfwSetWindowShouldClose", [Ptr, i32], void),
     poll_events: lib.fn("glfwPollEvents", [], void),
     framebuffer_size: lib.fn("glfwGetFramebufferSize", [Ptr, Ptr, Ptr], void),
     window_size: lib.fn("glfwGetWindowSize", [Ptr, Ptr, Ptr], void),
@@ -83,7 +104,6 @@ let raw = {
     get_cursor_pos: lib.fn("glfwGetCursorPos", [Ptr, Ptr, Ptr], void),
     get_mouse_button: lib.fn("glfwGetMouseButton", [Ptr, i32], i32),
     set_key_callback: lib.fn("glfwSetKeyCallback", [Ptr, Ptr], void),
-    set_should_close: lib.fn("glfwSetWindowShouldClose", [Ptr, i32], void),
     glfwGetCocoaWindow: glfwGetCocoaWindow,
     glfwGetX11Display: glfwGetX11Display,
     glfwGetX11Window: glfwGetX11Window,
@@ -92,69 +112,234 @@ let raw = {
     objc_msgSend: objc_msgSend,
 }
 
-mod vendor.glfw {
-    export Window = Window
-    export KEY_ESCAPE = KEY_ESCAPE
-    export PRESS = PRESS
-    export RELEASE = RELEASE
-    export REPEAT = REPEAT
-    export CLIENT_API = CLIENT_API
-    export NO_API = NO_API
+let state = {
+    initialized: false,
+    windows: 0,
+}
 
-    export init = raw.init
-    export terminate = raw.terminate
-    export windowHint = raw.window_hint
-    export createWindow = raw.create_window
-    export destroyWindow = raw.destroy_window
-    export makeContextCurrent = raw.make_context_current
-    export swapBuffers = raw.swap_buffers
-    export shouldClose = raw.should_close
-    export pollEvents = raw.poll_events
-    export framebufferSize = raw.framebuffer_size
-    export windowSize = raw.window_size
-    export time = raw.time
-    export setCursorPosCallback = raw.set_cursor_pos_callback
-    export setMouseButtonCallback = raw.set_mouse_button_callback
-    export getCursorPos = raw.get_cursor_pos
-    export getMouseButton = raw.get_mouse_button
-    export setKeyCallback = raw.set_key_callback
-    export setShouldClose = raw.set_should_close
+let framebuffer_coords = |handle, x, y| {
+    let window_size = ffi.array(i32, 2).new()
+    let frame_size = ffi.array(i32, 2).new()
+    raw.window_size(handle, window_size.add(0), window_size.add(1))
+    raw.framebuffer_size(handle, frame_size.add(0), frame_size.add(1))
+    let window_width = window_size.get(0)
+    let window_height = window_size.get(1)
+    let frame_width = frame_size.get(0)
+    let frame_height = frame_size.get(1)
+    let scale_x = if window_width > 0 { frame_width / window_width } else { 1.0 }
+    let scale_y = if window_height > 0 { frame_height / window_height } else { 1.0 }
+    let result = {
+        x: x * scale_x,
+        y: y * scale_y,
+    }
+    window_size.free()
+    frame_size.free()
+    result
+}
 
-    export create = { |title, width, height|
-        if raw.init() == 0 {
-            print("glfwInit failed")
-            sys.raw.exit(1)
+let Window = {
+    disposable*: Disposable
+
+    new: |title, width, height, options| {
+        let options = if options == null { {} } else { options }
+        if !state.initialized {
+            if raw.init() == 0 {
+                throw "glfwInit failed"
+            }
+            state.initialized = true
         }
-        raw.window_hint(CLIENT_API, NO_API)
-        let window = raw.create_window(width, height, title, null, null)
-        if window == null {
-            print("glfwCreateWindow failed")
-            sys.raw.exit(1)
+
+        raw.default_window_hints()
+        let client_api = if options.clientApi == null {
+                ClientApi.OPENGL
+            } else {
+                options.clientApi
+            }
+        if client_api == ClientApi.NONE {
+            raw.window_hint(CLIENT_API, NO_API)
         }
+
+        let window = self.clone()
+        window.handle = raw.create_window(width, height, title, null, null)
+        if window.handle == null {
+            if state.windows == 0 {
+                raw.terminate()
+                state.initialized = false
+            }
+            throw "glfwCreateWindow failed"
+        }
+        window.disposed = false
+        window.keyCallback = null
+        window.cursorCallback = null
+        window.mouseCallback = null
+        state.windows = state.windows + 1
         window
+    }
+
+    isOpen: {
+        !self.disposed && raw.should_close(self.handle) == 0
+    }
+
+    shouldClose: {
+        raw.should_close(self.handle) != 0
+    }
+
+    setShouldClose: |value| {
+        raw.set_should_close(self.handle, if value { 1 } else { 0 })
+        self
+    }
+
+    poll: {
+        raw.poll_events()
+        self
+    }
+
+    framebufferSize: {
+        let size = ffi.array(i32, 2).new()
+        raw.framebuffer_size(self.handle, size.add(0), size.add(1))
+        let result = {
+            width: size.get(0),
+            height: size.get(1),
+        }
+        size.free()
+        result
+    }
+
+    windowSize: {
+        let size = ffi.array(i32, 2).new()
+        raw.window_size(self.handle, size.add(0), size.add(1))
+        let result = {
+            width: size.get(0),
+            height: size.get(1),
+        }
+        size.free()
+        result
+    }
+
+    time: {
+        raw.time()
+    }
+
+    cursor: {
+        let position = ffi.array(f64, 2).new()
+        raw.get_cursor_pos(self.handle, position.add(0), position.add(1))
+        let result = {
+            x: position.get(0),
+            y: position.get(1),
+        }
+        position.free()
+        result
+    }
+
+    cursorFramebuffer: {
+        let position = self.cursor()
+        framebuffer_coords(self.handle, position.x, position.y)
+    }
+
+    mouseButton: |button| {
+        raw.get_mouse_button(self.handle, button) == PRESS
+    }
+
+    onKey: |callback| {
+        let wrapped = ffi.callback(
+            [Ptr, i32, i32, i32, i32],
+            void,
+            |handle, key, scancode, action, mods| {
+                callback(key, action, mods)
+            }
+        )
+        self.keyCallback = wrapped
+        raw.set_key_callback(self.handle, wrapped)
+        self
+    }
+
+    onCursor: |callback| {
+        let wrapped = ffi.callback([Ptr, f64, f64], void, |handle, x, y| {
+            callback(x, y)
+        })
+        self.cursorCallback = wrapped
+        raw.set_cursor_pos_callback(self.handle, wrapped)
+        self
+    }
+
+    onCursorFramebuffer: |callback| {
+        let window = self
+        let wrapped = ffi.callback([Ptr, f64, f64], void, |handle, x, y| {
+            let position = framebuffer_coords(handle, x, y)
+            callback(position.x, position.y)
+        })
+        window.cursorCallback = wrapped
+        raw.set_cursor_pos_callback(window.handle, wrapped)
+        window
+    }
+
+    onMouseButton: |callback| {
+        let wrapped = ffi.callback([Ptr, i32, i32, i32], void, |handle, button, action, mods| {
+            callback(button, action, mods)
+        })
+        self.mouseCallback = wrapped
+        raw.set_mouse_button_callback(self.handle, wrapped)
+        self
+    }
+
+    makeContextCurrent: {
+        raw.make_context_current(self.handle)
+        self
+    }
+
+    swapBuffers: {
+        raw.swap_buffers(self.handle)
+        self
     }
 
     // Build the tgpu.Window desc for the current platform.
     // The caller must load the `vendor.tgpu` module first.
-    export tgpuWindow = { |window|
+    tgpuWindow: {
         let tgpu = Modules.vendor.tgpu
+        if tgpu == undefined {
+            throw "vendor.tgpu is not loaded"
+        }
         let result = tgpu.Window.new()
         if os.name == "macos" {
             result.kind = tgpu.WindowKind.APP_KIT
-            let ns_window = raw.glfwGetCocoaWindow(window)
+            let ns_window = raw.glfwGetCocoaWindow(self.handle)
             // [ns_window contentView]
             let view = raw.objc_msgSend(ns_window, raw.sel_registerName("contentView"))
             result.window = view
         } else if os.name == "linux" {
             result.kind = tgpu.WindowKind.XLIB
             result.display = raw.glfwGetX11Display()
-            result.window = raw.glfwGetX11Window(window)
+            result.window = raw.glfwGetX11Window(self.handle)
         } else if os.name == "windows" {
             result.kind = tgpu.WindowKind.WIN32
-            result.window = raw.glfwGetWin32Window(window)
+            result.window = raw.glfwGetWin32Window(self.handle)
         }
         result
     }
 
+    dispose: {
+        if self.disposed {
+            return 0
+        }
+        self.disposed = true
+        self.keyCallback = null
+        self.cursorCallback = null
+        self.mouseCallback = null
+        raw.destroy_window(self.handle)
+        self.handle = null
+        state.windows = state.windows - 1
+        if state.windows == 0 {
+            raw.terminate()
+            state.initialized = false
+        }
+        0
+    }
+}
+
+mod vendor.glfw {
+    export Window = Window
+    export ClientApi = ClientApi
+    export Key = Key
+    export Action = Action
     export raw = raw
 }

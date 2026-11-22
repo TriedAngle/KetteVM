@@ -25,22 +25,22 @@ let UiPush = struct({
     pad: f32,
 })
 
-let window = glfw.create("kette ui", 800, 600)
-let framebuffer_size = FFI.array(FFI.i32, 2).new()
-glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
-let width = framebuffer_size.get(0)
-let height = framebuffer_size.get(1)
+let window = glfw.Window.new("kette ui", 800, 600, {
+    clientApi: glfw.ClientApi.NONE,
+})
+let start_size = window.framebufferSize()
+let width = start_size.width
+let height = start_size.height
 if width <= 0 || height <= 0 {
     print("window has no framebuffer")
     sys.raw.exit(1)
 }
 
-let on_key = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void, |handle, key, scancode, action, mods| {
-    if action == 1 && key == 256 {
-        glfw.setShouldClose(handle, 1)
+window.onKey(|key, action, mods| {
+    if action == glfw.Action.PRESS && key == glfw.Key.ESCAPE {
+        window.setShouldClose(true)
     }
 })
-glfw.setKeyCallback(window, on_key)
 
 let instance = tgpu.instanceCreate(null)
 tgpu.check()
@@ -51,7 +51,7 @@ let queue = queues.get(0)
 
 let swapchain_desc = tgpu.SwapchainDesc.new()
 swapchain_desc.struct_size = tgpu.SwapchainDesc.size()
-swapchain_desc.window = glfw.tgpuWindow(window)
+swapchain_desc.window = window.tgpuWindow()
 swapchain_desc.width = width
 swapchain_desc.height = height
 swapchain_desc.image_count = 3
@@ -135,8 +135,6 @@ space.root.addChild(transcript)
 space.frame()
 
 let mouse = FFI.array(FFI.f32, 2).new()
-let window_size = FFI.array(FFI.i32, 2).new()
-let cursor_framebuffer = FFI.array(FFI.i32, 2).new()
 let drag = {
     active: 0,
     mode: 0,
@@ -147,17 +145,9 @@ let drag = {
     startX: 0
 }
 
-let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, |handle, x, y| {
-    glfw.windowSize(handle, window_size.add(0), window_size.add(1))
-    glfw.framebufferSize(handle, cursor_framebuffer.add(0), cursor_framebuffer.add(1))
-    let window_width = window_size.get(0)
-    let window_height = window_size.get(1)
-    let frame_width = cursor_framebuffer.get(0)
-    let frame_height = cursor_framebuffer.get(1)
-    let scale_x = if window_width > 0 { frame_width / window_width } else { 1.0 }
-    let scale_y = if window_height > 0 { frame_height / window_height } else { 1.0 }
-    let mouse_x = x * scale_x
-    let mouse_y = y * scale_y
+window.onCursorFramebuffer(|x, y| {
+    let mouse_x = x
+    let mouse_y = y
     mouse.set(0, mouse_x)
     mouse.set(1, mouse_y)
     if drag.active == 1 {
@@ -172,9 +162,8 @@ let on_cursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, |handle, x, y| {
         }
     }
 })
-glfw.setCursorPosCallback(window, on_cursor)
 
-let on_button = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32], FFI.void, |handle, button, action, mods| {
+window.onMouseButton(|button, action, mods| {
     if button == 0 {
         if action == 1 {
             let hit = Hit.test(space.root, mouse.get(0), mouse.get(1))
@@ -202,7 +191,6 @@ let on_button = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32], FFI.void, |handle
         }
     }
 })
-glfw.setMouseButtonCallback(window, on_button)
 
 let instances = FFI.array(FFI.f32, CAPACITY * FLOATS).new()
 
@@ -257,12 +245,12 @@ let commands = FFI.array(Ptr, 1).new()
 let ui_push = UiPush.new()
 ui_push.instances = instance_index
 
-while glfw.shouldClose(window) == 0 {
-    glfw.pollEvents()
+while window.isOpen() {
+    window.poll()
 
-    glfw.framebufferSize(window, framebuffer_size.add(0), framebuffer_size.add(1))
-    let frame_width = framebuffer_size.get(0)
-    let frame_height = framebuffer_size.get(1)
+    let frame_size = window.framebufferSize()
+    let frame_width = frame_size.width
+    let frame_height = frame_size.height
 
     if frame_width > 0 && frame_height > 0 {
         if frame_width != extent.width || frame_height != extent.height {
@@ -340,10 +328,7 @@ tgpu.deviceDestroy(device)
 tgpu.instanceDestroy(instance)
 
 instances.free()
-framebuffer_size.free()
 mouse.free()
-window_size.free()
-cursor_framebuffer.free()
 queues.free()
 color_formats.free()
 attachments.free()
@@ -360,5 +345,4 @@ ui_push.free()
 vertex_entry.free()
 fragment_entry.free()
 
-glfw.destroyWindow(window)
-glfw.terminate()
+window.dispose()

@@ -24,31 +24,23 @@ let glClear = gl.fn("glClear", [u32], void)
 
 let GL_COLOR_BUFFER_BIT = 16384
 
-// GLFWkeyfun: void (*)(GLFWwindow *, int key, int scancode, int action, int mods)
-let onKey = ffi.callback(
-    [glfw.Window, i32, i32, i32, i32],
-    void,
-    |window, key, scancode, action, mods| {
-        if action == glfw.PRESS {
+with(glfw.Window.new("kette + glfw", 640, 480), |window| {
+    window.makeContextCurrent()
+    window.onKey(|key, action, mods| {
+        if action == Action.PRESS {
             print(key)
-            if key == glfw.KEY_ESCAPE {
-                glfw.setShouldClose(window, 1)
+            if key == Key.ESCAPE {
+                window.setShouldClose(true)
             }
         }
+    })
+
+    while window.isOpen() {
+        glClearColor(0.1, 0.2, 0.3, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+        window.swapBuffers()
+        window.poll()
     }
-)
+})
 
-glfw.init()
-let window = glfw.createWindow(640, 480, "kette + glfw", null, null)
-glfw.makeContextCurrent(window)
-glfw.setKeyCallback(window, onKey)
-
-while glfw.shouldClose(window) == 0 {
-    glClearColor(0.1, 0.2, 0.3, 1.0)
-    glClear(GL_COLOR_BUFFER_BIT)
-    glfw.swapBuffers(window)
-    glfw.pollEvents()
-}
-
-glfw.terminate()
 print("done")

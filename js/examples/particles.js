@@ -21,12 +21,13 @@ function ceil_div(value, divisor) {
     return (adjusted - (adjusted % divisor)) / divisor;
 }
 
-const glfwWindow = glfw.create("tgpu particles (JS)", 800, 600);
+const glfwWindow = glfw.Window.new("tgpu particles (JS)", 800, 600, {
+    clientApi: glfw.ClientApi.NONE,
+});
 
-const framebufferSize = FFI.array(FFI.i32, 2).new();
-glfw.framebufferSize(glfwWindow, framebufferSize.add(0), framebufferSize.add(1));
-const startWidth = framebufferSize.get(0);
-const startHeight = framebufferSize.get(1);
+const startSize = glfwWindow.framebufferSize();
+const startWidth = startSize.width;
+const startHeight = startSize.height;
 if (startWidth <= 0 || startHeight <= 0) {
     console.log("window has no framebuffer");
     sys.raw.exit(1);
@@ -34,38 +35,15 @@ if (startWidth <= 0 || startHeight <= 0) {
 
 // Mouse position in framebuffer coordinates, written by the GLFW callback.
 const mouse = FFI.array(FFI.f32, 2).new();
-const windowSize = FFI.array(FFI.i32, 2).new();
-const cursorFramebuffer = FFI.array(FFI.i32, 2).new();
-
-const onCursor = FFI.callback([Ptr, FFI.f64, FFI.f64], FFI.void, (windowHandle, x, y) => {
-    glfw.windowSize(windowHandle, windowSize.add(0), windowSize.add(1));
-    glfw.framebufferSize(windowHandle, cursorFramebuffer.add(0), cursorFramebuffer.add(1));
-    const windowWidth = windowSize.get(0);
-    const windowHeight = windowSize.get(1);
-    const frameWidth = cursorFramebuffer.get(0);
-    const frameHeight = cursorFramebuffer.get(1);
-
-    let scaleX = 1.0;
-    let scaleY = 1.0;
-    if (windowWidth > 0) {
-        scaleX = frameWidth / windowWidth;
-    }
-    if (windowHeight > 0) {
-        scaleY = frameHeight / windowHeight;
-    }
-    mouse.set(0, x * scaleX);
-    mouse.set(1, frameHeight - y * scaleY);
+glfwWindow.onCursorFramebuffer((x, y) => {
+    mouse.set(0, x);
+    mouse.set(1, glfwWindow.framebufferSize().height - y);
 });
-glfw.setCursorPosCallback(glfwWindow, onCursor);
-
-const onKey = FFI.callback([Ptr, FFI.i32, FFI.i32, FFI.i32, FFI.i32], FFI.void,
-    (windowHandle, key, scancode, action, mods) => {
-        // GLFW_PRESS = 1, GLFW_KEY_ESCAPE = 256
-        if (action === 1 && key === 256) {
-            glfw.setShouldClose(windowHandle, 1);
-        }
-    });
-glfw.setKeyCallback(glfwWindow, onKey);
+glfwWindow.onKey((key, action, mods) => {
+    if (action === glfw.Action.PRESS && key === glfw.Key.ESCAPE) {
+        glfwWindow.setShouldClose(true);
+    }
+});
 
 const instance = tgpu.instanceCreate(null);
 tgpu.check();
@@ -77,7 +55,7 @@ const queue = queues.get(0);
 
 const swapchainDesc = tgpu.SwapchainDesc.new();
 swapchainDesc.struct_size = tgpu.SwapchainDesc.size();
-swapchainDesc.window = glfw.tgpuWindow(glfwWindow);
+swapchainDesc.window = glfwWindow.tgpuWindow();
 swapchainDesc.width = startWidth;
 swapchainDesc.height = startHeight;
 swapchainDesc.image_count = 3;
@@ -232,16 +210,16 @@ renderInfo.struct_size = tgpu.RenderDesc.size();
 renderInfo.color_count = 1;
 renderInfo.colors = attachments;
 
-let lastTime = glfw.time();
+let lastTime = glfwWindow.time();
 let smoothedDt = 1.0 / 60.0;
 let frameCount = 0;
 
-while (glfw.shouldClose(glfwWindow) === 0) {
-    glfw.pollEvents();
+while (glfwWindow.isOpen()) {
+    glfwWindow.poll();
 
-    glfw.framebufferSize(glfwWindow, framebufferSize.add(0), framebufferSize.add(1));
-    const frameWidth = framebufferSize.get(0);
-    const frameHeight = framebufferSize.get(1);
+    const frameSize = glfwWindow.framebufferSize();
+    const frameWidth = frameSize.width;
+    const frameHeight = frameSize.height;
 
     if (frameWidth > 0 && frameHeight > 0) {
         if (frameWidth !== extent.width || frameHeight !== extent.height) {
@@ -252,7 +230,7 @@ while (glfw.shouldClose(glfwWindow) === 0) {
             tgpu.check();
         }
 
-        const now = glfw.time();
+        const now = glfwWindow.time();
         let measured = now - lastTime;
         lastTime = now;
         if (measured < 1.0 / 240.0) {
@@ -393,10 +371,7 @@ tgpu.deviceDestroy(device);
 tgpu.instanceDestroy(instance);
 
 particleData.free();
-framebufferSize.free();
 mouse.free();
-windowSize.free();
-cursorFramebuffer.free();
 queues.free();
 colorFormats.free();
 attachments.free();
@@ -420,7 +395,6 @@ entryComputeClear.free();
 entryVertexMain.free();
 entryFragmentMain.free();
 
-glfw.destroyWindow(glfwWindow);
-glfw.terminate();
+glfwWindow.dispose();
 
 console.log("done");

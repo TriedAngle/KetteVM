@@ -8,6 +8,39 @@ let UI_VERIFY_PATH = "kette/std/ui/verify.ktt"
 
 globalThis.Modules = {}
 
+globalThis.Disposable = {
+    dispose: { throw "dispose is not implemented" }
+}
+
+globalThis.with = |resource, block| {
+    let failed = false
+    let error = null
+    let result = null
+    try {
+        result = block(resource)
+    } catch (e) {
+        failed = true
+        error = e
+    }
+
+    let dispose_failed = false
+    let dispose_error = null
+    try {
+        resource.dispose()
+    } catch (e) {
+        dispose_failed = true
+        dispose_error = e
+    }
+
+    if failed {
+        throw error
+    }
+    if dispose_failed {
+        throw dispose_error
+    }
+    result
+}
+
 Object.addParent(Array.prototype, "array", {
     size: { self.length }
     iterator: {

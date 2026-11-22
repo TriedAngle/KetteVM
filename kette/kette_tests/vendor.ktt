@@ -37,13 +37,39 @@ try {
 }
 
 if glfw_loaded {
-    Test.assert(Modules.vendor.glfw.create != undefined, true)
-    Test.assert(Modules.vendor.glfw.createWindow != undefined, true)
-    Test.assert(Modules.vendor.glfw.makeContextCurrent != undefined, true)
-    Test.assert(Modules.vendor.glfw.swapBuffers != undefined, true)
-    Test.assert(Modules.vendor.glfw.KEY_ESCAPE, 256)
+    Test.assert(Modules.vendor.glfw.Window.dispose != undefined, true)
+    Test.assert(Modules.vendor.glfw.Key.ESCAPE, 256)
+    Test.assert(Modules.vendor.glfw.ClientApi.NONE, 1)
+    Test.assert(Modules.vendor.glfw.raw.default_window_hints != undefined, true)
     Test.assert(Modules.vendor.glfw.raw.lib != null, true)
 }
+
+// Disposable resources are disposed by `with`, including on failure.
+let disposed = 0
+let resource = {
+    disposable*: Disposable
+    dispose: {
+        disposed = disposed + 1
+    }
+}
+let result = with(resource, |item| {
+    Test.assert(item, resource)
+    Test.assert(disposed, 0)
+    7
+})
+Test.assert(result, 7)
+Test.assert(disposed, 1)
+
+let resource_error = null
+try {
+    with(resource, |item| {
+        throw "boom"
+    })
+} catch (e) {
+    resource_error = e
+}
+Test.assert(resource_error, "boom")
+Test.assert(disposed, 2)
 
 let raylib_loaded = false
 try {
