@@ -1,9 +1,5 @@
-// GLFW window with a guest key callback.
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/glfw/window_demo.ktt
-//
-// Requires libglfw (brew install glfw). ESC closes the window; every key press
-// is printed from inside the callback, which runs on the C stack when
-// glfwPollEvents delivers it.
+// Opens a GLFW + OpenGL window with a guest key callback.
+// Run: cargo run -- kette/examples/glfw/window_demo.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")

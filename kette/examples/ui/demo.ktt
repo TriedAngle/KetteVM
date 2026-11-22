@@ -1,3 +1,4 @@
+// Builds a layout tree and prints it with a terminal paint preview.
 // Run: cargo run -- kette/examples/ui/demo.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")

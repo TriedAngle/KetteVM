@@ -1,3 +1,4 @@
+// Demonstrates modules, extensions, and hot reload while preserving identity.
 // Run: cargo run -- kette/examples/modules_live.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")

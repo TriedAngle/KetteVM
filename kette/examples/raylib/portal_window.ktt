@@ -1,8 +1,5 @@
-// Kette port of raylib's `textures_portal_window.c` example.
-// https://github.com/raysan5/raylib/blob/38d0eded78d38cd5db7fd75bde0001a648c22207/examples/textures/textures_portal_window.c
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/portal_window.ktt
-//
-// Requires libraylib (brew install raylib).
+// Ports raylib's portal-window example with render-to-texture 3D drawing.
+// Run: cargo run -- kette/examples/raylib/portal_window.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/raylib.ktt")

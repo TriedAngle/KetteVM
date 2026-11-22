@@ -1,7 +1,3 @@
-// libc bindings. Loaded by startup.
-// Provides the `sys` module; use `sys.raw.<fn>` and `sys.raw.lib`.
-// These are not wrapped yet, so there is deliberately no `sys.fopen` etc.
-
 use ffi
 let (void, i32, u32, i64, f32, f64, u8, u64, CString) = ffi
 

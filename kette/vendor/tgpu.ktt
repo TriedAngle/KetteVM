@@ -1,4 +1,3 @@
-// tgpu bindings. Load explicitly; provides the `vendor.tgpu` module.
 use ffi
 use os
 use sys

@@ -1,9 +1,4 @@
-// A userspace scheduler running on its own platform thread.
-//
-// The scheduler thread owns a ready queue and mounts virtual threads itself.
-// The main thread keeps running in parallel and appends to the same string
-// under a mutex from std/sync.ktt.
-//
+// Runs a userspace scheduler that mounts virtual threads on a platform thread.
 // Run: cargo run -- kette/examples/user_scheduler.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")

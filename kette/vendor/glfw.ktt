@@ -1,9 +1,3 @@
-// GLFW window bindings and tgpu.Window helpers.
-// Load explicitly with KetteTools.evalFile.
-// Provides the `vendor.glfw` module; raw bindings are `glfw.raw.<fn>`,
-// `glfw.raw.lib`, and `glfw.raw.objc`.
-// `tgpuWindow` requires the `vendor.tgpu` module when it is called.
-
 use ffi
 use os
 use sys

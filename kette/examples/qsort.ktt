@@ -1,4 +1,4 @@
-// Guest callbacks into C: qsort with a Kette comparator.
+// Sorts an array through libc qsort with a Kette comparator callback.
 // Run: cargo run -- kette/examples/qsort.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")

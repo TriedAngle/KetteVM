@@ -1,7 +1,5 @@
-// Kette + raylib: open a window, draw a few frames, close.
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/examples/raylib/window_demo.ktt
-//
-// Requires libraylib (brew install raylib).
+// Opens a raylib window and draws a few frames.
+// Run: cargo run -- kette/examples/raylib/window_demo.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/raylib.ktt")

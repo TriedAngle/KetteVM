@@ -1,6 +1,5 @@
-// Particles example
-// Run from the repository root:
-//   cargo run -q -p vm -- js/examples/particles.js
+// Renders 10,000 GPU particles with tgpu.
+// Run: cargo run -- js/examples/particles.js
 
 KetteTools.evalFile("kette/std/startup.ktt");
 KetteTools.evalFile("kette/vendor/tgpu.ktt");

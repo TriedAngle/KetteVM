@@ -1,5 +1,5 @@
-// Platform threads run in parallel; virtual threads share a scheduler.
-// Run: cargo run -q -p vm -- kette/examples/threads.ktt
+// Compares atomic and racy counters across platform threads.
+// Run: cargo run -- kette/examples/threads.ktt
 
 let AtomicI64 = atomic.AtomicI64
 let rounds = 200000
