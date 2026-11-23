@@ -57,7 +57,7 @@ let WaitQueueTraits = {
         let prev = 0
         let current = self.head
         let removed = false
-        while current != 0 && !removed {
+        while current != 0 and !removed {
             if current == item {
                 if prev == 0 {
                     self.head = current.next
@@ -387,7 +387,7 @@ let ConditionTraits = {
         self.waiters.enqueue(waiter)
         let depth = mutex.releaseAllForAwait()
         let done = false
-        while !done && waiter.granted.load() == 0 {
+        while !done and waiter.granted.load() == 0 {
             if !timed {
                 me.park()
             } else {

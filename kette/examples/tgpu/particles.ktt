@@ -27,7 +27,7 @@ let window = glfw.Window.new("tgpu particles (Kette)", 800, 600, {
 let start_size = window.framebufferSize()
 let start_width = start_size.width
 let start_height = start_size.height
-if start_width <= 0 || start_height <= 0 {
+if start_width <= 0 or start_height <= 0 {
     print("window has no framebuffer")
     sys.raw.exit(1)
 }
@@ -39,7 +39,7 @@ window.onCursorFramebuffer(|x, y| {
     mouse.set(1, window.framebufferSize().height - y)
 })
 window.onKey(|key, action, mods| {
-    if action == glfw.Action.PRESS && key == glfw.Key.ESCAPE {
+    if action == glfw.Action.PRESS and key == glfw.Key.ESCAPE {
         window.setShouldClose(true)
     }
 })
@@ -224,8 +224,8 @@ while window.isOpen() {
     let frame_width = frame_size.width
     let frame_height = frame_size.height
 
-    if frame_width > 0 && frame_height > 0 {
-        if frame_width != extent.width || frame_height != extent.height {
+    if frame_width > 0 and frame_height > 0 {
+        if frame_width != extent.width or frame_height != extent.height {
             extent.width = frame_width
             extent.height = frame_height
             tgpu.swapchainSetExtent(swapchain, extent)
@@ -249,7 +249,7 @@ while window.isOpen() {
 
         tgpu.swapchainExtent(swapchain, current_extent)
         tgpu.check()
-        if current_extent.width != extent.width || current_extent.height != extent.height {
+        if current_extent.width != extent.width or current_extent.height != extent.height {
             extent.width = current_extent.width
             extent.height = current_extent.height
             tgpu.deviceWaitIdle(device)

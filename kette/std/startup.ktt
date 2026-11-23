@@ -169,7 +169,7 @@ globalThis.ModuleRegistry = {
             if entry == undefined {
                 throw "not a module"
             }
-            if name == undefined || name == null {
+            if name == undefined or name == null {
                 throw "extend needs an extension name"
             }
             let extension = entry.extensions[name]
@@ -193,7 +193,7 @@ globalThis.ModuleRegistry = {
         let snapshot = Object.create(null)
         for key in Object.getOwnPropertyNames(module) {
             let keyOwner = currentOwners[key]
-            if keyOwner != undefined && keyOwner != owner {
+            if keyOwner != undefined and keyOwner != owner {
                 let value = module[key]
                 next[key] = value
                 owners[key] = keyOwner
@@ -216,9 +216,9 @@ globalThis.ModuleRegistry = {
 
         let names = Object.getOwnPropertyNames(next)
         for key in names {
-            if copied[key] == undefined || next[key] != snapshot[key] {
+            if copied[key] == undefined or next[key] != snapshot[key] {
                 let keyOwner = currentOwners[key]
-                if keyOwner != undefined && keyOwner != module && keyOwner[self.entryKey] != undefined {
+                if keyOwner != undefined and keyOwner != module and keyOwner[self.entryKey] != undefined {
                     throw "cannot replace submodule: " + key
                 }
                 owners[key] = owner
@@ -353,7 +353,7 @@ globalThis.ModuleRegistry = {
 
     remove: |target, name| {
         self._withLock({
-            if target == null || target[self.entryKey] == undefined {
+            if target == null or target[self.entryKey] == undefined {
                 throw "not a module"
             }
             let desc = Object.getOwnPropertyDescriptor(target, name)
@@ -374,7 +374,7 @@ globalThis.ModuleRegistry = {
 
     reset: |target, initializer| {
         self._withLock({
-            if target == null || target[self.entryKey] == undefined {
+            if target == null or target[self.entryKey] == undefined {
                 throw "not a module"
             }
             let entry = target[self.entryKey]
@@ -384,7 +384,7 @@ globalThis.ModuleRegistry = {
             let own = Object.getOwnPropertyNames(target)
             for key in own {
                 let desc = Object.getOwnPropertyDescriptor(target, key)
-                if desc != undefined && desc.configurable == false {
+                if desc != undefined and desc.configurable == false {
                     throw "cannot reset sealed module property: " + key
                 }
             }

@@ -252,7 +252,7 @@ let raw = {
 }
 
 let record_status = { |status, what|
-    if status != 0 && pending.error == null {
+    if status != 0 and pending.error == null {
         raw.last_error(error_buffer, 512)
         pending.error = {
             status: status,
@@ -263,7 +263,7 @@ let record_status = { |status, what|
 }
 let record_last = { |what|
     let status = raw.last_error(error_buffer, 512)
-    if status != 0 && pending.error == null {
+    if status != 0 and pending.error == null {
         pending.error = {
             status: status,
             what: what,
@@ -507,7 +507,7 @@ mod vendor.tgpu {
         sys.raw.fseek(file, 0, 2)
         let size = sys.raw.ftell(file)
         sys.raw.fseek(file, 0, 0)
-        if size <= 0 || size % 4 != 0 {
+        if size <= 0 or size % 4 != 0 {
             print("not a SPIR-V file:")
             print(path)
             sys.raw.exit(1)

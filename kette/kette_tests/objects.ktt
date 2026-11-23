@@ -5,9 +5,9 @@ let OS = Modules.os
 
 let rgb = {
     label: "red"
-    [0]: 255
-    [1]: 0
-    [2]: 0
+    0: 255
+    1: 0
+    2: 0
 }
 
 rgb.label = "crimson"
@@ -22,11 +22,11 @@ Test.assert(OS.name, KetteTools.primitives.os.name)
 Test.assert(OS.name.length > 0, true)
 Test.assert(globalThis.os, undefined)
 
-// accessor slots: `name>>` installs a getter, `name<<` a setter
+// accessor slots: `name>>:` installs a getter, `name<<:` a setter
 let accessor = {
     _value: 1
-    value>> { self._value }
-    value<< { |v| self._value = v }
+    value>>: { self._value }
+    value<<: { |v| self._value = v }
 }
 Test.assert(accessor.value, 1)
 accessor.value = 7
@@ -34,13 +34,13 @@ Test.assert(accessor.value, 7)
 Test.assert(accessor._value, 7)
 
 let getter_only = {
-    answer>> { 42 }
+    answer>>: { 42 }
 }
 Test.assert(getter_only.answer, 42)
 
 let setter_only = {
     _stored: 0
-    stored<< { |v| self._stored = v }
+    stored<<: { |v| self._stored = v }
 }
 setter_only.stored = 9
 Test.assert(setter_only._stored, 9)
@@ -48,8 +48,8 @@ Test.assert(setter_only._stored, 9)
 // accessor halves merge regardless of source order
 let reverse = {
     _value: 0
-    value<< { |v| self._value = v }
-    value>> { self._value }
+    value<<: { |v| self._value = v }
+    value>>: { self._value }
 }
 reverse.value = 3
 Test.assert(reverse.value, 3)

@@ -31,13 +31,13 @@ let window = glfw.Window.new("kette ui", 800, 600, {
 let start_size = window.framebufferSize()
 let width = start_size.width
 let height = start_size.height
-if width <= 0 || height <= 0 {
+if width <= 0 or height <= 0 {
     print("window has no framebuffer")
     sys.raw.exit(1)
 }
 
 window.onKey(|key, action, mods| {
-    if action == glfw.Action.PRESS && key == glfw.Key.ESCAPE {
+    if action == glfw.Action.PRESS and key == glfw.Key.ESCAPE {
         window.setShouldClose(true)
     }
 })
@@ -151,11 +151,11 @@ window.onCursorFramebuffer(|x, y| {
     mouse.set(0, mouse_x)
     mouse.set(1, mouse_y)
     if drag.active == 1 {
-        if drag.mode == 2 && drag.splitter != null {
+        if drag.mode == 2 and drag.splitter != null {
             let delta = mouse_x - drag.startX
             drag.startX = mouse_x
             Splitter.resize(drag.splitter, delta)
-        } else if drag.mode == 1 && drag.window != null {
+        } else if drag.mode == 1 and drag.window != null {
             drag.window.x = Math.floor(mouse_x - drag.dx)
             drag.window.y = Math.floor(mouse_y - drag.dy)
             drag.window.markPaint()
@@ -252,8 +252,8 @@ while window.isOpen() {
     let frame_width = frame_size.width
     let frame_height = frame_size.height
 
-    if frame_width > 0 && frame_height > 0 {
-        if frame_width != extent.width || frame_height != extent.height {
+    if frame_width > 0 and frame_height > 0 {
+        if frame_width != extent.width or frame_height != extent.height {
             extent.width = frame_width
             extent.height = frame_height
             tgpu.swapchainSetExtent(swapchain, extent)

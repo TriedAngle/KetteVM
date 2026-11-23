@@ -47,7 +47,7 @@ let Collection = {
         let found = false
         let result = 0
         self.forEach(|item| {
-            if !found && predicate(item) {
+            if !found and predicate(item) {
                 found = true
                 result = item
             }
@@ -61,7 +61,7 @@ let Collection = {
         let found = false
         let result = 0
         self.forEach(|item| {
-            if !found && predicate(item) {
+            if !found and predicate(item) {
                 found = true
                 result = item
             }
@@ -236,7 +236,7 @@ let MutableCollection = {
 
 let Indexable = {
     parent*: Collection
-    version>> { throw UnimplementedError("version") }
+    version>>: { throw UnimplementedError("version") }
     get: |index| { throw UnimplementedError("get") }
     `[]`: |index| { self.get(index) }
     first: {
@@ -252,7 +252,7 @@ let Indexable = {
         self.get(self.size() - 1)
     }
     getOrElse: |index, block| {
-        if index < 0 || index >= self.size() {
+        if index < 0 or index >= self.size() {
             return block()
         }
         self.get(index)
@@ -408,7 +408,7 @@ let MutableIndexable = {
     }
     removeAt: |index| { throw UnimplementedError("removeAt") }
     removeAt?: |index| {
-        if index < 0 || index >= self.size() {
+        if index < 0 or index >= self.size() {
             None
         } else {
             self.removeAt(index)
@@ -417,7 +417,7 @@ let MutableIndexable = {
     remove: |value| {
         let i = 0
         let found = false
-        while i < self.size() && !found {
+        while i < self.size() and !found {
             if self.get(i) == value {
                 self.removeAt(i)
                 found = true
@@ -433,7 +433,7 @@ let MutableIndexable = {
     remove?: |value| {
         let i = 0
         let found = false
-        while i < self.size() && !found {
+        while i < self.size() and !found {
             if self.get(i) == value {
                 found = true
             } else {
@@ -449,7 +449,7 @@ let MutableIndexable = {
     removeIfPresent: |value| {
         let i = 0
         let found = false
-        while i < self.size() && !found {
+        while i < self.size() and !found {
             if self.get(i) == value {
                 self.removeAt(i)
                 found = true
@@ -509,7 +509,7 @@ let SequenceTraits = {
         self.newWithSizeFill(size, undefined)
     }
     newWithSizeFill: |size, fill| {
-        if size < 0 || size % 1 != 0 {
+        if size < 0 or size % 1 != 0 {
             throw IndexOutOfBounds("sequence size out of range", size, 0)
         }
         let sequence = self.clone()
@@ -534,13 +534,13 @@ let SequenceTraits = {
     asSequence: { self }
     size: { self.count }
     get: |index| {
-        if index < 0 || index >= self.count {
+        if index < 0 or index >= self.count {
             throw IndexOutOfBounds("index out of range", index, self.size())
         }
         self.items[self.start + index]
     }
     setAt: |index, value| {
-        if index < 0 || index >= self.count {
+        if index < 0 or index >= self.count {
             throw IndexOutOfBounds("index out of range", index, self.size())
         }
         self.items[self.start + index] = value
@@ -614,7 +614,7 @@ let SequenceTraits = {
         }
     }
     insert: |index, value| {
-        if index < 0 || index > self.count {
+        if index < 0 or index > self.count {
             throw IndexOutOfBounds("insert index out of range", index, self.count)
         }
         if index == 0 {
@@ -635,7 +635,7 @@ let SequenceTraits = {
         self
     }
     removeAt: |index| {
-        if index < 0 || index >= self.count {
+        if index < 0 or index >= self.count {
             throw IndexOutOfBounds("index out of range", index, self.size())
         }
         if index == 0 {
@@ -656,7 +656,7 @@ let SequenceTraits = {
         value
     }
     removeRange: |start, stop| {
-        if start < 0 || stop < start || stop > self.count {
+        if start < 0 or stop < start or stop > self.count {
             throw IndexOutOfBounds("range out of bounds", start, self.count)
         }
         let count = stop - start

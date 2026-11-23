@@ -25,11 +25,11 @@ let hits = 0
 let mark = { hits = hits + 1; true }
 
 // laziness: the rhs must not run
-let a = false && mark()
-let b = true || mark()
+let a = false and mark()
+let b = true or mark()
 Test.assert(hits, 0)
-Test.assert(false || 7, 7)
-Test.assert(true && 5, 5)
+Test.assert(false or 7, 7)
+Test.assert(true and 5, 5)
 
 // while: condition is truthy/falsy, body runs each iteration
 let i = 0

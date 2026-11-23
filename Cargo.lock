@@ -371,6 +371,7 @@ version = "0.1.0"
 dependencies = [
  "bytecode",
  "kette_parser",
+ "kette_syntax",
  "trace",
  "vm_core",
 ]
@@ -379,17 +380,20 @@ dependencies = [
 name = "kette_parser"
 version = "0.1.0"
 dependencies = [
- "trace",
+ "kette_syntax",
 ]
 
 [[package]]
 name = "kette_runtime"
 version = "0.1.0"
 dependencies = [
- "kette_compiler",
  "mark_sweep",
  "vm_core",
 ]
+
+[[package]]
+name = "kette_syntax"
+version = "0.1.0"
 
 [[package]]
 name = "lazy_static"

@@ -6,5 +6,6 @@ edition.workspace = true
 [dependencies]
 bytecode = { path = "../../bytecode" }
 kette_parser = { path = "../kette_parser" }
-vm_core = { path = "../../vm_core" }
+kette_syntax = { path = "../kette_syntax" }
 trace = { path = "../../trace" }
+vm_core = { path = "../../vm_core" }

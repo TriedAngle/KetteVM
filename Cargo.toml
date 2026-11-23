@@ -14,6 +14,7 @@ members = [
     "js/js_compiler",
     "kette/kette_compiler",
     "kette/kette_parser",
+    "kette/kette_syntax",
     "js/js_runtime",
     "kette/kette_runtime",
     "structures",

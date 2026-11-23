@@ -208,7 +208,7 @@ pub struct VM {
 }
 
 /// First-run data carried into a task's stack.
-pub(crate) struct TaskRun {
+pub struct TaskRun {
     vm: VM,
     heap: *mut Heap,
     state: *const ThreadState,
@@ -225,18 +225,18 @@ struct ParkState {
     timed_out: bool,
 }
 
-pub(crate) struct TaskStart {
+pub struct TaskStart {
     callable: Value,
     args: Vec<Value>,
     runtime: RuntimeId,
 }
 
-pub(crate) enum ResumeOutcome {
+pub enum ResumeOutcome {
     Suspended,
     Finished(Result<Value, Thrown>),
 }
 
-pub(crate) fn prepare_task(
+pub fn prepare_task(
     state: &ThreadState,
     vm: &VM,
     heap: &mut Heap,
@@ -260,7 +260,7 @@ pub(crate) fn prepare_task(
     run
 }
 
-pub(crate) fn task_outcome(state: &ThreadState) -> Option<Result<Value, Thrown>> {
+pub fn task_outcome(state: &ThreadState) -> Option<Result<Value, Thrown>> {
     let run = state.task_run();
     if run.is_null() {
         return None;
@@ -269,7 +269,7 @@ pub(crate) fn task_outcome(state: &ThreadState) -> Option<Result<Value, Thrown>>
     unsafe { (*run).outcome.take() }
 }
 
-pub(crate) fn release_task_run(state: &ThreadState) {
+pub fn release_task_run(state: &ThreadState) {
     let run = state.take_task_run();
     if !run.is_null() {
         // Safety: the task is finished and will not resume.
@@ -570,17 +570,17 @@ impl ThreadState {
     }
 
     #[inline(always)]
-    pub(crate) fn task_run(&self) -> *mut TaskRun {
+    pub fn task_run(&self) -> *mut TaskRun {
         self.task_run.get()
     }
 
     #[inline(always)]
-    pub(crate) fn set_task_run(&self, run: *mut TaskRun) {
+    pub fn set_task_run(&self, run: *mut TaskRun) {
         self.task_run.set(run);
     }
 
     #[inline(always)]
-    pub(crate) fn take_task_run(&self) -> *mut TaskRun {
+    pub fn take_task_run(&self) -> *mut TaskRun {
         self.task_run.replace(core::ptr::null_mut())
     }
 

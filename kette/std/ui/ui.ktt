@@ -93,9 +93,9 @@ let NodeTraits = {
     }
 
     isLayoutRoot: {
-        self.kind == K_WINDOW ||
-        self.boundary == 1 ||
-        (self.wMode == SIZE_FIXED && self.w > 0 && self.hMode == SIZE_FIXED && self.h > 0)
+        self.kind == K_WINDOW or
+        self.boundary == 1 or
+        (self.wMode == SIZE_FIXED and self.w > 0 and self.hMode == SIZE_FIXED and self.h > 0)
     }
 
     // content changed: stop at the nearest size-independent node
@@ -125,7 +125,7 @@ let NodeTraits = {
             if n.isLayoutRoot() { break }
             n = n.owner
         }
-        if root != null && root.space != null && root.layoutQueued == 0 {
+        if root != null and root.space != null and root.layoutQueued == 0 {
             root.layoutQueued = 1
             root.space.layoutDirty.push(root)
             root.space.needsFrame = 1
@@ -143,7 +143,7 @@ let NodeTraits = {
             if n.paintBoundary == 1 { break }
             n = n.owner
         }
-        if root != null && root.space != null && root.paintQueued == 0 {
+        if root != null and root.space != null and root.paintQueued == 0 {
             root.paintQueued = 1
             root.space.paintDirty.push(root)
             root.space.needsFrame = 1
@@ -234,28 +234,28 @@ let Layout = {
     // intrinsic-size seam
     pick: |mode, declared, content, avail| {
         if mode == SIZE_FILL { avail }
-        else if mode == SIZE_FIT || declared == 0 { content }
+        else if mode == SIZE_FIT or declared == 0 { content }
         else { declared }
     }
 
     measure: |n, aw, ah| {
-        if n.mValid == 1 && n.mAw == aw && n.mAh == ah { return n }
+        if n.mValid == 1 and n.mAw == aw and n.mAh == ah { return n }
         if n.space != null { n.space.measures = n.space.measures + 1 }
         if n.kind == K_TEXT {
             let t = n.data
             let natural = t.text.length * t.cw
             let avail = aw - n.pad - n.pad
             if avail < 1 { avail = 1 }
-            let width = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else if n.wMode == SIZE_FILL { avail } else if natural < avail { natural } else { avail }
+            let width = if n.wMode == SIZE_FIXED and n.w > 0 { n.w } else if n.wMode == SIZE_FILL { avail } else if natural < avail { natural } else { avail }
             if width < n.minW { width = n.minW }
             if width > n.maxW { width = n.maxW }
             if width < 1 { width = 1 }
             let lines = Math.floor((natural + width - 1) / width)
             n.mw = width
-            n.mh = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { lines * t.ch }
+            n.mh = if n.hMode == SIZE_FIXED and n.h > 0 { n.h } else { lines * t.ch }
         } else if n.layout == L_ROW {
-            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
-            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let baseW = if n.wMode == SIZE_FIXED and n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED and n.h > 0 { n.h } else { ah }
             let innerW = baseW - n.pad - n.pad
             let innerH = baseH - n.pad - n.pad
             if innerW < 0 { innerW = 0 }
@@ -280,8 +280,8 @@ let Layout = {
             n.mw = self.pick(n.wMode, n.w, contentW, aw)
             n.mh = self.pick(n.hMode, n.h, contentH, ah)
         } else if n.layout == L_COL {
-            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
-            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let baseW = if n.wMode == SIZE_FIXED and n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED and n.h > 0 { n.h } else { ah }
             let innerW = baseW - n.pad - n.pad
             let innerH = baseH - n.pad - n.pad
             if innerW < 0 { innerW = 0 }
@@ -306,8 +306,8 @@ let Layout = {
             n.mw = self.pick(n.wMode, n.w, contentW, aw)
             n.mh = self.pick(n.hMode, n.h, contentH, ah)
         } else {
-            let baseW = if n.wMode == SIZE_FIXED && n.w > 0 { n.w } else { aw }
-            let baseH = if n.hMode == SIZE_FIXED && n.h > 0 { n.h } else { ah }
+            let baseW = if n.wMode == SIZE_FIXED and n.w > 0 { n.w } else { aw }
+            let baseH = if n.hMode == SIZE_FIXED and n.h > 0 { n.h } else { ah }
             let innerW = baseW - n.pad - n.pad
             let innerH = baseH - n.pad - n.pad
             if innerW < 0 { innerW = 0 }
@@ -449,7 +449,7 @@ let Paint = {
         n.dirtyPaint = 0
         if n.space != null { n.space.paintNodes = n.space.paintNodes + 1 }
         if n.paintBoundary == 1 {
-            if n.pValid == 0 || n.pX != x || n.pY != y {
+            if n.pValid == 0 or n.pX != x or n.pY != y {
                 n.pList = []
                 self.body(n, x, y, n.pList)
                 n.pValid = 1
@@ -507,7 +507,7 @@ let Paint = {
 
 let Hit = {
     test: |n, x, y| {
-        if x < 0 || y < 0 || x >= n.w || y >= n.h { return null }
+        if x < 0 or y < 0 or x >= n.w or y >= n.h { return null }
         let i = n.children.length - 1
         while i >= 0 {
             let c = n.children[i]
@@ -535,7 +535,7 @@ let Windows = {
 
     rootOf: |n| {
         let w = n
-        while w != null && w.kind != K_WINDOW { w = w.owner }
+        while w != null and w.kind != K_WINDOW { w = w.owner }
         w
     }
 
@@ -601,7 +601,7 @@ let SpaceTraits = {
         let i = 0
         while i < list.length {
             let n = list[i]
-            if n.dirtyLayout == 1 && !self.hasAncestorIn(n, list) {
+            if n.dirtyLayout == 1 and !self.hasAncestorIn(n, list) {
                 out.push(n)
             }
             i = i + 1
@@ -629,12 +629,12 @@ let SpaceTraits = {
     }
 
     frame: {
-        if self.needsFrame == 0 && self.layoutDirty.length == 0 && self.paintDirty.length == 0 {
+        if self.needsFrame == 0 and self.layoutDirty.length == 0 and self.paintDirty.length == 0 {
             return self.list
         }
 
         let passes = 0
-        while self.layoutDirty.length > 0 && passes < 100 {
+        while self.layoutDirty.length > 0 and passes < 100 {
             let queue = self.layoutDirty
             self.layoutDirty = []
             let roots = self.extractRoots(queue)
@@ -657,7 +657,7 @@ let SpaceTraits = {
             if passes == 50 { print("ui: 50 layout passes") }
         }
 
-        if self.paintDirty.length > 0 || self.root.dirtyPaint == 1 {
+        if self.paintDirty.length > 0 or self.root.dirtyPaint == 1 {
             self.list = []
             Paint.node(self.root, 0, 0, self.list)
             self.root.dirtyPaint = 0
@@ -792,7 +792,7 @@ let TermTraits = {
         if y0 < 0 { y0 = 0 }
         if x1 > self.cols { x1 = self.cols }
         if y1 > self.rows { y1 = self.rows }
-        if x1 > x0 && y1 > y0 {
+        if x1 > x0 and y1 > y0 {
             let r = Math.floor(color / 65536)
             let g = Math.floor(color / 256) - r * 256
             let b = color - r * 65536 - g * 256

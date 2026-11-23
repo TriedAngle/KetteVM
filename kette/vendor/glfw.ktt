@@ -177,7 +177,7 @@ let WindowTraits = {
     }
 
     isOpen: {
-        !self.disposed && raw.should_close(self.handle) == 0
+        !self.disposed and raw.should_close(self.handle) == 0
     }
 
     shouldClose: {

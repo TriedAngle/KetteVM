@@ -5,5 +5,7 @@ edition.workspace = true
 
 [dependencies]
 vm = { path = "../../vm" }
+
+[dev-dependencies]
 dummy_heap = { path = "../dummy_heap" }
 mark_sweep = { path = "../mark_sweep" }

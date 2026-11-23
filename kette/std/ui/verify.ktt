@@ -104,10 +104,10 @@ let LayoutCheck = {
             i = i + 1
         }
         let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
-        if fills > 0 && sum + gaps != inner {
+        if fills > 0 and sum + gaps != inner {
             out.push(path + " row-sum " + (sum + gaps) + " != " + inner)
         }
-        if fills == 0 && sum + gaps > inner {
+        if fills == 0 and sum + gaps > inner {
             out.push(path + " row-overflow")
         }
         if count > 0 {
@@ -147,10 +147,10 @@ let LayoutCheck = {
             i = i + 1
         }
         let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
-        if fills > 0 && sum + gaps != inner {
+        if fills > 0 and sum + gaps != inner {
             out.push(path + " col-sum " + (sum + gaps) + " != " + inner)
         }
-        if fills == 0 && sum + gaps > inner {
+        if fills == 0 and sum + gaps > inner {
             out.push(path + " col-overflow")
         }
         if count > 0 {
@@ -173,7 +173,7 @@ let PaintCheck = {
                     out.push("rect-truncated " + i)
                     i = ops.length
                 } else {
-                    if ops[i + 3] < 0 || ops[i + 4] < 0 {
+                    if ops[i + 3] < 0 or ops[i + 4] < 0 {
                         out.push("rect-negative " + i)
                     }
                     i = i + 6

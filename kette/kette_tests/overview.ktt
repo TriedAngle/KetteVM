@@ -3,7 +3,7 @@
 //   { x: 1, y: 2 }        slots only      — a plain object
 //   { |x| x + 1 }         params + body   — a function
 //   { stmts }             body only       — a zero-arg block
-//   { count: 0 || stmts } all three       — a callable object
+//   { count: 0 or stmts } all three       — a callable object
 //   { }                   nothing         — an empty object
 //
 // A `{ }` literal with a `|params|` marker or a non-empty body is
@@ -55,8 +55,8 @@ Test.assert(vec.len(0), 5)
 
 let tuple = {
     label: "pair"
-    [0]: 30
-    [1]: 12
+    0: 30
+    1: 12
 }
 
 Test.assert(tuple.label, "pair")

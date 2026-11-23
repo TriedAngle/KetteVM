@@ -1,24 +1,17 @@
-//! Kette AST → bytecode lowering.
-//!
-//! Pipeline: parse → resolve → [`codegen`]. The output is a heap-free
-//! [`bytecode::Program`]; the `vm` crate owns converting it to VM objects.
-
-pub mod codegen;
+pub mod emit;
+pub mod plan;
 
 use bytecode::{FrontendDiagnostic, FrontendError, Program, SourceMode};
-use kette_parser::{Ast, ByteSpan, Parser, Utf8SliceStream, resolve};
+use kette_parser::parse;
+use kette_syntax::resolve::{Resolved, resolve};
+use kette_syntax::validate::validate;
+use kette_syntax::{TextRange, Tree};
 use vm_core::NativeIndex;
-/// A construct the lowering does not support yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompileError {
-    pub span: ByteSpan,
-    pub feature: &'static str,
-}
 
-impl CompileError {
-    pub fn new(span: ByteSpan, feature: &'static str) -> Self {
-        Self { span, feature }
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompileError {
+    pub range: TextRange,
+    pub message: String,
 }
 
 impl core::fmt::Display for CompileError {
@@ -26,66 +19,64 @@ impl core::fmt::Display for CompileError {
         write!(
             f,
             "unsupported: {} at {}..{}",
-            self.feature, self.span.start, self.span.end
+            self.message, self.range.start, self.range.end
         )
     }
 }
 
-/// Resolve + lower a parsed unit. `functions[0]` is the script.
-pub fn compile_ast(
-    ast: &Ast,
+impl std::error::Error for CompileError {}
+
+pub fn compile(
+    tree: &Tree,
+    resolved: &Resolved,
     mode: SourceMode,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
 ) -> Result<Program, CompileError> {
-    let _pipeline = trace::info_span!("kette::compile");
-    let resolved = {
-        let _span = trace::info_span!("kette::resolve").entered();
-        resolve(ast)
-    };
-    {
-        let _span = trace::info_span!("kette::codegen").entered();
-        codegen::generate(ast, &resolved, mode, declare_globals, install_accessor)
-    }
+    let _pipeline = trace::info_span!("kette::compile_new");
+    emit::generate(tree, resolved, mode, declare_globals, install_accessor)
 }
 
-/// Kette frontend entry point: parse `source` and lower it to bytecode,
-/// mapping failures into the language-neutral [`FrontendError`].
 pub fn compile_kette(
     source: &str,
     mode: SourceMode,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
 ) -> Result<Program, FrontendError> {
-    if !matches!(
-        mode,
-        SourceMode::Script | SourceMode::File | SourceMode::Repl | SourceMode::EvalGlobal
-    ) {
-        return Err(FrontendError::compile(
-            "kette: only script, file, repl, and indirect eval mode are implemented",
-        ));
-    }
-    let output = Parser::new(Utf8SliceStream::new(source)).parse();
-    if !output.errors.is_empty() {
-        let diagnostics = output
-            .diagnostics(source)
+    let parsed = parse(source);
+    if !parsed.errors.is_empty() {
+        let diagnostics = parsed
+            .errors
             .into_iter()
-            .map(|diagnostic| FrontendDiagnostic {
-                span: Some((diagnostic.span.start, diagnostic.span.end)),
-                line: Some(diagnostic.line),
-                column: Some(diagnostic.column),
-                message: diagnostic.message,
+            .map(|error| FrontendDiagnostic {
+                span: Some((error.range.start, error.range.end)),
+                line: None,
+                column: None,
+                message: error.message,
             })
             .collect();
         return Err(FrontendError::syntax_many(diagnostics));
     }
-    compile_ast(&output.ast, mode, declare_globals, install_accessor).map_err(|error| {
-        let position = output.line_index.line_column(source, error.span.start);
-        FrontendError::compile_many(vec![FrontendDiagnostic {
-            span: Some((error.span.start, error.span.end)),
-            line: Some(position.line),
-            column: Some(position.column),
-            message: format!("unsupported: {}", error.feature),
-        }])
-    })
+    let diagnostics = validate(&parsed.tree);
+    if !diagnostics.is_empty() {
+        let diagnostics = diagnostics
+            .into_iter()
+            .map(|diagnostic| FrontendDiagnostic {
+                span: Some((diagnostic.range.start, diagnostic.range.end)),
+                line: None,
+                column: None,
+                message: diagnostic.message,
+            })
+            .collect();
+        return Err(FrontendError::compile_many(diagnostics));
+    }
+    let resolved = resolve(&parsed.tree);
+    compile(
+        &parsed.tree,
+        &resolved,
+        mode,
+        declare_globals,
+        install_accessor,
+    )
+    .map_err(|error| FrontendError::compile(error.to_string()))
 }
