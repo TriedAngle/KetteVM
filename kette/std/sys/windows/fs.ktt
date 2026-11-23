@@ -1,0 +1,149 @@
+use ffi
+use sys.windows { raw }
+
+let Seek = {
+    SET: 0,
+    CUR: 1,
+    END: 2,
+}
+
+let FileTraits = {
+    disposable*: Disposable
+
+    open: |path, mode| {
+        let mode = if mode == null { "rb" } else { mode }
+        let file = self.clone()
+        file.handle = raw.fopen(path, mode)
+        if ffi.isNull(file.handle) {
+            throw "cannot open file: " + path
+        }
+        file.disposed = false
+        file
+    }
+
+    temp: {
+        let file = self.clone()
+        file.handle = raw.tmpfile()
+        if ffi.isNull(file.handle) {
+            throw "cannot create temporary file"
+        }
+        file.disposed = false
+        file
+    }
+
+    tell: {
+        let position = raw.ftell(self.handle)
+        if position < 0 {
+            throw "ftell failed"
+        }
+        position
+    }
+
+    seek: |offset, origin| {
+        if raw.fseek(self.handle, offset, origin) != 0 {
+            throw "fseek failed"
+        }
+        self
+    }
+
+    size: {
+        let current = self.tell()
+        self.seek(0, Seek.END)
+        let size = self.tell()
+        self.seek(current, Seek.SET)
+        size
+    }
+
+    read: |size| {
+        let data = ffi.array(ffi.u8, size).new()
+        let count = raw.fread(data, 1, size, self.handle)
+        if count != size {
+            data.free()
+            throw "short read"
+        }
+        { data: data, size: count }
+    }
+
+    readAll: {
+        let size = self.size()
+        self.seek(0, Seek.SET)
+        self.read(size)
+    }
+
+    readText: {
+        let size = self.size()
+        if size == 0 {
+            return ""
+        }
+        let data = ffi.array(ffi.u8, size).new()
+        self.seek(0, Seek.SET)
+        let count = raw.fread(data, 1, size, self.handle)
+        if count != size {
+            data.free()
+            throw "short read"
+        }
+        let text = null
+        try {
+            text = ffi.string_at(data)
+        } catch (e) {
+            data.free()
+            throw e
+        }
+        data.free()
+        text
+    }
+
+    write: |data, size| {
+        let count = raw.fwrite(data.cast(ffi.u8), 1, size, self.handle)
+        if count != size {
+            throw "short write"
+        }
+        self
+    }
+
+    writeText: |text| {
+        let data = ffi.cstring(text)
+        let status = raw.fputs(data, self.handle)
+        data.free()
+        if status < 0 {
+            throw "fputs failed"
+        }
+        self
+    }
+
+    flush: {
+        if raw.fflush(self.handle) != 0 {
+            throw "fflush failed"
+        }
+        self
+    }
+
+    dispose: {
+        if self.disposed {
+            return 0
+        }
+        self.disposed = true
+        let status = raw.fclose(self.handle)
+        self.handle = null
+        if status != 0 {
+            throw "fclose failed"
+        }
+        0
+    }
+}
+
+let File = {
+    traits*: FileTraits
+    handle: null
+    disposed: false
+}
+
+let readDir = |path| {
+    throw "readDir is not implemented on windows"
+}
+
+mod sys.windows.file {
+    export Seek = Seek
+    export File = File
+    export readDir = readDir
+}

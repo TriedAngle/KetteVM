@@ -1,17 +1,16 @@
 use ffi
-use os
-let (struct, void, bool, i32, u32, f32, f64, u8, CString) = ffi
-let Ptr = ffi.pointer(void)
+use sys
+let (Ptr, struct, void, bool, i32, u32, f32, f64, u8, CString) = ffi
 
-let raylib_path = if os.name == "macos" {
-        "/opt/homebrew/lib/libraylib.dylib"
-    } else if os.name == "windows" {
-        "raylib.dll"
-    } else {
-        "libraylib.so"
-    }
+let raylib_path = if sys.name == "macos" {
+    "libraylib.dylib"
+} else if sys.name == "windows" {
+    "raylib.dll"
+} else {
+    "libraylib.so"
+}
 
-let lib = ffi.library(raylib_path)
+let lib = sys.lib(raylib_path)
 
 let Vector2 = struct({
     x: f32,

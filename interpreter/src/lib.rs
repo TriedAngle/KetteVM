@@ -214,6 +214,20 @@ fn op_load_false(frame: Frame) {
     next!()
 }
 
+#[handler(TailGuard)]
+fn op_tail_guard(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let callee = frame.regs().get(frame.signed::<0>(), heap);
+    let current = frame.ctx().stack().callable(heap, frame.ctx().frame_base());
+    let v = if callee.ptr_eq(current) {
+        roots.true_object.get(heap).erase()
+    } else {
+        roots.false_object.get(heap).erase()
+    };
+    frame.set_acc(v);
+    next!()
+}
+
 #[handler(LoadHole)]
 fn op_load_hole(frame: Frame) {
     let heap = frame.ctx().heap();

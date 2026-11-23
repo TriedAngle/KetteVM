@@ -58,6 +58,9 @@ pub struct Binding {
     pub kind: BindingKind,
     pub scope: ScopeId,
     pub declaration: TextRange,
+    pub assigned: bool,
+    /// Declared in a loop body, whose slot is reused per iteration.
+    pub in_loop: bool,
 }
 
 #[derive(Default)]
@@ -140,6 +143,7 @@ pub fn resolve(tree: &Tree) -> Resolved {
         stack: Vec::new(),
         module: None,
         excluded: Vec::new(),
+        loop_depth: 0,
     };
     let script = tree.script();
     resolver.build_script(script);
@@ -168,6 +172,7 @@ struct Resolver<'a> {
     stack: Vec<ScopeId>,
     module: Option<ScopeId>,
     excluded: Vec<BindingId>,
+    loop_depth: u32,
 }
 
 impl<'a> Resolver<'a> {
@@ -215,6 +220,8 @@ impl<'a> Resolver<'a> {
             kind,
             scope,
             declaration,
+            assigned: false,
+            in_loop: self.loop_depth > 0,
         });
         self.scopes[scope.0 as usize].bindings.push(id);
         if let Some(map) = &mut self.by_name[scope.0 as usize] {
@@ -471,7 +478,9 @@ impl<'a> Resolver<'a> {
                     self.collect_expr(condition, false);
                 }
                 if let Some(body) = expr.body() {
+                    self.loop_depth += 1;
                     self.collect_object(body, false);
+                    self.loop_depth -= 1;
                 }
             }
             Expr::For(expr) => self.collect_for(expr),
@@ -555,10 +564,12 @@ impl<'a> Resolver<'a> {
         let Some(body) = expr.body() else {
             return;
         };
+        self.loop_depth += 1;
         let scope = self.collect_object(body, false);
         if let (Some(scope), Some(pattern)) = (scope, expr.pattern()) {
             self.declare_pattern(scope, pattern, BindingKind::ForBinding);
         }
+        self.loop_depth -= 1;
     }
 
     fn collect_try(&mut self, expr: TryExpr<'a>) {
@@ -655,7 +666,9 @@ impl<'a> Resolver<'a> {
                         self.pattern_bindings(pattern, &mut bindings);
                     }
                     let mark = self.excluded.len();
-                    self.excluded.extend(bindings);
+                    if !statement.is_recursive() {
+                        self.excluded.extend(bindings);
+                    }
                     self.resolve_expr(value, scope);
                     self.excluded.truncate(mark);
                 }
@@ -727,6 +740,7 @@ impl<'a> Resolver<'a> {
             Expr::Assign(expr) => {
                 if let Some(place) = expr.place() {
                     self.resolve_expr(place, scope);
+                    self.mark_assigned(place);
                 }
                 if let Some(value) = expr.value() {
                     self.resolve_expr(value, scope);
@@ -840,7 +854,9 @@ impl<'a> Resolver<'a> {
                             self.pattern_bindings(pattern, &mut bindings);
                         }
                         let mark = self.excluded.len();
-                        self.excluded.extend(bindings);
+                        if !statement.is_recursive() {
+                            self.excluded.extend(bindings);
+                        }
                         self.resolve_expr(value, scope);
                         self.excluded.truncate(mark);
                     }
@@ -856,6 +872,18 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
+        }
+    }
+
+    fn mark_assigned(&mut self, place: Expr<'a>) {
+        let Expr::Atom(atom) = place else {
+            return;
+        };
+        let node = atom.syntax().id().0 as usize;
+        if let Some(Resolution::Local(binding) | Resolution::Upvar(binding)) =
+            self.resolutions[node]
+        {
+            self.bindings[binding.0 as usize].assigned = true;
         }
     }
 

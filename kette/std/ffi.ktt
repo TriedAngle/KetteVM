@@ -16,12 +16,15 @@ let u64 = ffi.u64
 let f32 = ffi.f32
 let f64 = ffi.f64
 let CString = ffi.CString
+let Ptr = ffi.pointer(ffi.void)
 
 let library = ffi.library
 let cstring = ffi.cstring
 let wstring = ffi.wstring
 let string_at = ffi.string_at
+let string = ffi.string
 let wstring_at = ffi.wstring_at
+let isNull = ffi.isNull
 let pointer = ffi.pointer
 let fn = ffi.fn
 let callback = ffi.callback
@@ -47,12 +50,15 @@ mod ffi {
     export f32 = f32
     export f64 = f64
     export CString = CString
+    export Ptr = Ptr
 
     export library = library
     export cstring = cstring
     export wstring = wstring
     export string_at = string_at
+    export string = string
     export wstring_at = wstring_at
+    export isNull = isNull
     export pointer = pointer
     export fn = fn
     export callback = callback

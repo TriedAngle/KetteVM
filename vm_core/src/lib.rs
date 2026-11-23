@@ -7,7 +7,7 @@ use core::{
 use std::time::Duration;
 use std::{
     sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
-    sync::atomic::Ordering,
+    sync::atomic::AtomicI32, sync::atomic::Ordering,
 };
 
 pub mod access;
@@ -111,7 +111,7 @@ pub use objects::{
 };
 pub use prototype::{Prototype, PrototypeRegistry, ShapeChange};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
-pub use tools::{KetteTools, Termination};
+pub use tools::{KetteTools, Termination, request_shutdown};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
 pub use value::{
     MaybeWeak, MaybeWeakStore, PTR_BIT, STRONG_PTR, Smi, TAG_MASK, TAG_SMI, Tagged, Value,
@@ -194,6 +194,9 @@ pub struct SharedVM {
     /// live on the safepoint nodes, not here — the VM stays usable after a
     /// shutdown.
     shutdown_requested: AtomicBool,
+    /// Process exit status reported by `os.exit`; `0` unless a program asked
+    /// to exit with another code.
+    exit_code: AtomicI32,
     /// Wakes host-blocked mutators (`join`, `sleep`) on thread lifecycle
     /// events and shutdown.
     thread_event_lock: Mutex<()>,
@@ -1285,6 +1288,7 @@ impl VM {
             eval_languages: Vec::new(),
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
+            exit_code: AtomicI32::new(0),
             thread_event_lock: Mutex::new(()),
             thread_event: Condvar::new(),
             execute: I::EXECUTE,
@@ -1312,6 +1316,16 @@ impl VM {
             .shutdown_requested
             .store(true, Ordering::Release);
         self.notify_thread_event();
+    }
+
+    /// Record the process exit status a program requested via `os.exit`.
+    pub fn set_exit_code(&self, code: i32) {
+        self.shared.exit_code.store(code, Ordering::Release);
+    }
+
+    /// The process exit status a program requested; `0` by default.
+    pub fn exit_code(&self) -> i32 {
+        self.shared.exit_code.load(Ordering::Acquire)
     }
 
     /// Wake every host-blocked mutator waiting on a thread lifecycle event.

@@ -1,8 +1,13 @@
 let SYNC_PATH = "kette/std/sync.ktt"
+let COLLECTION_PATH = "kette/std/collection.ktt"
 let ERROR_PATH = "kette/std/error.ktt"
 let FFI_PATH = "kette/std/ffi.ktt"
-let OS_PATH = "kette/std/os.ktt"
-let SYS_PATH = "kette/std/sys.ktt"
+let LIBC_SYS_PATH = "kette/std/sys/libc/sys.ktt"
+let LIBC_FILE_PATH = "kette/std/sys/libc/fs.ktt"
+let WINDOWS_SYS_PATH = "kette/std/sys/windows/sys.ktt"
+let WINDOWS_FILE_PATH = "kette/std/sys/windows/fs.ktt"
+let SYS_PATH = "kette/std/sys/sys.ktt"
+let FS_PATH = "kette/std/sys/fs.ktt"
 let UI_PATH = "kette/std/ui/ui.ktt"
 let UI_VERIFY_PATH = "kette/std/ui/verify.ktt"
 
@@ -191,7 +196,8 @@ globalThis.ModuleRegistry = {
         let owners = Object.create(null)
         let copied = Object.create(null)
         let snapshot = Object.create(null)
-        for key in Object.getOwnPropertyNames(module) {
+        let moduleNames = Object.getOwnPropertyNames(module)
+        moduleNames.forEach(|key| {
             let keyOwner = currentOwners[key]
             if keyOwner != undefined and keyOwner != owner {
                 let value = module[key]
@@ -200,7 +206,7 @@ globalThis.ModuleRegistry = {
                 copied[key] = true
                 snapshot[key] = value
             }
-        }
+        })
 
         let failed = false
         let error = null
@@ -215,7 +221,7 @@ globalThis.ModuleRegistry = {
         }
 
         let names = Object.getOwnPropertyNames(next)
-        for key in names {
+        names.forEach(|key| {
             if copied[key] == undefined or next[key] != snapshot[key] {
                 let keyOwner = currentOwners[key]
                 if keyOwner != undefined and keyOwner != module and keyOwner[self.entryKey] != undefined {
@@ -223,7 +229,7 @@ globalThis.ModuleRegistry = {
                 }
                 owners[key] = owner
             }
-        }
+        })
 
         if !KetteTools.publishFlatModule(
             module,
@@ -240,20 +246,22 @@ globalThis.ModuleRegistry = {
     _pathParts: |name| {
         let parts = []
         let part = ""
-        let i = 0
-        while i < name.length {
-            let ch = name[i]
-            if ch == "." {
-                if part == "" {
-                    throw "invalid module path: " + name
+        let* visit = |i| {
+            if i < name.length {
+                let ch = name[i]
+                if ch == "." {
+                    if part == "" {
+                        throw "invalid module path: " + name
+                    }
+                    parts[parts.length] = part
+                    part = ""
+                } else {
+                    part = part + ch
                 }
-                parts[parts.length] = part
-                part = ""
-            } else {
-                part = part + ch
+                visit(i + 1)
             }
-            i = i + 1
         }
+        visit(0)
         if part == "" {
             throw "invalid module path: " + name
         }
@@ -277,14 +285,12 @@ globalThis.ModuleRegistry = {
         }
 
         let parent = ""
-        let i = 0
-        while i < parts.length - 1 {
+        parts.slice(0, parts.length - 1).forEach(|part, i| {
             if i != 0 {
                 parent = parent + "."
             }
-            parent = parent + parts[i]
-            i = i + 1
-        }
+            parent = parent + part
+        })
         let leaf = parts[parts.length - 1]
         let parent_module = self.registry[parent]
         let entry = parent_module[self.entryKey]
@@ -314,40 +320,41 @@ globalThis.ModuleRegistry = {
             return 0
         }
         let prefix = parts[0]
-        let i = 1
-        while i < parts.length {
-            let module = self.registry[prefix]
-            if module == null {
-                module = self._namespaceModule(prefix)
+        parts.forEach(|part, i| {
+            if i > 0 {
+                let module = self.registry[prefix]
+                if module == null {
+                    module = self._namespaceModule(prefix)
+                }
+                self._linkPath(prefix, module)
+                if i + 1 < parts.length {
+                    prefix = prefix + "." + parts[i]
+                }
             }
-            self._linkPath(prefix, module)
-            if i + 1 < parts.length {
-                prefix = prefix + "." + parts[i]
-            }
-            i = i + 1
-        }
+        })
         0
     }
 
     _relinkChildren: |parent_name| {
         let parent_parts = self._pathParts(parent_name)
-        for name in Object.getOwnPropertyNames(self.registry) {
-            let parts = self._pathParts(name)
-            if parts.length == parent_parts.length + 1 {
-                let matches = true
-                let i = 0
-                while i < parent_parts.length {
-                    if parts[i] != parent_parts[i] {
-                        matches = false
-                        break
-                    }
-                    i = i + 1
+        let* matches = |parts, i| {
+            if i < parent_parts.length {
+                if parts[i] != parent_parts[i] {
+                    false
+                } else {
+                    matches(parts, i + 1)
                 }
-                if matches {
-                    self._linkPath(name, self.registry[name])
-                }
+            } else {
+                true
             }
         }
+        let names = Object.getOwnPropertyNames(self.registry)
+        names.forEach(|name| {
+            let parts = self._pathParts(name)
+            if parts.length == parent_parts.length + 1 and matches(parts, 0) {
+                self._linkPath(name, self.registry[name])
+            }
+        })
         0
     }
 
@@ -382,12 +389,12 @@ globalThis.ModuleRegistry = {
                 throw "cannot reset non-extensible module"
             }
             let own = Object.getOwnPropertyNames(target)
-            for key in own {
+            own.forEach(|key| {
                 let desc = Object.getOwnPropertyDescriptor(target, key)
                 if desc != undefined and desc.configurable == false {
                     throw "cannot reset sealed module property: " + key
                 }
-            }
+            })
 
             let oldOwners = entry.owners
             let oldExtensions = entry.extensions
@@ -422,14 +429,46 @@ if !Modules.error {
 if !Modules.sync {
     KetteTools.evalFile(SYNC_PATH)
 }
+if !Modules.collection {
+    KetteTools.evalFile(COLLECTION_PATH)
+}
 if !Modules.ffi {
     KetteTools.evalFile(FFI_PATH)
 }
-if !Modules.os {
-    KetteTools.evalFile(OS_PATH)
+
+let windows = KetteTools.primitives.os.name == "windows"
+
+if globalThis.SysLib == undefined {
+    globalThis.SysLib = if windows {
+        Modules.ffi.library("ucrtbase.dll")
+    } else {
+        Modules.ffi.library(null)
+    }
 }
-if !Modules.sys {
+
+if windows {
+    if !Modules.sys or Modules.sys.windows == undefined {
+        KetteTools.evalFile(WINDOWS_SYS_PATH)
+    }
+    if Modules.sys.windows.file == undefined {
+        KetteTools.evalFile(WINDOWS_FILE_PATH)
+    }
+} else {
+    if !Modules.sys or Modules.sys.libc == undefined {
+        KetteTools.evalFile(LIBC_SYS_PATH)
+    }
+    if Modules.sys.libc.file == undefined {
+        KetteTools.evalFile(LIBC_FILE_PATH)
+    }
+}
+
+globalThis.SysBackend = if windows { Modules.sys.windows } else { Modules.sys.libc }
+
+if !Modules.sys or Modules.sys.raw == undefined {
     KetteTools.evalFile(SYS_PATH)
+}
+if !Modules.sys or Modules.sys.file == undefined {
+    KetteTools.evalFile(FS_PATH)
 }
 if !Modules.ui {
     KetteTools.evalFile(UI_PATH)

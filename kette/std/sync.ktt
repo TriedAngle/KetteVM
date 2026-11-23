@@ -55,25 +55,27 @@ let WaitQueueTraits = {
     remove: { |item|
         self.lock()
         let prev = 0
-        let current = self.head
         let removed = false
-        while current != 0 and !removed {
-            if current == item {
-                if prev == 0 {
-                    self.head = current.next
+        let* visit = |current| {
+            if current != 0 and !removed {
+                if current == item {
+                    if prev == 0 {
+                        self.head = current.next
+                    } else {
+                        prev.next = current.next
+                    }
+                    if self.tail == current {
+                        self.tail = prev
+                    }
+                    current.next = 0
+                    removed = true
                 } else {
-                    prev.next = current.next
+                    prev = current
+                    visit(current.next)
                 }
-                if self.tail == current {
-                    self.tail = prev
-                }
-                current.next = 0
-                removed = true
-            } else {
-                prev = current
-                current = current.next
             }
         }
+        visit(self.head)
         self.unlock()
         removed
     }
@@ -178,11 +180,13 @@ let MutexTraits = {
         1
     }
     acquireForAwait: |depth| {
-        let i = 0
-        while i < depth {
-            self.lock()
-            i = i + 1
+        let* visit = |i| {
+            if i < depth {
+                self.lock()
+                visit(i + 1)
+            }
         }
+        visit(0)
     }
 }
 
@@ -337,11 +341,13 @@ let RecursiveMutexTraits = {
         depth
     }
     acquireForAwait: |depth| {
-        let i = 0
-        while i < depth {
-            self.lock()
-            i = i + 1
+        let* visit = |i| {
+            if i < depth {
+                self.lock()
+                visit(i + 1)
+            }
         }
+        visit(0)
     }
 }
 
@@ -363,13 +369,16 @@ let ConditionTraits = {
         }
     }
     signalAll: {
-        while true {
+        let* visit = {
             let waiter = self.waiters.dequeue()
-            if waiter == 0 {
-                return 0
+            if waiter != 0 {
+                waiter.thread.unpark()
+                visit()
+            } else {
+                0
             }
-            waiter.thread.unpark()
         }
+        visit()
     }
     await: |mutex| {
         self.awaitUntil(mutex, 0, false)

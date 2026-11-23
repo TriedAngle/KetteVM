@@ -208,11 +208,9 @@ let MutableCollection = {
             keys.add(key)
         })
         self.clear()
-        let i = 0
-        while i < values.size() {
-            self.addWithKey(block(values.get(i), keys.get(i)), keys.get(i))
-            i = i + 1
-        }
+        values.forEachWithKey(|value, i| {
+            self.addWithKey(block(value, keys.get(i)), keys.get(i))
+        })
         self
     }
     filterSelf: |block| {
@@ -223,13 +221,11 @@ let MutableCollection = {
             keys.add(key)
         })
         self.clear()
-        let i = 0
-        while i < values.size() {
-            if block(values.get(i), keys.get(i)) {
-                self.addWithKey(values.get(i), keys.get(i))
+        values.forEachWithKey(|value, i| {
+            if block(value, keys.get(i)) {
+                self.addWithKey(value, keys.get(i))
             }
-            i = i + 1
-        }
+        })
         self
     }
 }
@@ -292,29 +288,48 @@ let Indexable = {
         }
     }
     keys: {
-        let result = Sequence.new()
-        let i = 0
-        for _ in self {
-            result.add(i)
-            i = i + 1
-        }
-        result
+        self.map(Sequence.new(), |value, key| { key })
     }
     indexOf: |value| {
-        for i, item in self {
-            if item == value {
-                return i
+        let iterator = self.iterator()
+        let* visit = {
+            if iterator.hasNext() {
+                let pair = iterator.nextKeyed()
+                if pair[1] == value {
+                    pair[0]
+                } else {
+                    visit()
+                }
+            } else {
+                -1
             }
         }
-        throw ElementDoesNotExist("element not found")
+        let index = visit()
+        if index < 0 {
+            throw ElementDoesNotExist("element not found")
+        }
+        index
     }
     indexOfOrElse: |value, block| {
-        for i, item in self {
-            if item == value {
-                return i
+        let iterator = self.iterator()
+        let* visit = {
+            if iterator.hasNext() {
+                let pair = iterator.nextKeyed()
+                if pair[1] == value {
+                    pair[0]
+                } else {
+                    visit()
+                }
+            } else {
+                -1
             }
         }
-        block()
+        let index = visit()
+        if index < 0 {
+            block()
+        } else {
+            index
+        }
     }
     indexOf?: |value| {
         self.indexOfOrElse(value, { None })
@@ -334,38 +349,44 @@ let Indexable = {
     }
     forEach: |block| {
         let expected = self.version
-        let i = 0
-        while i < self.size() {
-            block(self.get(i))
-            if self.version != expected {
-                throw ConcurrentModificationError("collection modified during iteration")
+        let* visit = |i| {
+            if i < self.size() {
+                block(self.get(i))
+                if self.version != expected {
+                    throw ConcurrentModificationError("collection modified during iteration")
+                }
+                visit(i + 1)
             }
-            i = i + 1
         }
+        visit(0)
         self
     }
     forEachWithKey: |block| {
         let expected = self.version
-        let i = 0
-        while i < self.size() {
-            block(self.get(i), i)
-            if self.version != expected {
-                throw ConcurrentModificationError("collection modified during iteration")
+        let* visit = |i| {
+            if i < self.size() {
+                block(self.get(i), i)
+                if self.version != expected {
+                    throw ConcurrentModificationError("collection modified during iteration")
+                }
+                visit(i + 1)
             }
-            i = i + 1
         }
+        visit(0)
         self
     }
     forEachReverse: |block| {
         let expected = self.version
-        let i = self.size() - 1
-        while i >= 0 {
-            block(self.get(i))
-            if self.version != expected {
-                throw ConcurrentModificationError("collection modified during iteration")
+        let* visit = |i| {
+            if i >= 0 {
+                block(self.get(i))
+                if self.version != expected {
+                    throw ConcurrentModificationError("collection modified during iteration")
+                }
+                visit(i - 1)
             }
-            i = i - 1
         }
+        visit(self.size() - 1)
         self
     }
     with: |other, block| {
@@ -373,21 +394,27 @@ let Indexable = {
         if other.size() < count {
             count = other.size()
         }
-        for i, value in self {
-            if i >= count {
-                break
+        let iterator = self.iterator()
+        let i = 0
+        let* visit = {
+            if i < count and iterator.hasNext() {
+                block(iterator.next(), other.get(i))
+                i = i + 1
+                visit()
             }
-            block(value, other.get(i))
         }
+        visit()
         self
     }
     copyReversed: {
         let result = self.emptyCopy()
-        let i = self.size() - 1
-        while i >= 0 {
-            result.add(self.get(i))
-            i = i - 1
+        let* visit = |i| {
+            if i >= 0 {
+                result.add(self.get(i))
+                visit(i - 1)
+            }
         }
+        visit(self.size() - 1)
         result
     }
 }
@@ -415,85 +442,114 @@ let MutableIndexable = {
         }
     }
     remove: |value| {
-        let i = 0
-        let found = false
-        while i < self.size() and !found {
-            if self.get(i) == value {
-                self.removeAt(i)
-                found = true
+        let* find = |i| {
+            if i < self.size() {
+                if self.get(i) == value {
+                    i
+                } else {
+                    find(i + 1)
+                }
             } else {
-                i = i + 1
+                -1
             }
         }
-        if !found {
+        let index = find(0)
+        if index < 0 {
             throw ElementDoesNotExist("element not found")
         }
+        self.removeAt(index)
         self
     }
     remove?: |value| {
-        let i = 0
-        let found = false
-        while i < self.size() and !found {
-            if self.get(i) == value {
-                found = true
+        let* find = |i| {
+            if i < self.size() {
+                if self.get(i) == value {
+                    i
+                } else {
+                    find(i + 1)
+                }
             } else {
-                i = i + 1
+                -1
             }
         }
-        if found {
-            self.removeAt(i)
-        } else {
+        let index = find(0)
+        if index < 0 {
             None
+        } else {
+            self.removeAt(index)
         }
     }
     removeIfPresent: |value| {
-        let i = 0
-        let found = false
-        while i < self.size() and !found {
-            if self.get(i) == value {
-                self.removeAt(i)
-                found = true
+        let* find = |i| {
+            if i < self.size() {
+                if self.get(i) == value {
+                    i
+                } else {
+                    find(i + 1)
+                }
             } else {
-                i = i + 1
+                -1
             }
         }
-        found
+        let index = find(0)
+        if index < 0 {
+            false
+        } else {
+            self.removeAt(index)
+            true
+        }
     }
     mapSelf: |block| {
-        for i, value in self {
-            self.setAt(i, block(value, i))
+        let iterator = self.iterator()
+        let i = 0
+        let* visit = {
+            if iterator.hasNext() {
+                let value = iterator.next()
+                self.setAt(i, block(value, i))
+                i = i + 1
+                visit()
+            }
         }
+        visit()
         self
     }
     filterSelf: |block| {
-        let i = self.size() - 1
-        while i >= 0 {
-            if !block(self.get(i), i) {
-                self.removeAt(i)
+        let* visit = |i| {
+            if i >= 0 {
+                if !block(self.get(i), i) {
+                    self.removeAt(i)
+                }
+                visit(i - 1)
             }
-            i = i - 1
         }
+        visit(self.size() - 1)
         self
     }
     fill: |value| {
+        let iterator = self.iterator()
         let i = 0
-        for _ in self {
-            self.setAt(i, value)
-            i = i + 1
+        let* visit = {
+            if iterator.hasNext() {
+                iterator.next()
+                self.setAt(i, value)
+                i = i + 1
+                visit()
+            }
         }
+        visit()
         self
     }
     reverse: {
-        let i = 0
-        let j = self.size() - 1
-        while i < j {
-            let left = self.get(i)
-            let right = self.get(j)
-            self.setAt(i, right)
-            self.setAt(j, left)
-            i = i + 1
-            j = j - 1
+        let* visit = |i, j| {
+            if i < j {
+                let left = self.get(i)
+                let right = self.get(j)
+                self.setAt(i, right)
+                self.setAt(j, left)
+                visit(i + 1, j - 1)
+            }
         }
+        visit(0, self.size() - 1)
         self
     }
 }
@@ -514,11 +570,13 @@ let SequenceTraits = {
         }
         let sequence = self.clone()
         let items = []
-        let i = 0
-        while i < size {
-            items[i] = fill
-            i = i + 1
+        let* visit = |i| {
+            if i < size {
+                items[i] = fill
+                visit(i + 1)
+            }
         }
+        visit(0)
         sequence.items = items
         sequence.start = 0
         sequence.count = size
@@ -564,11 +622,13 @@ let SequenceTraits = {
     }
     addAllFirst: |collection| {
         let collection_copy = Sequence.from(collection)
-        let i = collection_copy.size() - 1
-        while i >= 0 {
-            self.addFirst(collection_copy.get(i))
-            i = i - 1
+        let* visit = |i| {
+            if i >= 0 {
+                self.addFirst(collection_copy.get(i))
+                visit(i - 1)
+            }
         }
+        visit(collection_copy.size() - 1)
         self
     }
     addAllLast: |collection| { self.addAll(collection) }
@@ -624,11 +684,13 @@ let SequenceTraits = {
             return self.addLast(value)
         }
         self.ensureTail(1)
-        let i = self.count
-        while i > index {
-            self.items[self.start + i] = self.items[self.start + i - 1]
-            i = i - 1
+        let* visit = |i| {
+            if i > index {
+                self.items[self.start + i] = self.items[self.start + i - 1]
+                visit(i - 1)
+            }
         }
+        visit(self.count)
         self.items[self.start + index] = value
         self.count = self.count + 1
         self.version = self.version + 1
@@ -645,11 +707,13 @@ let SequenceTraits = {
             return self.removeLast()
         }
         let value = self.items[self.start + index]
-        let i = index
-        while i < self.count - 1 {
-            self.items[self.start + i] = self.items[self.start + i + 1]
-            i = i + 1
+        let* visit = |i| {
+            if i < self.count - 1 {
+                self.items[self.start + i] = self.items[self.start + i + 1]
+                visit(i + 1)
+            }
         }
+        visit(index)
         self.items[self.start + self.count - 1] = null
         self.count = self.count - 1
         self.version = self.version + 1
@@ -660,19 +724,23 @@ let SequenceTraits = {
             throw IndexOutOfBounds("range out of bounds", start, self.count)
         }
         let count = stop - start
-        let i = 0
-        while i < count {
-            self.removeAt(start)
-            i = i + 1
+        let* visit = |i| {
+            if i < count {
+                self.removeAt(start)
+                visit(i + 1)
+            }
         }
+        visit(0)
         self
     }
     clear: {
-        let i = 0
-        while i < self.count {
-            self.items[self.start + i] = null
-            i = i + 1
+        let* visit = |i| {
+            if i < self.count {
+                self.items[self.start + i] = null
+                visit(i + 1)
+            }
         }
+        visit(0)
         self.start = 0
         self.count = 0
         self.version = self.version + 1
@@ -685,11 +753,13 @@ let SequenceTraits = {
         } else {
             let next = []
             next[capacity - 1] = null
-            let i = 0
-            while i < self.count {
-                next[i] = self.items[self.start + i]
-                i = i + 1
+            let* visit = |i| {
+                if i < self.count {
+                    next[i] = self.items[self.start + i]
+                    visit(i + 1)
+                }
             }
+            visit(0)
             self.items = next
         }
         self.start = 0
@@ -700,11 +770,13 @@ let SequenceTraits = {
             return 0
         }
         if self.count + space <= self.items.length {
-            let i = 0
-            while i < self.count {
-                self.items[i] = self.items[self.start + i]
-                i = i + 1
+            let* move = |i| {
+                if i < self.count {
+                    self.items[i] = self.items[self.start + i]
+                    move(i + 1)
+                }
             }
+            move(0)
             self.start = 0
             return 0
         }
@@ -717,11 +789,13 @@ let SequenceTraits = {
         }
         let next = []
         next[capacity - 1] = null
-        let i = 0
-        while i < self.count {
-            next[i] = self.items[self.start + i]
-            i = i + 1
+        let* copy = |i| {
+            if i < self.count {
+                next[i] = self.items[self.start + i]
+                copy(i + 1)
+            }
         }
+        copy(0)
         self.items = next
         self.start = 0
     }
@@ -731,11 +805,13 @@ let SequenceTraits = {
         }
         if self.count + space <= self.items.length {
             let new_start = self.items.length - self.count
-            let i = self.count - 1
-            while i >= 0 {
-                self.items[new_start + i] = self.items[self.start + i]
-                i = i - 1
+            let* move = |i| {
+                if i >= 0 {
+                    self.items[new_start + i] = self.items[self.start + i]
+                    move(i - 1)
+                }
             }
+            move(self.count - 1)
             self.start = new_start
             return 0
         }
@@ -749,11 +825,13 @@ let SequenceTraits = {
         let new_start = capacity - self.count
         let next = []
         next[capacity - 1] = null
-        let i = 0
-        while i < self.count {
-            next[new_start + i] = self.items[self.start + i]
-            i = i + 1
+        let* copy = |i| {
+            if i < self.count {
+                next[new_start + i] = self.items[self.start + i]
+                copy(i + 1)
+            }
         }
+        copy(0)
         self.items = next
         self.start = new_start
     }

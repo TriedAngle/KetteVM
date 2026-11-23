@@ -37,7 +37,7 @@ Test.assert(text.add(3).get(0), 0)
 
 // struct fields are addressable by name; a pointer to a struct yields
 // struct values (copies) when indexed
-let Point = struct({x: i32, y: i32})
+let Point = struct({ x: i32, y: i32 })
 let point = Point.new(3, 5)
 Test.assert(point.get("x"), 3)
 Test.assert(point.get("y"), 5)
@@ -50,8 +50,8 @@ point.set("x", 8)
 Test.assert(point.get("x"), 8)
 
 // aggregate fields are zero-copy views: writes go through
-let Vec2 = struct({x: i32, y: i32})
-let Rect = struct({origin: Vec2, size: Vec2})
+let Vec2 = struct({ x: i32, y: i32 })
+let Rect = struct({ origin: Vec2, size: Vec2 })
 let rect = Rect.new()
 rect.origin.x = 7
 rect.size.y = 9

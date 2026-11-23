@@ -12,6 +12,7 @@ crate::register_natives! {
     array_pop,
     array_map,
     array_reduce,
+    array_for_each,
     array_iterator_next,
     array_iterator_symbol_iterator,
     array_is_array,
@@ -638,6 +639,65 @@ fn array_map<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a,
         }
         Object::set_array_length(heap, &scope, &result, len as usize);
         result.as_tagged(heap).erase()
+    })
+}
+
+/// `Array.prototype.forEach ( callback [ , thisArg ] )`
+/// [ES 23.1.3.13](https://tc39.es/ecma262/#sec-array.prototype.foreach)
+/// Calls `callback` for each present array-like element.
+fn array_for_each<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let receiver = call.receiver;
+        let obj = match Convert::to_object(vm, heap, state, &scope, receiver) {
+            Ok(obj) => obj.erase(),
+            Err(err) => return raise_runtime(heap, err),
+        };
+        let len = rt_try!(
+            heap,
+            Object::length_of_array_like(vm, heap, state, &scope, obj)
+        );
+        let callback = args.get_handle(heap, 0);
+        if !callback.as_tagged(heap).is_callable(heap) {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        }
+        let this_arg = if args.len() > 1 {
+            args.get_handle(heap, 1)
+        } else {
+            vm.known().undefined.get_handle(heap, &scope).erase()
+        };
+        let exception = vm.known().exception.get_handle(heap, &scope).erase();
+        for k in 0..len {
+            let value = match get_indexed_value(vm, heap, state, &scope, obj, k) {
+                Ok(IndexedValue::Absent) => continue,
+                Ok(IndexedValue::Present(value)) => value,
+                Err(err) => return raise_runtime(heap, err),
+            };
+            let call_args = scope.stage(&[
+                this_arg.as_tagged(heap),
+                value.as_tagged(heap),
+                Smi::new(k as i64).into_tagged(),
+                obj.as_tagged(heap),
+            ]);
+            let result = match HostCtx::enter(
+                vm,
+                state.runtime(vm, heap),
+                heap,
+                state,
+                callback,
+                call_args,
+                None,
+            ) {
+                Ok(value) => scope.handle(value),
+                Err(err) => return raise_runtime(heap, err),
+            };
+            if result.as_tagged(heap) == exception.as_tagged(heap) {
+                return exception.as_tagged(heap);
+            }
+        }
+        vm.known().undefined.get(heap).erase()
     })
 }
 

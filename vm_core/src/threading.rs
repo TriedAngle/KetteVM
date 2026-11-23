@@ -37,6 +37,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let thread_is_ready_index = vm.register_native(thread_is_ready);
     let thread_sleep_index = vm.register_native(thread_sleep);
     let thread_yield_index = vm.register_native(thread_yield);
+    let thread_available_processors_index = vm.register_native(thread_available_processors);
     let atomic_i64_new_index = vm.register_native(atomic_i64_new);
     let atomic_i64_load_index = vm.register_native(atomic_i64_load);
     let atomic_i64_store_index = vm.register_native(atomic_i64_store);
@@ -252,6 +253,15 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             thread_prototype,
             "yield",
             thread_yield_index,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            thread_prototype,
+            "availableProcessors",
+            thread_available_processors_index,
             0,
         );
 
@@ -891,6 +901,15 @@ fn thread_park<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
 fn thread_nano_time<'a>(_ctx: HostCtx<'a>, _call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
     let origin = NANO_TIME_ORIGIN.get_or_init(Instant::now);
     Smi::new(origin.elapsed().as_nanos().max(1) as i64).into_tagged()
+}
+
+fn thread_available_processors<'a>(
+    _ctx: HostCtx<'a>,
+    _call: CallInfo<'_>,
+    _args: Args,
+) -> Tagged<'a, Value> {
+    let count = std::thread::available_parallelism().map_or(1, |count| count.get());
+    Smi::new(count as i64).into_tagged()
 }
 
 fn thread_unpark<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {

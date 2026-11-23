@@ -1,6 +1,9 @@
 // Collection behavior and the growable Sequence.
-// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/collection.ktt kette/kette_tests/collection.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/collection.ktt
 // Check: kette/kette_tests/check.py
+
+use collection { Sequence }
+use collection.traits { Collection, Indexable }
 
 let seq = |values| {
     let result = Sequence.new()
@@ -137,7 +140,6 @@ Test.assert(bracket_missing_set, "IndexOutOfBounds")
 let total = 0
 s.forEach(|value| { total = total + value })
 Test.assert(total, 6)
-
 
 Test.assert(s.indexOf(4), 1)
 Test.assert(s.indexOfOrElse(9, { -1 }), -1)

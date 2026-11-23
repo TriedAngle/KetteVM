@@ -777,6 +777,10 @@ impl FnBuilder {
         self.emit_tracked(Opcode::CallNoFeedback, &[callee.operand(), base, count]);
     }
 
+    pub fn tail_guard(&mut self, callee: Reg) {
+        self.emit_tracked(Opcode::TailGuard, &[callee.operand()]);
+    }
+
     /// `acc = callee()` with the receiver implicitly `undefined`.
     pub fn call_function0(&mut self, callee: Reg, fb: Feedback) {
         self.emit_tracked(Opcode::CallFunction0, &[callee.operand(), fb.0]);
@@ -1033,6 +1037,7 @@ impl FnBuilder {
             feedback_count: self.feedback_slots,
             expected_slots: self.expected_slots,
             strict: meta.strict,
+            tail_callable: false,
         })
     }
 

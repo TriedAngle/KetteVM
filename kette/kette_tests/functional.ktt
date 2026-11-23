@@ -1,3 +1,5 @@
+use collection { Sequence }
+
 let seq = |values| {
     let result = Sequence.new()
     for value in values {

@@ -178,7 +178,7 @@ impl FrameHeader {
         self.new_target.get(heap)
     }
 
-    /// Actual argument count, receiver included.
+    /// The actual argument count, receiver included.
     #[inline(always)]
     pub fn argc(&self) -> usize {
         self.argc.read_smi().value() as usize

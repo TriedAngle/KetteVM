@@ -1,0 +1,75 @@
+use ffi
+
+let lib = globalThis.SysLib
+let Ptr = ffi.Ptr
+let WString = ffi.pointer(ffi.char16)
+let i32 = ffi.i32
+let i64 = ffi.i64
+let u32 = ffi.u32
+let u64 = ffi.u64
+let f32 = ffi.f32
+
+let raw = {
+    lib: lib,
+    fopen: lib.fn("_wfopen", [WString, WString], Ptr),
+    tmpfile: lib.fn("tmpfile", [], Ptr),
+    fclose: lib.fn("fclose", [Ptr], i32),
+    access: lib.fn("_waccess", [WString, i32], i32),
+    fseek: lib.fn("_fseeki64", [Ptr, i64, i32], i32),
+    ftell: lib.fn("_ftelli64", [Ptr], i64),
+    fread: lib.fn("fread", [Ptr, u64, u64, Ptr], u64),
+    fwrite: lib.fn("fwrite", [Ptr, u64, u64, Ptr], u64),
+    fputs: lib.fn("fputs", [ffi.CString, Ptr], i32),
+    fflush: lib.fn("fflush", [Ptr], i32),
+    srand: lib.fn("srand", [u32], ffi.void),
+    rand: lib.fn("rand", [], i32),
+    getcwd: lib.fn("_wgetcwd", [WString, i32], WString),
+    chdir: lib.fn("_wchdir", [WString], i32),
+    getenv: lib.fn("_wgetenv", [WString], WString),
+    sinf: lib.fn("sinf", [f32], f32),
+    cosf: lib.fn("cosf", [f32], f32),
+    fabsf: lib.fn("fabsf", [f32], f32),
+    exit: lib.fn("exit", [i32], ffi.void),
+}
+
+let getcwd = {
+    let size = 8192
+    let buffer = ffi.array(ffi.char16, size).new()
+    let result = raw.getcwd(buffer, size)
+    if ffi.isNull(result) {
+        buffer.free()
+        throw "getcwd failed"
+    }
+    let text = null
+    try {
+        text = ffi.wstring_at(buffer)
+    } catch (e) {
+        buffer.free()
+        throw e
+    }
+    buffer.free()
+    text
+}
+
+let chdir = |path| {
+    let status = raw.chdir(path)
+    if status != 0 {
+        throw "chdir failed: " + path
+    }
+    0
+}
+
+let getenv = |name| {
+    let value = raw.getenv(name)
+    if ffi.isNull(value) {
+        return null
+    }
+    ffi.wstring_at(value)
+}
+
+mod sys.windows {
+    export raw = raw
+    export getcwd = getcwd
+    export chdir = chdir
+    export getenv = getenv
+}

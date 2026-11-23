@@ -244,7 +244,6 @@ let caseScheduling = {
     Expect.eq(space.needsFrame, 0, "sched.clear")
 }
 
-
 let caseSplitter = {
     let space = Space.new(300, 100)
     let left = Node.Box(100, 0, rgb(200, 80, 80))

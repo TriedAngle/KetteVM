@@ -1,6 +1,7 @@
 use bytecode::Reg;
 use kette_syntax::ast::{
-    AstNode, Expr, ForExpr, IfExpr, Object, ObjectEntry, Script, Stmt, TryExpr, WhileExpr,
+    AstNode, Expr, ForExpr, IfExpr, LetStmt, Object, ObjectEntry, Pattern, Script, Stmt, TryExpr,
+    WhileExpr,
 };
 use kette_syntax::resolve::{BindingId, BindingKind, Resolved, ScopeId};
 use kette_syntax::{NodeId, Tree};
@@ -35,6 +36,8 @@ pub struct Frame {
     pub local_count: u32,
     pub context_slots: u32,
     pub creates_context: bool,
+    /// The `let*` binding whose initializer created this frame.
+    pub recursive_binding: Option<BindingId>,
 }
 
 pub struct Plan {
@@ -52,6 +55,7 @@ impl Plan {
             frames: Vec::new(),
             frame_of_scope: vec![None; resolved.scopes().len()],
             function_of_node: vec![None; tree.nodes().len()],
+            recursive_values: vec![None; tree.nodes().len()],
         };
         planner.build_script(tree.script());
 
@@ -66,9 +70,14 @@ impl Plan {
         }
 
         let mut captured = vec![false; binding_count];
-        for scope in resolved.scopes() {
+        for (index, scope) in resolved.scopes().iter().enumerate() {
+            let Some(scope_frame) = planner.frame_of_scope[index] else {
+                continue;
+            };
             for &binding in &scope.upvars {
-                captured[binding.0 as usize] = true;
+                if binding_frame[binding.0 as usize] != Some(scope_frame) {
+                    captured[binding.0 as usize] = true;
+                }
             }
         }
         if let Some(first) = planner.frames.first() {
@@ -173,6 +182,8 @@ struct Planner<'a> {
     frames: Vec<Frame>,
     frame_of_scope: Vec<Option<FrameId>>,
     function_of_node: Vec<Option<FrameId>>,
+    /// Object created by a `let*` initializer -> its binding.
+    recursive_values: Vec<Option<BindingId>>,
 }
 
 impl<'a> Planner<'a> {
@@ -193,6 +204,7 @@ impl<'a> Planner<'a> {
             local_count: 0,
             context_slots: 0,
             creates_context: true,
+            recursive_binding: None,
         });
         self.frame_of_scope[scope.0 as usize] = Some(FrameId(0));
         self.statements(script.statements(), FrameId(0));
@@ -200,6 +212,10 @@ impl<'a> Planner<'a> {
 
     fn new_frame(&mut self, kind: FrameKind, scope: ScopeId, parent: FrameId) -> FrameId {
         let id = FrameId(self.frames.len() as u32);
+        let recursive_binding = match kind {
+            FrameKind::Object(node) => self.recursive_values[node.0 as usize],
+            _ => None,
+        };
         self.frames.push(Frame {
             kind,
             scope,
@@ -212,6 +228,7 @@ impl<'a> Planner<'a> {
             local_count: 0,
             context_slots: 0,
             creates_context: false,
+            recursive_binding,
         });
         self.frame_of_scope[scope.0 as usize] = Some(id);
         if let FrameKind::Object(node) | FrameKind::Module(node) = kind {
@@ -225,6 +242,33 @@ impl<'a> Planner<'a> {
         self.frame_of_scope[scope.0 as usize] = Some(frame);
     }
 
+    fn note_recursive_value(&mut self, statement: LetStmt<'a>) {
+        if !statement.is_recursive() {
+            return;
+        }
+        let Some(Pattern::Name(name)) = statement.pattern() else {
+            return;
+        };
+        let Some(token) = name.name() else {
+            return;
+        };
+        let Some(binding) = self.resolved.binding_of_token(token.id()) else {
+            return;
+        };
+        let Some(object) = statement.value().and_then(Self::object_value) else {
+            return;
+        };
+        self.recursive_values[object.syntax().id().0 as usize] = Some(binding);
+    }
+
+    fn object_value(expr: Expr<'a>) -> Option<Object<'a>> {
+        match expr {
+            Expr::Object(object) => Some(object),
+            Expr::Paren(paren) => paren.expr().and_then(Self::object_value),
+            _ => None,
+        }
+    }
+
     fn statements(&mut self, statements: kette_syntax::AstChildren<'a, Stmt<'a>>, frame: FrameId) {
         for statement in statements {
             self.statement(statement, frame);
@@ -234,6 +278,7 @@ impl<'a> Planner<'a> {
     fn statement(&mut self, statement: Stmt<'a>, frame: FrameId) {
         match statement {
             Stmt::Let(statement) => {
+                self.note_recursive_value(statement);
                 if let Some(value) = statement.value() {
                     self.expr(value, frame);
                 }
@@ -387,6 +432,7 @@ impl<'a> Planner<'a> {
             match entry {
                 ObjectEntry::Slot(_) | ObjectEntry::Params(_) => {}
                 ObjectEntry::Let(statement) => {
+                    self.note_recursive_value(statement);
                     if let Some(value) = statement.value() {
                         self.expr(value, frame);
                     }

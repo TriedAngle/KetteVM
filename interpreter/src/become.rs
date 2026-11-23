@@ -260,6 +260,7 @@ handler_table!(
     crate::op_load_null,
     crate::op_load_true,
     crate::op_load_false,
+    crate::op_tail_guard,
     crate::op_load_global,
     crate::op_sub,
     crate::op_mul,

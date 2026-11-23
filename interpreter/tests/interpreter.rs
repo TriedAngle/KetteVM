@@ -54,6 +54,7 @@ fn callable<'s>(
             register_count,
             handlers: None,
             mode: MODE_SLOPPY,
+            tail_callable: false,
         },
         scope,
     );

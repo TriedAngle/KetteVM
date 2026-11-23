@@ -13,6 +13,7 @@ members = [
     "interpreter",
     "js/js_compiler",
     "kette/kette_compiler",
+    "kette/kette_native",
     "kette/kette_parser",
     "kette/kette_syntax",
     "js/js_runtime",

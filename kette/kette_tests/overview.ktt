@@ -82,7 +82,7 @@ Test.assert(named.describe(), "a named object")
 // the call binds the callee as `self`, so the body initializes the
 // object itself and returns it
 
-let origin = { x: 0, y: 0 | x, y | self.x = x; self.y = y; self }
+let origin = { x: 0, y: 0 |x, y| self.x = x; self.y = y; self }
 
 let p = origin(30, 12)
 Test.assert(p.x + p.y, 42)
@@ -90,7 +90,7 @@ Test.assert(p.x + p.y, 42)
 // a factory: each call creates a fresh object (origin above is shared —
 // every origin(...) rebinds the same instance)
 
-let make = { { x: 0, y: 0 | x, y | self.x = x; self.y = y; self } }
+let make = { { x: 0, y: 0 |x, y| self.x = x; self.y = y; self } }
 
 let q = make()(7, 8)
 let r = make()(9, 10)
@@ -98,7 +98,7 @@ Test.assert(q.x + q.y + r.x + r.y, 34)
 
 // an empty object is not callable (`empty()` would throw); with the
 // params marker it is
-let empty = { }
+let empty = {}
 let zero = { 0 }
 Test.assert(zero(), 0)
 Test.assert({ answer: 42 }.answer, 42)

@@ -2,7 +2,8 @@
 // Check: kette/kette_tests/check.py
 
 use ffi
-use sys { File, Seek }
+use sys
+use sys.file { File, Seek }
 
 let file = File.temp()
 Test.assert(file.disposed, false)
@@ -51,6 +52,22 @@ let returned = with(scoped, |handle| {
 Test.assert(returned, 9)
 Test.assert(scoped.disposed, true)
 
-let opened = File.open("kette/std/sys.ktt", "rb")
+let opened = File.open("kette/std/sys/sys.ktt", "rb")
 Test.assert(opened.readText().length > 0, true)
 opened.dispose()
+
+Test.assert(sys.getcwd(), sys.cwd)
+Test.assert(sys.getenv("PATH"), sys.env.PATH)
+Test.assert(sys.getenv("KETTE_NOT_SET"), null)
+
+Test.assert(sys.env.arguments.length, 0)
+Test.assert(sys.env.script != null, true)
+Test.assert(sys.env.executable != null, true)
+Test.assert(sys.env != null, true)
+Test.assert(sys.env.KETTE_NOT_SET, undefined)
+
+let before = sys.cwd
+let moved = sys.setCwd(before)
+Test.assert(moved, before)
+Test.assert(sys.cwd, before)
+Test.assert(sys.getcwd(), before)

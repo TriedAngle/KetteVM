@@ -56,6 +56,7 @@ Test.assert(cell.store(42), 42)
 Test.assert(cell.load(), 42)
 
 // Every ThreadObject exposes the same methods.
+Test.assert(Thread.availableProcessors() >= 1, true)
 let self_tid = AtomicI64.new(-1)
 let self_api = {
     let me = Thread.current()
@@ -169,7 +170,7 @@ Test.assert(psleep.isInterrupted(), true)
 // C callbacks suspend on the task stack and return through C frames.
 let (void, i32, u64) = FFI
 let libc = FFI.library(null)
-let Comparator = FFI.fn([FFI.pointer(void), FFI.pointer(void)], i32)
+let Comparator = FFI.fn([FFI.Ptr, FFI.Ptr], i32)
 let qsort = libc.fn(
     "qsort",
     [FFI.pointer(i32), u64, u64, FFI.pointer(Comparator)],

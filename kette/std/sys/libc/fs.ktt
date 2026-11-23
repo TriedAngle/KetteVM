@@ -1,33 +1,10 @@
 use ffi
-let (void, i32, u32, i64, f32, f64, u8, u64, CString) = ffi
-
-let lib = ffi.library(null)
-let Ptr = ffi.pointer(void)
+use sys.libc { raw }
 
 let Seek = {
     SET: 0,
     CUR: 1,
     END: 2,
-}
-
-let raw = {
-    lib: lib,
-    fopen: lib.fn("fopen", [CString, CString], Ptr),
-    tmpfile: lib.fn("tmpfile", [], Ptr),
-    fclose: lib.fn("fclose", [Ptr], i32),
-    access: lib.fn("access", [CString, i32], i32),
-    fseek: lib.fn("fseek", [Ptr, i64, i32], i32),
-    ftell: lib.fn("ftell", [Ptr], i64),
-    fread: lib.fn("fread", [Ptr, u64, u64, Ptr], u64),
-    fwrite: lib.fn("fwrite", [Ptr, u64, u64, Ptr], u64),
-    fputs: lib.fn("fputs", [CString, Ptr], i32),
-    fflush: lib.fn("fflush", [Ptr], i32),
-    srand: lib.fn("srand", [u32], void),
-    rand: lib.fn("rand", [], i32),
-    sinf: lib.fn("sinf", [f32], f32),
-    cosf: lib.fn("cosf", [f32], f32),
-    fabsf: lib.fn("fabsf", [f32], f32),
-    exit: lib.fn("exit", [i32], void),
 }
 
 let FileTraits = {
@@ -37,7 +14,7 @@ let FileTraits = {
         let mode = if mode == null { "rb" } else { mode }
         let file = self.clone()
         file.handle = raw.fopen(path, mode)
-        if file.handle == null {
+        if ffi.isNull(file.handle) {
             throw "cannot open file: " + path
         }
         file.disposed = false
@@ -47,7 +24,7 @@ let FileTraits = {
     temp: {
         let file = self.clone()
         file.handle = raw.tmpfile()
-        if file.handle == null {
+        if ffi.isNull(file.handle) {
             throw "cannot create temporary file"
         }
         file.disposed = false
@@ -78,7 +55,7 @@ let FileTraits = {
     }
 
     read: |size| {
-        let data = ffi.array(u8, size).new()
+        let data = ffi.array(ffi.u8, size).new()
         let count = raw.fread(data, 1, size, self.handle)
         if count != size {
             data.free()
@@ -98,20 +75,26 @@ let FileTraits = {
         if size == 0 {
             return ""
         }
-        let data = ffi.array(u8, size).new()
+        let data = ffi.array(ffi.u8, size).new()
         self.seek(0, Seek.SET)
         let count = raw.fread(data, 1, size, self.handle)
         if count != size {
             data.free()
             throw "short read"
         }
-        let text = ffi.string_at(data)
+        let text = null
+        try {
+            text = ffi.string_at(data)
+        } catch (e) {
+            data.free()
+            throw e
+        }
         data.free()
         text
     }
 
     write: |data, size| {
-        let count = raw.fwrite(data.cast(u8), 1, size, self.handle)
+        let count = raw.fwrite(data.cast(ffi.u8), 1, size, self.handle)
         if count != size {
             throw "short write"
         }
@@ -155,9 +138,45 @@ let File = {
     disposed: false
 }
 
-mod sys {
-    export raw = raw
+let readDir = |path| {
+    let dir = raw.opendir(path)
+    if ffi.isNull(dir) {
+        throw "cannot open directory: " + path
+    }
+    // struct dirent: d_name is at byte 21 on macOS and 19 on glibc.
+    let name_offset = if KetteTools.primitives.os.name == "macos" { 21 } else { 19 }
+    let names = []
+    let failed = false
+    let error = null
+    let* readEntries = {
+        let entry = raw.readdir(dir)
+        if !ffi.isNull(entry) {
+            let name = ffi.string_at(entry.add(name_offset))
+            if name != "." and name != ".." {
+                names.push(name)
+            }
+            readEntries()
+        }
+    }
+    try {
+        readEntries()
+    } catch (e) {
+        failed = true
+        error = e
+    }
+    let status = raw.closedir(dir)
+    if failed {
+        throw error
+    }
+    if status != 0 {
+        throw "closedir failed: " + path
+    }
+    names.sort()
+    names
+}
+
+mod sys.libc.file {
     export Seek = Seek
-    export FileTraits = FileTraits
     export File = File
+    export readDir = readDir
 }

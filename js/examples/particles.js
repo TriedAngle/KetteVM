@@ -9,7 +9,7 @@ const tgpu = globalThis.Modules.vendor.tgpu;
 const glfw = globalThis.Modules.vendor.glfw;
 const sys = globalThis.Modules.sys;
 const FFI = globalThis.Modules.ffi;
-const Ptr = FFI.pointer(FFI.void);
+const Ptr = FFI.Ptr;
 
 const PARTICLE_COUNT = 10000;
 const FLOATS_PER_PARTICLE = 8;

@@ -3,7 +3,7 @@ use crate::{
     AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
     PropertyDescriptor, SetupError, SlotName, Smi, StringRef, Tagged, ThreadState, Thrown,
-    TypeInfo, VM, Value, VmError, raise_runtime, tools::KetteTools,
+    TypeInfo, Utf8String, VM, Value, VmError, raise_runtime, tools::KetteTools,
 };
 
 /// Install the FFI namespace under `KetteTools.primitives` and register the
@@ -14,7 +14,9 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let cstring = vm.register_native(ffi_cstring);
     let wstring = vm.register_native(ffi_wstring);
     let string_at = vm.register_native(ffi_string_at);
+    let string = vm.register_native(ffi_string);
     let wstring_at = vm.register_native(ffi_wstring_at);
+    let is_null = vm.register_native(ffi_is_null);
     let pointer = vm.register_native(ffi_pointer);
     let fn_type = vm.register_native(ffi_fn);
     let callback = vm.register_native(ffi_callback);
@@ -293,6 +295,8 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             string_at,
             1,
         );
+        Object::add_method(thread_vm, heap, &scope, namespace, "isNull", is_null, 1);
+        Object::add_method(thread_vm, heap, &scope, namespace, "string", string, 2);
         Object::add_method(
             thread_vm,
             heap,
@@ -483,6 +487,21 @@ fn value_address(heap: &Heap, value: Tagged<Value>) -> FfiResult<*mut u8> {
     value.base(heap)
 }
 
+/// `FFI.isNull(value)` -> whether a C pointer or value has the null address.
+fn ffi_is_null<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx { heap, .. } = ctx;
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    let is_null = match value.get_as::<CValue>(heap) {
+        Some(value) => value.address().is_null(),
+        None => value.is_nullish(heap),
+    };
+    if is_null {
+        heap.known().true_object.get(heap).erase()
+    } else {
+        heap.known().false_object.get(heap).erase()
+    }
+}
+
 fn ffi_string_at<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -515,6 +534,35 @@ fn ffi_wstring_at<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagg
         match ffi.read_c_wstring(heap, &scope, address) {
             Ok(value) => value.as_tagged(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
+        }
+    })
+}
+
+/// `FFI.string(pointer, length)` -> UTF-8 string of exactly `length` bytes.
+fn ffi_string<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let value = args.get_handle(heap, 0).as_tagged(heap);
+        let address = match value_address(heap, value) {
+            Ok(address) => address,
+            Err(error) => return raise_ffi(vm, heap, state, error),
+        };
+        let length = args.get(heap, 1).to_i64().unwrap_or(0);
+        if length <= 0 {
+            let empty = vm.interner().intern_str(heap, &scope, "");
+            return empty.as_tagged(heap).erase();
+        }
+        if address.is_null() {
+            return raise_ffi(vm, heap, state, FfiError::NullPointer);
+        }
+        // Safety: the caller passes a length from the native buffer that
+        // produced the pointer.
+        let bytes = unsafe { core::slice::from_raw_parts(address, length as usize) };
+        match Utf8String::from_bytes(heap, &scope, bytes) {
+            Some(value) => value.as_tagged(heap).erase(),
+            None => raise_ffi(vm, heap, state, FfiError::InvalidUtf8),
         }
     })
 }

@@ -232,6 +232,10 @@ impl Scanner<'_> {
             self.bump();
         }
         let mut kind = keyword(&self.source[start..self.pos]).unwrap_or(Ident);
+        if kind == Let && self.peek() == Some('*') {
+            self.bump();
+            kind = LetStar;
+        }
         if matches!(kind, And | Or) && self.peek() == Some('=') {
             self.bump();
             kind = if kind == And { AndEq } else { OrEq };

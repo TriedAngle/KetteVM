@@ -1,0 +1,76 @@
+use ffi
+let (Ptr, void, i32, u32, i64, f32, f64, u8, u64, CString) = ffi
+
+let lib = globalThis.SysLib
+
+let raw = {
+    lib: lib,
+    fopen: lib.fn("fopen", [CString, CString], Ptr),
+    tmpfile: lib.fn("tmpfile", [], Ptr),
+    fclose: lib.fn("fclose", [Ptr], i32),
+    access: lib.fn("access", [CString, i32], i32),
+    fseek: lib.fn("fseek", [Ptr, i64, i32], i32),
+    ftell: lib.fn("ftell", [Ptr], i64),
+    fread: lib.fn("fread", [Ptr, u64, u64, Ptr], u64),
+    fwrite: lib.fn("fwrite", [Ptr, u64, u64, Ptr], u64),
+    fputs: lib.fn("fputs", [CString, Ptr], i32),
+    fflush: lib.fn("fflush", [Ptr], i32),
+    srand: lib.fn("srand", [u32], void),
+    rand: lib.fn("rand", [], i32),
+    getcwd: lib.fn("getcwd", [Ptr, u64], Ptr),
+    chdir: lib.fn("chdir", [CString], i32),
+    getenv: lib.fn("getenv", [CString], Ptr),
+    opendir: lib.fn("opendir", [CString], Ptr),
+    readdir: lib.fn("readdir", [Ptr], Ptr),
+    closedir: lib.fn("closedir", [Ptr], i32),
+    sinf: lib.fn("sinf", [f32], f32),
+    cosf: lib.fn("cosf", [f32], f32),
+    fabsf: lib.fn("fabsf", [f32], f32),
+    exit: lib.fn("exit", [i32], void),
+}
+
+let getcwd = {
+    let size = 8192
+    let buffer = ffi.array(u8, size).new()
+    let result = raw.getcwd(buffer, size)
+    if ffi.isNull(result) {
+        buffer.free()
+        throw "getcwd failed"
+    }
+    let text = null
+    try {
+        text = ffi.string_at(buffer)
+    } catch (e) {
+        buffer.free()
+        throw e
+    }
+    buffer.free()
+    text
+}
+
+let chdir = |path| {
+    let c_path = ffi.cstring(path)
+    let status = raw.chdir(c_path)
+    c_path.free()
+    if status != 0 {
+        throw "chdir failed: " + path
+    }
+    0
+}
+
+let getenv = |name| {
+    let c_name = ffi.cstring(name)
+    let value = raw.getenv(c_name)
+    c_name.free()
+    if ffi.isNull(value) {
+        return null
+    }
+    ffi.string_at(value)
+}
+
+mod sys.libc {
+    export raw = raw
+    export getcwd = getcwd
+    export chdir = chdir
+    export getenv = getenv
+}

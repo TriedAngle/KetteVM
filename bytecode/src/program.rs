@@ -278,6 +278,9 @@ pub struct Function {
     /// body. Seeds constructor object preallocation.
     pub expected_slots: u32,
     pub strict: bool,
+    /// Whether a tail call to this function may reuse the current frame
+    /// when the callee is the frame's own callable.
+    pub tail_callable: bool,
 }
 
 /// An ordered function table: `functions[0]` is the entry body.

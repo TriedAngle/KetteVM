@@ -14,6 +14,16 @@ pub enum Termination {
 
 pub struct KetteTools;
 
+/// Stop the current execution: cancel live executions and mark the VM as
+/// shut down. `os.exit` layers its exit status on top of this.
+pub fn request_shutdown<'a>(vm: &VM, heap: &'a mut Heap, state: &ThreadState) -> Tagged<'a, Value> {
+    heap.cancel_executions(&|| {});
+    vm.note_shutdown();
+    state.set_termination(Termination::Shutdown);
+    state.set_pending_exception(vm.known().undefined.get(heap));
+    vm.known().exception.get(heap).erase()
+}
+
 impl KetteTools {
     pub fn force_minor_gc<'a>(
         ctx: HostCtx<'a>,
@@ -39,11 +49,7 @@ impl KetteTools {
         let HostCtx {
             vm, heap, state, ..
         } = ctx;
-        heap.cancel_executions(&|| {});
-        vm.note_shutdown();
-        state.set_termination(Termination::Shutdown);
-        state.set_pending_exception(vm.known().undefined.get(heap));
-        vm.known().exception.get(heap).erase()
+        request_shutdown(vm, heap, state)
     }
 
     /// Indirect eval: compile `source` as `language` in a fresh lexical

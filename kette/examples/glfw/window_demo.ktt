@@ -5,17 +5,17 @@ KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")
 
 use ffi
-use os
+use sys
 use vendor.glfw
 let (void, i32, u32, f32, CString) = ffi
 
-let gl_path = if os.name == "macos" {
-        "/System/Library/Frameworks/OpenGL.framework/OpenGL"
-    } else if os.name == "windows" {
-        "opengl32.dll"
-    } else {
-        "libGL.so.1"
-    }
+let gl_path = if sys.name == "macos" {
+    "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+} else if sys.name == "windows" {
+    "opengl32.dll"
+} else {
+    "libGL.so.1"
+}
 
 let gl = ffi.library(gl_path)
 

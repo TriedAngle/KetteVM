@@ -1,0 +1,260 @@
+// kettefmt: format Kette sources in place. Run it from the repo root; the
+// std and formatter modules are loaded through the relative paths below.
+//
+// usage: kettefmt [--check] [--stdout] [--threads N] <path>...
+//
+// --check       report files that need formatting, do not write
+// --stdout      write formatted output to stdout instead of files
+// --threads N   worker count (default: available processors)
+// <path>...     files or directories; directories are walked recursively
+//
+// examples:
+//   kettefmt kette/std
+//   kettefmt --check kette
+//   kettefmt --stdout kette/tools/kettefmt.ktt
+//   kettefmt --threads 8 kette
+//
+// Formatting is layout-preserving: indentation, spacing, comments, and blank
+// lines are normalized; lines are never joined or reflowed.
+
+if globalThis.Modules == undefined {
+    KetteTools.evalFile("kette/std/startup.ktt")
+}
+if !Modules.kette {
+    KetteTools.evalFile("kette/vendor/kette/kette.ktt")
+}
+if !Modules.kette.fmt {
+    KetteTools.evalFile("kette/vendor/kette/fmt.ktt")
+}
+
+use ffi
+use kette
+use kette.fmt
+use sys
+use sys.file { File }
+
+let usage = {
+    print("usage: kettefmt [--check] [--stdout] [--threads N] <path>...")
+}
+
+let isKtt = |name| {
+    let n = name.length
+    n > 4 and name[n - 4] == "." and name[n - 3] == "k" and name[n - 2] == "t" and name[n - 1] == "t"
+}
+
+let skip = |name| {
+    name == ".git" or name == "target" or name == "target-become" or name == "node_modules"
+}
+
+let readSource = |path| {
+    with(File.open(path, "rb"), |file| {
+        let all = file.readAll()
+        let text = null
+        try {
+            text = ffi.string(all.data, all.size)
+        } catch (e) {
+            all.data.free()
+            throw e
+        }
+        all.data.free()
+        text
+    })
+}
+
+let writeSource = |path, text| {
+    with(File.open(path, "wb"), |file| {
+        file.writeText(text)
+    })
+}
+
+let check = false
+let stdout = false
+let threads = Thread.availableProcessors()
+let paths = []
+
+let arguments = sys.env.arguments
+let at = 0
+while at < arguments.length {
+    let arg = arguments[at]
+    at = at + 1
+    if arg == "--check" {
+        check = true
+    } else if arg == "--stdout" {
+        stdout = true
+    } else if arg == "--threads" {
+        if at >= arguments.length {
+            usage()
+            sys.exit(2)
+        }
+        threads = arguments[at] * 1
+        at = at + 1
+    } else if arg == "--help" {
+        usage()
+        sys.exit(0)
+    } else {
+        paths.push(arg)
+    }
+}
+
+if paths.length == 0 {
+    usage()
+    sys.exit(1)
+}
+
+threads = threads - threads % 1
+if !(threads >= 1) {
+    threads = 1
+}
+
+let stack = paths.slice(0)
+
+let files = []
+let seen = {}
+let scan = 0
+while scan < stack.length {
+    let path = stack[scan]
+    scan = scan + 1
+
+    let entries = null
+    try {
+        entries = sys.file.readDir(path)
+    } catch (e) {
+        entries = null
+    }
+
+    if entries == null {
+        let key = "@" + path
+        if isKtt(path) and seen[key] != true {
+            seen[key] = true
+            files.push(path)
+        }
+    } else {
+        entries.forEach(|name| {
+            if !skip(name) {
+                stack.push(path + "/" + name)
+            }
+        })
+    }
+}
+
+let count = files.length
+let results = files.map(|path, index| {
+    {
+        index: index,
+        path: path,
+        message: null,
+        changed: false,
+        output: null,
+        done: false,
+    }
+})
+
+let formatFile = |result| {
+    let path = result.path
+    let source = null
+    try {
+        source = readSource(path)
+    } catch (e) {
+        result.message = [path + ": " + e]
+    }
+
+    if source != null {
+        try {
+            with(kette.parse(source), |tree| {
+                if tree.errorCount > 0 {
+                    let lines = []
+                    let* collect = |error| {
+                        if error < tree.errorCount {
+                            lines.push(path + ": " + tree.errorMessage(error))
+                            collect(error + 1)
+                        }
+                    }
+                    collect(0)
+                    result.message = lines
+                } else {
+                    let output = fmt.format(tree)
+                    if output != source {
+                        result.changed = true
+                        if stdout {
+                            result.output = output
+                        } else if !check {
+                            try {
+                                writeSource(path, output)
+                            } catch (e) {
+                                result.message = [path + ": " + e]
+                            }
+                        }
+                    } else if stdout {
+                        result.output = output
+                    }
+                }
+            })
+        } catch (e) {
+            result.message = [path + ": " + e]
+        }
+    }
+    result.done = true
+}
+
+let next = atomic.AtomicI64.new(0)
+let process = {
+    let running = true
+    while running {
+        let index = next.add(1) - 1
+        if index >= count {
+            running = false
+        } else {
+            formatFile(results[index])
+        }
+    }
+}
+
+let workers = if count == 0 {
+    0
+} else if threads > count {
+    count
+} else {
+    threads
+}
+
+let started = []
+let worker = 0
+while worker < workers {
+    started.push(Thread.newPlatform("fmt-" + worker, process))
+    worker = worker + 1
+}
+started.forEach(|thread| {
+    thread.start()
+})
+started.forEach(|thread| {
+    thread.join()
+})
+
+let failed = false
+let changed = 0
+results.forEach(|result| {
+    if result.message != null {
+        result.message.forEach(|line| {
+            print(line)
+        })
+        failed = true
+    }
+    if !result.done {
+        print(result.path + ": formatting did not complete")
+        failed = true
+    }
+    if result.changed {
+        changed = changed + 1
+        if stdout {
+            Console.write(result.output)
+        } else if check {
+            print(result.path)
+        }
+    } else if stdout and result.output != null {
+        Console.write(result.output)
+    }
+})
+
+if failed or (check and changed > 0) {
+    sys.exit(1)
+}

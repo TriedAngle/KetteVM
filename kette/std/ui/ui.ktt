@@ -40,11 +40,9 @@ let NodeTraits = {
         n.layout = L_ROW
         n.pad = pad
         n.gap = gap
-        let i = 0
-        while i < children.length {
-            n.addChild(children[i])
-            i = i + 1
-        }
+        children.forEach(|child| {
+            n.addChild(child)
+        })
         n
     }
 
@@ -84,18 +82,16 @@ let NodeTraits = {
 
     setSpace: |space| {
         self.space = space
-        let i = 0
-        while i < self.children.length {
-            self.children[i].setSpace(space)
-            i = i + 1
-        }
+        self.children.forEach(|child| {
+            child.setSpace(space)
+        })
         self
     }
 
     isLayoutRoot: {
         self.kind == K_WINDOW or
-        self.boundary == 1 or
-        (self.wMode == SIZE_FIXED and self.w > 0 and self.hMode == SIZE_FIXED and self.h > 0)
+            self.boundary == 1 or
+            (self.wMode == SIZE_FIXED and self.w > 0 and self.hMode == SIZE_FIXED and self.h > 0)
     }
 
     // content changed: stop at the nearest size-independent node
@@ -116,15 +112,20 @@ let NodeTraits = {
     }
 
     markLayout: {
-        let n = self
-        let root = null
-        while n != null {
-            n.dirtyLayout = 1
-            n.mValid = 0
-            root = n
-            if n.isLayoutRoot() { break }
-            n = n.owner
+        let* visit = |n, root| {
+            if n != null {
+                n.dirtyLayout = 1
+                n.mValid = 0
+                if n.isLayoutRoot() {
+                    n
+                } else {
+                    visit(n.owner, n)
+                }
+            } else {
+                root
+            }
         }
+        let root = visit(self, null)
         if root != null and root.space != null and root.layoutQueued == 0 {
             root.layoutQueued = 1
             root.space.layoutDirty.push(root)
@@ -134,15 +135,20 @@ let NodeTraits = {
     }
 
     markPaint: {
-        let n = self
-        let root = null
-        while n != null {
-            n.dirtyPaint = 1
-            n.pValid = 0
-            root = n
-            if n.paintBoundary == 1 { break }
-            n = n.owner
+        let* visit = |n, root| {
+            if n != null {
+                n.dirtyPaint = 1
+                n.pValid = 0
+                if n.paintBoundary == 1 {
+                    n
+                } else {
+                    visit(n.owner, n)
+                }
+            } else {
+                root
+            }
         }
+        let root = visit(self, null)
         if root != null and root.space != null and root.paintQueued == 0 {
             root.paintQueued = 1
             root.space.paintDirty.push(root)
@@ -263,14 +269,16 @@ let Layout = {
             let contentW = 0
             let contentH = 0
             let hasFill = 0
-            let i = 0
-            while i < n.children.length {
-                let c = n.children[i]
-                self.measure(c, innerW, innerH)
-                if c.wMode == SIZE_FILL { hasFill = 1 } else { contentW = contentW + c.mw }
-                if c.mh > contentH { contentH = c.mh }
-                i = i + 1
+            let* visit = |i| {
+                if i < n.children.length {
+                    let c = n.children[i]
+                    self.measure(c, innerW, innerH)
+                    if c.wMode == SIZE_FILL { hasFill = 1 } else { contentW = contentW + c.mw }
+                    if c.mh > contentH { contentH = c.mh }
+                    visit(i + 1)
+                }
             }
+            visit(0)
             if n.children.length > 1 {
                 contentW = contentW + n.gap * (n.children.length - 1)
             }
@@ -289,14 +297,16 @@ let Layout = {
             let contentW = 0
             let contentH = 0
             let hasFill = 0
-            let i = 0
-            while i < n.children.length {
-                let c = n.children[i]
-                self.measure(c, innerW, innerH)
-                if c.mw > contentW { contentW = c.mw }
-                if c.hMode == SIZE_FILL { hasFill = 1 } else { contentH = contentH + c.mh }
-                i = i + 1
+            let* visit = |i| {
+                if i < n.children.length {
+                    let c = n.children[i]
+                    self.measure(c, innerW, innerH)
+                    if c.mw > contentW { contentW = c.mw }
+                    if c.hMode == SIZE_FILL { hasFill = 1 } else { contentH = contentH + c.mh }
+                    visit(i + 1)
+                }
             }
+            visit(0)
             if n.children.length > 1 {
                 contentH = contentH + n.gap * (n.children.length - 1)
             }
@@ -314,14 +324,16 @@ let Layout = {
             if innerH < 0 { innerH = 0 }
             let contentW = 0
             let contentH = 0
-            let i = 0
-            while i < n.children.length {
-                let c = n.children[i]
-                self.measure(c, innerW, innerH)
-                if c.x + c.mw > contentW { contentW = c.x + c.mw }
-                if c.y + c.mh > contentH { contentH = c.y + c.mh }
-                i = i + 1
+            let* visit = |i| {
+                if i < n.children.length {
+                    let c = n.children[i]
+                    self.measure(c, innerW, innerH)
+                    if c.x + c.mw > contentW { contentW = c.x + c.mw }
+                    if c.y + c.mh > contentH { contentH = c.y + c.mh }
+                    visit(i + 1)
+                }
             }
+            visit(0)
             contentW = contentW + n.pad + n.pad
             contentH = contentH + n.pad + n.pad
             n.mw = self.pick(n.wMode, n.w, contentW, aw)
@@ -347,14 +359,16 @@ let Layout = {
         if n.layout == L_ROW { self.arrangeRow(n) }
         else if n.layout == L_COL { self.arrangeCol(n) }
         else {
-            let i = 0
-            while i < n.children.length {
-                let c = n.children[i]
-                let cw = if c.w > 0 { c.w } else { c.mw }
-                let ch = if c.h > 0 { c.h } else { c.mh }
-                self.arrange(c, c.x, c.y, cw, ch)
-                i = i + 1
+            let* visit = |i| {
+                if i < n.children.length {
+                    let c = n.children[i]
+                    let cw = if c.w > 0 { c.w } else { c.mw }
+                    let ch = if c.h > 0 { c.h } else { c.mh }
+                    self.arrange(c, c.x, c.y, cw, ch)
+                    visit(i + 1)
+                }
             }
+            visit(0)
         }
         n
     }
@@ -365,37 +379,41 @@ let Layout = {
         let count = n.children.length
         let fixed = 0
         let fills = 0
-        let i = 0
-        while i < count {
-            let c = n.children[i]
-            if c.wMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mw }
-            i = i + 1
+        let* countFills = |i| {
+            if i < count {
+                let c = n.children[i]
+                if c.wMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mw }
+                countFills(i + 1)
+            }
         }
+        countFills(0)
         let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
         let remaining = innerW - fixed - gaps
         let share = if fills > 0 { Math.floor(remaining / fills) } else { 0 }
         let extra = if fills > 0 { remaining - share * fills } else { 0 }
         let cx = n.pad
-        i = 0
-        while i < count {
-            let c = n.children[i]
-            let cw = if c.wMode == SIZE_FILL {
-                let v = share
-                if extra > 0 {
-                    extra = extra - 1
-                    v + 1
+        let* place = |i| {
+            if i < count {
+                let c = n.children[i]
+                let cw = if c.wMode == SIZE_FILL {
+                    let v = share
+                    if extra > 0 {
+                        extra = extra - 1
+                        v + 1
+                    } else {
+                        v
+                    }
                 } else {
-                    v
+                    c.mw
                 }
-            } else {
-                c.mw
+                if c.wMode == SIZE_FILL { self.measure(c, cw, innerH) }
+                let ch = if c.hMode == SIZE_FIT { c.mh } else { innerH }
+                self.arrange(c, cx, n.pad, cw, ch)
+                cx = cx + cw + n.gap
+                place(i + 1)
             }
-            if c.wMode == SIZE_FILL { self.measure(c, cw, innerH) }
-            let ch = if c.hMode == SIZE_FIT { c.mh } else { innerH }
-            self.arrange(c, cx, n.pad, cw, ch)
-            cx = cx + cw + n.gap
-            i = i + 1
         }
+        place(0)
         n
     }
 
@@ -405,37 +423,41 @@ let Layout = {
         let count = n.children.length
         let fixed = 0
         let fills = 0
-        let i = 0
-        while i < count {
-            let c = n.children[i]
-            if c.hMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mh }
-            i = i + 1
+        let* countFills = |i| {
+            if i < count {
+                let c = n.children[i]
+                if c.hMode == SIZE_FILL { fills = fills + 1 } else { fixed = fixed + c.mh }
+                countFills(i + 1)
+            }
         }
+        countFills(0)
         let gaps = if count > 1 { n.gap * (count - 1) } else { 0 }
         let remaining = innerH - fixed - gaps
         let share = if fills > 0 { Math.floor(remaining / fills) } else { 0 }
         let extra = if fills > 0 { remaining - share * fills } else { 0 }
         let cy = n.pad
-        i = 0
-        while i < count {
-            let c = n.children[i]
-            let ch = if c.hMode == SIZE_FILL {
-                let v = share
-                if extra > 0 {
-                    extra = extra - 1
-                    v + 1
+        let* place = |i| {
+            if i < count {
+                let c = n.children[i]
+                let ch = if c.hMode == SIZE_FILL {
+                    let v = share
+                    if extra > 0 {
+                        extra = extra - 1
+                        v + 1
+                    } else {
+                        v
+                    }
                 } else {
-                    v
+                    c.mh
                 }
-            } else {
-                c.mh
+                if c.hMode == SIZE_FILL { self.measure(c, innerW, ch) }
+                let cw = if c.wMode == SIZE_FIT { c.mw } else { innerW }
+                self.arrange(c, n.pad, cy, cw, ch)
+                cy = cy + ch + n.gap
+                place(i + 1)
             }
-            if c.hMode == SIZE_FILL { self.measure(c, innerW, ch) }
-            let cw = if c.wMode == SIZE_FIT { c.mw } else { innerW }
-            self.arrange(c, n.pad, cy, cw, ch)
-            cy = cy + ch + n.gap
-            i = i + 1
         }
+        place(0)
         n
     }
 }
@@ -456,11 +478,13 @@ let Paint = {
                 n.pX = x
                 n.pY = y
             }
-            let i = 0
-            while i < n.pList.length {
-                list.push(n.pList[i])
-                i = i + 1
+            let* copy = |i| {
+                if i < n.pList.length {
+                    list.push(n.pList[i])
+                    copy(i + 1)
+                }
             }
+            copy(0)
         } else {
             self.body(n, x, y, list)
         }
@@ -470,11 +494,9 @@ let Paint = {
         if n.shadow == 1 { self.shadow(list, x + 4, y + 4, n.w, n.h, rgb(0, 0, 0)) }
         if n.color != 0 { self.rect(list, x, y, n.w, n.h, n.color) }
         if n.clip == 1 { self.clip(list, x, y, n.w, n.h) }
-        let i = 0
-        while i < n.children.length {
-            self.node(n.children[i], x, y, list)
-            i = i + 1
-        }
+        n.children.forEach(|child| {
+            self.node(child, x, y, list)
+        })
         if n.clip == 1 { list.push(OP_CLIP_POP) }
     }
 
@@ -508,25 +530,30 @@ let Paint = {
 let Hit = {
     test: |n, x, y| {
         if x < 0 or y < 0 or x >= n.w or y >= n.h { return null }
-        let i = n.children.length - 1
-        while i >= 0 {
-            let c = n.children[i]
-            let hit = self.test(c, x - c.x, y - c.y)
-            if hit != null { return hit }
-            i = i - 1
+        let* visit = |i| {
+            if i >= 0 {
+                let c = n.children[i]
+                let hit = self.test(c, x - c.x, y - c.y)
+                if hit != null {
+                    hit
+                } else {
+                    visit(i - 1)
+                }
+            } else {
+                null
+            }
         }
-        n
+        let hit = visit(n.children.length - 1)
+        if hit != null { hit } else { n }
     }
 }
 
 let Windows = {
     raise: |world, win| {
         let out = []
-        let i = 0
-        while i < world.children.length {
-            if world.children[i] != win { out.push(world.children[i]) }
-            i = i + 1
-        }
+        world.children.forEach(|child| {
+            if child != win { out.push(child) }
+        })
         out.push(win)
         world.children = out
         world.markPaint()
@@ -534,9 +561,14 @@ let Windows = {
     }
 
     rootOf: |n| {
-        let w = n
-        while w != null and w.kind != K_WINDOW { w = w.owner }
-        w
+        let* visit = |w| {
+            if w != null and w.kind != K_WINDOW {
+                visit(w.owner)
+            } else {
+                w
+            }
+        }
+        visit(n)
     }
 
     press: |space, x, y| {
@@ -584,47 +616,53 @@ let SpaceTraits = {
     }
 
     hasAncestorIn: |n, list| {
-        let p = n.owner
-        while p != null {
-            let i = 0
-            while i < list.length {
-                if list[i] == p { return true }
-                i = i + 1
+        let* inList = |item, i| {
+            if i < list.length {
+                if list[i] == item {
+                    true
+                } else {
+                    inList(item, i + 1)
+                }
+            } else {
+                false
             }
-            p = p.owner
         }
-        false
+        let* visit = |p| {
+            if p != null {
+                if inList(p, 0) {
+                    true
+                } else {
+                    visit(p.owner)
+                }
+            } else {
+                false
+            }
+        }
+        visit(n.owner)
     }
 
     extractRoots: |list| {
         let out = []
-        let i = 0
-        while i < list.length {
-            let n = list[i]
+        list.forEach(|n| {
             if n.dirtyLayout == 1 and !self.hasAncestorIn(n, list) {
                 out.push(n)
             }
-            i = i + 1
-        }
+        })
         out
     }
 
     clearLayout: |n| {
         n.dirtyLayout = 0
         n.layoutQueued = 0
-        let i = 0
-        while i < n.children.length {
-            self.clearLayout(n.children[i])
-            i = i + 1
-        }
+        n.children.forEach(|child| {
+            self.clearLayout(child)
+        })
     }
 
     clearPaintQueue: {
-        let i = 0
-        while i < self.paintDirty.length {
-            self.paintDirty[i].paintQueued = 0
-            i = i + 1
-        }
+        self.paintDirty.forEach(|node| {
+            node.paintQueued = 0
+        })
         self.paintDirty = []
     }
 
@@ -633,13 +671,8 @@ let SpaceTraits = {
             return self.list
         }
 
-        let passes = 0
-        while self.layoutDirty.length > 0 and passes < 100 {
-            let queue = self.layoutDirty
-            self.layoutDirty = []
-            let roots = self.extractRoots(queue)
-            let i = 0
-            while i < roots.length {
+        let* runRoots = |roots, i| {
+            if i < roots.length {
                 let r = roots[i]
                 r.layoutQueued = 0
                 if r.dirtyLayout == 1 {
@@ -651,11 +684,20 @@ let SpaceTraits = {
                     }
                     self.clearLayout(r)
                 }
-                i = i + 1
+                runRoots(roots, i + 1)
             }
-            passes = passes + 1
-            if passes == 50 { print("ui: 50 layout passes") }
         }
+        let* passes = |pass| {
+            if self.layoutDirty.length > 0 and pass < 100 {
+                let queue = self.layoutDirty
+                self.layoutDirty = []
+                let roots = self.extractRoots(queue)
+                runRoots(roots, 0)
+                if pass + 1 == 50 { print("ui: 50 layout passes") }
+                passes(pass + 1)
+            }
+        }
+        passes(0)
 
         if self.paintDirty.length > 0 or self.root.dirtyPaint == 1 {
             self.list = []
@@ -684,42 +726,37 @@ let Space = {
 
 let Dump = {
     tree: |n, depth, ox, oy| {
-        let pad = ""
-        let i = 0
-        while i < depth {
-            pad = pad + "  "
-            i = i + 1
-        }
+        let pad = Array(depth).fill("  ").join("")
         let x = ox + n.x
         let y = oy + n.y
         print(pad + "k" + n.kind + " " + x + "," + y + " " + n.w + "x" + n.h + " m" + n.mw + "x" + n.mh)
-        i = 0
-        while i < n.children.length {
-            self.tree(n.children[i], depth + 1, x, y)
-            i = i + 1
-        }
+        n.children.forEach(|child| {
+            self.tree(child, depth + 1, x, y)
+        })
     }
 
     list: |ops| {
-        let i = 0
-        while i < ops.length {
-            let op = ops[i]
-            if op == OP_RECT {
-                print("rect " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4] + " #" + ops[i + 5])
-                i = i + 6
-            } else if op == OP_SHADOW {
-                print("shadow " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
-                i = i + 6
-            } else if op == OP_CLIP {
-                print("clip " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
-                i = i + 5
-            } else if op == OP_CLIP_POP {
-                print("pop")
-                i = i + 1
-            } else {
-                i = i + 1
+        let* visit = |i| {
+            if i < ops.length {
+                let op = ops[i]
+                if op == OP_RECT {
+                    print("rect " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4] + " #" + ops[i + 5])
+                    visit(i + 6)
+                } else if op == OP_SHADOW {
+                    print("shadow " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
+                    visit(i + 6)
+                } else if op == OP_CLIP {
+                    print("clip " + ops[i + 1] + " " + ops[i + 2] + " " + ops[i + 3] + " " + ops[i + 4])
+                    visit(i + 5)
+                } else if op == OP_CLIP_POP {
+                    print("pop")
+                    visit(i + 1)
+                } else {
+                    visit(i + 1)
+                }
             }
         }
+        visit(0)
     }
 }
 
@@ -735,12 +772,15 @@ let TermTraits = {
         c.mode = mode
         c.cells = []
         c.colors = []
-        let i = 0
-        while i < cols * rows {
-            c.cells.push(" ")
-            c.colors.push(rgb(0, 0, 0))
-            i = i + 1
+        let total = cols * rows
+        let* visit = |i| {
+            if i < total {
+                c.cells.push(" ")
+                c.colors.push(rgb(0, 0, 0))
+                visit(i + 1)
+            }
         }
+        visit(0)
         c.stack = []
         c.depth = 0
         c.clipX = 0
@@ -752,24 +792,26 @@ let TermTraits = {
 
     render: |ops, sceneW, sceneH, cols, rows, mode| {
         let c = self.new(sceneW, sceneH, cols, rows, mode)
-        let i = 0
-        while i < ops.length {
-            let op = ops[i]
-            if op == OP_RECT {
-                c.rect(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5])
-                i = i + 6
-            } else if op == OP_SHADOW {
-                i = i + 6
-            } else if op == OP_CLIP {
-                c.clip(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4])
-                i = i + 5
-            } else if op == OP_CLIP_POP {
-                c.pop()
-                i = i + 1
-            } else {
-                i = i + 1
+        let* visit = |i| {
+            if i < ops.length {
+                let op = ops[i]
+                if op == OP_RECT {
+                    c.rect(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5])
+                    visit(i + 6)
+                } else if op == OP_SHADOW {
+                    visit(i + 6)
+                } else if op == OP_CLIP {
+                    c.clip(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4])
+                    visit(i + 5)
+                } else if op == OP_CLIP_POP {
+                    c.pop()
+                    visit(i + 1)
+                } else {
+                    visit(i + 1)
+                }
             }
         }
+        visit(0)
         c.dump()
     }
 
@@ -801,17 +843,21 @@ let TermTraits = {
             if idx < 0 { idx = 0 }
             if idx > 9 { idx = 9 }
             let ch = self.ramp[idx]
-            let yy = y0
-            while yy < y1 {
-                let xx = x0
-                while xx < x1 {
-                    let at = yy * self.cols + xx
-                    self.cells[at] = ch
-                    self.colors[at] = color
-                    xx = xx + 1
+            let* row = |yy| {
+                if yy < y1 {
+                    let* col = |xx| {
+                        if xx < x1 {
+                            let at = yy * self.cols + xx
+                            self.cells[at] = ch
+                            self.colors[at] = color
+                            col(xx + 1)
+                        }
+                    }
+                    col(x0)
+                    row(yy + 1)
                 }
-                yy = yy + 1
             }
+            row(y0)
         }
     }
 
@@ -845,33 +891,41 @@ let TermTraits = {
 
     dump: {
         if self.mode == 2 {
-            let y = 0
-            while y < self.rows {
-                let line = ""
-                let x = 0
-                while x < self.cols {
-                    let color = self.colors[y * self.cols + x]
-                    let r = Math.floor(color / 65536)
-                    let g = Math.floor(color / 256) - r * 256
-                    let b = color - r * 65536 - g * 256
-                    line = line + "\x1b[48;2;" + r + ";" + g + ";" + b + "m "
-                    x = x + 1
+            let* row = |y| {
+                if y < self.rows {
+                    let line = ""
+                    let* col = |x| {
+                        if x < self.cols {
+                            let color = self.colors[y * self.cols + x]
+                            let r = Math.floor(color / 65536)
+                            let g = Math.floor(color / 256) - r * 256
+                            let b = color - r * 65536 - g * 256
+                            line = line + "\x1b[48;2;" + r + ";" + g + ";" + b + "m "
+                            col(x + 1)
+                        }
+                    }
+                    col(0)
+                    print(line + "\x1b[0m")
+                    row(y + 1)
                 }
-                print(line + "\x1b[0m")
-                y = y + 1
             }
+            row(0)
         } else {
-            let y = 0
-            while y < self.rows {
-                let line = ""
-                let x = 0
-                while x < self.cols {
-                    line = line + self.cells[y * self.cols + x]
-                    x = x + 1
+            let* row = |y| {
+                if y < self.rows {
+                    let line = ""
+                    let* col = |x| {
+                        if x < self.cols {
+                            line = line + self.cells[y * self.cols + x]
+                            col(x + 1)
+                        }
+                    }
+                    col(0)
+                    print(line)
+                    row(y + 1)
                 }
-                print(line)
-                y = y + 1
             }
+            row(0)
         }
     }
 }
@@ -892,7 +946,6 @@ let Term = {
     clipW: 0
     clipH: 0
 }
-
 
 mod ui {
     export K_BOX = K_BOX

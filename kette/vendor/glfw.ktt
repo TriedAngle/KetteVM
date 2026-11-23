@@ -1,7 +1,6 @@
 use ffi
-use os
-let (void, i32, f64, CString) = ffi
-let Ptr = ffi.pointer(void)
+use sys
+let (Ptr, void, i32, f64, CString) = ffi
 let KEY_ESCAPE = 256
 let PRESS = 1
 let RELEASE = 0
@@ -23,57 +22,57 @@ let Action = {
     REPEAT: REPEAT,
 }
 
-let glfw_path = if os.name == "macos" {
-        "/opt/homebrew/lib/libglfw.dylib"
-    } else if os.name == "windows" {
-        "glfw3.dll"
-    } else {
-        "libglfw.so.3"
-    }
+let glfw_path = if sys.name == "macos" {
+    "libglfw.dylib"
+} else if sys.name == "windows" {
+    "glfw3.dll"
+} else {
+    "libglfw.so.3"
+}
 
-let lib = ffi.library(glfw_path)
+let lib = sys.lib(glfw_path)
 
-let glfwGetCocoaWindow = if os.name == "macos" {
-        lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
-    } else {
-        null
-    }
+let glfwGetCocoaWindow = if sys.name == "macos" {
+    lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
+} else {
+    null
+}
 
-let glfwGetX11Display = if os.name == "linux" {
-        lib.fn("glfwGetX11Display", [], Ptr)
-    } else {
-        null
-    }
+let glfwGetX11Display = if sys.name == "linux" {
+    lib.fn("glfwGetX11Display", [], Ptr)
+} else {
+    null
+}
 
-let glfwGetX11Window = if os.name == "linux" {
-        lib.fn("glfwGetX11Window", [Ptr], Ptr)
-    } else {
-        null
-    }
+let glfwGetX11Window = if sys.name == "linux" {
+    lib.fn("glfwGetX11Window", [Ptr], Ptr)
+} else {
+    null
+}
 
-let glfwGetWin32Window = if os.name == "windows" {
-        lib.fn("glfwGetWin32Window", [Ptr], Ptr)
-    } else {
-        null
-    }
+let glfwGetWin32Window = if sys.name == "windows" {
+    lib.fn("glfwGetWin32Window", [Ptr], Ptr)
+} else {
+    null
+}
 
-let objc = if os.name == "macos" {
-        ffi.library("/usr/lib/libobjc.A.dylib")
-    } else {
-        null
-    }
+let objc = if sys.name == "macos" {
+    ffi.library("/usr/lib/libobjc.A.dylib")
+} else {
+    null
+}
 
-let sel_registerName = if os.name == "macos" {
-        objc.fn("sel_registerName", [CString], Ptr)
-    } else {
-        null
-    }
+let sel_registerName = if sys.name == "macos" {
+    objc.fn("sel_registerName", [CString], Ptr)
+} else {
+    null
+}
 
-let objc_msgSend = if os.name == "macos" {
-        objc.fn("objc_msgSend", [Ptr, Ptr], Ptr)
-    } else {
-        null
-    }
+let objc_msgSend = if sys.name == "macos" {
+    objc.fn("objc_msgSend", [Ptr, Ptr], Ptr)
+} else {
+    null
+}
 
 let raw = {
     lib: lib,
@@ -151,10 +150,10 @@ let WindowTraits = {
 
         raw.default_window_hints()
         let client_api = if options.clientApi == null {
-                ClientApi.OPENGL
-            } else {
-                options.clientApi
-            }
+            ClientApi.OPENGL
+        } else {
+            options.clientApi
+        }
         if client_api == ClientApi.NONE {
             raw.window_hint(CLIENT_API, NO_API)
         }
@@ -300,17 +299,17 @@ let WindowTraits = {
             throw "vendor.tgpu is not loaded"
         }
         let result = tgpu.Window.new()
-        if os.name == "macos" {
+        if sys.name == "macos" {
             result.kind = tgpu.WindowKind.APP_KIT
             let ns_window = raw.glfwGetCocoaWindow(self.handle)
             // [ns_window contentView]
             let view = raw.objc_msgSend(ns_window, raw.sel_registerName("contentView"))
             result.window = view
-        } else if os.name == "linux" {
+        } else if sys.name == "linux" {
             result.kind = tgpu.WindowKind.XLIB
             result.display = raw.glfwGetX11Display()
             result.window = raw.glfwGetX11Window(self.handle)
-        } else if os.name == "windows" {
+        } else if sys.name == "windows" {
             result.kind = tgpu.WindowKind.WIN32
             result.window = raw.glfwGetWin32Window(self.handle)
         }

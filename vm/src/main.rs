@@ -1,3 +1,4 @@
+use kette_runtime::process::split_arguments;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::{io::Write, path::Path};
 use vm::{
@@ -40,7 +41,9 @@ fn main() {
     trace::init();
     let mut files = Vec::new();
     let mut repl_language = None;
-    let mut args = std::env::args().skip(1).peekable();
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let (vm_arguments, _program_arguments) = split_arguments(&all);
+    let mut args = vm_arguments.iter().cloned().peekable();
     while let Some(arg) = args.next() {
         if arg == "--repl" {
             let language = args.peek().and_then(|next| Language::parse(next));
@@ -100,13 +103,17 @@ fn main() {
     for (language, paths) in batches {
         run_batch(&mut thread, language, &paths);
         if thread.vm().is_shutdown() {
-            return;
+            break;
         }
     }
     if let Some(language) = repl_language
         && !thread.vm().is_shutdown()
     {
         repl(&mut thread, language);
+    }
+    let code = thread.vm().exit_code();
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 
@@ -143,12 +150,18 @@ fn run_batch(thread: &mut Thread, language: Language, paths: &[String]) {
 fn run_with<C: Compiler>(thread: &mut Thread, src: &str, path: &str) {
     match thread.eval_file::<C>(src) {
         Ok(_) => {
+            if thread.vm().is_shutdown() {
+                return;
+            }
             if report_uncaught(thread) {
                 eprintln!("{path}: uncaught exception");
                 std::process::exit(1);
             }
         }
         Err(ScriptError::Vm(_)) => {
+            if thread.vm().is_shutdown() {
+                return;
+            }
             report_uncaught(thread);
             eprintln!("{path}: uncaught exception");
             std::process::exit(1);

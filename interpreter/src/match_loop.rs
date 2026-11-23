@@ -29,12 +29,12 @@ use crate::{
     match_op_store_global, match_op_store_in_array_literal, match_op_store_indexed,
     match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
     match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
-    match_op_sub_immediate, match_op_sub_loc, match_op_test_reference_equal, match_op_test_typeof,
-    match_op_throw, match_op_throw_reference_error_if_hole, slow::match_slow_construct,
-    utils::CallFault, utils::ConstructStart, utils::StagedCall, utils::bound_apply_staged,
-    utils::call_native_target, utils::call_scatter_start, utils::call_window_start,
-    utils::construct_native, utils::construct_start, utils::proxy_apply_staged, utils::raise_fault,
-    utils::resolve_target,
+    match_op_sub_immediate, match_op_sub_loc, match_op_tail_guard, match_op_test_reference_equal,
+    match_op_test_typeof, match_op_throw, match_op_throw_reference_error_if_hole,
+    slow::match_slow_construct, utils::CallFault, utils::ConstructStart, utils::StagedCall,
+    utils::bound_apply_staged, utils::call_native_target, utils::call_scatter_start,
+    utils::call_window_start, utils::construct_native, utils::construct_start,
+    utils::proxy_apply_staged, utils::raise_fault, utils::resolve_target,
 };
 use bytecode::Opcode;
 use vm_core::{
@@ -383,6 +383,7 @@ fn step<'h, const STRIDE: usize>(
         Opcode::LoadNull => match_op_load_null::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadTrue => match_op_load_true::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadFalse => match_op_load_false::<STRIDE>(*ip, *regs, acc, ctx, roots),
+        Opcode::TailGuard => match_op_tail_guard::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::LoadGlobal => match_op_load_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Sub => match_op_sub::<STRIDE>(*ip, *regs, acc, ctx, roots),
         Opcode::Mul => match_op_mul::<STRIDE>(*ip, *regs, acc, ctx, roots),

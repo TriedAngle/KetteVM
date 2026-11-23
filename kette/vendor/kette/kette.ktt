@@ -1,0 +1,263 @@
+use collection.traits { Collection }
+use ffi
+use sys
+
+let name = if sys.name == "macos" {
+    "libkette.dylib"
+} else if sys.name == "windows" {
+    "kette.dll"
+} else {
+    "libkette.so"
+}
+
+let lib = sys.lib(name)
+let Ptr = ffi.Ptr
+let u8 = ffi.u8
+let u16 = ffi.u16
+let u32 = ffi.u32
+let u64 = ffi.u64
+
+let TOKEN_BIT = 2147483648
+let NO_NODE = 4294967295
+
+let raw = {
+    parse: lib.fn("kette_parse", [ffi.CString], Ptr),
+    parseFile: lib.fn("kette_parse_file", [ffi.CString], Ptr),
+    free: lib.fn("kette_tree_free", [Ptr], ffi.void),
+    sourcePtr: lib.fn("kette_tree_source_ptr", [Ptr], Ptr),
+    sourceLen: lib.fn("kette_tree_source_len", [Ptr], u64),
+    root: lib.fn("kette_tree_root", [Ptr], u32),
+    nodeCount: lib.fn("kette_tree_node_count", [Ptr], u32),
+    tokenCount: lib.fn("kette_tree_token_count", [Ptr], u32),
+    errorCount: lib.fn("kette_tree_error_count", [Ptr], u32),
+    errorStart: lib.fn("kette_error_start", [Ptr, u32], u32),
+    errorEnd: lib.fn("kette_error_end", [Ptr, u32], u32),
+    errorMessagePtr: lib.fn("kette_error_message_ptr", [Ptr, u32], Ptr),
+    errorMessageLen: lib.fn("kette_error_message_len", [Ptr, u32], u64),
+    nodeKind: lib.fn("kette_node_kind", [Ptr, u32], u16),
+    nodeStart: lib.fn("kette_node_start", [Ptr, u32], u32),
+    nodeEnd: lib.fn("kette_node_end", [Ptr, u32], u32),
+    nodeParent: lib.fn("kette_node_parent", [Ptr, u32], u32),
+    nodeChildCount: lib.fn("kette_node_child_count", [Ptr, u32], u32),
+    nodeChild: lib.fn("kette_node_child", [Ptr, u32, u32], u32),
+    nodeTextPtr: lib.fn("kette_node_text_ptr", [Ptr, u32], Ptr),
+    nodeTextLen: lib.fn("kette_node_text_len", [Ptr, u32], u64),
+    tokenKind: lib.fn("kette_token_kind", [Ptr, u32], u16),
+    tokenStart: lib.fn("kette_token_start", [Ptr, u32], u32),
+    tokenEnd: lib.fn("kette_token_end", [Ptr, u32], u32),
+    tokenParent: lib.fn("kette_token_parent", [Ptr, u32], u32),
+    tokenTextPtr: lib.fn("kette_token_text_ptr", [Ptr, u32], Ptr),
+    tokenTextLen: lib.fn("kette_token_text_len", [Ptr, u32], u64),
+    kindCount: lib.fn("kette_kind_count", [], u32),
+    kindAt: lib.fn("kette_kind_at", [u32], u16),
+    kindNamePtr: lib.fn("kette_kind_name_ptr", [u16], Ptr),
+    kindNameLen: lib.fn("kette_kind_name_len", [u16], u64),
+    kindIsTrivia: lib.fn("kette_kind_is_trivia", [u16], u8),
+}
+
+let kindName = |kind| {
+    ffi.string(raw.kindNamePtr(kind), raw.kindNameLen(kind))
+}
+
+let TRIVIA = []
+let triviaCount = raw.kindCount()
+let* trivia = |kind| {
+    if kind < triviaCount {
+        if raw.kindIsTrivia(kind) == 1 {
+            TRIVIA[kind] = true
+        }
+        trivia(kind + 1)
+    }
+}
+trivia(0)
+
+let isTrivia = |kind| {
+    TRIVIA[kind] == true
+}
+
+let Token = {
+    tree: null
+    index: 0
+
+    kind>>: { self.tree.tokenKind(self.index) }
+    text>>: { self.tree.tokenText(self.index) }
+    start>>: { self.tree.tokenStart(self.index) }
+    end>>: { self.tree.tokenEnd(self.index) }
+    parentId>>: { self.tree.tokenParent(self.index) }
+    parent>>: { self.tree.nodeKind(self.parentId) }
+    isTrivia>>: { isTrivia(self.kind) }
+}
+
+let Tokens = {
+    collection*: Collection
+
+    tree: null
+    start: 0
+    end: 0
+    version: 0
+
+    size: { self.end - self.start }
+    tokenAt: |index| {
+        let token = Token.clone()
+        token.tree = self.tree
+        token.index = index
+        token
+    }
+    get: |index| { self.tokenAt(self.start + index) }
+    forEach: |block| {
+        let* visit = |index| {
+            if index < self.end {
+                block(self.tokenAt(index))
+                visit(index + 1)
+            }
+        }
+        visit(self.start)
+        self
+    }
+    firstWhere: |predicate| {
+        let* visit = |index| {
+            if index < self.end {
+                let token = self.tokenAt(index)
+                if predicate(token) {
+                    return token
+                }
+                visit(index + 1)
+            } else {
+                null
+            }
+        }
+        visit(self.start)
+    }
+}
+
+let Tree = {
+    ptr: null
+
+    root>>: { raw.root(self.ptr) }
+    source>>: { ffi.string(raw.sourcePtr(self.ptr), raw.sourceLen(self.ptr)) }
+    nodeCount>>: { raw.nodeCount(self.ptr) }
+    tokenCount>>: { raw.tokenCount(self.ptr) }
+    errorCount>>: { raw.errorCount(self.ptr) }
+
+    nodeKind: |node| { raw.nodeKind(self.ptr, node) }
+    nodeStart: |node| { raw.nodeStart(self.ptr, node) }
+    nodeEnd: |node| { raw.nodeEnd(self.ptr, node) }
+    nodeParent: |node| { raw.nodeParent(self.ptr, node) }
+    nodeChildCount: |node| { raw.nodeChildCount(self.ptr, node) }
+    nodeChild: |node, index| { raw.nodeChild(self.ptr, node, index) }
+    nodeText: |node| {
+        ffi.string(raw.nodeTextPtr(self.ptr, node), raw.nodeTextLen(self.ptr, node))
+    }
+
+    tokenKind: |token| { raw.tokenKind(self.ptr, token) }
+    tokenStart: |token| { raw.tokenStart(self.ptr, token) }
+    tokenEnd: |token| { raw.tokenEnd(self.ptr, token) }
+    tokenParent: |token| { raw.tokenParent(self.ptr, token) }
+    tokenText: |token| {
+        ffi.string(raw.tokenTextPtr(self.ptr, token), raw.tokenTextLen(self.ptr, token))
+    }
+
+    tokens>>: {
+        let tokens = Tokens.clone()
+        tokens.tree = self
+        tokens.start = 0
+        tokens.end = self.tokenCount
+        tokens
+    }
+    tokensFrom: |start| {
+        let tokens = Tokens.clone()
+        tokens.tree = self
+        tokens.start = start
+        tokens.end = self.tokenCount
+        tokens
+    }
+
+    errorStart: |index| { raw.errorStart(self.ptr, index) }
+    errorEnd: |index| { raw.errorEnd(self.ptr, index) }
+    errorMessage: |index| {
+        ffi.string(raw.errorMessagePtr(self.ptr, index), raw.errorMessageLen(self.ptr, index))
+    }
+
+    dispose: {
+        if !ffi.isNull(self.ptr) {
+            raw.free(self.ptr)
+            self.ptr = null
+        }
+    }
+}
+
+let isTokenChild = |child| {
+    child >= TOKEN_BIT
+}
+let childId = |child| {
+    if child >= TOKEN_BIT {
+        return child - TOKEN_BIT
+    }
+    child
+}
+
+let range = |from, to| {
+    {
+        iterator: {
+            let value = from
+            {
+                hasNext: { value < to }
+                next: {
+                    let current = value
+                    value = value + 1
+                    current
+                }
+            }
+        }
+    }
+}
+
+let tokenIndices = |tree, from| {
+    let start = if from == null { 0 } else { from }
+    range(start, tree.tokenCount)
+}
+
+let K = {}
+let kindCount = raw.kindCount()
+let* buildKinds = |index| {
+    if index < kindCount {
+        let kind = raw.kindAt(index)
+        K[kindName(kind)] = kind
+        buildKinds(index + 1)
+    }
+}
+buildKinds(0)
+
+let parse = |source| {
+    let ptr = raw.parse(source)
+    if ffi.isNull(ptr) {
+        throw "kette: cannot parse source"
+    }
+    let tree = Tree.clone()
+    tree.ptr = ptr
+    tree
+}
+
+let parseFile = |path| {
+    let ptr = raw.parseFile(path)
+    if ffi.isNull(ptr) {
+        throw "kette: cannot read or parse " + path
+    }
+    let tree = Tree.clone()
+    tree.ptr = ptr
+    tree
+}
+
+mod kette {
+    export TOKEN_BIT = TOKEN_BIT
+    export NO_NODE = NO_NODE
+    export K = K
+    export kindName = kindName
+    export isTrivia = isTrivia
+    export isTokenChild = isTokenChild
+    export childId = childId
+    export range = range
+    export tokenIndices = tokenIndices
+    export parse = parse
+    export parseFile = parseFile
+}

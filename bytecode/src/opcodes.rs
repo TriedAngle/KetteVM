@@ -252,6 +252,8 @@ define_opcodes! {
     // for methods the `self` is the first element in the reglist
     Call { operands: [Register, RegisterListStart, RegisterCount, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, Feedback] }, // reg (callee) reglist (base) regcount (count) idx (feedback) -> acc
     CallNoFeedback { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] },
+    /// Write whether the register holds the current frame's callable.
+    TailGuard { operands: [Register], acc: writes, indices: [Unchecked] },
     CallNative { operands: [Index, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // idx (native function index) reglist (base) regcount (count) -> acc
 
     Construct { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // reg (callee) reglist (base) regcount (count) -> acc (constructed object)

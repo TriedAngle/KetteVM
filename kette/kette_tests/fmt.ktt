@@ -1,0 +1,25 @@
+KetteTools.evalFile("kette/vendor/kette/kette.ktt")
+KetteTools.evalFile("kette/vendor/kette/fmt.ktt")
+
+use kette.fmt
+
+let check = |source, expected| {
+    let actual = fmt.formatSource(source)
+    Test.assert(actual, expected)
+    Test.assert(fmt.formatSource(actual), actual)
+}
+
+check("let x=1\n", "let x = 1\n")
+check("let x={a:1,b:2}\n", "let x = { a: 1, b: 2 }\n")
+check("let x={\na:1\n}\n", "let x = {\n    a: 1\n}\n")
+check("if flag{\nlet x=1\n}\n", "if flag {\n    let x = 1\n}\n")
+check("let f=|a,b|{a+b}\n", "let f = |a, b| { a + b }\n")
+check("let g=||{1}\n", "let g = || { 1 }\n")
+check("let* f=|n|{f(n-1)}\n", "let* f = |n| { f(n - 1) }\n")
+check("let x=1// note\n// leading\nlet y=2\n", "let x = 1 // note\n// leading\nlet y = 2\n")
+check("{\nx*:p\ny>>:{v}\n}\n", "{\n    x*: p\n    y>>: { v }\n}\n")
+check("let y=a-b\nlet z=-a\nlet w=!a\n", "let y = a - b\nlet z = -a\nlet w = !a\n")
+check("use a.b{x,y}\nmod m{\nexport z=1\n}\n", "use a.b { x, y }\nmod m {\n    export z = 1\n}\n")
+check("let x=1\n\n\nlet y=2\n", "let x = 1\n\nlet y = 2\n")
+check("let x = 1   \n", "let x = 1\n")
+check("", "")

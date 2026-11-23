@@ -9,7 +9,7 @@ let FFI = Modules.ffi
 use sys
 use vendor.glfw
 use vendor.tgpu
-let Ptr = FFI.pointer(FFI.void)
+let Ptr = FFI.Ptr
 
 let PARTICLE_COUNT = 10000
 let FLOATS_PER_PARTICLE = 8

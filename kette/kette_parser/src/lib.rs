@@ -307,7 +307,7 @@ impl<'a> Parser<'a> {
             self.parse_mod()?;
             return Ok(());
         }
-        if token.kind == Let {
+        if token.kind == Let || token.kind == LetStar {
             self.parse_let()?;
             return Ok(());
         }
@@ -331,7 +331,11 @@ impl<'a> Parser<'a> {
 
     fn parse_let(&mut self) -> Result<NodeId, ()> {
         self.start(LetStmt);
-        self.expect(Let)?;
+        if self.peek().kind == LetStar {
+            self.bump();
+        } else {
+            self.expect(Let)?;
+        }
         self.parse_pattern()?;
         self.expect(Assign)?;
         self.parse_expression()?;
@@ -791,7 +795,7 @@ impl<'a> Parser<'a> {
 
     fn parse_object_entry(&mut self) -> Result<bool, ()> {
         let token = self.peek();
-        if token.kind == Let {
+        if token.kind == Let || token.kind == LetStar {
             self.parse_let()?;
             return Ok(false);
         }

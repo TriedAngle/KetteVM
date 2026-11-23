@@ -197,6 +197,7 @@ fn materialize_function<'s>(
             handlers,
             expected_slots: function.expected_slots as usize,
             mode: mode_from_strict(function.strict),
+            tail_callable: function.tail_callable,
         },
         scope,
     );

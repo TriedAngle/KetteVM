@@ -9,13 +9,14 @@ let Functional = {
             if count == null {
                 count = functions.size()
             }
-            let i = count - 1
-            let result = x
-            while i >= 0 {
-                result = functions[i](result)
-                i = i - 1
+            let* visit = |i, result| {
+                if i >= 0 {
+                    visit(i - 1, functions[i](result))
+                } else {
+                    result
+                }
             }
-            result
+            visit(count - 1, x)
         }
     }
     pipeAll: |functions| {
@@ -24,13 +25,14 @@ let Functional = {
             if count == null {
                 count = functions.size()
             }
-            let i = 0
-            let result = x
-            while i < count {
-                result = functions[i](result)
-                i = i + 1
+            let* visit = |i, result| {
+                if i < count {
+                    visit(i + 1, functions[i](result))
+                } else {
+                    result
+                }
             }
-            result
+            visit(0, x)
         }
     }
     flip: |f| { |a, b| { f(b, a) } }

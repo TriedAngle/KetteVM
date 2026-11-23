@@ -30,6 +30,8 @@ pub struct CallableInfoObject {
     /// function's own body. Seeds the constructor slack preallocation.
     pub expected_slots: GcSlot<Smi>,
     pub kind: GcSlot<Smi>,
+    /// Whether a self tail call may reuse this callable's frame.
+    pub tail_callable: GcSlot<Smi>,
 }
 
 #[repr(i64)]
@@ -106,6 +108,7 @@ pub enum CallableInfoInit<'a> {
         handlers: Option<Handle<'a, HandlerTable>>,
         expected_slots: usize,
         mode: u8,
+        tail_callable: bool,
     },
     /// A native function backed by the VM's NativeRegistry.
     Native { index: NativeIndex, mode: u8 },
@@ -131,6 +134,7 @@ impl HeapObject for CallableInfoObject {
                 handlers,
                 expected_slots,
                 mode,
+                tail_callable,
             } => {
                 self.function_data
                     .set(heap, host, code.as_tagged(heap).erase());
@@ -146,6 +150,8 @@ impl HeapObject for CallableInfoObject {
                 self.expected_slots
                     .set(heap, host, Smi::new(*expected_slots as i64));
                 self.mode.set(heap, host, Smi::new(*mode as i64));
+                self.tail_callable
+                    .set(heap, host, Smi::new(*tail_callable as i64));
             }
             CallableInfoInit::Native { index, mode } => {
                 self.function_data
@@ -156,6 +162,7 @@ impl HeapObject for CallableInfoObject {
                 self.handlers.clear(heap);
                 self.expected_slots.set(heap, host, Smi::new(0));
                 self.mode.set(heap, host, Smi::new(*mode as i64));
+                self.tail_callable.set(heap, host, Smi::new(0));
             }
         }
         self.feedback.clear(heap);
@@ -220,6 +227,10 @@ impl CallableInfoObject {
     }
 
     #[inline(always)]
+    pub fn tail_callable(&self) -> bool {
+        self.tail_callable.to_smi_unchecked().value() != 0
+    }
+
     pub fn mode(&self) -> LanguageMode {
         LanguageMode::from_mode(self.mode.to_smi_unchecked().value() as u8)
     }

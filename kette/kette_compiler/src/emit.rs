@@ -54,6 +54,13 @@ struct LoopCtx {
     result: Reg,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TailMode {
+    None,
+    Guard,
+    Loop,
+}
+
 struct FunctionGen<'a> {
     tree: &'a Tree,
     resolved: &'a Resolved,
@@ -67,6 +74,8 @@ struct FunctionGen<'a> {
     ctx_save: Reg,
     completion: Reg,
     loops: Vec<LoopCtx>,
+    try_depth: u32,
+    loop_label: Option<Label>,
 }
 
 impl<'a> FunctionGen<'a> {
@@ -102,18 +111,27 @@ impl<'a> FunctionGen<'a> {
             ctx_save,
             completion,
             loops: Vec::new(),
+            try_depth: 0,
+            loop_label: None,
         }
     }
 
     fn finish(self) -> Function {
-        self.b
+        let tail_callable = matches!(self.frame.kind, FrameKind::Object(_))
+            && !self.frame.creates_context
+            && self.frame.context_slots == 0
+            && self.frame.rest.is_none();
+        let mut function = self
+            .b
             .finish(FunctionMeta {
                 name: None,
                 kind: CallableKind::Method,
                 length: self.frame.params.len() as u32,
                 strict: true,
             })
-            .expect("kette function builder invariants")
+            .expect("kette function builder invariants");
+        function.tail_callable = tail_callable;
+        function
     }
 
     fn err<T>(&self, range: TextRange, message: impl Into<String>) -> Result<T, CompileError> {
@@ -261,6 +279,11 @@ impl<'a> FunctionGen<'a> {
 
     fn generate(mut self) -> Result<Function, CompileError> {
         self.prologue()?;
+        if self.tail_callable() {
+            let label = self.b.new_label();
+            self.b.bind(label);
+            self.loop_label = Some(label);
+        }
         match self.frame.kind {
             FrameKind::Script => {
                 let script = self.tree.script();
@@ -269,7 +292,8 @@ impl<'a> FunctionGen<'a> {
             FrameKind::Object(node) => {
                 let object = Object::cast(SyntaxNode::new(self.tree, node))
                     .expect("object frame points at an Object");
-                self.object_body(object, self.completion)?;
+                let tail = self.tail_callable();
+                self.object_body(object, self.completion, tail)?;
             }
             FrameKind::Module(node) => {
                 let module = kette_syntax::ast::ModDecl::cast(SyntaxNode::new(self.tree, node))
@@ -400,8 +424,15 @@ impl<'a> FunctionGen<'a> {
         }
     }
 
-    fn object_body(&mut self, object: Object<'a>, sink: Reg) -> Result<(), CompileError> {
-        for entry in object.entries() {
+    fn object_body(
+        &mut self,
+        object: Object<'a>,
+        sink: Reg,
+        tail: bool,
+    ) -> Result<(), CompileError> {
+        let entries: Vec<_> = object.entries().collect();
+        let last = entries.len().saturating_sub(1);
+        for (index, entry) in entries.into_iter().enumerate() {
             if !self.b.is_live() {
                 break;
             }
@@ -411,7 +442,13 @@ impl<'a> FunctionGen<'a> {
                 ObjectEntry::Export(export) => self.export(export)?,
                 ObjectEntry::Expr(statement) => {
                     if let Some(expr) = statement.expr() {
-                        self.expr(expr)?;
+                        let mut tailed = false;
+                        if tail && index == last && self.try_depth == 0 {
+                            tailed = self.tail_expr(expr)?;
+                        }
+                        if !tailed {
+                            self.expr(expr)?;
+                        }
                         if self.b.is_live() {
                             self.b.store(sink);
                         }
@@ -420,6 +457,92 @@ impl<'a> FunctionGen<'a> {
             }
         }
         Ok(())
+    }
+
+    fn tail_callable(&self) -> bool {
+        matches!(self.frame.kind, FrameKind::Object(_))
+            && !self.frame.creates_context
+            && self.frame.context_slots == 0
+            && self.frame.rest.is_none()
+    }
+
+    fn tail_expr(&mut self, expr: Expr<'a>) -> Result<bool, CompileError> {
+        match expr {
+            Expr::Call(call) => {
+                self.call_expr(call, true)?;
+                Ok(true)
+            }
+            Expr::Send(send) => {
+                self.send_expr(send, true)?;
+                Ok(true)
+            }
+            Expr::If(expr) => {
+                self.if_expr(expr, true)?;
+                Ok(true)
+            }
+            Expr::Paren(paren) => {
+                let Some(inner) = paren.expr() else {
+                    return Ok(false);
+                };
+                self.tail_expr(inner)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn tail_mode_call(&self, callee: Option<Expr<'a>>, argc: usize) -> TailMode {
+        if argc != self.frame.params.len() {
+            return TailMode::None;
+        }
+        match callee {
+            Some(Expr::Atom(atom)) => {
+                let Some(token) = atom.token() else {
+                    return TailMode::None;
+                };
+                if token.kind() == SyntaxKind::SelfContext {
+                    return TailMode::Loop;
+                }
+                let Some(resolution) = self.resolved.resolution(atom.syntax().id()) else {
+                    return TailMode::None;
+                };
+                let binding = match resolution {
+                    Resolution::Local(binding) | Resolution::Upvar(binding) => binding,
+                    Resolution::Global => return TailMode::None,
+                };
+                if self.frame.recursive_binding != Some(binding) {
+                    return TailMode::None;
+                }
+                let binding = self.resolved.binding(binding);
+                if binding.assigned || binding.in_loop {
+                    TailMode::Guard
+                } else {
+                    TailMode::Loop
+                }
+            }
+            Some(Expr::Paren(paren)) => paren.expr().map_or(TailMode::None, |inner| {
+                self.tail_mode_call(Some(inner), argc)
+            }),
+            _ => TailMode::None,
+        }
+    }
+
+    fn tail_mode_send(&self, receiver: Option<Expr<'a>>, argc: usize) -> TailMode {
+        if argc != self.frame.params.len() {
+            return TailMode::None;
+        }
+        match receiver {
+            Some(Expr::Atom(atom))
+                if atom
+                    .token()
+                    .is_some_and(|token| token.kind() == SyntaxKind::SelfKw) =>
+            {
+                TailMode::Guard
+            }
+            Some(Expr::Paren(paren)) => paren.expr().map_or(TailMode::None, |inner| {
+                self.tail_mode_send(Some(inner), argc)
+            }),
+            _ => TailMode::None,
+        }
     }
 
     fn let_statement(&mut self, statement: LetStmt<'a>) -> Result<(), CompileError> {
@@ -433,6 +556,15 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn inline_body(&mut self, object: Object<'a>, sink: Reg) -> Result<(), CompileError> {
+        self.inline_body_with(object, sink, false)
+    }
+
+    fn inline_body_with(
+        &mut self,
+        object: Object<'a>,
+        sink: Reg,
+        tail: bool,
+    ) -> Result<(), CompileError> {
         if object.params().is_some() {
             return self.err_node(
                 object.syntax().id(),
@@ -442,7 +574,7 @@ impl<'a> FunctionGen<'a> {
         if object.has_slots() {
             return self.err_node(object.syntax().id(), "slots in a control body");
         }
-        self.object_body(object, sink)
+        self.object_body(object, sink, tail)
     }
 
     fn expr(&mut self, expr: Expr<'a>) -> Result<(), CompileError> {
@@ -472,14 +604,21 @@ impl<'a> FunctionGen<'a> {
                 self.b.load(array);
                 Ok(())
             }
-            Expr::If(expr) => self.if_expr(expr),
+            Expr::If(expr) => self.if_expr(expr, false),
             Expr::While(expr) => self.while_expr(expr),
             Expr::For(expr) => self.for_expr(expr),
             Expr::Try(expr) => self.try_expr(expr),
             Expr::Throw(expr) => self.throw_expr(expr),
             Expr::Return(statement) => {
+                let tail = self.try_depth == 0 && self.tail_callable();
+                let mut tailed = false;
                 if let Some(value) = statement.value() {
-                    self.expr(value)?;
+                    if tail {
+                        tailed = self.tail_expr(value)?;
+                    }
+                    if !tailed {
+                        self.expr(value)?;
+                    }
                 } else {
                     self.b.load_null();
                 }
@@ -507,8 +646,8 @@ impl<'a> FunctionGen<'a> {
             Expr::Assign(expr) => self.assign_expr(expr),
             Expr::Get(expr) => self.get_expr(expr),
             Expr::Index(expr) => self.index_expr(expr),
-            Expr::Send(expr) => self.send_expr(expr),
-            Expr::Call(expr) => self.call_expr(expr),
+            Expr::Send(expr) => self.send_expr(expr, false),
+            Expr::Call(expr) => self.call_expr(expr, false),
         }
     }
 
@@ -599,7 +738,7 @@ impl<'a> FunctionGen<'a> {
         Ok(())
     }
 
-    fn send_expr(&mut self, expr: SendExpr<'a>) -> Result<(), CompileError> {
+    fn send_expr(&mut self, expr: SendExpr<'a>, tail: bool) -> Result<(), CompileError> {
         let Some(receiver) = expr.receiver() else {
             return self.err_node(expr.syntax().id(), "missing receiver");
         };
@@ -610,6 +749,11 @@ impl<'a> FunctionGen<'a> {
             return self.err_node(expr.syntax().id(), "missing arguments");
         };
         let args: Vec<_> = args.args().collect();
+        let mode = if tail {
+            self.tail_mode_send(Some(receiver), args.len())
+        } else {
+            TailMode::None
+        };
         let temps = self.b.temp_scope();
         self.expr(receiver)?;
         let receiver = self.b.stage_acc(&temps);
@@ -617,10 +761,13 @@ impl<'a> FunctionGen<'a> {
         let feedback = self.b.new_feedback();
         self.b.load_named_property(receiver, name, feedback);
         let callee = self.b.stage_acc(&temps);
+        if mode == TailMode::Guard {
+            return self.guarded_tail_args(&temps, callee, receiver, &args, false);
+        }
         self.call_args(&temps, callee, Some(receiver), &args)
     }
 
-    fn call_expr(&mut self, expr: CallExpr<'a>) -> Result<(), CompileError> {
+    fn call_expr(&mut self, expr: CallExpr<'a>, tail: bool) -> Result<(), CompileError> {
         let Some(receiver) = expr.receiver() else {
             return self.err_node(expr.syntax().id(), "missing callee");
         };
@@ -628,9 +775,20 @@ impl<'a> FunctionGen<'a> {
             return self.err_node(expr.syntax().id(), "missing arguments");
         };
         let args: Vec<_> = args.args().collect();
+        let mode = if tail {
+            self.tail_mode_call(Some(receiver), args.len())
+        } else {
+            TailMode::None
+        };
         let temps = self.b.temp_scope();
+        if mode == TailMode::Loop {
+            return self.tail_loop_args(&temps, &args, true);
+        }
         self.expr(receiver)?;
         let callee = self.b.stage_acc(&temps);
+        if mode == TailMode::Guard {
+            return self.guarded_tail_args(&temps, callee, callee, &args, true);
+        }
         self.call_args(&temps, callee, None, &args)
     }
 
@@ -675,6 +833,77 @@ impl<'a> FunctionGen<'a> {
             }
         }
         Ok(())
+    }
+
+    fn tail_loop_args(
+        &mut self,
+        temps: &TempScope,
+        args: &[Expr<'a>],
+        rebind_self: bool,
+    ) -> Result<(), CompileError> {
+        let Some(label) = self.loop_label else {
+            return self.err_node(self.tree.root_id(), "tail loop outside a loop frame");
+        };
+        debug_assert_eq!(args.len(), self.frame.params.len());
+        let count = args.len();
+        let mut params = Vec::with_capacity(count);
+        for &binding in &self.frame.params {
+            let Location::Reg(reg) = self.plan.location(binding) else {
+                return self.err_node(
+                    self.tree.root_id(),
+                    "tail loop parameter is not in a register",
+                );
+            };
+            params.push(reg);
+        }
+        let staged = count.saturating_sub(1);
+        let base = temps.reserve(staged as u32);
+        for (index, arg) in args.iter().enumerate() {
+            self.expr(*arg)?;
+            if index == staged {
+                self.b.store(params[index]);
+            } else {
+                self.b.store(Reg::new(base.index() + index as i32));
+            }
+        }
+        for index in 0..staged {
+            self.b
+                .move_reg(params[index], Reg::new(base.index() + index as i32));
+        }
+        if rebind_self && let Some(binding) = self.frame.self_binding {
+            self.b.load_current_closure();
+            self.store_binding(binding)?;
+        }
+        self.b.jump_loop(label);
+        Ok(())
+    }
+
+    fn guarded_tail_args(
+        &mut self,
+        temps: &TempScope,
+        callee: Reg,
+        receiver: Reg,
+        args: &[Expr<'a>],
+        rebind_self: bool,
+    ) -> Result<(), CompileError> {
+        if self.loop_label.is_none() {
+            return self.err_node(
+                self.tree.root_id(),
+                "guarded tail call outside a loop frame",
+            );
+        }
+        debug_assert_eq!(args.len(), self.frame.params.len());
+        self.b.tail_guard(callee);
+        let slow = self.b.new_label();
+        self.b.jump_if_falsy(slow);
+        self.tail_loop_args(temps, args, rebind_self)?;
+        self.b.bind(slow);
+        let mut arg_regs = Vec::with_capacity(args.len());
+        for arg in args {
+            self.expr(*arg)?;
+            arg_regs.push(self.b.stage_acc(temps));
+        }
+        self.call_regs(temps, callee, receiver, &arg_regs)
     }
 
     fn call_regs(
@@ -1411,7 +1640,7 @@ impl<'a> FunctionGen<'a> {
         Ok(())
     }
 
-    fn if_expr(&mut self, expr: IfExpr<'a>) -> Result<(), CompileError> {
+    fn if_expr(&mut self, expr: IfExpr<'a>, tail: bool) -> Result<(), CompileError> {
         let Some(condition) = expr.condition() else {
             return self.err_node(expr.syntax().id(), "missing condition");
         };
@@ -1426,14 +1655,20 @@ impl<'a> FunctionGen<'a> {
         let else_label = self.b.new_label();
         let end = self.b.new_label();
         self.b.jump_if_falsy(else_label);
-        self.inline_body(then_branch, result)?;
+        self.inline_body_with(then_branch, result, tail)?;
         self.b.jump(end);
         self.b.bind(else_label);
         if let Some(else_branch) = expr.else_branch() {
             match else_branch {
-                Expr::Object(object) => self.inline_body(object, result)?,
+                Expr::Object(object) => self.inline_body_with(object, result, tail)?,
                 other => {
-                    self.expr(other)?;
+                    let mut tailed = false;
+                    if tail {
+                        tailed = self.tail_expr(other)?;
+                    }
+                    if !tailed {
+                        self.expr(other)?;
+                    }
                     self.b.store(result);
                 }
             }
@@ -1534,7 +1769,9 @@ impl<'a> FunctionGen<'a> {
         let block = self.b.begin_try();
         self.b.load_undefined();
         self.b.store(result);
+        self.try_depth += 1;
         self.inline_body(body, result)?;
+        self.try_depth -= 1;
         self.b.end_try(block);
         let end = self.b.new_label();
         self.b.jump(end);
@@ -1544,7 +1781,9 @@ impl<'a> FunctionGen<'a> {
         {
             self.store_binding(binding)?;
         }
+        self.try_depth += 1;
         self.inline_body(handler, result)?;
+        self.try_depth -= 1;
         self.b.bind(end);
         self.b.load(result);
         Ok(())

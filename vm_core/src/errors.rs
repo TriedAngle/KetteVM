@@ -120,6 +120,7 @@ vm_errors! {
     StackOverflow => Range, "maximum call stack size exceeded";
     FfiError => Type, "C FFI: %";
     EvalError => Eval, "%";
+    OsError => Error, "%";
     UninitializedVariable => Reference, "cannot access variable before initialization";
     NotDefined => Reference, "'%' is not defined";
     InvalidDeclaration => Syntax, "invalid or conflicting declaration";

@@ -1,0 +1,41 @@
+use ffi
+
+let backend = globalThis.SysBackend
+let process = KetteTools.primitives.os
+let env = KetteTools.primitives.env
+
+let lib = |name| {
+    let home = if env.HOME != undefined { env.HOME } else { env.USERPROFILE }
+    if home != undefined {
+        let path = home + "/lib/" + name
+        let loaded = try {
+            ffi.library(path)
+        } catch (e) {
+            null
+        }
+        if loaded != null {
+            return loaded
+        }
+    }
+    ffi.library(name)
+}
+
+mod sys {
+    export raw = backend.raw
+    export lib = lib
+    export getcwd = backend.getcwd
+    export chdir = backend.chdir
+    export getenv = backend.getenv
+
+    export name = process.name
+    export cwd = process.cwd
+    export env = env
+    export exit = process.exit
+
+    export setCwd = |path| {
+        let cwd = process.setCwd(path)
+        process.cwd = cwd
+        Modules.sys.cwd = cwd
+        cwd
+    }
+}

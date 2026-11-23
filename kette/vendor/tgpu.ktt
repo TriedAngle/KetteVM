@@ -1,18 +1,16 @@
 use ffi
-use os
 use sys
-let (struct, void, bool, i32, u32, f32, u8, u64, CString) = ffi
-let Ptr = ffi.pointer(void)
+let (Ptr, struct, void, bool, i32, u32, f32, u8, u64, CString) = ffi
 
-let tgpu_native_path = if os.name == "macos" {
-        "/Users/sebastian/Projects/tgpu/target/release/libtgpu_native.dylib"
-    } else if os.name == "windows" {
-        "tgpu_native.dll"
-    } else {
-        "libtgpu_native.so"
-    }
+let tgpu_path = if sys.name == "macos" {
+    "libtgpu.dylib"
+} else if sys.name == "windows" {
+    "tgpu.dll"
+} else {
+    "libtgpu.so"
+}
 
-let lib = ffi.library(tgpu_native_path)
+let lib = sys.lib(tgpu_path)
 
 let pending = { error: null }
 let error_buffer = ffi.array(u8, 512).new()
@@ -277,7 +275,6 @@ let record_handle = { |value, what|
     }
     value
 }
-
 
 mod vendor.tgpu {
     export INVALID_HANDLE = invalid_handle

@@ -377,6 +377,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kette_native"
+version = "0.1.0"
+dependencies = [
+ "kette_parser",
+ "kette_syntax",
+]
+
+[[package]]
 name = "kette_parser"
 version = "0.1.0"
 dependencies = [

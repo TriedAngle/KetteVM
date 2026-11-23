@@ -48,7 +48,6 @@ def main() -> None:
     runner = here / "test_runner.ktt"
     std = [
         kette / "std" / "startup.ktt",
-        kette / "std" / "collection.ktt",
         kette / "std" / "functional.ktt",
     ]
 

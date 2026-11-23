@@ -1,0 +1,48 @@
+let backend = globalThis.SysBackend.file
+let Seek = backend.Seek
+
+let FileTraits = {
+    open: |path, mode| {
+        let file = self.clone()
+        file.inner = backend.File.open(path, mode)
+        file
+    }
+
+    temp: {
+        let file = self.clone()
+        file.inner = backend.File.temp()
+        file
+    }
+
+    tell: { self.inner.tell() }
+    size: { self.inner.size() }
+    read: |size| { self.inner.read(size) }
+    readAll: { self.inner.readAll() }
+    readText: { self.inner.readText() }
+    write: |data, size| { self.inner.write(data, size) }
+    writeText: |text| {
+        self.inner.writeText(text)
+        self
+    }
+    seek: |offset, origin| {
+        self.inner.seek(offset, origin)
+        self
+    }
+    flush: {
+        self.inner.flush()
+        self
+    }
+    disposed>>: { self.inner.disposed }
+    dispose: { self.inner.dispose() }
+}
+
+let File = {
+    traits*: FileTraits
+    inner: null
+}
+
+mod sys.file {
+    export Seek = Seek
+    export File = File
+    export readDir = backend.readDir
+}

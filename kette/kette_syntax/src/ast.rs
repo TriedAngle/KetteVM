@@ -667,6 +667,10 @@ impl<'a> LetStmt<'a> {
     pub fn value(self) -> Option<Expr<'a>> {
         self.syntax.child_as()
     }
+
+    pub fn is_recursive(self) -> bool {
+        self.syntax.child_token_of_kind(LetStar).is_some()
+    }
 }
 
 #[repr(C)]

@@ -1,6 +1,8 @@
 // Iteration protocol: `for` lowering, explicit iterators, fail-fast guards.
-// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/collection.ktt kette/std/functional.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/iterators.ktt
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/functional.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/iterators.ktt
 // Check: kette/kette_tests/check.py
+
+use collection { Sequence }
 
 let s = Sequence.new()
 s.add(1)

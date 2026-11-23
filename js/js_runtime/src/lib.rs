@@ -164,6 +164,7 @@ pub struct BuiltinIndices {
     pub array_pop: NativeIndex,
     pub array_map: NativeIndex,
     pub array_reduce: NativeIndex,
+    pub array_for_each: NativeIndex,
     pub math_log: NativeIndex,
     pub math_pow: NativeIndex,
     pub number_to_fixed: NativeIndex,
@@ -1049,6 +1050,15 @@ pub fn install_builtins(vm: &mut VM, state: &mut JSRuntime) {
             array_prototype,
             "reduce",
             idx.array_reduce,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            array_prototype,
+            "forEach",
+            idx.array_for_each,
             1,
         );
         Object::add_method(

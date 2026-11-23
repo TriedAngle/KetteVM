@@ -1,10 +1,15 @@
+use std::io::Write;
+
 use vm_core::{
-    Args, CallInfo, CallableInfoObject, DenseString, EdgeVisitable, Handle, HandleScope,
+    Args, CallInfo, CallableInfoObject, DenseString, EdgeVisitable, Errors, Handle, HandleScope,
     HandleSlice, Heap, HostCtx, Key, Map, MapInit, MapKind, NativeIndex, Object, ObjectKind,
     OwnProperty, OwnPropertyLocation, PartialDescriptor, PropertyDescriptor, Prototype, Runtime,
-    RuntimeId, SetupError, ShapeChange, ShouldThrow, Smi, Symbol, Tagged, ThreadState, VM, Value,
-    Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime, rt_try, tools::KetteTools,
+    RuntimeId, SetupError, ShapeChange, ShouldThrow, Smi, StringRef, Symbol, Tagged, ThreadState,
+    VM, Value, Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime,
+    request_shutdown, rt_try, tools::KetteTools,
 };
+
+pub mod process;
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
 #[derive(Default)]
@@ -40,6 +45,7 @@ impl Runtime for KetteRuntime {
         state.publish_flat_module = vm.register_native(tools_publish_flat_module);
         let clone = state.clone;
         let print = vm.register_native(console_print);
+        let write = vm.register_native(console_write);
         let is_type = vm.register_native(object_is_type);
         let add_parent = vm.register_native(object_add_parent);
         let add_parent_uncached = state.add_parent_uncached;
@@ -47,6 +53,10 @@ impl Runtime for KetteRuntime {
         let define_in_place = state.define_in_place;
         let define_in_place_from = state.define_in_place_from;
         let publish_flat_module = state.publish_flat_module;
+        let is_tail_callable = vm.register_native(is_tail_callable);
+        let set_cwd = vm.register_native(os_set_cwd);
+        let exit = vm.register_native(os_exit);
+        let process = process::Process::capture();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let (thread_vm, heap, thread_state) = thread.split();
@@ -62,6 +72,7 @@ impl Runtime for KetteRuntime {
             );
             let console = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
             Object::add_method(thread_vm, heap, &scope, console, "print", print, 0);
+            Object::add_method(thread_vm, heap, &scope, console, "write", write, 1);
             let console_name = thread_vm.interner().intern_str(heap, &scope, "Console");
             let console_name = scope.handle(console_name.as_tagged(heap));
             let global = heap.known().global_object.get_handle(heap, &scope);
@@ -164,6 +175,15 @@ impl Runtime for KetteRuntime {
                     publish_flat_module,
                     6,
                 );
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    tools,
+                    "isTailCallable",
+                    is_tail_callable,
+                    1,
+                );
             }
 
             let none_name = scope.handle(
@@ -182,33 +202,139 @@ impl Runtime for KetteRuntime {
             )
             .expect("install None global");
 
-            // `os.name` reports the host OS for platform-specific paths.
+            // `os` exposes host process state; live POSIX calls live in
+            // `std/sys.ktt` instead.
             let primitives = KetteTools::primitives(heap, thread_vm.interner(), &scope)
                 .expect("KetteTools primitives are installed before the Kette runtime");
             let os = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
-            let name = scope.handle(
+
+            let mut argument_handles = Vec::with_capacity(process.arguments.len());
+            for argument in &process.arguments {
+                let argument = thread_vm.interner().intern_str(heap, &scope, argument);
+                argument_handles.push(argument.erase());
+            }
+            let staged = scope.stage_handles(&argument_handles);
+            let arguments = scope.handle(heap.new_array(&scope, staged));
+
+            let script = match &process.script {
+                Some(script) => thread_vm
+                    .interner()
+                    .intern_str(heap, &scope, script)
+                    .erase(),
+                None => heap.known().null.get_handle(heap, &scope).erase(),
+            };
+            let executable = match &process.executable {
+                Some(executable) => thread_vm
+                    .interner()
+                    .intern_str(heap, &scope, executable)
+                    .erase(),
+                None => heap.known().null.get_handle(heap, &scope).erase(),
+            };
+            let cwd = match &process.cwd {
+                Some(cwd) => thread_vm.interner().intern_str(heap, &scope, cwd).erase(),
+                None => heap.known().null.get_handle(heap, &scope).erase(),
+            };
+
+            let env_map = heap.allocate_handle::<Map>(
+                MapInit {
+                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                    value_slot_count: 0,
+                    descriptors: &[],
+                    prototype: object_prototype.erase(),
+                },
+                &scope,
+            );
+            let env = scope.handle(heap.new_object(&scope, env_map, HandleSlice::EMPTY));
+            for (key, value) in &process.env {
+                let key = scope.handle(
+                    thread_vm
+                        .interner()
+                        .intern_str(heap, &scope, key)
+                        .as_tagged(heap),
+                );
+                let value = thread_vm.interner().intern_str(heap, &scope, value);
+                Object::define_own_property_ordinary(
+                    heap,
+                    &scope,
+                    env,
+                    key,
+                    PropertyDescriptor::data(value.erase()),
+                )
+                .expect("install env variable");
+            }
+
+            let env_values: Vec<(&str, Handle<'_, Value>)> = vec![
+                ("arguments", arguments.erase()),
+                ("script", script),
+                ("executable", executable),
+            ];
+            for (name, value) in env_values {
+                let key = scope.handle(
+                    thread_vm
+                        .interner()
+                        .intern_str(heap, &scope, name)
+                        .as_tagged(heap),
+                );
+                Object::define_own_property_ordinary(
+                    heap,
+                    &scope,
+                    env,
+                    key,
+                    PropertyDescriptor::data(value),
+                )
+                .expect("install env field");
+            }
+
+            let os_values: Vec<(&str, Handle<'_, Value>)> = vec![
+                (
+                    "name",
+                    thread_vm
+                        .interner()
+                        .intern_str(heap, &scope, std::env::consts::OS)
+                        .erase(),
+                ),
+                ("cwd", cwd),
+            ];
+            for (name, value) in os_values {
+                let key = scope.handle(
+                    thread_vm
+                        .interner()
+                        .intern_str(heap, &scope, name)
+                        .as_tagged(heap),
+                );
+                Object::define_own_property_ordinary(
+                    heap,
+                    &scope,
+                    os,
+                    key,
+                    PropertyDescriptor::data(value),
+                )
+                .expect("install os field");
+            }
+            Object::add_method(thread_vm, heap, &scope, os, "setCwd", set_cwd, 1);
+            Object::add_method(thread_vm, heap, &scope, os, "exit", exit, 1);
+
+            let env_name = scope.handle(
                 thread_vm
                     .interner()
-                    .intern_str(heap, &scope, "name")
+                    .intern_str(heap, &scope, "env")
                     .as_tagged(heap),
             );
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                primitives,
+                env_name,
+                PropertyDescriptor::data(env.erase()),
+            )
+            .expect("install env primitive");
+
             let os_name = scope.handle(
                 thread_vm
                     .interner()
                     .intern_str(heap, &scope, "os")
                     .as_tagged(heap),
             );
-            let value = thread_vm
-                .interner()
-                .intern_str(heap, &scope, std::env::consts::OS);
-            Object::define_own_property_ordinary(
-                heap,
-                &scope,
-                os,
-                name,
-                PropertyDescriptor::data(value.erase()),
-            )
-            .expect("install os name");
             Object::define_own_property_ordinary(
                 heap,
                 &scope,
@@ -220,6 +346,42 @@ impl Runtime for KetteRuntime {
             Ok(())
         })
     }
+}
+
+fn string_arg(heap: &Heap, args: Args, index: usize) -> Option<String> {
+    StringRef::try_from(heap, args.get_handle(heap, index).as_tagged(heap))
+        .map(|text| text.to_rust_string(heap))
+}
+
+/// `os.setCwd(path)` — changes the process directory and returns the new
+/// path.
+fn os_set_cwd<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(path) = string_arg(heap, args, 0) else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    if let Err(error) = std::env::set_current_dir(&path) {
+        let message = format!("cannot change directory to '{path}': {error}");
+        return Errors::raise_with(vm, heap, state, VmError::OsError, &message);
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = cwd.to_string_lossy();
+    state.handle_scope(|scope| {
+        let cwd = vm.interner().intern_str(heap, &scope, &cwd);
+        cwd.as_tagged(heap).erase()
+    })
+}
+
+/// `os.exit(code)` — stops the VM and records the process exit status.
+fn os_exit<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let code = args.get(heap, 0).to_i64().unwrap_or(0) as i32;
+    vm.set_exit_code(code);
+    request_shutdown(vm, heap, state)
 }
 
 fn object_clone<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
@@ -864,6 +1026,45 @@ fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Ta
             Object::define_property_or_throw(vm, heap, state, &scope, target, key.erase(), partial)
         );
         closure.as_tagged(heap)
+    })
+}
+
+fn is_tail_callable<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx { heap, .. } = ctx;
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    let tail = value
+        .as_heap_object()
+        .and_then(|object| object.callable_info(heap))
+        .is_some_and(|info| info.as_ref().tail_callable());
+    if tail {
+        heap.known().true_object.get(heap).erase()
+    } else {
+        heap.known().false_object.get(heap).erase()
+    }
+}
+
+fn console_write<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    if args.is_empty() {
+        return vm.known().undefined.get(heap).erase();
+    }
+    let v = args.get_handle(heap, 0);
+    state.handle_scope(|scope| {
+        let text = match Object::to_string(vm, heap, state, v) {
+            Ok(t) => {
+                let t = scope.handle(t);
+                t.as_tagged(heap)
+                    .get_as::<DenseString>(heap)
+                    .map(|s| s.to_rust_string(heap))
+                    .unwrap_or_default()
+            }
+            Err(err) => return raise_runtime(heap, err),
+        };
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+        vm.known().undefined.get(heap).erase()
     })
 }
 
