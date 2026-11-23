@@ -1,4 +1,5 @@
-use crate::{Ast, Node, NodeId, SlotKind, plumbing::ByteSpan, plumbing::Symbol};
+use crate::{Ast, ByteSpan, Node, NodeId, SlotKind, Symbol};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub u32);
@@ -33,6 +34,8 @@ pub struct ScopeInfo {
     pub direct_eval: bool,
     /// The root script scope owns a lexical context even without captures.
     pub force_context: bool,
+    /// Declaration indices by name, in declaration order.
+    by_name: HashMap<Symbol, Vec<u32>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +141,7 @@ impl Resolver<'_> {
             owns_self: false,
             direct_eval: false,
             force_context: false,
+            by_name: HashMap::new(),
         });
         self.stack.push(id);
         id
@@ -153,9 +157,15 @@ impl Resolver<'_> {
 
     fn declare(&mut self, name: Symbol, span: ByteSpan) {
         let scope = self.current_scope();
-        self.scopes[scope.0 as usize]
-            .decls
-            .push(Declaration { name, span });
+        self.push_decl(scope, name, span);
+    }
+
+    fn push_decl(&mut self, scope: ScopeId, name: Symbol, span: ByteSpan) -> u32 {
+        let info = &mut self.scopes[scope.0 as usize];
+        let index = info.decls.len() as u32;
+        info.decls.push(Declaration { name, span });
+        info.by_name.entry(name).or_default().push(index);
+        index
     }
 
     /// Append the hidden `self` binding to an owner scope after all user
@@ -165,11 +175,7 @@ impl Resolver<'_> {
             return Some(decl);
         }
         let name = self.ast.self_symbol()?;
-        let decl = self.scopes[scope.0 as usize].decls.len() as u32;
-        self.scopes[scope.0 as usize].decls.push(Declaration {
-            name,
-            span: ByteSpan::default(),
-        });
+        let decl = self.push_decl(scope, name, ByteSpan::default());
         self.scopes[scope.0 as usize].self_decl = Some(decl);
         Some(decl)
     }
@@ -510,7 +516,12 @@ impl Resolver<'_> {
             }
             Node::Slot { .. } | Node::PatternFields { .. } | Node::PatternArray { .. } => {}
             Node::Self_ => self.resolve_self(node),
-            Node::Number(_) | Node::String(_) | Node::Bool(_) | Node::Null | Node::SelfContext => {}
+            Node::Number(_)
+            | Node::String(_)
+            | Node::Bool(_)
+            | Node::Null
+            | Node::SelfContext
+            | Node::Name(_) => {}
         }
     }
 
@@ -583,17 +594,18 @@ impl Resolver<'_> {
         let use_span = self.ast.span(node);
         let mut found = None;
         for (depth_from_root, &scope) in self.stack.iter().enumerate().rev() {
+            let info = &self.scopes[scope.0 as usize];
+            let Some(indices) = info.by_name.get(&sym) else {
+                continue;
+            };
             let mut count = 0;
             let mut last = None;
             let mut before = None;
-            for (index, decl) in self.scopes[scope.0 as usize].decls.iter().enumerate() {
-                if decl.name != sym {
-                    continue;
-                }
+            for &index in indices {
                 count += 1;
-                last = Some(index);
-                if decl.span.end <= use_span.start {
-                    before = Some(index);
+                last = Some(index as usize);
+                if info.decls[index as usize].span.end <= use_span.start {
+                    before = Some(index as usize);
                 }
             }
             // A unique declaration keeps forward captures working. With

@@ -238,7 +238,7 @@ let Indexable = {
     parent*: Collection
     version>> { throw UnimplementedError("version") }
     get: |index| { throw UnimplementedError("get") }
-    []: |index| { self.get(index) }
+    `[]`: |index| { self.get(index) }
     first: {
         if self.size() == 0 {
             throw ElementDoesNotExist("first of empty collection")
@@ -395,7 +395,7 @@ let Indexable = {
 let MutableIndexable = {
     parent*: Indexable
     setAt: |index, value| { throw UnimplementedError("setAt") }
-    []=: |index, value| { self.setAt(index, value) }
+    `[]=`: |index, value| { self.setAt(index, value) }
     addWithKey: |value, key| { self.insert(self.size(), value) }
     insert: |index, value| { throw UnimplementedError("insert") }
     insertAll: |index, collection| {

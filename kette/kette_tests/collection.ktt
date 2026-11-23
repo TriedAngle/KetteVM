@@ -397,8 +397,8 @@ Test.assert(bracket_child.x, 2)
 
 let bracket_box = {
     values: [10, 20]
-    []: |index| { self.values[index] }
-    []=: |index, value| { self.values[index] = value }
+    `[]`: |index| { self.values[index] }
+    `[]=`: |index, value| { self.values[index] = value }
 }
 Test.assert(bracket_box[1], 20)
 bracket_box[1] = 99
@@ -407,7 +407,7 @@ Test.assert(bracket_box["values"].length, 2)
 
 let bracket_precedence = {
     x: 1
-    []: |key| { 99 }
+    `[]`: |key| { 99 }
 }
 Test.assert(bracket_precedence["x"], 1)
 Test.assert(bracket_precedence["missing"], 99)
@@ -415,7 +415,7 @@ Test.assert(bracket_precedence["missing"], 99)
 let bracket_set_precedence = {
     x: 1
     y: 0
-    []=: |key, value| { self.y = value }
+    `[]=`: |key, value| { self.y = value }
 }
 bracket_set_precedence["x"] = 5
 Test.assert(bracket_set_precedence.x, 5)

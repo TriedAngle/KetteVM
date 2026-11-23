@@ -1,6 +1,7 @@
-use crate::{ByteSpan, CharStream, ParseError, Symbol, SymbolTable, Token, TokenKind, TokenValue};
-
-pub type ScanResult = Result<Token, ParseError>;
+use crate::{
+    ByteSpan, CharStream, ParseError, Symbol, SymbolTable, SyntaxToken, Token, TokenKind,
+    TokenValue, Trivia, TriviaKind,
+};
 
 const NL: u32 = 0x0A; // \n
 const CR: u32 = 0x0D; // \r
@@ -53,6 +54,8 @@ enum Action {
     IdentStart,
     Digit,
     Quote,
+    /// backtick-quoted slot name
+    QuotedName,
     /// single-char token from the table
     Punct(TokenKind),
     /// multi-char handling in `scan_special`
@@ -83,6 +86,7 @@ const fn first_char_table() -> [Action; 128] {
 
     t[b'"' as usize] = Quote;
     t[b'\'' as usize] = Quote;
+    t[b'`' as usize] = QuotedName;
 
     t[b'(' as usize] = Punct(TokenKind::LParen);
     t[b')' as usize] = Punct(TokenKind::RParen);
@@ -137,11 +141,15 @@ pub struct Scanner<S: CharStream> {
     /// parse-local string interner; handed to the Ast when parsing finishes
     symbols: SymbolTable,
     /// the current token, scanned on demand
-    current: Option<ScanResult>,
+    current: Option<Token>,
     /// line terminator crossed since the last produced token
     newline_seen: bool,
-    /// sticky first error; scanning never recovers
-    failed: Option<ParseError>,
+    /// lossless source stream, including trivia
+    tokens: Vec<SyntaxToken>,
+    /// positions after every line break, built while scanning
+    line_starts: Vec<u32>,
+    /// recoverable scanner diagnostics
+    errors: Vec<ParseError>,
     /// decode buffer for string literals with escapes / span copies
     scratch: Vec<u8>,
 }
@@ -153,7 +161,9 @@ impl<S: CharStream> Scanner<S> {
             symbols: SymbolTable::default(),
             current: None,
             newline_seen: false,
-            failed: None,
+            tokens: Vec::new(),
+            line_starts: vec![0],
+            errors: Vec::new(),
             scratch: Vec::new(),
         }
     }
@@ -171,8 +181,21 @@ impl<S: CharStream> Scanner<S> {
         std::mem::take(&mut self.symbols)
     }
 
+    /// Take the lossless token stream.
+    pub fn take_tokens(&mut self) -> Vec<SyntaxToken> {
+        std::mem::take(&mut self.tokens)
+    }
+
+    pub fn take_errors(&mut self) -> Vec<ParseError> {
+        std::mem::take(&mut self.errors)
+    }
+
+    pub fn take_line_starts(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.line_starts)
+    }
+
     /// Current token, scanning on demand. Idempotent.
-    pub fn peek(&mut self) -> &ScanResult {
+    pub fn peek(&mut self) -> &Token {
         if self.current.is_none() {
             self.current = Some(self.scan_token());
         }
@@ -180,116 +203,125 @@ impl<S: CharStream> Scanner<S> {
     }
 
     /// Consume and return the current token.
-    pub fn next_token(&mut self) -> ScanResult {
+    pub fn next_token(&mut self) -> Token {
         self.peek();
         self.current.take().unwrap()
     }
 
     // -- token scanning -----------------------------------------------------
 
-    fn scan_token(&mut self) -> ScanResult {
-        if let Some(e) = &self.failed {
-            return Err(e.clone());
-        }
-        match self.scan_token_inner() {
-            Err(e) => {
-                self.failed = Some(e.clone());
-                Err(e)
-            }
-            ok => ok,
-        }
+    fn scan_token(&mut self) -> Token {
+        let token = self.scan_token_inner();
+        self.tokens.push(SyntaxToken::Token(token));
+        token
     }
 
-    fn scan_token_inner(&mut self) -> ScanResult {
-        self.skip_trivia()?;
+    fn scan_token_inner(&mut self) -> Token {
+        self.skip_trivia();
         let start = self.stream.pos();
         let after_newline = std::mem::take(&mut self.newline_seen);
 
         let Some(c) = self.stream.peek() else {
-            return Ok(Token {
+            return Token {
                 kind: TokenKind::Eof,
                 after_newline,
                 value: TokenValue::None,
                 span: ByteSpan::new(start, start),
-            });
+            };
         };
 
         let mut tok = if c < 128 {
             match FIRST_CHAR[c as usize] {
                 Action::Illegal => {
-                    return Err(ParseError::new(
-                        ByteSpan::new(start, start + 1),
+                    self.stream.advance();
+                    self.error(
+                        ByteSpan::new(start, self.stream.pos()),
                         "unexpected character",
-                    ));
+                    )
                 }
-                Action::IdentStart => self.scan_identifier(start)?,
-                Action::Digit => self.scan_number(start)?,
-                Action::Quote => self.scan_string(c, start)?,
+                Action::IdentStart => self.scan_identifier(start),
+                Action::Digit => self.scan_number(start),
+                Action::Quote => self.scan_string(c, start),
+                Action::QuotedName => self.scan_quoted_name(start),
                 Action::Punct(kind) => {
-                    if kind == TokenKind::LBracket
-                        && let Some(token) = self.scan_bracket_slot(start)
-                    {
-                        token
-                    } else {
-                        self.stream.advance();
-                        Token::new(kind, ByteSpan::new(start, self.stream.pos()))
-                    }
+                    self.stream.advance();
+                    Token::new(kind, ByteSpan::new(start, self.stream.pos()))
                 }
-                Action::Special => self.scan_special(start)?,
+                Action::Special => self.scan_special(start),
             }
         } else if is_ident_start(c) {
-            self.scan_identifier(start)?
+            self.scan_identifier(start)
         } else {
-            return Err(ParseError::new(
-                ByteSpan::new(start, start + 1),
+            self.stream.advance();
+            self.error(
+                ByteSpan::new(start, self.stream.pos()),
                 "unexpected non-ascii character",
-            ));
+            )
         };
         tok.after_newline = after_newline;
-        Ok(tok)
+        tok
     }
 
-    fn scan_bracket_slot(&mut self, start: u32) -> Option<Token> {
-        let save = self.stream.pos();
+    fn scan_quoted_name(&mut self, start: u32) -> Token {
         self.stream.advance();
-        if self.stream.peek() != Some(b']' as u32) {
-            self.stream.seek(save);
-            return None;
-        }
-        self.stream.advance();
-        let mut end = self.stream.pos();
-        let symbol = if self.stream.peek() == Some(b'=' as u32) {
-            self.stream.advance();
-            if self.stream.peek() != Some(b':' as u32) {
-                self.stream.seek(save);
-                return None;
-            }
-            end = self.stream.pos();
-            self.symbols.intern(b"[]=")
-        } else if self.stream.peek() == Some(b':' as u32) {
-            self.symbols.intern(b"[]")
-        } else {
-            self.stream.seek(save);
-            return None;
-        };
-        Some(Token {
-            kind: TokenKind::Identifier,
-            after_newline: false,
-            value: TokenValue::Symbol(symbol.0),
-            span: ByteSpan::new(start, end),
-        })
-    }
-
-    fn skip_trivia(&mut self) -> Result<(), ParseError> {
+        let content_start = self.stream.pos();
         loop {
+            match self.stream.peek() {
+                None => {
+                    return self.error(
+                        ByteSpan::new(start, self.stream.pos()),
+                        "unterminated quoted name",
+                    );
+                }
+                Some(c) if is_newline(c) => {
+                    return self.error(
+                        ByteSpan::new(start, self.stream.pos()),
+                        "unterminated quoted name",
+                    );
+                }
+                Some(c) if c == b'`' as u32 => {
+                    let content_end = self.stream.pos();
+                    self.stream.advance();
+                    let span = ByteSpan::new(start, self.stream.pos());
+                    if content_start == content_end {
+                        return self.error(span, "empty quoted name");
+                    }
+                    let symbol = self.intern_span(ByteSpan::new(content_start, content_end));
+                    return Token {
+                        kind: TokenKind::QuotedName,
+                        after_newline: false,
+                        value: TokenValue::Symbol(symbol.0),
+                        span,
+                    };
+                }
+                Some(_) => self.stream.advance(),
+            }
+        }
+    }
+
+    fn error(&mut self, span: ByteSpan, message: impl Into<String>) -> Token {
+        self.errors.push(ParseError::new(span, message));
+        Token::new(TokenKind::Illegal, span)
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            let start = self.stream.pos();
             let Some(c) = self.stream.peek() else {
-                return Ok(());
+                return;
             };
             match c {
-                0x09 | 0x0B | 0x0C | 0x20 => self.stream.advance(),
+                0x09 | 0x0B | 0x0C | 0x20 => {
+                    while matches!(self.stream.peek(), Some(0x09 | 0x0B | 0x0C | 0x20)) {
+                        self.stream.advance();
+                    }
+                    self.push_trivia(TriviaKind::Whitespace, start);
+                }
                 NL | CR => {
-                    self.newline_seen = true;
-                    self.stream.advance();
+                    while matches!(self.stream.peek(), Some(NL | CR)) {
+                        self.consume_newline(true);
+                    }
+                    self.push_trivia(TriviaKind::Newline, start);
                 }
                 c if c == b'/' as u32 => {
                     let save = self.stream.pos();
@@ -302,30 +334,22 @@ impl<S: CharStream> Scanner<S> {
                                 }
                                 self.stream.advance();
                             }
+                            self.push_trivia(TriviaKind::LineComment, start);
                         }
                         Some(c) if c == b'*' as u32 => {
                             self.stream.advance();
                             let mut depth = 1u32;
-                            loop {
+                            while depth > 0 {
                                 match self.stream.peek() {
-                                    None => {
-                                        return Err(ParseError::new(
-                                            ByteSpan::new(save, self.stream.pos()),
-                                            "unterminated block comment",
-                                        ));
-                                    }
+                                    None => break,
                                     Some(c) if is_newline(c) => {
-                                        self.newline_seen = true;
-                                        self.stream.advance();
+                                        self.consume_newline(true);
                                     }
                                     Some(c) if c == b'*' as u32 => {
                                         self.stream.advance();
                                         if self.stream.peek() == Some(b'/' as u32) {
                                             self.stream.advance();
                                             depth -= 1;
-                                            if depth == 0 {
-                                                break;
-                                            }
                                         }
                                     }
                                     Some(c) if c == b'/' as u32 => {
@@ -338,11 +362,20 @@ impl<S: CharStream> Scanner<S> {
                                     _ => self.stream.advance(),
                                 }
                             }
+                            let span = ByteSpan::new(start, self.stream.pos());
+                            if depth != 0 {
+                                self.errors
+                                    .push(ParseError::new(span, "unterminated block comment"));
+                            }
+                            self.tokens.push(SyntaxToken::Trivia(Trivia {
+                                kind: TriviaKind::BlockComment,
+                                span,
+                            }));
                         }
                         // division, not a comment: un-consume the '/'
                         _ => {
                             self.stream.seek(save);
-                            return Ok(());
+                            return;
                         }
                     }
                 }
@@ -350,16 +383,37 @@ impl<S: CharStream> Scanner<S> {
                     let ch = char::from_u32(c).unwrap();
                     if ch == '\u{FEFF}' || ch.is_whitespace() {
                         self.stream.advance();
+                        self.push_trivia(TriviaKind::Whitespace, start);
                     } else {
-                        return Ok(());
+                        return;
                     }
                 }
-                _ => return Ok(()),
+                _ => return,
             }
         }
     }
 
-    fn scan_identifier(&mut self, start: u32) -> ScanResult {
+    fn consume_newline(&mut self, statement_break: bool) {
+        if statement_break {
+            self.newline_seen = true;
+        }
+        if self.stream.peek() == Some(CR) {
+            self.stream.advance();
+            if self.stream.peek() == Some(NL) {
+                self.stream.advance();
+            }
+        } else {
+            self.stream.advance();
+        }
+        self.line_starts.push(self.stream.pos());
+    }
+
+    fn push_trivia(&mut self, kind: TriviaKind, start: u32) {
+        let span = ByteSpan::new(start, self.stream.pos());
+        self.tokens.push(SyntaxToken::Trivia(Trivia { kind, span }));
+    }
+
+    fn scan_identifier(&mut self, start: u32) -> Token {
         while let Some(c) = self.stream.peek() {
             if !is_ident_continue(c) {
                 break;
@@ -370,20 +424,18 @@ impl<S: CharStream> Scanner<S> {
             self.stream.advance();
         }
         let span = ByteSpan::new(start, self.stream.pos());
-        Ok(
-            match Self::with_span_bytes(&mut self.stream, &mut self.scratch, span, keyword_kind) {
-                Some(kind) => Token::new(kind, span),
-                None => Token {
-                    kind: TokenKind::Identifier,
-                    after_newline: false,
-                    value: TokenValue::Symbol(self.intern_span(span).0),
-                    span,
-                },
+        match Self::with_span_bytes(&mut self.stream, &mut self.scratch, span, keyword_kind) {
+            Some(kind) => Token::new(kind, span),
+            None => Token {
+                kind: TokenKind::Identifier,
+                after_newline: false,
+                value: TokenValue::Symbol(self.intern_span(span).0),
+                span,
             },
-        )
+        }
     }
 
-    fn scan_number(&mut self, start: u32) -> ScanResult {
+    fn scan_number(&mut self, start: u32) -> Token {
         self.consume_digits();
         if self.stream.peek() == Some(b'.' as u32) {
             let save = self.stream.pos();
@@ -401,13 +453,13 @@ impl<S: CharStream> Scanner<S> {
                 .and_then(|s| s.parse::<f64>().ok())
         });
         match value {
-            Some(n) => Ok(Token {
+            Some(n) => Token {
                 kind: TokenKind::Number,
                 after_newline: false,
                 value: TokenValue::Number(n),
                 span,
-            }),
-            None => Err(ParseError::new(span, "invalid number literal")),
+            },
+            None => self.error(span, "invalid number literal"),
         }
     }
 
@@ -418,16 +470,16 @@ impl<S: CharStream> Scanner<S> {
     }
 
     /// String literal. Contents are decoded into a symbol.
-    fn scan_string(&mut self, quote: u32, start: u32) -> ScanResult {
+    fn scan_string(&mut self, quote: u32, start: u32) -> Token {
         self.stream.advance(); // opening quote
         let content_start = self.stream.pos();
         let mut decoded: Option<Vec<u8>> = None;
         loop {
             let Some(c) = self.stream.peek() else {
-                return Err(ParseError::new(
+                return self.error(
                     ByteSpan::new(start, self.stream.pos()),
                     "unterminated string literal",
-                ));
+                );
             };
             if c == quote {
                 let content_end = self.stream.pos();
@@ -437,23 +489,27 @@ impl<S: CharStream> Scanner<S> {
                     Some(buf) => self.symbols.intern(&buf),
                     None => self.intern_span(ByteSpan::new(content_start, content_end)),
                 };
-                return Ok(Token {
+                return Token {
                     kind: TokenKind::String,
                     after_newline: false,
                     value: TokenValue::Symbol(sym.0),
                     span,
-                });
+                };
             }
             if is_newline(c) {
-                return Err(ParseError::new(
+                return self.error(
                     ByteSpan::new(start, self.stream.pos()),
                     "unterminated string literal",
-                ));
+                );
             }
             if c == BACKSLASH {
                 self.ensure_decoded(&mut decoded, content_start);
                 self.stream.advance();
-                self.scan_escape(decoded.as_mut().unwrap())?;
+                if let Err(error) = self.scan_escape(decoded.as_mut().unwrap()) {
+                    self.errors.push(error);
+                    self.skip_string_tail(quote);
+                    return Token::new(TokenKind::Illegal, ByteSpan::new(start, self.stream.pos()));
+                }
                 continue;
             }
             if c > 0x7F || decoded.is_some() {
@@ -461,6 +517,20 @@ impl<S: CharStream> Scanner<S> {
                 push_utf8(decoded.as_mut().unwrap(), c);
             }
             self.stream.advance();
+        }
+    }
+
+    fn skip_string_tail(&mut self, quote: u32) {
+        loop {
+            match self.stream.peek() {
+                None => return,
+                Some(c) if is_newline(c) => return,
+                Some(c) if c == quote => {
+                    self.stream.advance();
+                    return;
+                }
+                Some(_) => self.stream.advance(),
+            }
         }
     }
 
@@ -500,12 +570,8 @@ impl<S: CharStream> Scanner<S> {
                 push_utf8(out, v);
                 return Ok(());
             }
-            NL => {}
-            CR => {
-                self.stream.advance();
-                if self.stream.peek() == Some(NL) {
-                    self.stream.advance();
-                }
+            NL | CR => {
+                self.consume_newline(false);
                 return Ok(());
             }
             c => push_utf8(out, c), // \', \", \\, and any other char is itself
@@ -530,7 +596,7 @@ impl<S: CharStream> Scanner<S> {
         Ok(v)
     }
 
-    fn scan_special(&mut self, start: u32) -> ScanResult {
+    fn scan_special(&mut self, start: u32) -> Token {
         use TokenKind::*;
         let c = self.stream.peek().unwrap();
         self.stream.advance();
@@ -546,10 +612,10 @@ impl<S: CharStream> Scanner<S> {
                 if self.try_consume("&") {
                     AmpAmp
                 } else {
-                    return Err(ParseError::new(
+                    return self.error(
                         ByteSpan::new(start, self.stream.pos()),
                         "unexpected `&` (did you mean `&&`?)",
-                    ));
+                    );
                 }
             }
             c => {
@@ -567,7 +633,7 @@ impl<S: CharStream> Scanner<S> {
                 kind
             }
         };
-        Ok(Token::new(kind, ByteSpan::new(start, self.stream.pos())))
+        Token::new(kind, ByteSpan::new(start, self.stream.pos()))
     }
 
     // -- helpers --------------------------------------------------------------

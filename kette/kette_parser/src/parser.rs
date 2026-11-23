@@ -9,6 +9,7 @@
 //! slot   := name ':' expr          (named)
 //!         | name '*' ':' expr      (parent)
 //!         | '[' expr ']' ':' expr  (element)
+//!         | quoted ':' expr        (operator/index name: `+`, `[]`, ...)
 //! ```
 //!
 //! Each entry is parsed as a statement first; a `:` directly after it
@@ -19,11 +20,30 @@
 //! follows. Slots must precede `|params|`, which must precede the body.
 
 use crate::{
-    CharStream, Scanner, Symbol, SymbolTable, ast::Ast, ast::BinaryOp, ast::Node, ast::NodeId,
-    ast::NodeList, ast::ObjectParts, ast::SlotKind, ast::UnaryOp, plumbing::ParseError,
-    token::ByteSpan, token::Token, token::TokenKind, token::TokenValue,
+    ByteSpan, CharStream, Diagnostic, LineIndex, ParseError, Scanner, Symbol, SyntaxToken,
+    ast::Ast, ast::BinaryOp, ast::Node, ast::NodeId, ast::NodeList, ast::ObjectParts,
+    ast::SlotKind, ast::UnaryOp, token::Token, token::TokenKind, token::TokenValue,
 };
 use std::collections::VecDeque;
+
+/// The result of a parse. Errors never abort the parse: the AST contains
+/// every statement that could be recovered, and `tokens` is lossless.
+pub struct ParseOutput {
+    pub ast: Ast,
+    pub tokens: Vec<SyntaxToken>,
+    pub errors: Vec<ParseError>,
+    pub line_index: LineIndex,
+}
+
+impl ParseOutput {
+    /// Resolve byte spans to 1-based line/column diagnostics.
+    pub fn diagnostics(&self, source: &str) -> Vec<Diagnostic> {
+        self.errors
+            .iter()
+            .map(|error| error.diagnostic(&self.line_index, source))
+            .collect()
+    }
+}
 
 fn is_name_kind(kind: TokenKind) -> bool {
     kind == TokenKind::Identifier || kind.is_keyword()
@@ -65,6 +85,12 @@ enum Entry {
     Stmt(NodeId),
 }
 
+struct SlotHead {
+    kind: SlotKind,
+    key: NodeId,
+    start: u32,
+}
+
 pub struct Parser<S: CharStream> {
     scanner: Scanner<S>,
     ast: Ast,
@@ -78,6 +104,9 @@ pub struct Parser<S: CharStream> {
     extend_symbol: Symbol,
     export_symbol: Symbol,
     use_symbol: Symbol,
+    errors: Vec<ParseError>,
+    tokens_consumed: u64,
+    last_end: u32,
 }
 
 impl<S: CharStream> Parser<S> {
@@ -118,72 +147,87 @@ impl<S: CharStream> Parser<S> {
             extend_symbol,
             export_symbol,
             use_symbol,
+            errors: Vec::new(),
+            tokens_consumed: 0,
+            last_end: 0,
         }
     }
 
-    pub fn ast(&self) -> &Ast {
-        &self.ast
-    }
-
-    pub fn symbols(&self) -> &SymbolTable {
-        self.scanner.symbols()
-    }
-
-    pub fn into_ast(mut self) -> Ast {
-        self.ast.set_symbol_table(self.scanner.take_symbols());
-        self.ast
-    }
-
-    pub fn parse_script(&mut self) -> Result<NodeId, ParseError> {
+    /// Parse the whole source. Recovery is unconditional: a malformed
+    /// statement never stops later statements from being parsed.
+    pub fn parse(mut self) -> ParseOutput {
         let _span = trace::info_span!("kette::parse").entered();
-        let start = self.peek()?.span.start;
-        let stmts = self.parse_statement_list(TokenKind::Eof)?;
-        let end = self.peek()?.span.end;
+        let start = self.peek().span.start;
+        let stmts = self.parse_statement_list(TokenKind::Eof);
+        let end = self.peek().span.end;
         let list = self.ast.list(&stmts);
         let root = self
             .ast
             .add(Node::StmtList { stmts: list }, ByteSpan::new(start, end));
         self.ast.set_root(root);
-        Ok(root)
+
+        let tokens = self.scanner.take_tokens();
+        let line_starts = self.scanner.take_line_starts();
+        let mut errors = self.scanner.take_errors();
+        errors.append(&mut self.errors);
+        errors.sort_by_key(|error| error.span.start);
+        errors.dedup_by(|a, b| a.span == b.span);
+        errors.truncate(64);
+
+        self.ast.set_symbol_table(self.scanner.take_symbols());
+        ParseOutput {
+            ast: self.ast,
+            tokens,
+            errors,
+            line_index: LineIndex::from_line_starts(line_starts),
+        }
     }
 
-    // -- token plumbing ------------------------------------------------------
+    // -- token access --------------------------------------------------------
 
-    fn peek(&mut self) -> Result<Token, ParseError> {
+    fn peek(&mut self) -> Token {
         if let Some(token) = self.buffer.front() {
-            return Ok(*token);
+            return *token;
         }
-        self.scanner.peek().clone()
+        *self.scanner.peek()
     }
 
-    fn next(&mut self) -> Result<Token, ParseError> {
-        if let Some(token) = self.buffer.pop_front() {
-            return Ok(token);
-        }
-        self.scanner.next_token()
+    fn next(&mut self) -> Token {
+        self.tokens_consumed += 1;
+        let token = if let Some(token) = self.buffer.pop_front() {
+            token
+        } else {
+            self.scanner.next_token()
+        };
+        self.last_end = token.span.end;
+        token
     }
 
-    fn peek_nth(&mut self, n: usize) -> Result<Token, ParseError> {
+    fn finish_node(&mut self, start: u32, node: Node) -> NodeId {
+        self.ast.add(node, ByteSpan::new(start, self.last_end))
+    }
+
+    fn peek_nth(&mut self, n: usize) -> Token {
         if self.buffer.is_empty() {
-            self.buffer.push_back(self.scanner.next_token()?);
+            self.buffer.push_back(self.scanner.next_token());
         }
         while self.buffer.len() <= n {
-            self.buffer.push_back(self.scanner.next_token()?);
+            self.buffer.push_back(self.scanner.next_token());
         }
-        Ok(self.buffer[n])
+        self.buffer[n]
     }
 
-    fn eat(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
-        if self.peek()?.kind == kind {
-            self.next()?;
-            Ok(true)
+    fn eat(&mut self, kind: TokenKind) -> bool {
+        if self.peek().kind == kind {
+            self.next();
+            true
         } else {
-            Ok(false)
+            false
         }
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<Token, ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         if t.kind != kind {
             return Err(ParseError::new(
                 t.span,
@@ -194,13 +238,13 @@ impl<S: CharStream> Parser<S> {
                 ),
             ));
         }
-        self.next()
+        Ok(self.next())
     }
 
     fn expect_semicolon(&mut self) -> Result<(), ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         if t.kind == TokenKind::Semicolon {
-            self.next()?;
+            self.next();
             return Ok(());
         }
         if t.kind == TokenKind::RBrace || t.kind == TokenKind::Eof || t.after_newline {
@@ -247,42 +291,122 @@ impl<S: CharStream> Parser<S> {
 
     // -- statements ----------------------------------------------------------
 
-    fn parse_statement_list(&mut self, terminator: TokenKind) -> Result<Vec<NodeId>, ParseError> {
+    fn parse_statement_list(&mut self, terminator: TokenKind) -> Vec<NodeId> {
         let mut stmts = Vec::new();
         loop {
-            if self.peek()?.kind == terminator {
+            let token = self.peek();
+            if token.kind == terminator || token.kind == TokenKind::Eof {
                 break;
             }
-            if self.eat(TokenKind::Semicolon)? {
+            if token.kind == TokenKind::Semicolon {
+                self.next();
                 continue;
             }
-            if self.peek()?.kind == TokenKind::Eof {
-                break;
-            }
-            let stmt = self.parse_statement()?;
-            stmts.push(stmt);
-            self.expect_semicolon()?;
+            self.parse_statement_into(&mut stmts, terminator);
         }
-        Ok(stmts)
+        stmts
+    }
+
+    fn parse_statement_into(&mut self, stmts: &mut Vec<NodeId>, terminator: TokenKind) {
+        let before = self.tokens_consumed;
+        match self.parse_statement() {
+            Ok(stmt) => {
+                stmts.push(stmt);
+                if let Err(error) = self.expect_semicolon() {
+                    self.push_error(error);
+                    self.recover_statement();
+                }
+            }
+            Err(error) => {
+                self.push_error(error);
+                self.recover_statement();
+            }
+        }
+        if self.tokens_consumed == before {
+            let next = self.peek();
+            if next.kind != terminator && next.kind != TokenKind::Eof {
+                self.next();
+            }
+        }
+    }
+
+    fn push_error(&mut self, error: ParseError) {
+        if self.errors.len() < 64 {
+            self.errors.push(error);
+        }
+    }
+
+    fn recover_statement(&mut self) {
+        let mut depth = 0u32;
+        loop {
+            let token = self.peek();
+            match token.kind {
+                TokenKind::Eof => return,
+                TokenKind::RBrace if depth == 0 => return,
+                TokenKind::Semicolon if depth == 0 => {
+                    self.next();
+                    return;
+                }
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => {
+                    depth += 1;
+                    self.next();
+                }
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    self.next();
+                }
+                _ if depth == 0 && token.after_newline => return,
+                _ => {
+                    self.next();
+                }
+            }
+        }
+    }
+
+    fn recover_entry(&mut self) {
+        let mut depth = 0u32;
+        loop {
+            let token = self.peek();
+            match token.kind {
+                TokenKind::Eof => return,
+                TokenKind::RBrace if depth == 0 => return,
+                TokenKind::Comma | TokenKind::Semicolon if depth == 0 => {
+                    self.next();
+                    return;
+                }
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => {
+                    depth += 1;
+                    self.next();
+                }
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    self.next();
+                }
+                _ if depth == 0 && token.after_newline => return,
+                _ => {
+                    self.next();
+                }
+            }
+        }
     }
 
     fn parse_statement(&mut self) -> Result<NodeId, ParseError> {
-        if self.peek()?.kind == TokenKind::Mod {
+        if self.peek().kind == TokenKind::Mod {
             if !self.allow_mod {
                 return Err(ParseError::new(
-                    self.peek()?.span,
+                    self.peek().span,
                     "`mod` is only allowed at the top level or directly inside another `mod`",
                 ));
             }
             return self.parse_mod();
         }
-        if self.peek()?.kind == TokenKind::Let {
+        if self.peek().kind == TokenKind::Let {
             return self.parse_let();
         }
-        if self.at_word(self.use_symbol)? && self.next_is_name()? {
+        if self.at_word(self.use_symbol) && self.next_is_name() {
             return self.parse_use();
         }
-        if self.export_target.is_some() && self.at_word(self.export_symbol)? {
+        if self.export_target.is_some() && self.at_word(self.export_symbol) {
             return self.parse_export();
         }
         let expr = self.parse_expression()?;
@@ -290,54 +414,56 @@ impl<S: CharStream> Parser<S> {
         Ok(self.ast.add(Node::ExprStmt { expr }, span))
     }
 
-    fn at_word(&mut self, word: Symbol) -> Result<bool, ParseError> {
-        let token = self.peek()?;
-        Ok(token.kind == TokenKind::Identifier && token.value.symbol() == Some(word.0))
+    fn at_word(&mut self, word: Symbol) -> bool {
+        let token = self.peek();
+        token.kind == TokenKind::Identifier && token.value.symbol() == Some(word.0)
     }
 
-    fn next_is_name(&mut self) -> Result<bool, ParseError> {
-        Ok(is_name_kind(self.peek_nth(1)?.kind))
+    fn next_is_name(&mut self) -> bool {
+        is_name_kind(self.peek_nth(1).kind)
     }
 
-    fn parse_module_path(&mut self) -> Result<(Vec<Symbol>, ByteSpan), ParseError> {
-        let first = self.next()?;
+    fn parse_module_path(&mut self) -> Result<(Vec<(Symbol, ByteSpan)>, ByteSpan), ParseError> {
+        let first = self.next();
         if !is_name_kind(first.kind) {
             return Err(ParseError::new(first.span, "expected a module name"));
         }
         let start = first.span.start;
         let mut end = first.span.end;
-        let mut parts = vec![self.token_name(first)?];
-        while self.eat(TokenKind::Period)? {
-            let token = self.next()?;
+        let mut parts = vec![(self.token_name(first)?, first.span)];
+        while self.eat(TokenKind::Period) {
+            let token = self.next();
             if !is_name_kind(token.kind) {
                 return Err(ParseError::new(token.span, "expected a module name"));
             }
             end = token.span.end;
-            parts.push(self.token_name(token)?);
+            parts.push((self.token_name(token)?, token.span));
         }
         Ok((parts, ByteSpan::new(start, end)))
     }
 
-    fn module_name_symbol(&mut self, parts: &[Symbol]) -> Symbol {
+    fn module_name_symbol(&mut self, parts: &[(Symbol, ByteSpan)]) -> Symbol {
         let mut bytes = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             if index != 0 {
                 bytes.push(b'.');
             }
-            bytes.extend_from_slice(self.scanner.symbols().get(*part));
+            bytes.extend_from_slice(self.scanner.symbols().get(part.0));
         }
         self.scanner.symbols_mut().intern(&bytes)
     }
 
-    fn modules_path(&mut self, parts: &[Symbol], span: ByteSpan) -> NodeId {
-        let mut node = self.ast.add(Node::Ident(self.modules_symbol), span);
-        for part in parts {
+    fn modules_path(&mut self, parts: &[(Symbol, ByteSpan)], span: ByteSpan) -> NodeId {
+        let mut node = self.ast.add(
+            Node::Ident(self.modules_symbol),
+            ByteSpan::new(span.start, span.start),
+        );
+        for &(symbol, part_span) in parts {
+            let start = self.ast.span(node).start;
+            let name = self.ast.add(Node::Name(symbol), part_span);
             node = self.ast.add(
-                Node::Get {
-                    recv: node,
-                    name: *part,
-                },
-                span,
+                Node::Get { recv: node, name },
+                ByteSpan::new(start, part_span.end),
             );
         }
         node
@@ -346,9 +472,9 @@ impl<S: CharStream> Parser<S> {
     fn parse_mod(&mut self) -> Result<NodeId, ParseError> {
         let keyword = self.expect(TokenKind::Mod)?;
         let (parts, path_span) = self.parse_module_path()?;
-        let extension = if self.at_word(self.extend_symbol)? {
-            self.next()?;
-            let token = self.next()?;
+        let extension = if self.at_word(self.extend_symbol) {
+            self.next();
+            let token = self.next();
             if !is_name_kind(token.kind) {
                 return Err(ParseError::new(token.span, "expected an extension name"));
             }
@@ -367,25 +493,34 @@ impl<S: CharStream> Parser<S> {
         let mut body_stmts = Vec::new();
         let mut nested = Vec::new();
         loop {
-            if self.peek()?.kind == TokenKind::RBrace {
+            if self.peek().kind == TokenKind::RBrace {
                 break;
             }
-            if self.eat(TokenKind::Semicolon)? {
+            if self.eat(TokenKind::Semicolon) {
                 continue;
             }
-            if self.peek()?.kind == TokenKind::Mod {
+            if self.peek().kind == TokenKind::Mod {
                 if extension.is_some() {
-                    return Err(ParseError::new(
-                        self.peek()?.span,
+                    let span = self.peek().span;
+                    self.push_error(ParseError::new(
+                        span,
                         "`mod` is not allowed inside an extension",
                     ));
                 }
-                nested.push(self.parse_mod()?);
-                self.expect_semicolon()?;
+                match self.parse_mod() {
+                    Ok(module) => nested.push(module),
+                    Err(error) => {
+                        self.push_error(error);
+                        self.recover_statement();
+                    }
+                }
+                if let Err(error) = self.expect_semicolon() {
+                    self.push_error(error);
+                    self.recover_statement();
+                }
                 continue;
             }
-            body_stmts.push(self.parse_statement()?);
-            self.expect_semicolon()?;
+            self.parse_statement_into(&mut body_stmts, TokenKind::RBrace);
         }
 
         self.export_target = saved_export;
@@ -408,36 +543,39 @@ impl<S: CharStream> Parser<S> {
             ByteSpan::new(open.span.start, close.span.end),
         );
 
+        let span = ByteSpan::new(keyword.span.start, close.span.end);
         let registry = self
             .ast
             .add(Node::Ident(self.module_registry_symbol), path_span);
+        let zero = ByteSpan::new(path_span.start, path_span.start);
         let expr = if let Some((extension_name, extension_span)) = extension {
             let target = self.modules_path(&parts, path_span);
             let extension_name = self.ast.add(Node::String(extension_name), extension_span);
+            let name = self.ast.add(Node::Name(self.extend_symbol), zero);
             let args = self.ast.list(&[target, extension_name, closure]);
             self.ast.add(
                 Node::Send {
                     recv: registry,
-                    name: self.extend_symbol,
+                    name,
                     args,
                 },
-                path_span,
+                span,
             )
         } else {
             let name = self.module_name_symbol(&parts);
             let name = self.ast.add(Node::String(name), path_span);
             let args = self.ast.list(&[name, closure]);
+            let send_name = self.ast.add(Node::Name(self.declare_symbol), zero);
             self.ast.add(
                 Node::Send {
                     recv: registry,
-                    name: self.declare_symbol,
+                    name: send_name,
                     args,
                 },
-                path_span,
+                span,
             )
         };
 
-        let span = ByteSpan::new(keyword.span.start, close.span.end);
         let statement = self.ast.add(Node::ExprStmt { expr }, span);
         nested.push(statement);
         let stmts = self.ast.list(&nested);
@@ -449,31 +587,34 @@ impl<S: CharStream> Parser<S> {
         let Some(staging) = self.export_target else {
             return Err(ParseError::new(keyword.span, "`export` outside a module"));
         };
-        let name_token = self.next()?;
+        let name_token = self.next();
         if !is_name_kind(name_token.kind) {
             return Err(ParseError::new(name_token.span, "expected an export name"));
         }
-        let name = self.token_name(name_token)?;
+        let symbol = self.token_name(name_token)?;
         self.expect(TokenKind::Assign)?;
         let value = self.parse_expression()?;
-        let recv = self.ast.add(Node::Ident(staging), keyword.span);
+        let recv = self.ast.add(
+            Node::Ident(staging),
+            ByteSpan::new(name_token.span.start, name_token.span.start),
+        );
+        let name = self.ast.add(Node::Name(symbol), name_token.span);
         let target = self.ast.add(Node::Get { recv, name }, name_token.span);
-        let span = ByteSpan::new(keyword.span.start, self.ast.span(value).end);
-        let assign = self.ast.add(Node::Assign { target, value }, span);
-        Ok(self.ast.add(Node::ExprStmt { expr: assign }, span))
+        let start = keyword.span.start;
+        let assign = self.finish_node(start, Node::Assign { target, value });
+        Ok(self.finish_node(start, Node::ExprStmt { expr: assign }))
     }
 
     fn parse_use(&mut self) -> Result<NodeId, ParseError> {
         let keyword = self.expect(TokenKind::Identifier)?;
         let (parts, path_span) = self.parse_module_path()?;
-        if self.peek()?.kind == TokenKind::LBrace {
-            let (stmts, tree_span) = self.parse_use_tree(&parts)?;
+        if self.peek().kind == TokenKind::LBrace {
+            let stmts = self.parse_use_tree(&parts)?;
             let list = self.ast.list(&stmts);
-            let span = ByteSpan::new(keyword.span.start, tree_span.end);
-            return Ok(self.ast.add(Node::StmtList { stmts: list }, span));
+            return Ok(self.finish_node(keyword.span.start, Node::StmtList { stmts: list }));
         }
-        let alias = if self.eat(TokenKind::As)? {
-            let token = self.next()?;
+        let alias = if self.eat(TokenKind::As) {
+            let token = self.next();
             if !is_name_kind(token.kind) {
                 return Err(ParseError::new(token.span, "expected a use alias"));
             }
@@ -484,16 +625,16 @@ impl<S: CharStream> Parser<S> {
         Ok(self.import_binding(&[], &parts, alias, path_span))
     }
 
-    fn parse_use_tree(&mut self, parent: &[Symbol]) -> Result<(Vec<NodeId>, ByteSpan), ParseError> {
-        let open = self.expect(TokenKind::LBrace)?;
+    fn parse_use_tree(&mut self, parent: &[(Symbol, ByteSpan)]) -> Result<Vec<NodeId>, ParseError> {
+        self.expect(TokenKind::LBrace)?;
         let mut stmts = Vec::new();
         loop {
-            if self.peek()?.kind == TokenKind::RBrace {
+            if self.peek().kind == TokenKind::RBrace {
                 break;
             }
             let (parts, path_span) = self.parse_module_path()?;
-            let alias = if self.eat(TokenKind::As)? {
-                let token = self.next()?;
+            let alias = if self.eat(TokenKind::As) {
+                let token = self.next();
                 if !is_name_kind(token.kind) {
                     return Err(ParseError::new(token.span, "expected an import alias"));
                 }
@@ -501,15 +642,15 @@ impl<S: CharStream> Parser<S> {
             } else {
                 None
             };
-            if alias.is_none() && self.peek()?.kind == TokenKind::LBrace {
+            if alias.is_none() && self.peek().kind == TokenKind::LBrace {
                 let mut full = parent.to_vec();
                 full.extend_from_slice(&parts);
-                let (mut nested, _) = self.parse_use_tree(&full)?;
+                let mut nested = self.parse_use_tree(&full)?;
                 stmts.append(&mut nested);
             } else {
                 stmts.push(self.import_binding(parent, &parts, alias, path_span));
             }
-            if !self.eat(TokenKind::Comma)? {
+            if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
@@ -520,24 +661,23 @@ impl<S: CharStream> Parser<S> {
                 "expected at least one import name",
             ));
         }
-        Ok((stmts, ByteSpan::new(open.span.start, close.span.end)))
+        Ok(stmts)
     }
 
     fn import_binding(
         &mut self,
-        parent: &[Symbol],
-        parts: &[Symbol],
+        parent: &[(Symbol, ByteSpan)],
+        parts: &[(Symbol, ByteSpan)],
         alias: Option<(Symbol, ByteSpan)>,
         path_span: ByteSpan,
     ) -> NodeId {
         let mut full = parent.to_vec();
         full.extend_from_slice(parts);
         let (bound, bound_span) =
-            alias.unwrap_or_else(|| (*full.last().expect("module path has a segment"), path_span));
+            alias.unwrap_or_else(|| *full.last().expect("module path has a segment"));
         let pattern = self.ast.add(Node::Ident(bound), bound_span);
         let init = self.modules_path(&full, path_span);
-        let span = ByteSpan::new(path_span.start, self.ast.span(init).end);
-        self.ast.add(Node::Let { pattern, init }, span)
+        self.finish_node(path_span.start, Node::Let { pattern, init })
     }
 
     fn parse_let(&mut self) -> Result<NodeId, ParseError> {
@@ -545,19 +685,17 @@ impl<S: CharStream> Parser<S> {
         let pattern = self.parse_pattern()?;
         self.expect(TokenKind::Assign)?;
         let init = self.parse_expression()?;
-        let span = ByteSpan::new(kw.span.start, self.ast.span(init).end);
-        Ok(self.ast.add(Node::Let { pattern, init }, span))
+        Ok(self.finish_node(kw.span.start, Node::Let { pattern, init }))
     }
 
     /// A binding pattern: a name, `(a, b as c, ...)`, or `[a, b, ...rest]`.
     fn parse_pattern(&mut self) -> Result<NodeId, ParseError> {
-        match self.peek()?.kind {
+        match self.peek().kind {
             TokenKind::LParen => self.parse_field_pattern(),
             TokenKind::LBracket => self.parse_array_pattern(),
             _ => {
-                let name_tok = self.next()?;
-                let name = self.token_name(name_tok)?;
-                Ok(self.ast.add(Node::Ident(name), name_tok.span))
+                let name_tok = self.next();
+                Ok(self.named_key(name_tok)?)
             }
         }
     }
@@ -565,36 +703,28 @@ impl<S: CharStream> Parser<S> {
     /// `(a, b as c, ...)` — read named fields.
     fn parse_field_pattern(&mut self) -> Result<NodeId, ParseError> {
         let open = self.expect(TokenKind::LParen)?;
-        let mut sources = Vec::new();
-        let mut names = Vec::new();
-        loop {
-            if self.peek()?.kind == TokenKind::RParen {
-                break;
-            }
-            let source_tok = self.next()?;
+        let (items, close) = self.parse_comma_list(TokenKind::RParen, |parser| {
+            let source_tok = parser.next();
             let source_span = source_tok.span;
-            let source = self.token_name(source_tok)?;
-            sources.push(self.ast.add(Node::Ident(source), source_span));
-            let (bound, bound_span) = if self.eat(TokenKind::As)? {
-                let bound_tok = self.next()?;
+            let source = parser.token_name(source_tok)?;
+            let source_node = parser.ast.add(Node::Ident(source), source_span);
+            let (bound, bound_span) = if parser.eat(TokenKind::As) {
+                let bound_tok = parser.next();
                 let span = bound_tok.span;
-                (self.token_name(bound_tok)?, span)
+                (parser.token_name(bound_tok)?, span)
             } else {
                 (source, source_span)
             };
-            names.push(self.ast.add(Node::Ident(bound), bound_span));
-            if !self.eat(TokenKind::Comma)? {
-                break;
-            }
-        }
-        let close = self.expect(TokenKind::RParen)?;
-        if names.is_empty() {
+            let bound_node = parser.ast.add(Node::Ident(bound), bound_span);
+            Ok((source_node, bound_node))
+        })?;
+        if items.is_empty() {
             return Err(ParseError::new(close.span, "expected at least one name"));
         }
+        let (sources, names): (Vec<_>, Vec<_>) = items.into_iter().unzip();
         let sources = self.ast.list(&sources);
         let names = self.ast.list(&names);
-        let span = ByteSpan::new(open.span.start, close.span.end);
-        Ok(self.ast.add(Node::PatternFields { sources, names }, span))
+        Ok(self.finish_node(open.span.start, Node::PatternFields { sources, names }))
     }
 
     /// `[a, b as c, ...rest]` — bind positions, rest as a fresh array.
@@ -603,29 +733,23 @@ impl<S: CharStream> Parser<S> {
         let mut elements = Vec::new();
         let mut rest = None;
         loop {
-            if self.peek()?.kind == TokenKind::RBracket {
+            if self.peek().kind == TokenKind::RBracket {
                 break;
             }
-            if self.peek()?.kind == TokenKind::Period {
-                self.next()?;
-                self.expect(TokenKind::Period)?;
-                self.expect(TokenKind::Period)?;
-                let name_tok = self.next()?;
-                let name = self.token_name(name_tok)?;
-                rest = Some(self.ast.add(Node::Ident(name), name_tok.span));
+            if self.peek().kind == TokenKind::Period {
+                rest = Some(self.parse_rest_name()?);
                 break;
             }
             let element = self.parse_pattern()?;
             let element = if matches!(self.ast.node(element), Node::Ident(_)) {
-                if self.eat(TokenKind::As)? {
-                    let alias_tok = self.next()?;
-                    let alias = self.token_name(alias_tok)?;
-                    self.ast.add(Node::Ident(alias), alias_tok.span)
+                if self.eat(TokenKind::As) {
+                    let alias = self.next();
+                    self.named_key(alias)?
                 } else {
                     element
                 }
             } else {
-                if self.peek()?.kind == TokenKind::As {
+                if self.peek().kind == TokenKind::As {
                     return Err(ParseError::new(
                         self.ast.span(element),
                         "as is only allowed after a name",
@@ -634,20 +758,19 @@ impl<S: CharStream> Parser<S> {
                 element
             };
             elements.push(element);
-            if !self.eat(TokenKind::Comma)? {
+            if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
-        let close = self.expect(TokenKind::RBracket)?;
+        self.expect(TokenKind::RBracket)?;
         let elements = self.ast.list(&elements);
-        let span = ByteSpan::new(open.span.start, close.span.end);
-        Ok(self.ast.add(Node::PatternArray { elements, rest }, span))
+        Ok(self.finish_node(open.span.start, Node::PatternArray { elements, rest }))
     }
 
     // -- expressions ---------------------------------------------------------
 
     fn parse_expression(&mut self) -> Result<NodeId, ParseError> {
-        if self.peek()?.kind == TokenKind::Throw {
+        if self.peek().kind == TokenKind::Throw {
             return self.parse_throw();
         }
         self.parse_assignment()
@@ -656,8 +779,7 @@ impl<S: CharStream> Parser<S> {
     fn parse_throw(&mut self) -> Result<NodeId, ParseError> {
         let kw = self.expect(TokenKind::Throw)?;
         let value = self.parse_expression()?;
-        let span = ByteSpan::new(kw.span.start, self.ast.span(value).end);
-        Ok(self.ast.add(Node::Throw { value }, span))
+        Ok(self.finish_node(kw.span.start, Node::Throw { value }))
     }
 
     fn parse_assignment(&mut self) -> Result<NodeId, ParseError> {
@@ -667,13 +789,13 @@ impl<S: CharStream> Parser<S> {
 
     /// `= value`, when the parsed left side turns out to be the target.
     fn parse_assignment_from(&mut self, lhs: NodeId) -> Result<NodeId, ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         if t.kind == TokenKind::Assign && !t.after_newline {
-            self.next()?;
+            self.next();
             self.check_assign_target(lhs)?;
             let value = self.parse_assignment()?;
-            let span = ByteSpan::new(self.ast.span(lhs).start, self.ast.span(value).end);
-            return Ok(self.ast.add(Node::Assign { target: lhs, value }, span));
+            let start = self.ast.span(lhs).start;
+            return Ok(self.finish_node(start, Node::Assign { target: lhs, value }));
         }
         Ok(lhs)
     }
@@ -699,7 +821,7 @@ impl<S: CharStream> Parser<S> {
     /// parameter list on its own line).
     fn parse_binary_from(&mut self, mut lhs: NodeId, min_prec: u8) -> Result<NodeId, ParseError> {
         loop {
-            let t = self.peek()?;
+            let t = self.peek();
             if t.after_newline {
                 break;
             }
@@ -707,45 +829,45 @@ impl<S: CharStream> Parser<S> {
             if prec == 0 || prec < min_prec {
                 break;
             }
-            let op_tok = self.next()?;
+            let op_tok = self.next();
             let rhs = self.parse_binary(prec + 1)?;
-            let span = ByteSpan::new(self.ast.span(lhs).start, self.ast.span(rhs).end);
-            lhs = self.ast.add(
+            let start = self.ast.span(lhs).start;
+            lhs = self.finish_node(
+                start,
                 Node::Binary {
                     op: binary_op(op_tok.kind),
+                    op_span: op_tok.span,
                     lhs,
                     rhs,
                 },
-                span,
             );
         }
         Ok(lhs)
     }
 
     fn parse_unary(&mut self) -> Result<NodeId, ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         match t.kind {
             TokenKind::Minus | TokenKind::Bang => {
-                self.next()?;
+                self.next();
                 let expr = self.parse_unary()?;
-                let span = ByteSpan::new(t.span.start, self.ast.span(expr).end);
-                Ok(self.ast.add(
+                Ok(self.finish_node(
+                    t.span.start,
                     Node::Unary {
                         op: unary_op(t.kind),
+                        op_span: t.span,
                         expr,
                     },
-                    span,
                 ))
             }
             TokenKind::Return => {
-                self.next()?;
+                self.next();
                 let value = self.parse_unary()?;
-                let span = ByteSpan::new(t.span.start, self.ast.span(value).end);
-                Ok(self.ast.add(Node::Return { value }, span))
+                Ok(self.finish_node(t.span.start, Node::Return { value }))
             }
             TokenKind::Break => {
-                self.next()?;
-                let next = self.peek()?;
+                self.next();
+                let next = self.peek();
                 let empty = next.after_newline
                     || matches!(
                         next.kind,
@@ -757,14 +879,10 @@ impl<S: CharStream> Parser<S> {
                             | TokenKind::Eof
                     );
                 if empty {
-                    return Ok(self.ast.add(
-                        Node::Break { value: None },
-                        ByteSpan::new(t.span.start, t.span.end),
-                    ));
+                    return Ok(self.finish_node(t.span.start, Node::Break { value: None }));
                 }
                 let value = self.parse_expression()?;
-                let span = ByteSpan::new(t.span.start, self.ast.span(value).end);
-                Ok(self.ast.add(Node::Break { value: Some(value) }, span))
+                Ok(self.finish_node(t.span.start, Node::Break { value: Some(value) }))
             }
             _ => self.parse_postfix(),
         }
@@ -778,20 +896,19 @@ impl<S: CharStream> Parser<S> {
     /// Continue postfix parsing over an already-parsed primary.
     fn parse_postfix_from(&mut self, mut expr: NodeId) -> Result<NodeId, ParseError> {
         loop {
-            let t = self.peek()?;
+            let t = self.peek();
             match t.kind {
                 TokenKind::Period => {
-                    self.next()?;
-                    let nt = self.peek()?;
+                    self.next();
+                    let nt = self.peek();
                     if nt.kind == TokenKind::Number {
-                        self.next()?;
+                        self.next();
                         let key = self.number_node(nt)?;
-                        let span = ByteSpan::new(self.ast.span(expr).start, nt.span.end);
-                        expr = self.ast.add(Node::Index { recv: expr, key }, span);
+                        let start = self.ast.span(expr).start;
+                        expr = self.finish_node(start, Node::Index { recv: expr, key });
                     } else if is_name_kind(nt.kind) {
-                        let name_tok = self.next()?;
-                        let name = self.token_name(name_tok)?;
-                        expr = self.finish_named(expr, name, name_tok.span.end)?;
+                        let name_tok = self.next();
+                        expr = self.finish_named(expr, name_tok)?;
                     } else {
                         return Err(ParseError::new(
                             nt.span,
@@ -800,17 +917,17 @@ impl<S: CharStream> Parser<S> {
                     }
                 }
                 TokenKind::LBracket if !t.after_newline => {
-                    self.next()?;
+                    self.next();
                     let key = self.parse_expression()?;
-                    let close = self.expect(TokenKind::RBracket)?;
-                    let span = ByteSpan::new(self.ast.span(expr).start, close.span.end);
-                    expr = self.ast.add(Node::Index { recv: expr, key }, span);
+                    self.expect(TokenKind::RBracket)?;
+                    let start = self.ast.span(expr).start;
+                    expr = self.finish_node(start, Node::Index { recv: expr, key });
                 }
                 TokenKind::LParen if !t.after_newline => {
                     // `f(x)` — call shorthand; the callee is the receiver
-                    let (args, end) = self.parse_args()?;
-                    let span = ByteSpan::new(self.ast.span(expr).start, end);
-                    expr = self.ast.add(Node::Call { callee: expr, args }, span);
+                    let args = self.parse_args()?;
+                    let start = self.ast.span(expr).start;
+                    expr = self.finish_node(start, Node::Call { callee: expr, args });
                 }
                 _ => break,
             }
@@ -818,70 +935,73 @@ impl<S: CharStream> Parser<S> {
         Ok(expr)
     }
 
-    fn finish_named(
-        &mut self,
-        recv: NodeId,
-        name: Symbol,
-        name_end: u32,
-    ) -> Result<NodeId, ParseError> {
+    fn finish_named(&mut self, recv: NodeId, name_tok: Token) -> Result<NodeId, ParseError> {
+        let symbol = self.token_name(name_tok)?;
+        let name = self.ast.add(Node::Name(symbol), name_tok.span);
         let start = self.ast.span(recv).start;
-        let next = self.peek()?;
+        let next = self.peek();
         if next.kind == TokenKind::LParen && !next.after_newline {
-            let (args, end) = self.parse_args()?;
-            Ok(self
-                .ast
-                .add(Node::Send { recv, name, args }, ByteSpan::new(start, end)))
+            let args = self.parse_args()?;
+            Ok(self.finish_node(start, Node::Send { recv, name, args }))
         } else {
-            Ok(self
-                .ast
-                .add(Node::Get { recv, name }, ByteSpan::new(start, name_end)))
+            Ok(self.finish_node(start, Node::Get { recv, name }))
         }
     }
 
-    fn parse_args(&mut self) -> Result<(NodeList, u32), ParseError> {
+    fn parse_args(&mut self) -> Result<NodeList, ParseError> {
         self.expect(TokenKind::LParen)?;
-        let mut args = Vec::new();
-        if self.peek()?.kind != TokenKind::RParen {
+        let (args, _) =
+            self.parse_comma_list(TokenKind::RParen, |parser| parser.parse_expression())?;
+        Ok(self.ast.list(&args))
+    }
+
+    fn parse_comma_list<T>(
+        &mut self,
+        close: TokenKind,
+        mut item: impl FnMut(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<(Vec<T>, Token), ParseError> {
+        let mut items = Vec::new();
+        if self.peek().kind != close {
             loop {
-                args.push(self.parse_expression()?);
-                if !self.eat(TokenKind::Comma)? {
+                items.push(item(self)?);
+                if !self.eat(TokenKind::Comma) {
                     break;
                 }
-                if self.peek()?.kind == TokenKind::RParen {
+                if self.peek().kind == close {
                     break;
                 }
             }
         }
-        let close = self.expect(TokenKind::RParen)?;
-        Ok((self.ast.list(&args), close.span.end))
+        let close = self.expect(close)?;
+        Ok((items, close))
     }
 
     fn parse_primary(&mut self) -> Result<NodeId, ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         match t.kind {
             TokenKind::Number => {
-                self.next()?;
+                self.next();
                 self.number_node(t)
             }
             TokenKind::String => {
-                self.next()?;
+                self.next();
                 let sym = Symbol(t.value.symbol().expect("string token carries a symbol"));
                 Ok(self.ast.add(Node::String(sym), t.span))
             }
             TokenKind::True | TokenKind::False | TokenKind::Null | TokenKind::SelfKw => {
-                self.next()?;
+                self.next();
                 self.name_primary(t)
             }
             TokenKind::SelfContext => {
-                self.next()?;
+                self.next();
                 Ok(self.ast.add(Node::SelfContext, t.span))
             }
             TokenKind::Identifier => {
-                self.next()?;
+                self.next();
                 self.name_primary(t)
             }
             TokenKind::LParen => {
-                self.next()?;
+                self.next();
                 let expr = self.parse_expression()?;
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)
@@ -913,7 +1033,7 @@ impl<S: CharStream> Parser<S> {
         let mut rest = None;
         let mut saw_stmt = false;
         loop {
-            let t = self.peek()?;
+            let t = self.peek();
             if t.kind == TokenKind::RBrace {
                 break;
             }
@@ -921,55 +1041,75 @@ impl<S: CharStream> Parser<S> {
             // at an entry boundary cannot continue an expression)
             if t.kind == TokenKind::Pipe || t.kind == TokenKind::OrOr {
                 if saw_stmt || params.is_some() {
-                    return Err(ParseError::new(t.span, "params must precede the body"));
+                    self.push_error(ParseError::new(t.span, "params must precede the body"));
                 }
-                let (list, rest_param) = self.parse_params()?;
-                params = Some(list);
-                rest = rest_param;
+                match self.parse_params() {
+                    Ok((list, rest_param)) => {
+                        params = Some(list);
+                        rest = rest_param;
+                    }
+                    Err(error) => {
+                        self.push_error(error);
+                        self.recover_entry();
+                    }
+                }
                 continue;
             }
-            if self.eat(TokenKind::Comma)? || self.eat(TokenKind::Semicolon)? {
+            if self.eat(TokenKind::Comma) || self.eat(TokenKind::Semicolon) {
                 continue;
             }
-            match self.parse_entry()? {
-                Entry::Slot(slot) => {
+            let before = self.tokens_consumed;
+            match self.parse_entry() {
+                Ok(Entry::Slot(slot)) => {
                     if saw_stmt || params.is_some() {
-                        return Err(ParseError::new(
+                        self.push_error(ParseError::new(
                             self.ast.span(slot),
                             "slots must precede the body",
                         ));
                     }
                     slots.push(slot);
                 }
-                Entry::Stmt(stmt) => {
+                Ok(Entry::Stmt(stmt)) => {
                     saw_stmt = true;
                     stmts.push(stmt);
-                    self.expect_semicolon()?;
+                    if let Err(error) = self.expect_semicolon() {
+                        self.push_error(error);
+                        self.recover_entry();
+                    }
+                }
+                Err(error) => {
+                    self.push_error(error);
+                    self.recover_entry();
+                }
+            }
+            if self.tokens_consumed == before {
+                let next = self.peek();
+                if next.kind != TokenKind::RBrace && next.kind != TokenKind::Eof {
+                    self.next();
                 }
             }
         }
+        self.export_target = saved_export;
         let close = self.expect(TokenKind::RBrace)?;
         let body_span = ByteSpan::new(open.span.end, close.span.start);
         let body_list = self.ast.list(&stmts);
         let body = self.ast.add(Node::StmtList { stmts: body_list }, body_span);
         let slots = self.ast.list(&slots);
-        self.export_target = saved_export;
-        let span = ByteSpan::new(open.span.start, close.span.end);
-        Ok(self.ast.add(
+        Ok(self.finish_node(
+            open.span.start,
             Node::Object(ObjectParts {
                 slots,
                 params,
                 rest,
                 body,
             }),
-            span,
         ))
     }
 
     /// One entry inside braces: a slot (revealed by a trailing `:`) or a
     /// statement.
     fn parse_entry(&mut self) -> Result<Entry, ParseError> {
-        let t = self.peek()?;
+        let t = self.peek();
         // `let` is never an expression, and never a slot key
         if t.kind == TokenKind::Let {
             return Ok(Entry::Stmt(self.parse_let()?));
@@ -993,45 +1133,33 @@ impl<S: CharStream> Parser<S> {
         {
             return Ok(Entry::Slot(slot));
         }
+        if let Some(head) = self.slot_head()? {
+            let value = self.parse_expression()?;
+            return Ok(Entry::Slot(self.finish_node(
+                head.start,
+                Node::Slot {
+                    kind: head.kind,
+                    key: head.key,
+                    value,
+                },
+            )));
+        }
         if is_name_kind(t.kind) {
-            let name_tok = self.next()?;
-            // `name >> value` / `name << value` — an accessor slot
-            let accessor = match self.peek()?.kind {
-                TokenKind::GtGt => Some(SlotKind::Getter),
-                TokenKind::LtLt => Some(SlotKind::Setter),
-                _ => None,
-            };
-            if let Some(kind) = accessor {
-                self.next()?;
-                let name = self.token_name(name_tok)?;
-                let key = self.ast.add(Node::Ident(name), name_tok.span);
-                let value = self.parse_expression()?;
-                let span = ByteSpan::new(name_tok.span.start, self.ast.span(value).end);
-                return Ok(Entry::Slot(
-                    self.ast.add(Node::Slot { kind, key, value }, span),
-                ));
-            }
-            // `name :` — a named slot
-            if self.peek()?.kind == TokenKind::Colon {
-                return Ok(Entry::Slot(self.name_slot(name_tok, SlotKind::Named)?));
-            }
-            // `name * :` — a parent slot; any other token after `*` means
-            // the star was the multiply operator
-            if self.peek()?.kind == TokenKind::Star {
-                self.next()?;
-                if self.peek()?.kind == TokenKind::Colon {
-                    return Ok(Entry::Slot(self.name_slot(name_tok, SlotKind::Parent)?));
-                }
+            let name_tok = self.next();
+            // `name * expr` — the star is multiplication here; a parent slot
+            // was already consumed by `slot_head`.
+            if self.peek().kind == TokenKind::Star {
+                let star = self.next();
                 let lhs = self.name_primary(name_tok)?;
                 let rhs = self.parse_binary(MUL_PREC + 1)?;
-                let span = ByteSpan::new(name_tok.span.start, self.ast.span(rhs).end);
-                let lhs = self.ast.add(
+                let lhs = self.finish_node(
+                    name_tok.span.start,
                     Node::Binary {
                         op: BinaryOp::Mul,
+                        op_span: star.span,
                         lhs,
                         rhs,
                     },
-                    span,
                 );
                 let expr = self.parse_binary_from(lhs, 1)?;
                 let expr = self.parse_assignment_from(expr)?;
@@ -1047,33 +1175,92 @@ impl<S: CharStream> Parser<S> {
         // everything else: parse the statement; a trailing `:` turns a
         // `[key]` expression into an element slot
         let expr = self.parse_expression()?;
-        if self.eat(TokenKind::Colon)? {
+        if self.eat(TokenKind::Colon) {
             let key = self.element_key(expr)?;
             let value = self.parse_expression()?;
-            let span = ByteSpan::new(self.ast.span(key).start, self.ast.span(value).end);
-            let slot = self.ast.add(
+            let start = self.ast.span(key).start;
+            return Ok(Entry::Slot(self.finish_node(
+                start,
                 Node::Slot {
                     kind: SlotKind::Element,
                     key,
                     value,
                 },
-                span,
-            );
-            return Ok(Entry::Slot(slot));
+            )));
         }
         Ok(Entry::Stmt(self.expr_stmt(expr)?))
     }
 
+    fn slot_head(&mut self) -> Result<Option<SlotHead>, ParseError> {
+        let token = self.peek();
+        if token.kind == TokenKind::QuotedName {
+            let key_tok = self.next();
+            if self.peek().kind != TokenKind::Colon {
+                return Err(ParseError::new(
+                    key_tok.span,
+                    "a quoted name is only allowed as a slot key",
+                ));
+            }
+            let symbol = Symbol(key_tok.value.symbol().expect("quoted name has a symbol"));
+            let key = self.ast.add(Node::Ident(symbol), key_tok.span);
+            self.expect(TokenKind::Colon)?;
+            return Ok(Some(SlotHead {
+                kind: SlotKind::Named,
+                key,
+                start: key_tok.span.start,
+            }));
+        }
+        if !is_name_kind(token.kind) {
+            return Ok(None);
+        }
+        let next = self.peek_nth(1);
+        let (kind, accessor) = match next.kind {
+            TokenKind::Colon => (SlotKind::Named, false),
+            TokenKind::Star if self.peek_nth(2).kind == TokenKind::Colon => {
+                (SlotKind::Parent, true)
+            }
+            TokenKind::GtGt => (SlotKind::Getter, true),
+            TokenKind::LtLt => (SlotKind::Setter, true),
+            _ => return Ok(None),
+        };
+        let key_tok = self.next();
+        let key = self.named_key(key_tok)?;
+        if accessor {
+            self.next();
+        }
+        if matches!(kind, SlotKind::Named | SlotKind::Parent) {
+            self.expect(TokenKind::Colon)?;
+        }
+        Ok(Some(SlotHead {
+            kind,
+            key,
+            start: key_tok.span.start,
+        }))
+    }
+
+    fn named_key(&mut self, token: Token) -> Result<NodeId, ParseError> {
+        let symbol = self.token_name(token)?;
+        Ok(self.ast.add(Node::Ident(symbol), token.span))
+    }
+
+    fn parse_rest_name(&mut self) -> Result<NodeId, ParseError> {
+        self.expect(TokenKind::Period)?;
+        self.expect(TokenKind::Period)?;
+        self.expect(TokenKind::Period)?;
+        let token = self.expect(TokenKind::Identifier)?;
+        self.named_key(token)
+    }
+
     /// `a, b, c: value` — several named slots sharing one initializer.
     fn multi_slot(&mut self) -> Result<Option<NodeId>, ParseError> {
-        let first = self.peek_nth(0)?;
+        let first = self.peek_nth(0);
         if !is_name_kind(first.kind) {
             return Ok(None);
         }
         let mut count = 1;
         let mut saw_comma = false;
         loop {
-            let separator = self.peek_nth(count)?;
+            let separator = self.peek_nth(count);
             if separator.kind == TokenKind::Colon {
                 if !saw_comma {
                     return Ok(None);
@@ -1084,16 +1271,16 @@ impl<S: CharStream> Parser<S> {
                 return Ok(None);
             }
             saw_comma = true;
-            let next = self.peek_nth(count + 1)?;
+            let next = self.peek_nth(count + 1);
             if !is_name_kind(next.kind) {
                 return Ok(None);
             }
             count += 2;
         }
-        let mut keys = Vec::with_capacity((count + 1) / 2);
+        let mut keys = Vec::with_capacity(count.div_ceil(2));
         for offset in 0..count {
             if offset % 2 == 0 {
-                let token = self.next()?;
+                let token = self.next();
                 let name = self.token_name(token)?;
                 keys.push(self.ast.add(Node::Ident(name), token.span));
             } else {
@@ -1102,31 +1289,20 @@ impl<S: CharStream> Parser<S> {
         }
         self.expect(TokenKind::Colon)?;
         let value = self.parse_expression()?;
-        let span = ByteSpan::new(first.span.start, self.ast.span(value).end);
         let keys = self.ast.list(&keys);
-        Ok(Some(self.ast.add(
+        Ok(Some(self.finish_node(
+            first.span.start,
             Node::SlotMulti {
                 kind: SlotKind::Named,
                 keys,
                 value,
             },
-            span,
         )))
     }
 
     fn expr_stmt(&mut self, expr: NodeId) -> Result<NodeId, ParseError> {
-        let span = self.ast.span(expr);
-        Ok(self.ast.add(Node::ExprStmt { expr }, span))
-    }
-
-    /// `name` (already consumed) `:` value.
-    fn name_slot(&mut self, name_tok: Token, kind: SlotKind) -> Result<NodeId, ParseError> {
-        let name = self.token_name(name_tok)?;
-        let key = self.ast.add(Node::Ident(name), name_tok.span);
-        self.expect(TokenKind::Colon)?;
-        let value = self.parse_expression()?;
-        let span = ByteSpan::new(name_tok.span.start, self.ast.span(value).end);
-        Ok(self.ast.add(Node::Slot { kind, key, value }, span))
+        let start = self.ast.span(expr).start;
+        Ok(self.finish_node(start, Node::ExprStmt { expr }))
     }
 
     /// The `[key]` of an element slot, unwrapped from the array literal
@@ -1146,33 +1322,27 @@ impl<S: CharStream> Parser<S> {
 
     /// Parse `|params|`; a trailing `...name` is the rest parameter.
     fn parse_params(&mut self) -> Result<(NodeList, Option<NodeId>), ParseError> {
-        if self.eat(TokenKind::OrOr)? {
+        if self.eat(TokenKind::OrOr) {
             return Ok((self.ast.list(&[]), None));
         }
         self.expect(TokenKind::Pipe)?;
         let mut params = Vec::new();
         let mut rest = None;
-        if self.peek()?.kind != TokenKind::Pipe {
+        if self.peek().kind != TokenKind::Pipe {
             loop {
-                if self.peek()?.kind == TokenKind::Period {
-                    for _ in 0..3 {
-                        self.expect(TokenKind::Period)?;
-                    }
-                    let t = self.expect(TokenKind::Identifier)?;
-                    let sym = Symbol(t.value.symbol().expect("identifier carries a symbol"));
-                    rest = Some(self.ast.add(Node::Ident(sym), t.span));
-                    if self.peek()?.kind != TokenKind::Pipe {
+                if self.peek().kind == TokenKind::Period {
+                    rest = Some(self.parse_rest_name()?);
+                    if self.peek().kind != TokenKind::Pipe {
                         return Err(ParseError::new(
-                            self.peek()?.span,
+                            self.peek().span,
                             "rest parameter must be last",
                         ));
                     }
                     break;
                 }
-                let t = self.expect(TokenKind::Identifier)?;
-                let sym = Symbol(t.value.symbol().expect("identifier carries a symbol"));
-                params.push(self.ast.add(Node::Ident(sym), t.span));
-                if !self.eat(TokenKind::Comma)? {
+                let token = self.expect(TokenKind::Identifier)?;
+                params.push(self.named_key(token)?);
+                if !self.eat(TokenKind::Comma) {
                     break;
                 }
             }
@@ -1183,22 +1353,10 @@ impl<S: CharStream> Parser<S> {
 
     fn parse_array(&mut self) -> Result<NodeId, ParseError> {
         let open = self.expect(TokenKind::LBracket)?;
-        let mut elements = Vec::new();
-        if self.peek()?.kind != TokenKind::RBracket {
-            loop {
-                elements.push(self.parse_expression()?);
-                if !self.eat(TokenKind::Comma)? {
-                    break;
-                }
-                if self.peek()?.kind == TokenKind::RBracket {
-                    break;
-                }
-            }
-        }
-        let close = self.expect(TokenKind::RBracket)?;
+        let (elements, _) =
+            self.parse_comma_list(TokenKind::RBracket, |parser| parser.parse_expression())?;
         let elements = self.ast.list(&elements);
-        let span = ByteSpan::new(open.span.start, close.span.end);
-        Ok(self.ast.add(Node::Array { elements }, span))
+        Ok(self.finish_node(open.span.start, Node::Array { elements }))
     }
 
     // -- control flow --------------------------------------------------------
@@ -1208,54 +1366,45 @@ impl<S: CharStream> Parser<S> {
         let cond = self.parse_expression()?;
         let then = self.parse_branch()?;
         let mut else_ = None;
-        if self.peek()?.kind == TokenKind::Else {
-            self.next()?;
-            else_ = Some(if self.peek()?.kind == TokenKind::If {
+        if self.peek().kind == TokenKind::Else {
+            self.next();
+            else_ = Some(if self.peek().kind == TokenKind::If {
                 self.parse_if()?
             } else {
                 self.parse_branch()?
             });
         }
-        let end = else_
-            .map(|e| self.ast.span(e).end)
-            .unwrap_or_else(|| self.ast.span(then).end);
-        let span = ByteSpan::new(kw.span.start, end);
-        Ok(self.ast.add(Node::If { cond, then, else_ }, span))
+        Ok(self.finish_node(kw.span.start, Node::If { cond, then, else_ }))
     }
 
     fn parse_while(&mut self) -> Result<NodeId, ParseError> {
         let kw = self.expect(TokenKind::While)?;
         let cond = self.parse_expression()?;
         let body = self.parse_branch()?;
-        let span = ByteSpan::new(kw.span.start, self.ast.span(body).end);
-        Ok(self.ast.add(Node::While { cond, body }, span))
+        Ok(self.finish_node(kw.span.start, Node::While { cond, body }))
     }
 
     /// `for pattern in iterable { body }`
     fn parse_for(&mut self) -> Result<NodeId, ParseError> {
         let kw = self.expect(TokenKind::For)?;
         let first = self.parse_pattern()?;
-        let (pattern, keyed) = if self.eat(TokenKind::Comma)? {
+        let (pattern, keyed) = if self.eat(TokenKind::Comma) {
             let start = self.ast.span(first).start;
-            let mut end;
             let mut elements = vec![first];
             loop {
-                let element = self.parse_pattern()?;
-                end = self.ast.span(element).end;
-                elements.push(element);
-                if !self.eat(TokenKind::Comma)? {
+                elements.push(self.parse_pattern()?);
+                if !self.eat(TokenKind::Comma) {
                     break;
                 }
             }
             let elements = self.ast.list(&elements);
-            let span = ByteSpan::new(start, end);
             (
-                self.ast.add(
+                self.finish_node(
+                    start,
                     Node::PatternArray {
                         elements,
                         rest: None,
                     },
-                    span,
                 ),
                 true,
             )
@@ -1265,35 +1414,33 @@ impl<S: CharStream> Parser<S> {
         self.expect(TokenKind::In)?;
         let iterable = self.parse_expression()?;
         let body = self.parse_branch()?;
-        let span = ByteSpan::new(kw.span.start, self.ast.span(body).end);
-        Ok(self.ast.add(
+        Ok(self.finish_node(
+            kw.span.start,
             Node::For {
                 keyed,
                 pattern,
                 iterable,
                 body,
             },
-            span,
         ))
     }
 
     fn parse_prefixed_function(&mut self) -> Result<NodeId, ParseError> {
-        let start = self.peek()?.span.start;
+        let start = self.peek().span.start;
         let (params, rest) = self.parse_params()?;
         let saved_export = self.export_target;
         self.export_target = None;
         let body = self.parse_branch()?;
         self.export_target = saved_export;
         let slots = self.ast.list(&[]);
-        let span = ByteSpan::new(start, self.ast.span(body).end);
-        Ok(self.ast.add(
+        Ok(self.finish_node(
+            start,
             Node::Object(ObjectParts {
                 slots,
                 params: Some(params),
                 rest,
                 body,
             }),
-            span,
         ))
     }
 
@@ -1306,14 +1453,13 @@ impl<S: CharStream> Parser<S> {
         let param = self.name_primary(param_tok)?;
         self.expect(TokenKind::RParen)?;
         let handler = self.parse_branch()?;
-        let span = ByteSpan::new(kw.span.start, self.ast.span(handler).end);
-        Ok(self.ast.add(
+        Ok(self.finish_node(
+            kw.span.start,
             Node::Try {
                 body,
                 param,
                 handler,
             },
-            span,
         ))
     }
 
@@ -1323,13 +1469,10 @@ impl<S: CharStream> Parser<S> {
         let open = self.expect(TokenKind::LBrace)?;
         let saved = self.allow_mod;
         self.allow_mod = false;
-        let stmts = self.parse_statement_list(TokenKind::RBrace)?;
+        let stmts = self.parse_statement_list(TokenKind::RBrace);
         self.allow_mod = saved;
-        let close = self.expect(TokenKind::RBrace)?;
+        self.expect(TokenKind::RBrace)?;
         let list = self.ast.list(&stmts);
-        Ok(self.ast.add(
-            Node::StmtList { stmts: list },
-            ByteSpan::new(open.span.start, close.span.end),
-        ))
+        Ok(self.finish_node(open.span.start, Node::StmtList { stmts: list }))
     }
 }

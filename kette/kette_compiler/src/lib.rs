@@ -5,7 +5,7 @@
 
 pub mod codegen;
 
-use bytecode::{FrontendError, Program, SourceMode};
+use bytecode::{FrontendDiagnostic, FrontendError, Program, SourceMode};
 use kette_parser::{Ast, ByteSpan, Parser, Utf8SliceStream, resolve};
 use vm_core::NativeIndex;
 /// A construct the lowering does not support yet.
@@ -33,7 +33,7 @@ impl core::fmt::Display for CompileError {
 
 /// Resolve + lower a parsed unit. `functions[0]` is the script.
 pub fn compile_ast(
-    ast: &mut Ast,
+    ast: &Ast,
     mode: SourceMode,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
@@ -65,11 +65,27 @@ pub fn compile_kette(
             "kette: only script, file, repl, and indirect eval mode are implemented",
         ));
     }
-    let mut parser = Parser::new(Utf8SliceStream::new(source));
-    parser
-        .parse_script()
-        .map_err(|e| FrontendError::syntax(e.to_string()))?;
-    let mut ast = parser.into_ast();
-    compile_ast(&mut ast, mode, declare_globals, install_accessor)
-        .map_err(|e| FrontendError::compile(e.to_string()))
+    let output = Parser::new(Utf8SliceStream::new(source)).parse();
+    if !output.errors.is_empty() {
+        let diagnostics = output
+            .diagnostics(source)
+            .into_iter()
+            .map(|diagnostic| FrontendDiagnostic {
+                span: Some((diagnostic.span.start, diagnostic.span.end)),
+                line: Some(diagnostic.line),
+                column: Some(diagnostic.column),
+                message: diagnostic.message,
+            })
+            .collect();
+        return Err(FrontendError::syntax_many(diagnostics));
+    }
+    compile_ast(&output.ast, mode, declare_globals, install_accessor).map_err(|error| {
+        let position = output.line_index.line_column(source, error.span.start);
+        FrontendError::compile_many(vec![FrontendDiagnostic {
+            span: Some((error.span.start, error.span.end)),
+            line: Some(position.line),
+            column: Some(position.column),
+            message: format!("unsupported: {}", error.feature),
+        }])
+    })
 }

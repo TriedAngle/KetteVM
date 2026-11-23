@@ -1,4 +1,4 @@
-use crate::{plumbing::ByteSpan, plumbing::Symbol, plumbing::SymbolTable};
+use crate::{ByteSpan, Symbol, SymbolTable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u32);
@@ -90,6 +90,8 @@ pub enum Node {
     Self_,
     SelfContext,
     Ident(Symbol),
+    /// A slot/send name reference; its span lives in the AST side table.
+    Name(Symbol),
 
     Object(ObjectParts),
     Slot {
@@ -127,7 +129,7 @@ pub enum Node {
     /// `recv.name` slot read
     Get {
         recv: NodeId,
-        name: Symbol,
+        name: NodeId,
     },
     /// `recv[key]` / `recv.0` element read
     Index {
@@ -137,7 +139,7 @@ pub enum Node {
     /// `recv.name(args)`
     Send {
         recv: NodeId,
-        name: Symbol,
+        name: NodeId,
         args: NodeList,
     },
     /// `callee(args)` — the callee itself is the receiver (`self`)
@@ -153,10 +155,12 @@ pub enum Node {
     /// prefix `-` / `!`
     Unary {
         op: UnaryOp,
+        op_span: ByteSpan,
         expr: NodeId,
     },
     Binary {
         op: BinaryOp,
+        op_span: ByteSpan,
         lhs: NodeId,
         rhs: NodeId,
     },

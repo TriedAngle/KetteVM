@@ -123,7 +123,8 @@ fn collect_objects(ast: &Ast, node: NodeId, out: &mut Vec<NodeId>) {
         | Node::Null
         | Node::Self_
         | Node::SelfContext
-        | Node::Ident(_) => {}
+        | Node::Ident(_)
+        | Node::Name(_) => {}
     }
 }
 
@@ -282,7 +283,8 @@ fn collect_object_names(
         | Node::Null
         | Node::Self_
         | Node::SelfContext
-        | Node::Ident(_) => {}
+        | Node::Ident(_)
+        | Node::Name(_) => {}
     }
 }
 
@@ -491,6 +493,13 @@ impl<'a> FunctionGen<'a> {
     }
 
     // -- constants -----------------------------------------------------------
+
+    fn name_symbol(&self, node: NodeId) -> Symbol {
+        match *self.ast.node(node) {
+            Node::Name(symbol) => symbol,
+            _ => unreachable!("name nodes only hold symbols"),
+        }
+    }
 
     fn name_constant(&mut self, name: Symbol) -> ConstIdx {
         self.b.name(self.ast.symbol(name))
@@ -846,12 +855,14 @@ impl<'a> FunctionGen<'a> {
                 self.load_ident(node);
                 Ok(())
             }
+            Node::Name(_) => self.err(node, "slot name in expression position"),
             Node::Object(_) => self.emit_object(node),
             Node::Array { elements } => self.emit_array(elements),
             Node::Get { recv, name } => {
                 self.expr(recv)?;
                 let obj = self.b.stage_acc(&temps);
-                let name = self.name_constant(name);
+                let symbol = self.name_symbol(name);
+                let name = self.name_constant(symbol);
                 let feedback = self.b.new_feedback();
                 self.b.load_named_property(obj, name, feedback);
                 Ok(())
@@ -864,7 +875,10 @@ impl<'a> FunctionGen<'a> {
                 self.b.load_indexed(obj, feedback);
                 Ok(())
             }
-            Node::Send { recv, name, args } => self.emit_send(recv, name, args),
+            Node::Send { recv, name, args } => {
+                let symbol = self.name_symbol(name);
+                self.emit_send(recv, symbol, args)
+            }
             Node::Call { callee, args } => self.emit_call(callee, args),
             Node::Assign { target, value } => self.emit_assign(target, value),
             Node::Return { value } => {
@@ -895,8 +909,8 @@ impl<'a> FunctionGen<'a> {
             }
             Node::While { .. } => self.emit_while(node),
             Node::For { .. } => self.emit_for(node),
-            Node::Binary { op, lhs, rhs } => self.emit_binary(op, lhs, rhs),
-            Node::Unary { op, expr } => self.emit_unary(op, expr),
+            Node::Binary { op, lhs, rhs, .. } => self.emit_binary(op, lhs, rhs),
+            Node::Unary { op, expr, .. } => self.emit_unary(op, expr),
             Node::Slot { .. }
             | Node::SlotMulti { .. }
             | Node::PatternFields { .. }
@@ -1020,7 +1034,8 @@ impl<'a> FunctionGen<'a> {
             Node::Get { recv, name } => {
                 self.expr(recv)?;
                 let obj = self.b.stage_acc(&temps);
-                let name = self.name_constant(name);
+                let symbol = self.name_symbol(name);
+                let name = self.name_constant(symbol);
                 self.expr(value)?;
                 let feedback = self.b.new_feedback();
                 self.b.store_named_property_no_shadow(obj, name, feedback);

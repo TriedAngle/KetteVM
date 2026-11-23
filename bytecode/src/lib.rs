@@ -9,9 +9,9 @@ pub use builder::{
 };
 pub use opcodes::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
 pub use program::{
-    CallableKind, Constant, FrontendError, FrontendErrorKind, Function, FunctionId,
-    GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program, ScopeLayout, ScopeLocal,
-    SourceMode,
+    CallableKind, Constant, FrontendDiagnostic, FrontendError, FrontendErrorKind, Function,
+    FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program, ScopeLayout,
+    ScopeLocal, SourceMode,
 };
 pub use validate::{ValidationError, validate, validate_function};
 

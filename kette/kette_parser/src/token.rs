@@ -1,4 +1,4 @@
-pub use crate::plumbing::ByteSpan;
+use crate::ByteSpan;
 
 use TokenInfo as I;
 
@@ -12,6 +12,8 @@ pub enum TokenKind {
     Identifier,
     Number,
     String,
+    /// A backtick-quoted slot name, e.g. `` `+` `` or `` `[]` ``.
+    QuotedName,
 
     // punctuation
     LParen,    // (
@@ -93,6 +95,7 @@ const TOKEN_INFO: &[TokenInfo] = &[
     I::new("", 0, 0),                       // Identifier
     I::new("", 0, 0),                       // Number
     I::new("", 0, 0),                       // String
+    I::new("", 0, 0),                       // QuotedName
     I::new("(", 0, 0),                      // LParen
     I::new(")", 0, 0),                      // RParen
     I::new("{", 0, 0),                      // LBrace
@@ -173,9 +176,11 @@ impl TokenKind {
         }
         match self {
             TokenKind::Eof => "end of input",
+            TokenKind::Illegal => "invalid token",
             TokenKind::Identifier => "identifier",
             TokenKind::Number => "number",
             TokenKind::String => "string",
+            TokenKind::QuotedName => "quoted name",
             _ => "token",
         }
     }
@@ -220,6 +225,37 @@ impl Token {
             after_newline: false,
             value: TokenValue::None,
             span,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriviaKind {
+    Whitespace,
+    Newline,
+    LineComment,
+    BlockComment,
+}
+
+/// A non-syntax span retained for source fidelity (formatting, docs, tools).
+#[derive(Clone, Copy, Debug)]
+pub struct Trivia {
+    pub kind: TriviaKind,
+    pub span: ByteSpan,
+}
+
+/// A lossless piece of the source stream.
+#[derive(Clone, Copy, Debug)]
+pub enum SyntaxToken {
+    Trivia(Trivia),
+    Token(Token),
+}
+
+impl SyntaxToken {
+    pub fn span(self) -> ByteSpan {
+        match self {
+            Self::Trivia(trivia) => trivia.span,
+            Self::Token(token) => token.span,
         }
     }
 }

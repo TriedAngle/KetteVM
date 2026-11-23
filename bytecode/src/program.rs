@@ -37,12 +37,24 @@ pub enum FrontendErrorKind {
     Compile,
 }
 
+/// One structured frontend diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendDiagnostic {
+    pub span: Option<(u32, u32)>,
+    /// 1-based line, when the frontend computed source coordinates.
+    pub line: Option<u32>,
+    /// 1-based Unicode scalar column.
+    pub column: Option<u32>,
+    pub message: String,
+}
+
 /// A frontend (parser/compiler) failure, in a form the VM can turn into a
 /// thrown exception without knowing the language.
 #[derive(Clone, Debug)]
 pub struct FrontendError {
     pub kind: FrontendErrorKind,
     pub message: String,
+    pub diagnostics: Vec<FrontendDiagnostic>,
 }
 
 impl FrontendError {
@@ -50,6 +62,7 @@ impl FrontendError {
         Self {
             kind: FrontendErrorKind::Syntax,
             message: message.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -57,7 +70,48 @@ impl FrontendError {
         Self {
             kind: FrontendErrorKind::Compile,
             message: message.into(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    pub fn syntax_many(diagnostics: Vec<FrontendDiagnostic>) -> Self {
+        Self {
+            kind: FrontendErrorKind::Syntax,
+            message: join_diagnostics(&diagnostics),
+            diagnostics,
+        }
+    }
+
+    pub fn compile_many(diagnostics: Vec<FrontendDiagnostic>) -> Self {
+        Self {
+            kind: FrontendErrorKind::Compile,
+            message: join_diagnostics(&diagnostics),
+            diagnostics,
+        }
+    }
+}
+
+fn join_diagnostics(diagnostics: &[FrontendDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(format_diagnostic)
+        .collect::<Vec<_>>()
+        .join("\n  ")
+}
+
+fn format_diagnostic(diagnostic: &FrontendDiagnostic) -> String {
+    match (diagnostic.line, diagnostic.column, diagnostic.span) {
+        (Some(line), Some(column), Some((start, end))) => format!(
+            "{}:{} (bytes {}..{}): {}",
+            line, column, start, end, diagnostic.message
+        ),
+        (Some(line), Some(column), None) => {
+            format!("{}:{}: {}", line, column, diagnostic.message)
+        }
+        (None, None, Some((start, end))) => {
+            format!("bytes {}..{}: {}", start, end, diagnostic.message)
+        }
+        _ => diagnostic.message.clone(),
     }
 }
 
