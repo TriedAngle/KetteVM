@@ -1,6 +1,6 @@
 use crate::{
     CallableKind, Opcode, Operand, Scale, emit, program::Constant, program::Function,
-    program::HandlerEntry,
+    program::HandlerEntry, program::SwitchTable,
 };
 use core::cell::Cell;
 use std::{collections::HashMap, sync::atomic::AtomicU32, sync::atomic::Ordering};
@@ -194,6 +194,8 @@ pub enum BuildError {
     UnbalancedTemps,
     /// A jump offset exceeds the widened (16-bit) range.
     JumpOutOfRange,
+    /// A switch table is too large or has an invalid range.
+    SwitchTooLarge,
 }
 
 impl core::fmt::Display for BuildError {
@@ -203,6 +205,7 @@ impl core::fmt::Display for BuildError {
             Self::UnfinishedHandler => f.write_str("try range missing end_try/handler_entry"),
             Self::UnbalancedTemps => f.write_str("temporary registers still allocated at finish"),
             Self::JumpOutOfRange => f.write_str("jump offset exceeds the 16-bit range"),
+            Self::SwitchTooLarge => f.write_str("switch table range is too large"),
         }
     }
 }
@@ -224,6 +227,15 @@ enum Acc {
     True,
     False,
     Hole,
+}
+
+#[derive(Debug)]
+struct SwitchRec {
+    /// Label anchored at the switch instruction.
+    at: Label,
+    const_idx: u32,
+    /// One label per target, with the default last.
+    labels: Vec<Label>,
 }
 
 #[derive(Debug)]
@@ -370,6 +382,7 @@ pub struct FnBuilder {
     // emission state
     code: Vec<u8>,
     jumps: Vec<JumpRec>,
+    switch_tables: Vec<SwitchRec>,
     labels: Vec<LabelRec>,
     handlers: Vec<HandlerRec>,
 
@@ -406,6 +419,7 @@ impl FnBuilder {
             arity,
             code: Vec::new(),
             jumps: Vec::new(),
+            switch_tables: Vec::new(),
             labels: Vec::new(),
             handlers: Vec::new(),
             constants: Vec::new(),
@@ -634,9 +648,31 @@ impl FnBuilder {
         self.emit_tracked(Opcode::LoadNamedProperty, &[obj.operand(), name.0, fb.0]);
     }
 
+    pub fn load_named_property_or_hole(&mut self, obj: Reg, name: ConstIdx, fb: Feedback) {
+        self.emit_tracked(
+            Opcode::LoadNamedPropertyOrHole,
+            &[obj.operand(), name.0, fb.0],
+        );
+    }
+
+    pub fn test_type(&mut self, value: Reg, type_value: Reg, kind: u32, fb: Feedback) {
+        self.emit_tracked(
+            Opcode::TestType,
+            &[value.operand(), type_value.operand(), kind, fb.0],
+        );
+    }
+
+    pub fn load_length(&mut self, value: Reg, fb: Feedback) {
+        self.emit_tracked(Opcode::LoadLength, &[value.operand(), fb.0]);
+    }
+
     /// Keyed load: the key is in the accumulator, the result replaces it.
     /// A directly preceding `LoadSmi` with an in-range non-negative value
     /// fuses into [`Opcode::LoadElementImm`].
+    pub fn load_keyed_property_or_hole(&mut self, obj: Reg, fb: Feedback) {
+        self.emit_tracked(Opcode::LoadKeyedPropertyOrHole, &[obj.operand(), fb.0]);
+    }
+
     pub fn load_keyed_property(&mut self, obj: Reg, fb: Feedback) {
         if let LastOp::LoadSmi { at, imm } = self.last
             && (0..=u16::MAX as i32).contains(&imm)
@@ -914,6 +950,57 @@ impl FnBuilder {
         self.emit_jump_op(Opcode::JumpLoop, target);
     }
 
+    /// Emit a dense integer switch. `cases` must be unique and within
+    /// `min..=max`; missing values use `default`.
+    pub fn array_slice(&mut self, src: Reg, from: u32) {
+        self.emit_tracked(Opcode::ArraySlice, &[src.operand(), from]);
+    }
+
+    pub fn switch_int(
+        &mut self,
+        value: Reg,
+        min: i64,
+        cases: &[(i64, Label)],
+        default: Label,
+    ) -> Result<(), BuildError> {
+        self.check_label(default);
+        let mut max = min;
+        for &(case, label) in cases {
+            self.check_label(label);
+            max = max.max(case);
+        }
+        let range = max
+            .checked_sub(min)
+            .and_then(|v| v.checked_add(1))
+            .ok_or(BuildError::SwitchTooLarge)?;
+        if range <= 0 || range > 0x1_0000 {
+            return Err(BuildError::SwitchTooLarge);
+        }
+        let mut labels = vec![default; range as usize + 1];
+        for &(case, label) in cases {
+            debug_assert!(min <= case && case <= max);
+            debug_assert_eq!(labels[(case - min) as usize], default);
+            labels[(case - min) as usize] = label;
+        }
+        labels[range as usize] = default;
+        let const_idx = self.constants.len() as u32;
+        self.constants.push(Constant::SwitchTable(SwitchTable {
+            min,
+            targets: vec![0i32; range as usize + 1].into_boxed_slice(),
+        }));
+        let at = self.new_label();
+        self.bind(at);
+        self.emit_tracked(Opcode::SwitchInt, &[value.operand(), const_idx]);
+        self.acc = Acc::Dead;
+        self.last = LastOp::None;
+        self.switch_tables.push(SwitchRec {
+            at,
+            const_idx,
+            labels,
+        });
+        Ok(())
+    }
+
     pub fn jump_if_truthy(&mut self, target: Label) {
         self.emit_cond_jump(Opcode::JumpIfTruthy, target);
     }
@@ -999,6 +1086,13 @@ impl FnBuilder {
                 return Err(BuildError::UnboundLabel);
             }
         }
+        for switch in &self.switch_tables {
+            for label in &switch.labels {
+                if self.labels[label.id as usize].bind.is_none() {
+                    return Err(BuildError::UnboundLabel);
+                }
+            }
+        }
         for handler in &self.handlers {
             if handler.try_end.is_none() || handler.handler_pc.is_none() {
                 return Err(BuildError::UnfinishedHandler);
@@ -1006,6 +1100,19 @@ impl FnBuilder {
         }
 
         let (code, label_out, jump_out, handler_out) = self.layout()?;
+
+        for switch in &self.switch_tables {
+            let pc = label_out[switch.at.id as usize] as i64;
+            let mut targets = Vec::with_capacity(switch.labels.len());
+            for label in &switch.labels {
+                let offset = label_out[label.id as usize] as i64 - pc;
+                targets.push(i32::try_from(offset).map_err(|_| BuildError::JumpOutOfRange)?);
+            }
+            match &mut self.constants[switch.const_idx as usize] {
+                Constant::SwitchTable(table) => table.targets = targets.into_boxed_slice(),
+                _ => unreachable!("switch table constant was replaced"),
+            }
+        }
 
         for (i, jump) in self.jumps.iter().enumerate() {
             if jump.op == Opcode::JumpLoop {

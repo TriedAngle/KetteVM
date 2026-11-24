@@ -1,14 +1,15 @@
-//! Become (nightly, `fast`) backend.
+//! Tail-call (nightly, `fast`) backend.
 
 use crate::{FloatReg, Frame, RootsArg};
 use bytecode::Opcode;
-use handler_derive::{handler, handler_become, handler_table};
+use handler_derive::{handler, handler_tail_call, tail_call_table};
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
-    HandleSlice, Heap, Interpreter, NativeIndex, Object, Ops, Regs, Result, Tagged, ThreadState,
-    Thrown, VM, Value, VmError, bail,
+    HandleSlice, Heap, Interpreter, NativeIndex, Object, Ops, Regs, Result, Tagged, Termination,
+    ThreadState, Thrown, VM, Value, VmError, bail,
 };
 
+use crate::handler;
 use crate::slow::*;
 #[cfg(feature = "star_fusion")]
 use crate::star_lookahead;
@@ -224,121 +225,121 @@ pub type Handler = for<'h> extern "rust-preserve-none" fn(
     FloatReg,
 ) -> Acc;
 
-// --- trampolines ---
-
-// Peel the `Wide` prefix and dispatch the stride-2 handler instantiation,
-// keeping the NARROW table: the next instruction (whatever its width)
-// dispatches narrow-first, and a following `Wide` returns through here.
-
-handler_table!(
-    op_wide,
-    crate::op_load,
-    crate::op_bind_this,
-    crate::op_move,
-    crate::op_store,
-    crate::op_add,
-    crate::op_call_native,
-    crate::op_jump,
-    crate::op_jump_if_truthy,
-    crate::op_jump_if_falsy,
-    crate::op_jump_if_not_undefined,
-    crate::op_jump_if_nullish,
-    op_jump_loop,
-    op_return,
-    op_call_no_feedback,
-    op_call,
-    op_call_method0,
-    op_call_method1,
-    op_call_method2,
-    op_call_function0,
-    op_call_function1,
-    op_call_function2,
-    crate::op_load_smi,
-    crate::op_load_zero,
-    crate::op_load_constant,
-    crate::op_load_undefined,
-    crate::op_load_null,
-    crate::op_load_true,
-    crate::op_load_false,
-    crate::op_tail_guard,
-    crate::op_load_global,
-    crate::op_sub,
-    crate::op_mul,
-    crate::op_div,
-    crate::op_mod,
-    crate::op_exp,
-    crate::op_negate,
-    crate::op_add_immediate,
-    crate::op_sub_immediate,
-    crate::op_mul_immediate,
-    crate::op_div_immediate,
-    crate::op_mod_immediate,
-    crate::op_exp_immediate,
-    crate::op_add_loc,
-    crate::op_sub_loc,
-    crate::op_bitwise_or,
-    crate::op_bitwise_xor,
-    crate::op_bitwise_and,
-    crate::op_shift_left,
-    crate::op_shift_right,
-    crate::op_shift_right_logical,
-    crate::op_bitwise_or_immediate,
-    crate::op_bitwise_xor_immediate,
-    crate::op_bitwise_and_immediate,
-    crate::op_shift_left_immediate,
-    crate::op_shift_right_immediate,
-    crate::op_shift_right_logical_immediate,
-    crate::op_equal,
-    crate::op_less_than,
-    crate::op_greater_than,
-    crate::op_less_than_or_equal,
-    crate::op_greater_than_or_equal,
-    crate::op_equal_strict,
-    crate::op_test_reference_equal,
-    crate::op_test_typeof,
-    crate::op_instance_of,
-    crate::op_compare_jump,
-    crate::op_inc_loc,
-    crate::op_dec_loc,
-    crate::op_load_keyed_property,
-    crate::op_load_indexed,
-    crate::op_load_keyed_property_reg,
-    crate::op_load_element_imm,
-    crate::op_load_named_property,
-    crate::op_store_named_property,
-    crate::op_store_keyed_property,
-    crate::op_store_indexed,
-    crate::op_store_named_property_no_shadow,
-    crate::op_store_keyed_property_no_shadow,
-    crate::op_define_named_own_property,
-    crate::op_define_keyed_own_property,
-    crate::op_store_in_array_literal,
-    crate::op_store_global,
-    crate::op_create_closure,
-    crate::op_throw,
-    crate::op_add_parent,
-    crate::op_load_context_slot,
-    crate::op_store_context_slot,
-    crate::op_push_context,
-    crate::op_pop_context,
-    crate::op_create_function_context,
-    crate::op_create_empty_array_literal,
-    crate::op_create_sized_array_literal,
-    crate::op_create_rest_parameter,
-    op_construct,
-    crate::op_create_empty_object_literal,
-    crate::op_create_block_context,
-    crate::op_load_hole,
-    crate::op_load_new_target,
-    crate::op_load_context,
-    crate::op_load_current_closure,
-    crate::op_throw_reference_error_if_hole,
-    crate::op_load_global_no_throw,
+tail_call_table!(
+    Wide => op_wide,
+    Load => handler::op_load,
+    BindThis => handler::op_bind_this,
+    Move => handler::op_move,
+    Store => handler::op_store,
+    Add => handler::op_add,
+    CallNative => handler::op_call_native,
+    Jump => handler::op_jump,
+    JumpIfTruthy => handler::op_jump_if_truthy,
+    JumpIfFalsy => handler::op_jump_if_falsy,
+    JumpIfNotUndefined => handler::op_jump_if_not_undefined,
+    JumpIfNullish => handler::op_jump_if_nullish,
+    JumpLoop => op_jump_loop,
+    Return => op_return,
+    CallNoFeedback => op_call_no_feedback,
+    Call => op_call,
+    CallMethod0 => op_call_method0,
+    CallMethod1 => op_call_method1,
+    CallMethod2 => op_call_method2,
+    CallFunction0 => op_call_function0,
+    CallFunction1 => op_call_function1,
+    CallFunction2 => op_call_function2,
+    LoadSmi => handler::op_load_smi,
+    LoadZero => handler::op_load_zero,
+    LoadConstant => handler::op_load_constant,
+    LoadUndefined => handler::op_load_undefined,
+    LoadNull => handler::op_load_null,
+    LoadTrue => handler::op_load_true,
+    LoadFalse => handler::op_load_false,
+    TailGuard => handler::op_tail_guard,
+    TestType => handler::op_test_type,
+    LoadLength => handler::op_load_length,
+    LoadGlobal => handler::op_load_global,
+    Sub => handler::op_sub,
+    Mul => handler::op_mul,
+    Div => handler::op_div,
+    Mod => handler::op_mod,
+    Exp => handler::op_exp,
+    Negate => handler::op_negate,
+    AddImmediate => handler::op_add_immediate,
+    SubImmediate => handler::op_sub_immediate,
+    MulImmediate => handler::op_mul_immediate,
+    DivImmediate => handler::op_div_immediate,
+    ModImmediate => handler::op_mod_immediate,
+    ExpImmediate => handler::op_exp_immediate,
+    AddLoc => handler::op_add_loc,
+    SubLoc => handler::op_sub_loc,
+    BitwiseOr => handler::op_bitwise_or,
+    BitwiseXor => handler::op_bitwise_xor,
+    BitwiseAnd => handler::op_bitwise_and,
+    ShiftLeft => handler::op_shift_left,
+    ShiftRight => handler::op_shift_right,
+    ShiftRightLogical => handler::op_shift_right_logical,
+    BitwiseOrImmediate => handler::op_bitwise_or_immediate,
+    BitwiseXorImmediate => handler::op_bitwise_xor_immediate,
+    BitwiseAndImmediate => handler::op_bitwise_and_immediate,
+    ShiftLeftImmediate => handler::op_shift_left_immediate,
+    ShiftRightImmediate => handler::op_shift_right_immediate,
+    ShiftRightLogicalImmediate => handler::op_shift_right_logical_immediate,
+    Equal => handler::op_equal,
+    LessThan => handler::op_less_than,
+    GreaterThan => handler::op_greater_than,
+    LessThanOrEqual => handler::op_less_than_or_equal,
+    GreaterThanOrEqual => handler::op_greater_than_or_equal,
+    EqualStrict => handler::op_equal_strict,
+    TestReferenceEqual => handler::op_test_reference_equal,
+    TestTypeof => handler::op_test_typeof,
+    InstanceOf => handler::op_instance_of,
+    CompareJump => handler::op_compare_jump,
+    SwitchInt => handler::op_switch_int,
+    ArraySlice => handler::op_array_slice,
+    IncLoc => handler::op_inc_loc,
+    DecLoc => handler::op_dec_loc,
+    LoadKeyedProperty => handler::op_load_keyed_property,
+    LoadKeyedPropertyOrHole => handler::op_load_keyed_property_or_hole,
+    LoadIndexed => handler::op_load_indexed,
+    LoadKeyedPropertyReg => handler::op_load_keyed_property_reg,
+    LoadElementImm => handler::op_load_element_imm,
+    LoadNamedProperty => handler::op_load_named_property,
+    LoadNamedPropertyOrHole => handler::op_load_named_property_or_hole,
+    StoreNamedProperty => handler::op_store_named_property,
+    StoreKeyedProperty => handler::op_store_keyed_property,
+    StoreIndexed => handler::op_store_indexed,
+    StoreNamedPropertyNoShadow => handler::op_store_named_property_no_shadow,
+    StoreKeyedPropertyNoShadow => handler::op_store_keyed_property_no_shadow,
+    DefineNamedOwnProperty => handler::op_define_named_own_property,
+    DefineKeyedOwnProperty => handler::op_define_keyed_own_property,
+    StoreInArrayLiteral => handler::op_store_in_array_literal,
+    StoreGlobal => handler::op_store_global,
+    CreateClosure => handler::op_create_closure,
+    Throw => handler::op_throw,
+    AddParent => handler::op_add_parent,
+    LoadContextSlot => handler::op_load_context_slot,
+    StoreContextSlot => handler::op_store_context_slot,
+    PushContext => handler::op_push_context,
+    PopContext => handler::op_pop_context,
+    CreateFunctionContext => handler::op_create_function_context,
+    CreateEmptyArrayLiteral => handler::op_create_empty_array_literal,
+    CreateSizedArrayLiteral => handler::op_create_sized_array_literal,
+    CreateRestParameter => handler::op_create_rest_parameter,
+    Construct => op_construct,
+    CreateEmptyObjectLiteral => handler::op_create_empty_object_literal,
+    CreateBlockContext => handler::op_create_block_context,
+    LoadHole => handler::op_load_hole,
+    LoadNewTarget => handler::op_load_new_target,
+    LoadContext => handler::op_load_context,
+    LoadCurrentClosure => handler::op_load_current_closure,
+    ThrowReferenceErrorIfHole => handler::op_throw_reference_error_if_hole,
+    LoadGlobalNoThrow => handler::op_load_global_no_throw,
 );
 
 pub static TABLE: DispatchTable = DispatchTable {
-    narrow: __table_narrow(),
-    wide: __table_wide(),
+    narrow: __tail_call_narrow(),
+    wide: __tail_call_wide(),
 };
 
 // --- entry ---
@@ -461,9 +462,9 @@ pub fn execute<'a, 't>(
     })
 }
 
-pub struct BecomeInterpreter;
+pub struct TailCallInterpreter;
 
-impl Interpreter for BecomeInterpreter {
+impl Interpreter for TailCallInterpreter {
     const EXECUTE: EntryFn = execute;
 }
 /// `Wide` prefix comes back through here. The table argument is
@@ -525,7 +526,7 @@ pub extern "rust-preserve-none" fn throw_dispatch<'h, const STRIDE: usize>(
     }
 }
 
-#[handler_become(JumpLoop)]
+#[handler_tail_call(JumpLoop)]
 fn op_jump_loop(frame: Frame) {
     let target = frame.ip().wrapping_offset(frame.signed::<0>() as isize);
     if frame.ctx().safepoint_tick() {
@@ -537,7 +538,7 @@ fn op_jump_loop(frame: Frame) {
         let shutdown = frame.ctx().heap_mut().safepoint_poll();
         frame.ctx().reload_code();
         if shutdown {
-            state.set_termination(vm_core::Termination::Shutdown);
+            state.set_termination(Termination::Shutdown);
             state.set_pending_exception(roots.undefined.get(frame.ctx().heap()));
             let fault_ip = unsafe { frame.ctx().code_ptr().add(fault) };
             become throw_dispatch::<STRIDE>(
@@ -558,7 +559,7 @@ fn op_jump_loop(frame: Frame) {
     dispatch!(target)
 }
 
-#[handler_become(Return)]
+#[handler_tail_call(Return)]
 fn op_return(frame: Frame) {
     frame.opcode_check();
     if frame.ctx().frame_base() == frame.ctx().base_anchor() {
@@ -609,7 +610,7 @@ fn op_return(frame: Frame) {
 
 // --- calls ---
 
-#[handler_become(Call)]
+#[handler_tail_call(Call)]
 fn op_call(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -626,7 +627,7 @@ fn op_call(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallNoFeedback)]
+#[handler_tail_call(CallNoFeedback)]
 fn op_call_no_feedback(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -649,7 +650,7 @@ fn op_call_no_feedback(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallMethod0)]
+#[handler_tail_call(CallMethod0)]
 fn op_call_method0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -667,7 +668,7 @@ fn op_call_method0(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallMethod1)]
+#[handler_tail_call(CallMethod1)]
 fn op_call_method1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -686,7 +687,7 @@ fn op_call_method1(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallMethod2)]
+#[handler_tail_call(CallMethod2)]
 fn op_call_method2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -706,7 +707,7 @@ fn op_call_method2(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallFunction0)]
+#[handler_tail_call(CallFunction0)]
 fn op_call_function0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -723,7 +724,7 @@ fn op_call_function0(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallFunction1)]
+#[handler_tail_call(CallFunction1)]
 fn op_call_function1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -741,7 +742,7 @@ fn op_call_function1(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(CallFunction2)]
+#[handler_tail_call(CallFunction2)]
 fn op_call_function2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -760,7 +761,7 @@ fn op_call_function2(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler_become(Construct)]
+#[handler_tail_call(Construct)]
 fn op_construct(frame: Frame) {
     let pc = frame.pc();
     let size =

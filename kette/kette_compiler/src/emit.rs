@@ -1,17 +1,19 @@
 use bytecode::{
     CallableKind, Constant, FnBuilder, Function, FunctionId, FunctionMeta, GlobalDeclarations,
     Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode, TempScope,
+    TestTypeKind,
 };
 use kette_syntax::ast::{
     AssignExpr, AstNode, BinaryExpr, CallExpr, ExportDecl, Expr, Field, ForExpr, GetExpr, IfExpr,
-    IndexExpr, LetStmt, Object, ObjectEntry, Pattern, SendExpr, SlotEntry, SlotKind, SlotMulti,
-    Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl, UseTree, WhileExpr,
+    IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern, PatternField, SendExpr,
+    SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl, UseTree,
+    WhileExpr,
 };
 use kette_syntax::ops::{AssignOp, BinaryOp, UnaryOp};
 use kette_syntax::resolve::{Binding, BindingId, BindingKind, Resolution, Resolved};
 use kette_syntax::{NodeId, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree};
 use vm_core::{
-    INFO_GLOBAL, MODE_LET, MODE_VAR, NativeIndex, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
+    INFO_GLOBAL, MODE_LET, MODE_VAR, NativeIndex, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, Smi,
 };
 
 use crate::CompileError;
@@ -480,6 +482,10 @@ impl<'a> FunctionGen<'a> {
                 self.if_expr(expr, true)?;
                 Ok(true)
             }
+            Expr::Match(expr) => {
+                self.match_expr(expr, true)?;
+                Ok(true)
+            }
             Expr::Paren(paren) => {
                 let Some(inner) = paren.expr() else {
                     return Ok(false);
@@ -648,6 +654,7 @@ impl<'a> FunctionGen<'a> {
             Expr::Index(expr) => self.index_expr(expr),
             Expr::Send(expr) => self.send_expr(expr, false),
             Expr::Call(expr) => self.call_expr(expr, false),
+            Expr::Match(expr) => self.match_expr(expr, false),
         }
     }
 
@@ -866,9 +873,9 @@ impl<'a> FunctionGen<'a> {
                 self.b.store(Reg::new(base.index() + index as i32));
             }
         }
-        for index in 0..staged {
+        for (index, param) in params.iter().take(staged).enumerate() {
             self.b
-                .move_reg(params[index], Reg::new(base.index() + index as i32));
+                .move_reg(*param, Reg::new(base.index() + index as i32));
         }
         if rebind_self && let Some(binding) = self.frame.self_binding {
             self.b.load_current_closure();
@@ -1563,6 +1570,9 @@ impl<'a> FunctionGen<'a> {
                 Ok(())
             }
             Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.bind_pattern(inner, value)?;
+                }
                 let Some(token) = alias.alias() else {
                     return self.err_node(alias.syntax().id(), "missing pattern alias");
                 };
@@ -1570,6 +1580,11 @@ impl<'a> FunctionGen<'a> {
                 self.b.load(value);
                 self.store_binding(binding)
             }
+            Pattern::Literal(_) | Pattern::Wildcard(_) => Ok(()),
+            Pattern::Object(_) | Pattern::Type(_) => self.err_node(
+                pattern.syntax().id(),
+                "unsupported pattern in this position",
+            ),
         }
     }
 
@@ -1638,6 +1653,484 @@ impl<'a> FunctionGen<'a> {
             self.store_binding(binding)?;
         }
         Ok(())
+    }
+
+    fn pattern_needs_hole(pattern: Pattern<'_>) -> bool {
+        match pattern {
+            Pattern::Object(_) | Pattern::Fields(_) => true,
+            Pattern::Array(array) => array
+                .elements()
+                .any(|element| Self::pattern_needs_hole(element)),
+            Pattern::Tuple(tuple) => tuple
+                .elements()
+                .any(|element| Self::pattern_needs_hole(element)),
+            Pattern::Alias(alias) => alias
+                .pattern()
+                .is_some_and(|inner| Self::pattern_needs_hole(inner)),
+            Pattern::Name(_) | Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Type(_) => {
+                false
+            }
+        }
+    }
+
+    fn match_expr(&mut self, expr: MatchExpr<'a>, tail: bool) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        let subject = temps.temp();
+        if let Some(scrutinee) = expr.scrutinee() {
+            self.expr(scrutinee)?;
+            self.b.store(subject);
+        } else {
+            if self.frame.params.len() != 1 {
+                return self.err_node(
+                    expr.syntax().id(),
+                    "a match closure must take exactly one parameter",
+                );
+            }
+            let binding = self.frame.params[0];
+            self.load_binding(binding)?;
+            self.b.store(subject);
+        }
+        let result = temps.temp();
+        self.b.load_null();
+        self.b.store(result);
+        let arms: Vec<MatchArm<'a>> = expr.arms().collect();
+        let hole = temps.temp();
+        if arms.iter().any(|arm| {
+            arm.pattern()
+                .is_some_and(|pattern| Self::pattern_needs_hole(pattern))
+        }) {
+            self.b.load_hole();
+            self.b.store(hole);
+        }
+        let end = self.b.new_label();
+        let mut cases = Vec::new();
+        for arm in &arms {
+            if arm.guard().is_some() {
+                break;
+            }
+            let Some(pattern) = arm.pattern() else {
+                break;
+            };
+            let Some(value) = Self::integer_pattern_value(pattern) else {
+                break;
+            };
+            if cases.iter().any(|(existing, _)| *existing == value) {
+                break;
+            }
+            cases.push((value, *arm));
+        }
+        let mut consumed = 0;
+        if let Some(min) = Self::switch_min(&cases) {
+            let labels: Vec<Label> = cases.iter().map(|_| self.b.new_label()).collect();
+            let fallthrough = self.b.new_label();
+            let targets: Vec<(i64, Label)> = cases
+                .iter()
+                .zip(&labels)
+                .map(|((value, _), label)| (*value, *label))
+                .collect();
+            self.b
+                .switch_int(subject, min, &targets, fallthrough)
+                .map_err(|error| self.error(expr.syntax().id(), error.to_string()))?;
+            for ((_, arm), label) in cases.iter().zip(labels) {
+                self.b.bind(label);
+                self.match_arm_body(*arm, result, tail, end)?;
+            }
+            self.b.bind(fallthrough);
+            consumed = cases.len();
+        }
+        for arm in arms.into_iter().skip(consumed) {
+            let fail = self.b.new_label();
+            let Some(pattern) = arm.pattern() else {
+                return self.err_node(arm.syntax().id(), "match arm without a pattern");
+            };
+            self.pattern_match(pattern, subject, hole, fail)?;
+            if let Some(guard) = arm.guard() {
+                self.expr(guard)?;
+                self.b.jump_if_falsy(fail);
+            }
+            self.match_arm_body(arm, result, tail, end)?;
+            self.b.bind(fail);
+        }
+        let message = Constant::String(b"match: no pattern matched".to_vec().into_boxed_slice());
+        let message = self.b.constant(message);
+        self.b.load_constant(message);
+        self.b.throw();
+        self.b.bind(end);
+        self.b.load(result);
+        Ok(())
+    }
+
+    fn match_arm_body(
+        &mut self,
+        arm: MatchArm<'a>,
+        result: Reg,
+        tail: bool,
+        end: Label,
+    ) -> Result<(), CompileError> {
+        if let Some(body) = arm.body() {
+            match body {
+                Expr::Object(object)
+                    if object.params().is_none()
+                        && !object.has_slots()
+                        && object.statements().next().is_some() =>
+                {
+                    self.inline_body_with(object, result, tail)?;
+                }
+                other => {
+                    let mut tailed = false;
+                    if tail {
+                        tailed = self.tail_expr(other)?;
+                    }
+                    if !tailed {
+                        self.expr(other)?;
+                        self.b.store(result);
+                    }
+                }
+            }
+        }
+        self.b.jump(end);
+        Ok(())
+    }
+
+    fn integer_pattern_value(pattern: Pattern<'a>) -> Option<i64> {
+        let Pattern::Literal(literal) = pattern else {
+            return None;
+        };
+        let mut tokens = literal
+            .syntax()
+            .tokens()
+            .filter(|token| !token.kind().is_trivia());
+        let first = tokens.next()?;
+        let negative = first.kind() == SyntaxKind::Minus;
+        let token = if negative { tokens.next()? } else { first };
+        if token.kind() != SyntaxKind::Number {
+            return None;
+        }
+        let value = token.text().parse::<f64>().ok()?;
+        let value = if negative { -value } else { value };
+        Smi::from_f64(value).map(|smi| smi.value())
+    }
+
+    fn switch_min(cases: &[(i64, MatchArm<'a>)]) -> Option<i64> {
+        if cases.len() < 4 {
+            return None;
+        }
+        let min = cases.iter().map(|(value, _)| *value).min()?;
+        let max = cases.iter().map(|(value, _)| *value).max()?;
+        let range = max.checked_sub(min)?.checked_add(1)?;
+        let count = cases.len() as i64;
+        (range <= count * 2 && range <= 1024).then_some(min)
+    }
+
+    fn pattern_match(
+        &mut self,
+        pattern: Pattern<'a>,
+        value: Reg,
+        hole: Reg,
+        fail: Label,
+    ) -> Result<(), CompileError> {
+        match pattern {
+            Pattern::Name(name) => {
+                let Some(token) = name.name() else {
+                    return self.err_node(name.syntax().id(), "missing binding name");
+                };
+                self.bind_token(token, value)
+            }
+            Pattern::Wildcard(_) => Ok(()),
+            Pattern::Literal(literal) => self.literal_pattern(literal, value, fail),
+            Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.pattern_match(inner, value, hole, fail)?;
+                }
+                if let Some(token) = alias.alias() {
+                    self.bind_token(token, value)?;
+                }
+                Ok(())
+            }
+            Pattern::Type(typed) => {
+                self.load_resolution(typed.syntax().id())?;
+                let temps = self.b.temp_scope();
+                let type_value = self.b.stage_acc(&temps);
+                let feedback = self.b.new_feedback();
+                self.b
+                    .test_type(value, type_value, TestTypeKind::User as u32, feedback);
+                self.b.jump_if_falsy(fail);
+                if let Some(token) = typed.binding()
+                    && token.text() != "_"
+                {
+                    self.bind_token(token, value)?;
+                }
+                Ok(())
+            }
+            Pattern::Fields(fields) => {
+                self.test_object(value, fail);
+                let temps = self.b.temp_scope();
+                for field in fields.fields() {
+                    let token = field.alias.unwrap_or(field.name);
+                    let field_value = self.load_named_field(
+                        value,
+                        field.name.text().as_bytes(),
+                        hole,
+                        fail,
+                        &temps,
+                    )?;
+                    self.bind_token(token, field_value)?;
+                }
+                Ok(())
+            }
+            Pattern::Object(object) => {
+                self.test_object(value, fail);
+                let temps = self.b.temp_scope();
+                for field in object.fields() {
+                    let field_value = self.load_pattern_field(value, field, hole, fail, &temps)?;
+                    if let Some(inner) = field.pattern() {
+                        self.pattern_match(inner, field_value, hole, fail)?;
+                    } else {
+                        let Some(token) = field.alias().or_else(|| field.key()) else {
+                            return self.err_node(field.syntax().id(), "missing field binding");
+                        };
+                        self.bind_token(token, field_value)?;
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Array(array) => {
+                let elements: Vec<_> = array.elements().collect();
+                self.pattern_sequence(value, &elements, array.rest(), hole, fail)
+            }
+            Pattern::Tuple(tuple) => {
+                let elements: Vec<_> = tuple.elements().collect();
+                self.pattern_sequence(value, &elements, None, hole, fail)
+            }
+        }
+    }
+
+    fn literal_pattern(
+        &mut self,
+        literal: kette_syntax::ast::PatternLiteral<'a>,
+        value: Reg,
+        fail: Label,
+    ) -> Result<(), CompileError> {
+        let mut tokens = literal
+            .syntax()
+            .tokens()
+            .filter(|token| !token.kind().is_trivia());
+        let Some(first) = tokens.next() else {
+            return self.err_node(literal.syntax().id(), "empty literal pattern");
+        };
+        let negative = first.kind() == SyntaxKind::Minus;
+        let Some(token) = (if negative { tokens.next() } else { Some(first) }) else {
+            return self.err_node(literal.syntax().id(), "empty literal pattern");
+        };
+        match token.kind() {
+            SyntaxKind::Number => {
+                let mut number = token.text().parse::<f64>().unwrap_or(0.0);
+                if negative {
+                    number = -number;
+                }
+                self.number(number);
+                self.b.equal_strict(value);
+            }
+            SyntaxKind::String => {
+                let text = decode_string(token.text());
+                let index = self.b.constant(Constant::String(text.into_boxed_slice()));
+                self.b.load_constant(index);
+                self.b.equal_strict(value);
+            }
+            SyntaxKind::True => {
+                self.b.load_true();
+                self.b.test_reference_equal(value);
+            }
+            SyntaxKind::False => {
+                self.b.load_false();
+                self.b.test_reference_equal(value);
+            }
+            SyntaxKind::Null => {
+                self.b.load_null();
+                self.b.test_reference_equal(value);
+            }
+            SyntaxKind::Ident if token.text() == "undefined" => {
+                self.b.load_undefined();
+                self.b.test_reference_equal(value);
+            }
+            _ => return self.err_node(literal.syntax().id(), "unsupported literal pattern"),
+        }
+        self.b.jump_if_falsy(fail);
+        Ok(())
+    }
+
+    fn pattern_sequence(
+        &mut self,
+        value: Reg,
+        elements: &[Pattern<'a>],
+        rest: Option<SyntaxToken<'a>>,
+        hole: Reg,
+        fail: Label,
+    ) -> Result<(), CompileError> {
+        self.test_object(value, fail);
+        let temps = self.b.temp_scope();
+        let length = self.sequence_length(value, &temps)?;
+        self.b.load_smi(elements.len() as i32);
+        if rest.is_some() {
+            self.b.greater_than(length);
+            self.b.jump_if_truthy(fail);
+        } else {
+            self.b.equal_strict(length);
+            self.b.jump_if_falsy(fail);
+        }
+        for (index, element) in elements.iter().enumerate() {
+            self.b.load_smi(index as i32);
+            let feedback = self.b.new_feedback();
+            self.b.load_indexed(value, feedback);
+            let element_value = self.b.stage_acc(&temps);
+            self.pattern_match(*element, element_value, hole, fail)?;
+        }
+        if let Some(rest) = rest {
+            self.bind_rest(value, elements.len(), length, rest, &temps)?;
+        }
+        Ok(())
+    }
+
+    fn sequence_length(&mut self, value: Reg, temps: &TempScope) -> Result<Reg, CompileError> {
+        let length = temps.temp();
+        let feedback = self.b.new_feedback();
+        self.b.load_length(value, feedback);
+        self.b.store(length);
+        let call = self.b.new_label();
+        let have = self.b.new_label();
+        self.b.load(length);
+        let feedback = self.b.new_feedback();
+        self.b
+            .test_type(length, length, TestTypeKind::Function as u32, feedback);
+        self.b.jump_if_truthy(call);
+        self.b.jump(have);
+        self.b.bind(call);
+        self.send_reg0(value, "size", temps)?;
+        self.b.store(length);
+        self.b.bind(have);
+        Ok(length)
+    }
+
+    fn bind_rest(
+        &mut self,
+        value: Reg,
+        start: usize,
+        length: Reg,
+        token: SyntaxToken<'a>,
+        temps: &TempScope,
+    ) -> Result<(), CompileError> {
+        let copy = self.b.new_label();
+        let done = self.b.new_label();
+        if start <= u16::MAX as usize {
+            let feedback = self.b.new_feedback();
+            self.b
+                .test_type(value, value, TestTypeKind::Array as u32, feedback);
+            self.b.jump_if_falsy(copy);
+            self.b.array_slice(value, start as u32);
+            let sliced = temps.temp();
+            self.b.store(sliced);
+            self.b.load_hole();
+            self.b.test_reference_equal(sliced);
+            self.b.jump_if_truthy(copy);
+            self.b.load(sliced);
+            let binding = self.binding(token)?;
+            self.store_binding(binding)?;
+            self.b.jump(done);
+        }
+        self.b.bind(copy);
+        let tail = temps.temp();
+        self.b.create_empty_array_literal();
+        self.b.store(tail);
+        let index = temps.temp();
+        self.b.load_smi(start as i32);
+        self.b.store(index);
+        let begin = self.b.new_label();
+        let end = self.b.new_label();
+        self.b.bind(begin);
+        self.b.load(index);
+        self.b.less_than(length);
+        self.b.jump_if_falsy(end);
+        let key = temps.temp();
+        self.b.load_smi(start as i32);
+        self.b.sub(index);
+        self.b.store(key);
+        self.b.load(index);
+        let feedback = self.b.new_feedback();
+        self.b.load_indexed(value, feedback);
+        let feedback = self.b.new_feedback();
+        self.b.store_indexed(tail, key, feedback);
+        self.b.load_smi(1);
+        self.b.add(index);
+        self.b.store(index);
+        self.b.jump_loop(begin);
+        self.b.bind(end);
+        self.bind_token(token, tail)?;
+        self.b.bind(done);
+        Ok(())
+    }
+
+    fn load_pattern_field(
+        &mut self,
+        value: Reg,
+        field: PatternField<'a>,
+        hole: Reg,
+        fail: Label,
+        temps: &TempScope,
+    ) -> Result<Reg, CompileError> {
+        let Some(key) = field.key() else {
+            return self.err_node(field.syntax().id(), "missing pattern field key");
+        };
+        match key.kind() {
+            SyntaxKind::Number => {
+                let index = key.text().parse::<i32>().unwrap_or(0);
+                self.b.load_smi(index);
+                let feedback = self.b.new_feedback();
+                self.b.load_keyed_property_or_hole(value, feedback);
+            }
+            SyntaxKind::String => {
+                let name = decode_string(key.text());
+                self.load_named_or_hole(value, &name);
+            }
+            _ => self.load_named_or_hole(value, key.text().as_bytes()),
+        }
+        let field_value = self.b.stage_acc(temps);
+        self.b.test_reference_equal(hole);
+        self.b.jump_if_truthy(fail);
+        Ok(field_value)
+    }
+
+    fn load_named_field(
+        &mut self,
+        value: Reg,
+        name: &[u8],
+        hole: Reg,
+        fail: Label,
+        temps: &TempScope,
+    ) -> Result<Reg, CompileError> {
+        self.load_named_or_hole(value, name);
+        let field_value = self.b.stage_acc(temps);
+        self.b.test_reference_equal(hole);
+        self.b.jump_if_truthy(fail);
+        Ok(field_value)
+    }
+
+    fn load_named_or_hole(&mut self, value: Reg, name: &[u8]) {
+        let name = self.b.name(name);
+        let feedback = self.b.new_feedback();
+        self.b.load_named_property_or_hole(value, name, feedback);
+    }
+
+    fn test_object(&mut self, value: Reg, fail: Label) {
+        let feedback = self.b.new_feedback();
+        self.b
+            .test_type(value, value, TestTypeKind::Object as u32, feedback);
+        self.b.jump_if_falsy(fail);
+    }
+
+    fn bind_token(&mut self, token: SyntaxToken<'a>, value: Reg) -> Result<(), CompileError> {
+        let binding = self.binding(token)?;
+        self.b.load(value);
+        self.store_binding(binding)
     }
 
     fn if_expr(&mut self, expr: IfExpr<'a>, tail: bool) -> Result<(), CompileError> {

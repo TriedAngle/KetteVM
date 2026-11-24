@@ -1,16 +1,16 @@
 use crate::{FloatReg, Ops, Regs, RootsArg};
 use bytecode::{Opcode, PropertyFlags};
-#[cfg(feature = "fast")]
-use handler_derive::handler_become as handler;
 #[cfg(not(feature = "fast"))]
-use handler_derive::handler_match as handler;
+use handler_derive::handler_loop_match as handler;
+#[cfg(feature = "fast")]
+use handler_derive::handler_tail_call as handler;
 use vm_core::{
     AccessorInfo, AccessorPair, Args, CallInfo, Compare, ContextInit, ContextObject, Convert,
     DenseString, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
     Object, PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi,
-    StoreSemantics, StringRef, Tagged, ThreadState, VM, Value, VmError, ic::InlineCache,
-    ic::StoreHit, ic::StoreOutcomeKind, lookup::Hit, lookup::Lookup, proxy::Proxy, raise,
-    raise_runtime, rt_try,
+    StoreSemantics, StringRef, Tagged, ThreadState, VM, Value, VmError, global_lexical_get,
+    global_lexical_set, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, lookup::Hit,
+    lookup::Lookup, proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -789,7 +789,12 @@ fn load_keyed_body<'a>(
     recv: Handle<'_, Value>,
     key: Handle<'_, Value>,
     fallback: bool,
+    or_hole: bool,
 ) -> Tagged<'a, Value> {
+    debug_assert!(
+        !(fallback && or_hole),
+        "the index fallback cannot report holes"
+    );
     {
         let recv = scope.handle(recv.as_tagged(heap).erase());
         let key = scope.handle(key.as_tagged(heap).erase());
@@ -849,7 +854,12 @@ fn load_keyed_body<'a>(
                 return heap.known().undefined.get(heap).erase();
             }
         }
-        let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
+        let out = if or_hole {
+            Object::get_property_or_hole(vm, heap, state, recv, recv, key)
+        } else {
+            Object::get_property(vm, heap, state, recv, recv, key, false)
+        };
+        let out = match out {
             Ok(v) => scope.handle(v),
             Err(e) => return raise_runtime(heap, e),
         };
@@ -910,6 +920,44 @@ pub fn slow_keyed_load(frame: Frame) {
             recv,
             key.erase(),
             false,
+            false,
+        )
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(LoadKeyedPropertyOrHole)]
+#[cold]
+pub fn slow_keyed_load_or_hole(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<1>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        if recv.as_tagged(heap).is_nullish(heap) {
+            raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
+        }
+        let key = scope.handle(rt_try!(
+            heap,
+            Object::to_property_key(vm, heap, state, raw_key)
+        ));
+        load_keyed_body(
+            vm,
+            heap,
+            state,
+            roots,
+            &scope,
+            base,
+            fb,
+            recv,
+            key.erase(),
+            false,
+            true,
         )
     });
     frame.set_acc(v);
@@ -946,6 +994,7 @@ pub fn slow_indexed_load(frame: Frame) {
             recv,
             key.erase(),
             true,
+            false,
         )
     });
     frame.set_acc(v);
@@ -983,6 +1032,7 @@ pub fn slow_keyed_load_reg(frame: Frame) {
             recv,
             key.erase(),
             false,
+            false,
         )
     });
     frame.set_acc(v);
@@ -1012,6 +1062,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
             fb,
             recv,
             key.erase(),
+            false,
             false,
         )
     });
@@ -1082,49 +1133,59 @@ pub fn slow_global_getter(frame: Frame) {
     reenter!(pc)
 }
 
-#[handler(LoadNamedProperty)]
-pub fn slow_named_load(frame: Frame) {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let name_idx = frame.unsigned::<1>();
-    let fb_slot = frame.unsigned::<2>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| -> Acc {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let heap = frame.ctx().heap_mut();
-        let name = scope.handle(
-            state
-                .stack()
-                .callable(heap, base)
-                .constant_slot_name(heap, name_idx),
-        );
-        let out = match Object::get_property(vm, heap, state, recv, recv, name.erase(), false) {
-            Ok(v) => scope.handle(v),
-            Err(e) => return Acc::set(raise_runtime(heap, e)),
-        };
-        {
-            InlineCache::update_load(
-                heap,
-                &scope,
-                state
-                    .stack()
-                    .frame_header(base)
-                    .feedback(heap)
-                    .map(|v| scope.handle(v)),
-                fb_slot,
-                recv.as_tagged(heap)
-                    .as_heap_object()
-                    .map(|o| scope.handle(o)),
-                scope.handle(name.as_tagged(heap).erase().as_name()),
-                true,
-            );
+macro_rules! named_load_slow {
+    ($op:ident, $name:ident, $or_hole:expr) => {
+        #[handler($op)]
+        pub fn $name(frame: Frame) {
+            let pc = frame.pc();
+            let base = frame.ctx().frame_base();
+            let name_idx = frame.unsigned::<1>();
+            let fb_slot = frame.unsigned::<2>();
+            let vm = frame.ctx().vm();
+            let state = frame.ctx().state();
+            let v = state.handle_scope(|scope| -> Acc {
+                let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+                let heap = frame.ctx().heap_mut();
+                let name = scope.handle(
+                    state
+                        .stack()
+                        .callable(heap, base)
+                        .constant_slot_name(heap, name_idx),
+                );
+                let out = if $or_hole {
+                    Object::get_property_or_hole(vm, heap, state, recv, recv, name.erase())
+                } else {
+                    Object::get_property(vm, heap, state, recv, recv, name.erase(), false)
+                };
+                let out = match out {
+                    Ok(v) => scope.handle(v),
+                    Err(e) => return Acc::set(raise_runtime(heap, e)),
+                };
+                InlineCache::update_load(
+                    heap,
+                    &scope,
+                    state
+                        .stack()
+                        .frame_header(base)
+                        .feedback(heap)
+                        .map(|v| scope.handle(v)),
+                    fb_slot,
+                    recv.as_tagged(heap)
+                        .as_heap_object()
+                        .map(|o| scope.handle(o)),
+                    scope.handle(name.as_tagged(heap).erase().as_name()),
+                    true,
+                );
+                Acc::set(out.as_tagged(heap).erase())
+            });
+            frame.set_acc(v.get(frame.ctx().heap()));
+            reenter!(pc)
         }
-        Acc::set(out.as_tagged(heap).erase())
-    });
-    frame.set_acc(v.get(frame.ctx().heap()));
-    reenter!(pc)
+    };
 }
+
+named_load_slow!(LoadNamedProperty, slow_named_load, false);
+named_load_slow!(LoadNamedPropertyOrHole, slow_named_load_or_hole, true);
 
 #[allow(clippy::too_many_arguments)]
 pub fn global_load_body<'a>(
@@ -1151,7 +1212,7 @@ pub fn global_load_body<'a>(
         let global_handle = scope.handle(global);
         let global_value = scope.handle(global_handle.as_tagged(heap).erase());
         let name_value = name.as_tagged(heap).erase();
-        let lexical = match vm_core::global_lexical_get(heap, name_value) {
+        let lexical = match global_lexical_get(heap, name_value) {
             Ok(Some((value, binding))) => Some((scope.handle(value), binding)),
             Ok(None) => None,
             Err(err) => raise!(vm, heap, state, err),
@@ -1866,7 +1927,7 @@ pub fn slow_store_global(frame: Frame) {
         );
         let global = roots.global_object.get_handle(heap, &scope).erase();
         let name_value = name.as_tagged(heap).erase();
-        match vm_core::global_lexical_set(heap, name_value, value.as_tagged(heap)) {
+        match global_lexical_set(heap, name_value, value.as_tagged(heap)) {
             Ok(Some(binding)) => {
                 InlineCache::update_global_lexical(
                     heap,

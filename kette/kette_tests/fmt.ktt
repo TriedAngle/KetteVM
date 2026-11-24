@@ -23,3 +23,5 @@ check("use a.b{x,y}\nmod m{\nexport z=1\n}\n", "use a.b { x, y }\nmod m {\n    e
 check("let x=1\n\n\nlet y=2\n", "let x = 1\n\nlet y = 2\n")
 check("let x = 1   \n", "let x = 1\n")
 check("", "")
+check("let r=match x{\n0=>1\n_=>2\n}\n", "let r = match x {\n    0 => 1\n    _ => 2\n}\n")
+check("let* f=match |n|{\n0=>0\n_=>f(n-1)\n}\n", "let* f = match |n| {\n    0 => 0\n    _ => f(n - 1)\n}\n")

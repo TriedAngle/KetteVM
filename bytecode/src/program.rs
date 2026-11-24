@@ -199,6 +199,15 @@ pub enum Constant {
     FunctionPrototype,
     /// The realm's global object (`this` in global code)
     GlobalObject,
+    /// Sparse jump table for `SwitchInt`: min value plus one relative
+    /// offset per entry and a default at the end.
+    SwitchTable(SwitchTable),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SwitchTable {
+    pub min: i64,
+    pub targets: Box<[i32]>,
 }
 
 impl Constant {
@@ -214,6 +223,7 @@ impl Constant {
             Self::ObjectPrototype => ConstantKey::ObjectPrototype,
             Self::FunctionPrototype => ConstantKey::FunctionPrototype,
             Self::GlobalObject => ConstantKey::GlobalObject,
+            Self::SwitchTable(table) => ConstantKey::SwitchTable(table),
         }
     }
 }
@@ -244,6 +254,7 @@ enum ConstantKey<'a> {
     ObjectPrototype,
     FunctionPrototype,
     GlobalObject,
+    SwitchTable(&'a SwitchTable),
 }
 
 /// `layout [try_start, try_end, handler_pc]`: a half-open bytecode region.

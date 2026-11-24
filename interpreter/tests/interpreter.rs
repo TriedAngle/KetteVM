@@ -1,21 +1,21 @@
 #![cfg(feature = "fast")]
 
 use bytecode::{Opcode, emit};
-use interpreter::BecomeInterpreter;
+use interpreter::TailCallInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FeedbackVector, FeedbackVectorInit,
     FixedArray, Handle, HandleScope, Heap, MODE_SLOPPY, Object, ObjectSlotsInit, Runtime, Smi,
-    Tagged, Thread, VM, Value,
+    Tagged, Thread, Thrown, VM, Value, intrinsics::VmCore,
 };
 
 /// The `#[handler]`-based interpreter plugs into `VM::new` like any
 /// other; the JS-runtime bootstrap enters and dispatches through it.
 #[test]
 fn new_interpreter_constructs() {
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     drop(vm);
 }
@@ -33,7 +33,7 @@ fn callable<'s>(
     register_count: usize,
     feedback_slots: usize,
 ) -> Handle<'s, Object> {
-    let runtime = thread.vm().runtime_id::<vm_core::intrinsics::VmCore>();
+    let runtime = thread.vm().runtime_id::<VmCore>();
     let code = thread.heap().allocate_handle::<Code>(
         CodeInit {
             runtime,
@@ -113,20 +113,16 @@ fn call_function1_ic_miss_then_hit() {
     emit(&mut outer, Opcode::Load, &[1]); // 18
     emit(&mut outer, Opcode::Return, &[]); // 20
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
         let outer = callable(thread, &scope, &outer, 4, 2);
         let inner_word = inner.as_tagged(thread.heap()).raw();
-        thread.execute(
-            outer,
-            &[inner_word, smi(41), smi(3), smi(-1)],
-            vm_core::intrinsics::VmCore::ID,
-        )
+        thread.execute(outer, &[inner_word, smi(41), smi(3), smi(-1)], VmCore::ID)
     });
     assert_eq!(result, Ok(smi(41)));
     assert!(!thread.has_pending_exception());
@@ -143,20 +139,16 @@ fn call_method0_stages_receiver() {
     emit(&mut outer, Opcode::CallMethod0, &[0, 1, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 1, 0);
         let outer = callable(thread, &scope, &outer, 2, 0);
         let inner_word = inner.as_tagged(thread.heap()).raw();
-        thread.execute(
-            outer,
-            &[inner_word, smi(7)],
-            vm_core::intrinsics::VmCore::ID,
-        )
+        thread.execute(outer, &[inner_word, smi(7)], VmCore::ID)
     });
     assert_eq!(result, Ok(smi(7)));
 }
@@ -172,20 +164,16 @@ fn call_passes_window() {
     emit(&mut outer, Opcode::Call, &[0, 2, 2, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
         let outer = callable(thread, &scope, &outer, 3, 2);
         let inner_word = inner.as_tagged(thread.heap()).raw();
-        thread.execute(
-            outer,
-            &[inner_word, smi(5), smi(9)],
-            vm_core::intrinsics::VmCore::ID,
-        )
+        thread.execute(outer, &[inner_word, smi(5), smi(9)], VmCore::ID)
     });
     assert_eq!(result, Ok(smi(9)));
 }
@@ -193,14 +181,14 @@ fn call_passes_window() {
 /// Build a callable, run it, and return the result value; panics on a
 /// throw. `args[0]` is the receiver, `args[1..]` the parameters.
 fn run(program: &[u8], register_count: usize, args: &[Value]) -> Value {
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, program, register_count, 0);
-        thread.execute(f, args, vm_core::intrinsics::VmCore::ID)
+        thread.execute(f, args, VmCore::ID)
     });
     assert!(!thread.has_pending_exception(), "program threw");
     result.expect("program must not throw")
@@ -370,15 +358,15 @@ fn literals_under_gc_stress() {
     emit(&mut arr, Opcode::Return, &[]);
 
     for p in [&obj, &arr] {
-        let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+        let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
             .unwrap()
-            .add::<vm_core::intrinsics::VmCore>()
+            .add::<VmCore>()
             .unwrap();
         vm.arm_gc_stress();
         let mut thread = vm.attach();
         let result = thread.handle_scope(|thread, scope| {
             let f = callable(thread, &scope, p, 1, 0);
-            thread.execute(f, &[smi(0)], vm_core::intrinsics::VmCore::ID)
+            thread.execute(f, &[smi(0)], VmCore::ID)
         });
         assert!(!thread.has_pending_exception());
         assert!(result.expect("literal must not throw").is_ptr());
@@ -394,14 +382,14 @@ fn load_null_handler() {
     emit(&mut p, Opcode::LoadSmi, &[1]);
     emit(&mut p, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &p, 1, 0);
-        thread.execute(f, &[smi(0)], vm_core::intrinsics::VmCore::ID)
+        thread.execute(f, &[smi(0)], VmCore::ID)
     });
     let result = result.expect("program must not throw");
     let null = {
@@ -460,15 +448,15 @@ fn bitwise_slow_paths() {
 /// Run a program and decode a true/false result against the well-known
 /// singleton objects.
 fn run_boolean(program: &[u8], register_count: usize, args: &[Value]) -> bool {
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread
         .handle_scope(|thread, scope| {
             let f = callable(thread, &scope, program, register_count, 0);
-            thread.execute(f, args, vm_core::intrinsics::VmCore::ID)
+            thread.execute(f, args, VmCore::ID)
         })
         .expect("program must not throw");
     let heap = thread.heap();
@@ -547,20 +535,16 @@ fn construct_handler() {
         emit(&mut outer, Opcode::Construct, &[0, 1, 0]);
         emit(&mut outer, Opcode::Return, &[]);
 
-        let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+        let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
             .unwrap()
-            .add::<vm_core::intrinsics::VmCore>()
+            .add::<VmCore>()
             .unwrap();
         let mut thread = vm.attach();
         let result = thread.handle_scope(|thread, scope| {
             let inner = callable(thread, &scope, body, 1, 0);
             let outer = callable(thread, &scope, &outer, 2, 0);
             let inner_word = inner.as_tagged(thread.heap()).raw();
-            thread.execute(
-                outer,
-                &[inner_word, smi(0)],
-                vm_core::intrinsics::VmCore::ID,
-            )
+            thread.execute(outer, &[inner_word, smi(0)], VmCore::ID)
         });
         assert!(!thread.has_pending_exception(), "construct threw");
         result.expect("construct must not throw")
@@ -604,16 +588,16 @@ fn throw_handler() {
     emit(&mut p, Opcode::LoadSmi, &[7]);
     emit(&mut p, Opcode::Throw, &[]);
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &p, 1, 0);
-        thread.execute(f, &[smi(0)], vm_core::intrinsics::VmCore::ID)
+        thread.execute(f, &[smi(0)], VmCore::ID)
     });
-    assert!(matches!(result, Err(vm_core::Thrown)));
+    assert!(matches!(result, Err(Thrown)));
     assert!(thread.has_pending_exception(), "the throw must surface");
 }
 
@@ -624,15 +608,15 @@ fn call_non_callable_throws() {
     emit(&mut outer, Opcode::Call, &[0, 0, 1, 0]);
     emit(&mut outer, Opcode::Return, &[]);
 
-    let vm = VM::new::<MarkSweep, BecomeInterpreter>(MarkSweepConfig::default())
+    let vm = VM::new::<MarkSweep, TailCallInterpreter>(MarkSweepConfig::default())
         .unwrap()
-        .add::<vm_core::intrinsics::VmCore>()
+        .add::<VmCore>()
         .unwrap();
     let mut thread = vm.attach();
     let result = thread.handle_scope(|thread, scope| {
         let outer = callable(thread, &scope, &outer, 1, 2);
-        thread.execute(outer, &[smi(1)], vm_core::intrinsics::VmCore::ID)
+        thread.execute(outer, &[smi(1)], VmCore::ID)
     });
-    assert!(matches!(result, Err(vm_core::Thrown)));
+    assert!(matches!(result, Err(Thrown)));
     assert!(thread.has_pending_exception(), "the raise must surface");
 }

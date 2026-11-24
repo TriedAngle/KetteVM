@@ -152,6 +152,22 @@ impl Object {
         })
     }
 
+    /// `[[Get]]` with `the_hole` on a miss, so pattern matching can tell a
+    /// missing property from one whose value is `undefined`.
+    pub fn get_property_or_hole<'h>(
+        vm: &'h VM,
+        heap: &'h mut Heap,
+        state: &'h ThreadState,
+        holder: Handle<'_, Value>,
+        receiver: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+    ) -> Result<Tagged<'h, Value>> {
+        if !Self::has_property(vm, heap, state, holder, name)? {
+            return Ok(heap.known().the_hole.get(heap).erase());
+        }
+        Self::get_property(vm, heap, state, holder, receiver, name, false)
+    }
+
     /// Data value behind a hit, never invoking getters or traps.
     pub fn get_data_property<'a>(
         heap: &'a Heap,

@@ -648,6 +648,7 @@ impl<'a> Parser<'a> {
             For => self.parse_for(),
             Try => self.parse_try(),
             Throw => self.parse_throw(),
+            Match => self.parse_match(),
             _ => self.fail(
                 token.range,
                 format!("expected an expression, found {:?}", token.kind),
@@ -659,6 +660,187 @@ impl<'a> Parser<'a> {
         self.start(ThrowExpr);
         self.bump();
         self.parse_expression()?;
+        Ok(self.finish())
+    }
+
+    fn parse_match(&mut self) -> Result<NodeId, ()> {
+        self.flush_trivia();
+        if self.peek2().0.kind == Pipe {
+            return self.parse_match_closure();
+        }
+        self.start(MatchExpr);
+        self.bump();
+        self.parse_expression()?;
+        self.parse_match_arms()?;
+        Ok(self.finish())
+    }
+
+    fn parse_match_closure(&mut self) -> Result<NodeId, ()> {
+        self.bump();
+        self.start(Object);
+        self.parse_params()?;
+        self.start(ExprStmt);
+        self.start(MatchExpr);
+        self.parse_match_arms()?;
+        self.finish();
+        self.finish();
+        Ok(self.finish())
+    }
+
+    fn parse_match_arms(&mut self) -> Result<(), ()> {
+        self.expect(LBrace)?;
+        loop {
+            let token = self.peek();
+            if token.kind == RBrace || token.kind == SyntaxKind::Eof {
+                break;
+            }
+            if token.kind == Comma || token.kind == Semicolon {
+                self.bump();
+                continue;
+            }
+            self.start(MatchArm);
+            self.parse_match_pattern()?;
+            if self.peek().kind == If {
+                self.bump();
+                self.parse_expression()?;
+            }
+            self.expect(FatArrow)?;
+            self.parse_expression()?;
+            self.finish();
+            let next = self.peek();
+            if next.kind == RBrace {
+                break;
+            }
+            if next.kind == Comma || next.kind == Semicolon {
+                self.bump();
+            } else if !next.after_newline {
+                self.record_error(next.range, "expected a separator or `}`");
+                self.recover_entry();
+            }
+        }
+        self.expect(RBrace)?;
+        Ok(())
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<NodeId, ()> {
+        let checkpoint = self.builder.checkpoint();
+        self.flush_trivia();
+        let token = self.peek();
+        let pattern = match token.kind {
+            Ident if &self.source[token.range.start as usize..token.range.end as usize] == "_" => {
+                self.start(PatternWildcard);
+                self.bump();
+                self.finish()
+            }
+            Ident
+                if &self.source[token.range.start as usize..token.range.end as usize]
+                    == "undefined" =>
+            {
+                self.start(PatternLiteral);
+                self.bump();
+                self.finish()
+            }
+            Ident => {
+                if self.peek2().0.kind == Ident && !self.peek2().0.after_newline {
+                    self.start(PatternType);
+                    self.bump();
+                    self.bump();
+                    self.finish()
+                } else {
+                    self.start(PatternName);
+                    self.bump();
+                    self.finish()
+                }
+            }
+            Minus if self.peek2().0.kind == Number => {
+                self.start(PatternLiteral);
+                self.bump();
+                self.bump();
+                self.finish()
+            }
+            Number | String | True | False | Null => {
+                self.start(PatternLiteral);
+                self.bump();
+                self.finish()
+            }
+            LBrace => self.parse_object_pattern()?,
+            LBracket => self.parse_match_array_pattern()?,
+            LParen => self.parse_field_pattern()?,
+            _ => {
+                return self.fail(
+                    token.range,
+                    format!("expected a pattern, found {:?}", token.kind),
+                );
+            }
+        };
+        if self.peek().kind == As {
+            self.builder.start_node_at(checkpoint, PatternAlias);
+            self.bump();
+            self.expect_name()?;
+            return Ok(self.finish());
+        }
+        Ok(pattern)
+    }
+
+    fn parse_object_pattern(&mut self) -> Result<NodeId, ()> {
+        self.start(PatternObject);
+        self.expect(LBrace)?;
+        loop {
+            let token = self.peek();
+            if token.kind == RBrace || token.kind == SyntaxKind::Eof {
+                break;
+            }
+            self.start(PatternField);
+            if !(token.kind.is_name() || token.kind == Number || token.kind == String) {
+                self.record_error(token.range, "expected a field key");
+                self.recover_entry();
+                self.finish();
+                continue;
+            }
+            self.bump();
+            if self.peek().kind == Colon {
+                self.bump();
+                self.parse_match_pattern()?;
+            } else if self.peek().kind == As {
+                self.bump();
+                self.expect_name()?;
+            }
+            self.finish();
+            let next = self.peek();
+            if next.kind == RBrace {
+                break;
+            }
+            if next.kind == Comma {
+                self.bump();
+            } else if !next.after_newline {
+                self.record_error(next.range, "expected a separator or `}`");
+                self.recover_entry();
+            }
+        }
+        self.expect(RBrace)?;
+        Ok(self.finish())
+    }
+
+    fn parse_match_array_pattern(&mut self) -> Result<NodeId, ()> {
+        self.start(PatternArray);
+        self.expect(LBracket)?;
+        loop {
+            if self.peek().kind == RBracket {
+                break;
+            }
+            if self.peek().kind == Ellipsis {
+                self.bump();
+                self.expect_name()?;
+                break;
+            }
+            self.parse_match_pattern()?;
+            if self.peek().kind == Comma {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        self.expect(RBracket)?;
         Ok(self.finish())
     }
 

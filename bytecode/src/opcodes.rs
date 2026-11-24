@@ -193,7 +193,9 @@ define_opcodes! {
     // dynamic name resolution (direct eval) walks the frame context chain
     // by name through the runtime functions Load/StoreDynamicName
     LoadNamedProperty { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
+    LoadNamedPropertyOrHole { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // like LoadNamedProperty; miss -> hole
     LoadKeyedProperty { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // reg (obj) idx (feedback); key in acc -> acc
+    LoadKeyedPropertyOrHole { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // like LoadKeyedProperty; miss -> hole
 
     LoadIndexed { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] },
 
@@ -254,6 +256,10 @@ define_opcodes! {
     CallNoFeedback { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] },
     /// Write whether the register holds the current frame's callable.
     TailGuard { operands: [Register], acc: writes, indices: [Unchecked] },
+    /// Test a value against a primitive kind or a type object's map.
+    TestType { operands: [Register, Register, UImmediate, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, Feedback] },
+    /// Load an array/string length with a `length`/`size` property fallback.
+    LoadLength { operands: [Register, Index], acc: writes, indices: [Unchecked, Feedback] },
     CallNative { operands: [Index, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // idx (native function index) reglist (base) regcount (count) -> acc
 
     Construct { operands: [Register, RegisterListStart, RegisterCount], acc: writes, indices: [Unchecked, Unchecked, Unchecked] }, // reg (callee) reglist (base) regcount (count) -> acc (constructed object)
@@ -302,6 +308,11 @@ define_opcodes! {
 
     // -- control flow (jumps and branches) ----------------------------------
     Jump { operands: [Immediate], indices: [Unchecked] },     // imm (offset)
+    /// Dense integer switch: `reg` selects a relative target from the
+    /// `Constant::SwitchTable`; entries are `[min, offsets..., default]`.
+    SwitchInt { operands: [Register, Index], indices: [Unchecked, ConstantPool] },
+    /// `acc = array[reg..]`: copy a real array's tail into a fresh array.
+    ArraySlice { operands: [Register, UImmediate], acc: writes, indices: [Unchecked, Unchecked] },
     JumpLoop { operands: [Immediate], indices: [Unchecked] }, // imm (negative offset); safepoint-polls before jumping
 
     JumpIfTruthy { operands: [Immediate], acc: reads, indices: [Unchecked] }, // imm; jump if ToBoolean(acc) == true

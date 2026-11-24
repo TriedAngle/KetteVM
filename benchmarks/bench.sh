@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wall-time benchmark harness for the KetteVM interpreters and QuickJS.
 #
-#   benchmarks/bench.sh <match-binary> <become-binary> [quickjs-binary] [node-binary]
+#   benchmarks/bench.sh <loop-match-binary> <tail-call-binary> [quickjs-binary] [node-binary]
 #
 # The node binary runs jitless (--jitless) with a print->console.log shim
 # for the Octane runner's print().
@@ -24,8 +24,8 @@
 
 set -euo pipefail
 
-MATCH="${1:?usage: bench.sh <match-binary> <become-binary> [quickjs-binary] [node-binary]}"
-BECOME="${2:?usage: bench.sh <match-binary> <become-binary> [quickjs-binary] [node-binary]}"
+MATCH="${1:?usage: bench.sh <loop-match-binary> <tail-call-binary> [quickjs-binary] [node-binary]}"
+BECOME="${2:?usage: bench.sh <loop-match-binary> <tail-call-binary> [quickjs-binary] [node-binary]}"
 QJS="${3:-}"
 NODE="${4:-}"
 
@@ -91,7 +91,7 @@ fmt_us() { awk -v us="$1" 'BEGIN { printf "%.2f", us / 1000000 }'; }
 ratio()  { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a / b }'; }
 
 declare -a BINS=("$MATCH" "$BECOME")
-declare -a NAMES=("match_loop" "become")
+declare -a NAMES=("loop_match" "tail_call")
 if [[ -n "$QJS" ]]; then BINS+=("$QJS"); NAMES+=("quickjs"); fi
 if [[ -n "$NODE" ]]; then
   # node runs exactly one script file per invocation: the shim plus the
@@ -137,12 +137,12 @@ echo "| fannkuch (x$AMPLIFY) | wall s (median $RUNS) |$fan_cells"
 echo "| nbody (x$AMPLIFY) | wall s (median $RUNS) |$nb_cells"
 echo "| deltablue | score (median $RUNS) |$db_cells"
 
-ratios=""; base="${fan[1]}" # become is the reference column
+ratios=""; base="${fan[1]}" # tail_call is the reference column
 for t in "${fan[@]}"; do ratios+=" $(ratio "$t" "$base")x |"; done
-echo "| fannkuch ratio vs become | |$ratios"
+echo "| fannkuch ratio vs tail_call | |$ratios"
 ratios=""; base="${nb[1]}"
 for t in "${nb[@]}"; do ratios+=" $(ratio "$t" "$base")x |"; done
-echo "| nbody ratio vs become | |$ratios"
+echo "| nbody ratio vs tail_call | |$ratios"
 ratios=""; base="${db[1]}"
 for t in "${db[@]}"; do ratios+=" $(ratio "$t" "$base")x |"; done
-echo "| deltablue ratio vs become (higher = faster) | |$ratios"
+echo "| deltablue ratio vs tail_call (higher = faster) | |$ratios"

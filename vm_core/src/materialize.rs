@@ -166,6 +166,16 @@ fn materialize_function<'s>(
                 .get_handle(heap, scope)
                 .erase(),
             Constant::GlobalObject => heap.known().global_object.get_handle(heap, scope).erase(),
+            Constant::SwitchTable(table) => {
+                let mut values: Vec<Handle<'s, Value>> =
+                    Vec::with_capacity(table.targets.len() + 1);
+                values.push(scope.handle(Smi::new(table.min)));
+                for &target in table.targets.iter() {
+                    values.push(scope.handle(Smi::new(target as i64)));
+                }
+                heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), scope)
+                    .erase()
+            }
         };
         materialized.push(value);
     }

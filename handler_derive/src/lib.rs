@@ -43,7 +43,7 @@
 //! # Slow paths
 //!
 //! A slow path is the same `#[handler(Opcode)]` form plus `#[cold]`
-//! and not listed in `handler_table!`. The hot handler tail-calls it
+//! and not listed in `tail-call table`. The hot handler tail-calls it
 //! with `tail!(path)`; the slow path owns its continuation — it
 //! computes a result and re-enters with `set_acc` +
 //! `reenter!` (keeping the advance compile-time via the opcode).
@@ -94,7 +94,24 @@ use proc_macro2::{
     Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream as TokenStream2, TokenTree,
 };
 use quote::{format_ident, quote};
-use syn::{Token, parse_macro_input, punctuated::Punctuated, spanned::Spanned};
+use syn::{parse_macro_input, spanned::Spanned};
+
+mod tables;
+
+#[proc_macro]
+pub fn tail_call_table(input: TokenStream) -> TokenStream {
+    tables::tail_call_table(input)
+}
+
+#[proc_macro]
+pub fn loop_call_table(input: TokenStream) -> TokenStream {
+    tables::loop_call_table(input)
+}
+
+#[proc_macro]
+pub fn match_step(input: TokenStream) -> TokenStream {
+    tables::match_step(input)
+}
 
 const EXITS: &[&str] = &[
     "next",
@@ -104,69 +121,6 @@ const EXITS: &[&str] = &[
     "dispatch_frame",
     "call_enter",
 ];
-
-/// `handler_table!(op_load, op_store, ..)` — dispatch table generation.
-#[proc_macro]
-pub fn handler_table(input: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(input with Punctuated::<syn::Path, Token![,]>::parse_terminated);
-    match expand_table(&names) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
-}
-
-fn expand_table(names: &Punctuated<syn::Path, Token![,]>) -> syn::Result<TokenStream2> {
-    let mut narrow = Vec::new();
-    let mut wide = Vec::new();
-    for name in names {
-        let ident = name
-            .segments
-            .last()
-            .map(|s| &s.ident)
-            .ok_or_else(|| syn::Error::new(name.span(), "empty handler path"))?;
-        let op = opcode_of(ident)?;
-        narrow.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
-        wide.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
-    }
-    Ok(quote! {
-        #[rustfmt::skip]
-        const fn __table_narrow() -> [Handler; 256] {
-            let mut t = [op_trap::<1> as Handler; 256];
-            #(#narrow)*
-            t
-        }
-
-        #[rustfmt::skip]
-        const fn __table_wide() -> [Handler; 256] {
-            let mut t = [op_trap::<2> as Handler; 256];
-            #(#wide)*
-            t
-        }
-    })
-}
-
-/// `op_jump_if_truthy` -> `Opcode::JumpIfTruthy`.
-fn opcode_of(name: &Ident) -> syn::Result<Ident> {
-    let full = name.to_string();
-    let Some(rest) = full.strip_prefix("op_") else {
-        return Err(syn::Error::new(
-            name.span(),
-            "handler names must start with `op_` (they map to the like-named `Opcode` variant)",
-        ));
-    };
-    if rest.is_empty() {
-        return Err(syn::Error::new(name.span(), "handler name is just `op_`"));
-    }
-    let mut camel = String::new();
-    for seg in rest.split('_') {
-        let mut chars = seg.chars();
-        if let Some(f) = chars.next() {
-            camel.extend(f.to_uppercase());
-        }
-        camel.push_str(chars.as_str());
-    }
-    Ok(Ident::new(&camel, name.span()))
-}
 
 const PARAM_NAMES: &[&str] = &[
     "ip", "regs", "acc", "ctx", "table", "roots", "float", "STRIDE",
@@ -178,7 +132,7 @@ const PARAM_NAMES: &[&str] = &[
 #[derive(Clone)]
 enum HandlerForm {
     /// `#[handler(Add)]`: opcode known. Hot handlers are listed in
-    /// `handler_table!`; cold ones (`#[cold]`) are tail-called through
+    /// `tail-call table`; cold ones (`#[cold]`) are tail-called through
     /// `tail!` and own their continuation (`set_acc` + `reenter!`).
     Dispatch(Ident),
     /// `#[handler]`: no opcode (trampolines such as `op_trap`,
@@ -199,14 +153,14 @@ impl HandlerForm {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Backend {
     Both,
-    Become,
-    Match,
+    TailCall,
+    LoopMatch,
 }
 
 fn parse_handler_attr(attr: TokenStream) -> syn::Result<(HandlerForm, Backend)> {
     let tts: Vec<TokenTree> = TokenStream2::from(attr).into_iter().collect();
     if tts.is_empty() {
-        return Ok((HandlerForm::Trampoline, Backend::Become));
+        return Ok((HandlerForm::Trampoline, Backend::TailCall));
     }
     let op = match &tts[0] {
         TokenTree::Ident(i) => Ident::new(&i.to_string(), i.span()),
@@ -222,12 +176,14 @@ fn parse_handler_attr(attr: TokenStream) -> syn::Result<(HandlerForm, Backend)> 
         [_] => Backend::Both,
         [_, TokenTree::Punct(p), TokenTree::Ident(mode)] if p.as_char() == ',' => {
             match mode.to_string().as_str() {
-                "become" => Backend::Become,
-                "match_loop" => Backend::Match,
+                "tail_call" => Backend::TailCall,
+                "loop_match" => Backend::LoopMatch,
                 other => {
                     return Err(syn::Error::new(
                         mode.span(),
-                        format!("unknown handler backend `{other}` (use `become` or `match_loop`)"),
+                        format!(
+                            "unknown handler backend `{other}` (use `tail_call` or `loop_match`)"
+                        ),
                     ));
                 }
             }
@@ -235,7 +191,7 @@ fn parse_handler_attr(attr: TokenStream) -> syn::Result<(HandlerForm, Backend)> 
         _ => {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "#[handler] takes `Opcode`, `Opcode, become`, or `Opcode, match_loop`",
+                "#[handler] takes `Opcode`, `Opcode, tail_call`, or `Opcode, loop_match`",
             ));
         }
     };
@@ -251,15 +207,15 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(err) => return err.to_compile_error().into(),
     };
     let became = match backend {
-        Backend::Become | Backend::Both => Some(match expand(form.clone(), &func) {
+        Backend::TailCall | Backend::Both => Some(match expand(form.clone(), &func) {
             Ok(tokens) => tokens,
             Err(err) => return err.to_compile_error().into(),
         }),
-        Backend::Match => None,
+        Backend::LoopMatch => None,
     };
     let mat = match backend {
-        Backend::Become => None,
-        Backend::Both | Backend::Match => {
+        Backend::TailCall => None,
+        Backend::Both | Backend::LoopMatch => {
             let Some(op) = form.op() else {
                 unreachable!("an opcode form is required for the match backend")
             };
@@ -278,21 +234,21 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn handler_become(attr: TokenStream, item: TokenStream) -> TokenStream {
-    handler_forced(attr, item, Backend::Become)
+pub fn handler_tail_call(attr: TokenStream, item: TokenStream) -> TokenStream {
+    handler_forced(attr, item, Backend::TailCall)
 }
 
 #[proc_macro_attribute]
-pub fn handler_match(attr: TokenStream, item: TokenStream) -> TokenStream {
-    handler_forced(attr, item, Backend::Match)
+pub fn handler_loop_match(attr: TokenStream, item: TokenStream) -> TokenStream {
+    handler_forced(attr, item, Backend::LoopMatch)
 }
 
 fn handler_forced(attr: TokenStream, item: TokenStream, backend: Backend) -> TokenStream {
     let mut func: syn::ItemFn = parse_macro_input!(item as syn::ItemFn);
     func.attrs.retain(|a| {
         !a.path().is_ident("handler")
-            && !a.path().is_ident("handler_become")
-            && !a.path().is_ident("handler_match")
+            && !a.path().is_ident("handler_tail_call")
+            && !a.path().is_ident("handler_loop_match")
     });
     let op = match syn::parse::<Ident>(attr) {
         Ok(op) => op,
@@ -304,11 +260,11 @@ fn handler_forced(attr: TokenStream, item: TokenStream, backend: Backend) -> Tok
     };
     let form = HandlerForm::Dispatch(op);
     match backend {
-        Backend::Become => match expand(form, &func) {
+        Backend::TailCall => match expand(form, &func) {
             Ok(tokens) => tokens.into(),
             Err(err) => err.to_compile_error().into(),
         },
-        Backend::Match => {
+        Backend::LoopMatch => {
             let Some(op) = form.op() else { unreachable!() };
             match expand_match(op, &func, true) {
                 Ok(tokens) => tokens.into(),
@@ -734,7 +690,7 @@ impl MatchRewriter {
                         return {
                             let __pc = ip as usize - ctx.code_ptr() as usize;
                             ctx.set_throw_pc(__pc);
-                            crate::match_loop::throw_ptr()
+                            crate::loop_match::throw_ptr()
                         };
                     ));
                 }
@@ -767,9 +723,9 @@ impl MatchRewriter {
                         ctx.reload_code();
                         if __threw {
                             ctx.set_throw_pc(#pc);
-                            crate::match_loop::throw_ptr()
+                            crate::loop_match::throw_ptr()
                         } else {
-                            crate::match_loop::offset(ctx, __next_pc)
+                            crate::loop_match::offset(ctx, __next_pc)
                         }
                     };
                 ))
@@ -794,6 +750,11 @@ fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<T
     let block = &func.block;
     let cold = func.attrs.iter().any(|a| a.path().is_ident("cold"))
         || name.to_string().starts_with("slow_");
+    // Keep large handlers out of the shared dispatch frame.
+    let no_inline = func.attrs.iter().any(|a| {
+        a.path().is_ident("inline")
+            && matches!(&a.meta, syn::Meta::List(list) if list.tokens.to_string() == "never")
+    });
     let mut rw = MatchRewriter {
         op: op.clone(),
         recv: recv.to_string(),
@@ -802,6 +763,8 @@ fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<T
     let body = rw.rewrite(quote!(#block));
     let attr = if cold {
         quote!(#[cold])
+    } else if no_inline {
+        quote!(#[inline(never)])
     } else {
         quote!(#[inline(always)])
     };

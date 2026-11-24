@@ -281,7 +281,32 @@ impl<'a> Resolver<'a> {
                 }
             }
             Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.pattern_bindings(inner, out);
+                }
                 if let Some(token) = alias.alias()
+                    && let Some(binding) = self.token_bindings[token.id().0 as usize]
+                {
+                    out.push(binding);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Wildcard(_) => {}
+            Pattern::Object(object) => {
+                for field in object.fields() {
+                    if let Some(inner) = field.pattern() {
+                        self.pattern_bindings(inner, out);
+                    } else {
+                        let token = field.alias().or_else(|| field.key());
+                        if let Some(token) = token
+                            && let Some(binding) = self.token_bindings[token.id().0 as usize]
+                        {
+                            out.push(binding);
+                        }
+                    }
+                }
+            }
+            Pattern::Type(pattern) => {
+                if let Some(token) = pattern.binding()
                     && let Some(binding) = self.token_bindings[token.id().0 as usize]
                 {
                     out.push(binding);
@@ -439,7 +464,28 @@ impl<'a> Resolver<'a> {
                 }
             }
             Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.declare_pattern(scope, inner, kind);
+                }
                 if let Some(token) = alias.alias() {
+                    self.declare_token(scope, token, kind);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Wildcard(_) => {}
+            Pattern::Object(object) => {
+                for field in object.fields() {
+                    if let Some(inner) = field.pattern() {
+                        self.declare_pattern(scope, inner, kind);
+                    } else {
+                        let token = field.alias().or_else(|| field.key());
+                        if let Some(token) = token {
+                            self.declare_token(scope, token, kind);
+                        }
+                    }
+                }
+            }
+            Pattern::Type(pattern) => {
+                if let Some(token) = pattern.binding() {
                     self.declare_token(scope, token, kind);
                 }
             }
@@ -485,6 +531,28 @@ impl<'a> Resolver<'a> {
             }
             Expr::For(expr) => self.collect_for(expr),
             Expr::Try(expr) => self.collect_try(expr),
+            Expr::Match(expr) => {
+                if let Some(scrutinee) = expr.scrutinee() {
+                    self.collect_expr(scrutinee, false);
+                }
+                for arm in expr.arms() {
+                    let scope = self.push_scope(
+                        ScopeKind::Function { owns_self: false },
+                        arm.syntax().text_range().start,
+                    );
+                    self.node_scopes[arm.syntax().id().0 as usize] = Some(scope);
+                    if let Some(pattern) = arm.pattern() {
+                        self.declare_pattern(scope, pattern, BindingKind::Let);
+                    }
+                    if let Some(guard) = arm.guard() {
+                        self.collect_expr(guard, false);
+                    }
+                    if let Some(body) = arm.body() {
+                        self.collect_expr(body, false);
+                    }
+                    self.pop_scope();
+                }
+            }
             Expr::Throw(expr) => {
                 if let Some(value) = expr.value() {
                     self.collect_expr(value, false);
@@ -709,6 +777,23 @@ impl<'a> Resolver<'a> {
             Expr::While(expr) => self.resolve_while(expr, scope),
             Expr::For(expr) => self.resolve_for(expr, scope),
             Expr::Try(expr) => self.resolve_try(expr, scope),
+            Expr::Match(expr) => {
+                if let Some(scrutinee) = expr.scrutinee() {
+                    self.resolve_expr(scrutinee, scope);
+                }
+                for arm in expr.arms() {
+                    let arm_scope = self.scope_of_node(arm.syntax().id());
+                    if let Some(pattern) = arm.pattern() {
+                        self.resolve_pattern_types(pattern, scope);
+                    }
+                    if let Some(guard) = arm.guard() {
+                        self.resolve_expr(guard, arm_scope);
+                    }
+                    if let Some(body) = arm.body() {
+                        self.resolve_expr(body, arm_scope);
+                    }
+                }
+            }
             Expr::Throw(expr) => {
                 if let Some(value) = expr.value() {
                     self.resolve_expr(value, scope);
@@ -884,6 +969,52 @@ impl<'a> Resolver<'a> {
             self.resolutions[node]
         {
             self.bindings[binding.0 as usize].assigned = true;
+        }
+    }
+
+    fn resolve_pattern_types(&mut self, pattern: Pattern<'a>, scope: ScopeId) {
+        match pattern {
+            Pattern::Type(pattern) => {
+                if let Some(token) = pattern.type_name()
+                    && let Some(name) = self.token_name(token)
+                {
+                    let node = pattern.syntax().id();
+                    let start = token.text_range().start;
+                    if let Some((binding, binding_scope)) = self.lookup(scope, name, start) {
+                        if binding_scope == scope {
+                            self.resolutions[node.0 as usize] = Some(Resolution::Local(binding));
+                        } else {
+                            self.record_upvar(scope, binding, binding_scope);
+                            self.resolutions[node.0 as usize] = Some(Resolution::Upvar(binding));
+                        }
+                    } else {
+                        self.resolutions[node.0 as usize] = Some(Resolution::Global);
+                    }
+                }
+            }
+            Pattern::Object(object) => {
+                for field in object.fields() {
+                    if let Some(inner) = field.pattern() {
+                        self.resolve_pattern_types(inner, scope);
+                    }
+                }
+            }
+            Pattern::Array(array) => {
+                for element in array.elements() {
+                    self.resolve_pattern_types(element, scope);
+                }
+            }
+            Pattern::Tuple(tuple) => {
+                for element in tuple.elements() {
+                    self.resolve_pattern_types(element, scope);
+                }
+            }
+            Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.resolve_pattern_types(inner, scope);
+                }
+            }
+            Pattern::Name(_) | Pattern::Fields(_) | Pattern::Literal(_) | Pattern::Wildcard(_) => {}
         }
     }
 

@@ -314,6 +314,9 @@ impl Scanner<'_> {
                 if self.peek() == Some('=') {
                     self.bump();
                     EqEq
+                } else if self.peek() == Some('>') {
+                    self.bump();
+                    FatArrow
                 } else {
                     Assign
                 }
@@ -481,6 +484,7 @@ fn keyword(text: &str) -> Option<SyntaxKind> {
         "try" => Try,
         "catch" => Catch,
         "throw" => Throw,
+        "match" => Match,
         _ => return None,
     })
 }

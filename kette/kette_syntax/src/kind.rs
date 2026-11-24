@@ -74,6 +74,8 @@ pub enum SyntaxKind {
     OrEq = 69,
     LtLtEq = 70,
     GtGtEq = 71,
+    FatArrow = 72,
+    Match = 73,
 
     Script = 100,
     Body = 101,
@@ -112,6 +114,13 @@ pub enum SyntaxKind {
     Path = 134,
     ErrorNode = 135,
     PatternAlias = 136,
+    MatchExpr = 137,
+    MatchArm = 138,
+    PatternLiteral = 139,
+    PatternWildcard = 140,
+    PatternObject = 141,
+    PatternField = 142,
+    PatternType = 143,
 }
 
 impl SyntaxKind {
@@ -186,6 +195,8 @@ impl SyntaxKind {
         Self::OrEq,
         Self::LtLtEq,
         Self::GtGtEq,
+        Self::FatArrow,
+        Self::Match,
         Self::Script,
         Self::Body,
         Self::ExprStmt,
@@ -223,6 +234,13 @@ impl SyntaxKind {
         Self::Path,
         Self::ErrorNode,
         Self::PatternAlias,
+        Self::MatchExpr,
+        Self::MatchArm,
+        Self::PatternLiteral,
+        Self::PatternWildcard,
+        Self::PatternObject,
+        Self::PatternField,
+        Self::PatternType,
     ];
 
     /// The variant name as written in the enum.
@@ -297,6 +315,8 @@ impl SyntaxKind {
             Self::OrEq => "OrEq",
             Self::LtLtEq => "LtLtEq",
             Self::GtGtEq => "GtGtEq",
+            Self::FatArrow => "FatArrow",
+            Self::Match => "Match",
             Self::Script => "Script",
             Self::Body => "Body",
             Self::ExprStmt => "ExprStmt",
@@ -334,6 +354,13 @@ impl SyntaxKind {
             Self::Path => "Path",
             Self::ErrorNode => "ErrorNode",
             Self::PatternAlias => "PatternAlias",
+            Self::MatchExpr => "MatchExpr",
+            Self::MatchArm => "MatchArm",
+            Self::PatternLiteral => "PatternLiteral",
+            Self::PatternWildcard => "PatternWildcard",
+            Self::PatternObject => "PatternObject",
+            Self::PatternField => "PatternField",
+            Self::PatternType => "PatternType",
         }
     }
 
@@ -374,6 +401,7 @@ impl SyntaxKind {
                 | Self::Try
                 | Self::Catch
                 | Self::Throw
+                | Self::Match
         )
     }
 }

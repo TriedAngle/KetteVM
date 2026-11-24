@@ -1,0 +1,317 @@
+// Pattern matching: literals, objects with field presence, arrays, aliases,
+// types, guards, match closures, and tail recursion through match.
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/match.ktt
+// Check: kette/kette_tests/check.py
+
+use collection { Sequence }
+
+Test.assert(match 2 {
+    0 => "zero"
+    1 => "one"
+    _ => "other"
+}, "other")
+
+Test.assert(match -1 {
+    -1 => "neg"
+    0 => "zero"
+    _ => "other"
+}, "neg")
+
+Test.assert(match 5 {
+    n if n > 10 => "big"
+    n if n > 3 => "medium"
+    _ => "small"
+}, "medium")
+
+Test.assert(match { a: { b: 5 } } {
+    { a: { b: v } } => v
+    _ => 0
+}, 5)
+
+Test.assert(match { a: 1 } {
+    { a: x } as whole => whole.a + x
+    _ => 0
+}, 2)
+
+Test.assert(match { a: 1, b: 2 } {
+    { a: x
+        b: y } => x + y
+    _ => 0
+}, 3)
+
+Test.assert(match [1, 2] {
+    [a] => 1
+    [a, b] => 2
+    _ => 3
+}, 2)
+
+Test.assert(match [1, 2, 3] {
+    [a, b] => a + b
+    [a, ...rest] => a + rest.length
+    _ => -1
+}, 3)
+
+Test.assert(match "abc" {
+    "abc" => true
+    _ => false
+}, true)
+
+Test.assert(match null {
+    null => true
+    _ => false
+}, true)
+
+Test.assert(match true {
+    true => true
+    false => false
+}, true)
+
+Test.assert(match { a: 1 } {
+    { a: undefined } => 0
+    { a: v } => v
+    _ => -1
+}, 1)
+
+let TypeA = { value: 1 }
+let instance = TypeA.clone()
+Test.assert(match instance {
+    TypeA v => v.value
+    _ => -1
+}, 1)
+Test.assert(match instance {
+    TypeA _ => 1
+    _ => 0
+}, 1)
+Test.assert(match { other: 1 } {
+    TypeA v => 1
+    _ => 0
+}, 0)
+
+let block = match 2 {
+    2 => {
+        let x = 40
+        x + 2
+    }
+    _ => 0
+}
+Test.assert(block, 42)
+
+let nested = match 1 {
+    1 => match 2 {
+        2 => "nested"
+        _ => "no"
+    }
+    _ => "no"
+}
+Test.assert(nested, "nested")
+
+let* count = match |n| {
+    0 => 0
+    _ => count(n - 1)
+}
+Test.assert(count(100000), 0)
+
+let* step = match |state| {
+    { done: 1, value: v } => v
+    { done: 0, next: n } => step(n)
+}
+Test.assert(step({ done: 0, next: { done: 1, value: 7 } }), 7)
+
+let seq = Sequence.new()
+seq.add(10)
+seq.add(20)
+seq.add(30)
+Test.assert(match seq {
+    [a, b, ...rest] => a + b + rest.length
+    _ => -1
+}, 31)
+
+let caught = try {
+    match 5 {
+        0 => 0
+    }
+} catch (e) {
+    "caught"
+}
+Test.assert(caught, "caught")
+
+let returned = |n| {
+    return match n {
+        0 => "zero"
+        _ => "other"
+    }
+}
+Test.assert(returned(0), "zero")
+
+// Object field presence is strict: a missing field is not `undefined`.
+Test.assert(match { b: 1 } {
+    { a: undefined } => "wrong"
+    { a: _ } => "wrong"
+    { a } => "wrong"
+    _ => "fallback"
+}, "fallback")
+
+Test.assert(match { a: undefined } {
+    { a: undefined } => "explicit"
+    _ => "fallback"
+}, "explicit")
+
+Test.assert(match { a: {} } {
+    { a: { b: _ } } => "wrong"
+    { a: {} } => "empty"
+    _ => "fallback"
+}, "empty")
+
+Test.assert(match { a: 1 } {
+    (a, b) => "wrong"
+    _ => "fallback"
+}, "fallback")
+
+Test.assert(match {} {
+    { 0: v } => "wrong"
+    _ => "fallback"
+}, "fallback")
+
+Test.assert(match ["x"] {
+    { 0: v } => v
+    _ => "fallback"
+}, "x")
+
+// `{}` in an arm body is the empty object literal, not an empty block.
+let emptyObject = match 1 {
+    1 => {}
+    _ => null
+}
+Test.assert(emptyObject.toString(), "[object Object]")
+
+// Arm bodies are ordinary expressions, including across ASI continuations.
+let obj = { name: { |x| x + 1 } }
+Test.assert(match 1 {
+    1 => obj.name(1)
+    _ => 0
+}, 2)
+Test.assert(match 1 {
+    1 => obj
+    .name(2)
+    _ => 0
+}, 3)
+Test.assert(match 1 {
+    1 =>
+        obj.name(3)
+    _ => 0
+}, 4)
+
+// Cached misses and a present `undefined` element.
+let readA = |o| {
+    match o {
+        { a: v } => v
+        _ => "missing"
+    }
+}
+let noA = { b: 1 }
+Test.assert(readA(noA), "missing")
+Test.assert(readA(noA), "missing")
+
+let readAt = |a| {
+    match a {
+        { 3: v } => v
+        _ => "missing"
+    }
+}
+let short = [1, 2]
+Test.assert(readAt(short), "missing")
+Test.assert(readAt(short), "missing")
+
+Test.assert(match [undefined] {
+    { 0: undefined } => "undefined"
+    _ => "missing"
+}, "undefined")
+
+// Brace bodies are expressions; postfix operators apply to the whole body.
+Test.assert(match 1 {
+    1 => {}.toString()
+    _ => ""
+}, "[object Object]")
+Test.assert(match 1 {
+    1 => { a: 1 }.a
+    _ => 0
+}, 1)
+Test.assert(match 1 {
+    1 => { |x| x + 1 }(1)
+    _ => 0
+}, 2)
+
+// Dense integer literals use the switch table.
+let digit = |n| {
+    match n {
+        0 => "zero"
+        1 => "one"
+        2 => "two"
+        3 => "three"
+        4 => "four"
+        5 => "five"
+        6 => "six"
+        7 => "seven"
+        _ => "other"
+    }
+}
+Test.assert(digit(0), "zero")
+Test.assert(digit(5), "five")
+Test.assert(digit(7), "seven")
+Test.assert(digit(8), "other")
+Test.assert(digit(-1), "other")
+
+// A guard stops the switch prefix; order is preserved.
+let guardedPrefix = |n| {
+    match n {
+        1 if n > 10 => "guarded"
+        1 => "one"
+        2 => "two"
+        3 => "three"
+        4 => "four"
+        _ => "other"
+    }
+}
+Test.assert(guardedPrefix(1), "one")
+Test.assert(guardedPrefix(4), "four")
+
+// Duplicate literals keep the first arm.
+Test.assert(match 1 {
+    1 => "first"
+    1 => "second"
+    2 => "two"
+    3 => "three"
+    4 => "four"
+    _ => "other"
+}, "first")
+
+// Sparse values stay on the compare path.
+Test.assert(match 1000 {
+    1 => "one"
+    1000 => "thousand"
+    1000000 => "million"
+    _ => "other"
+}, "thousand")
+
+// Array rest uses the slice path and creates a fresh array.
+let source = [1, 2, 3, 4]
+let tail = match source {
+    [first, ...rest] => rest
+    _ => []
+}
+Test.assert(tail.length, 3)
+Test.assert(tail[0], 2)
+Test.assert(tail[2], 4)
+tail[0] = 99
+Test.assert(source[1], 2)
+
+// Sparse/holey arrays keep holes as undefined in the rest array.
+let sparse = []
+sparse[4] = 9
+let sparseRest = match sparse {
+    [...rest] => rest
+    _ => []
+}
+Test.assert(sparseRest.length, 5)
+Test.assert(sparseRest[4], 9)
+Test.assert(sparseRest[0], undefined)

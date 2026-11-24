@@ -30,6 +30,8 @@ pub enum ValidationError {
     /// A `Constant::Callable` references a function table slot that does
     /// not exist.
     CallableOutOfRange { function: usize, id: u32 },
+    /// A `SwitchInt` table is missing or not a switch table.
+    BadSwitchTable { pc: usize },
 }
 
 impl core::fmt::Display for ValidationError {
@@ -49,8 +51,14 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
         offset: i32,
     }
 
+    struct SwitchSite {
+        pc: usize,
+        table: u32,
+    }
+
     let mut starts: Vec<usize> = Vec::new();
     let mut jumps: Vec<JumpSite> = Vec::new();
+    let mut switches: Vec<SwitchSite> = Vec::new();
     let mut last = None;
 
     let mut pc = 0usize;
@@ -135,6 +143,12 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
                     offset: ops.imm(2),
                 });
             }
+            Opcode::SwitchInt => {
+                switches.push(SwitchSite {
+                    pc,
+                    table: ops.idx(1) as u32,
+                });
+            }
             _ => {}
         }
 
@@ -142,7 +156,9 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
     }
 
     match last {
-        Some(Opcode::Return | Opcode::Jump | Opcode::JumpLoop | Opcode::Throw) => {}
+        Some(
+            Opcode::Return | Opcode::Jump | Opcode::JumpLoop | Opcode::Throw | Opcode::SwitchInt,
+        ) => {}
         _ => return Err(ValidationError::MissingTerminal),
     }
 
@@ -159,6 +175,25 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
                 pc: jump.pc,
                 target,
             });
+        }
+    }
+
+    for site in &switches {
+        let table = match f.constants.get(site.table as usize) {
+            Some(Constant::SwitchTable(table)) => table,
+            _ => return Err(ValidationError::BadSwitchTable { pc: site.pc }),
+        };
+        for &offset in table.targets.iter() {
+            let target = site.pc as i64 + offset as i64;
+            if target < 0
+                || target as usize >= f.code.len()
+                || starts.binary_search(&(target as usize)).is_err()
+            {
+                return Err(ValidationError::BadJumpTarget {
+                    pc: site.pc,
+                    target: target.max(0) as usize,
+                });
+            }
         }
     }
 

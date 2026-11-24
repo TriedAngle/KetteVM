@@ -59,7 +59,7 @@ let kindSet = |names| {
 let operatorKinds = kindSet([
     "And", "Or", "EqEq", "NotEq",
     "Lt", "Gt", "LtEq", "GtEq",
-    "LtLt", "GtGt",
+    "LtLt", "GtGt", "FatArrow",
     "Plus", "Minus", "Star", "Slash", "Percent",
 ])
 
@@ -72,7 +72,7 @@ let wordKinds = kindSet([
     "Ident", "Number", "String", "QuotedName",
     "True", "False", "Null", "SelfKw",
     "Let", "LetStar", "Mod", "If", "Else", "While", "For", "In",
-    "Return", "Break", "As", "Try", "Catch", "Throw",
+    "Return", "Break", "As", "Try", "Catch", "Throw", "Match",
     "SelfContext",
 ])
 
@@ -108,10 +108,10 @@ let spaceBetween = |prev, cur, prevParent, curParent, prevPipeOpening, curPipeOp
         return true
     }
 
-    if cur == K.Colon and (curParent == K.Slot or curParent == K.SlotMulti) {
+    if cur == K.Colon and (curParent == K.Slot or curParent == K.SlotMulti or curParent == K.PatternField) {
         return false
     }
-    if prev == K.Colon and (prevParent == K.Slot or prevParent == K.SlotMulti) {
+    if prev == K.Colon and (prevParent == K.Slot or prevParent == K.SlotMulti or prevParent == K.PatternField) {
         return true
     }
     if cur == K.Star and curParent == K.Slot {
@@ -149,7 +149,7 @@ let spaceBetween = |prev, cur, prevParent, curParent, prevPipeOpening, curPipeOp
     }
 
     if prev == K.Minus or prev == K.Bang {
-        if prevParent == K.Unary {
+        if prevParent == K.Unary or prevParent == K.PatternLiteral {
             return false
         }
     }

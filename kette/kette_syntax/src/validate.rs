@@ -134,6 +134,19 @@ impl Validator {
             Expr::Index(expr) => self.index_expr(expr, in_module),
             Expr::Send(expr) => self.send_expr(expr, in_module),
             Expr::Call(expr) => self.call_expr(expr, in_module),
+            Expr::Match(expr) => {
+                if let Some(scrutinee) = expr.scrutinee() {
+                    self.expr(scrutinee, in_module);
+                }
+                for arm in expr.arms() {
+                    if let Some(guard) = arm.guard() {
+                        self.expr(guard, in_module);
+                    }
+                    if let Some(body) = arm.body() {
+                        self.expr(body, in_module);
+                    }
+                }
+            }
         }
     }
 

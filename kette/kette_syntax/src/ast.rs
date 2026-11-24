@@ -72,6 +72,13 @@ ast_node!(PatternFields, PatternFields);
 ast_node!(PatternArray, PatternArray);
 ast_node!(PatternTuple, PatternTuple);
 ast_node!(PatternAlias, PatternAlias);
+ast_node!(PatternLiteral, PatternLiteral);
+ast_node!(PatternWildcard, PatternWildcard);
+ast_node!(PatternObject, PatternObject);
+ast_node!(PatternField, PatternField);
+ast_node!(PatternType, PatternType);
+ast_node!(MatchExpr, MatchExpr);
+ast_node!(MatchArm, MatchArm);
 ast_node!(Object, Object);
 ast_node!(Slot, Slot);
 ast_node!(SlotMulti, SlotMulti);
@@ -114,6 +121,7 @@ ast_enum!(Expr {
     Index(IndexExpr),
     Send(SendExpr),
     Call(CallExpr),
+    Match(MatchExpr),
 });
 
 ast_enum!(Stmt {
@@ -130,6 +138,10 @@ ast_enum!(Pattern {
     Array(PatternArray),
     Tuple(PatternTuple),
     Alias(PatternAlias),
+    Literal(PatternLiteral),
+    Wildcard(PatternWildcard),
+    Object(PatternObject),
+    Type(PatternType),
 });
 
 ast_enum!(SlotEntry {
@@ -268,6 +280,83 @@ impl<'a> Path<'a> {
 impl<'a> PatternName<'a> {
     pub fn name(self) -> Option<SyntaxToken<'a>> {
         Tokens::new(self.syntax).next_token()
+    }
+}
+
+impl<'a> PatternLiteral<'a> {
+    pub fn token(self) -> Option<SyntaxToken<'a>> {
+        Tokens::new(self.syntax).next_token()
+    }
+}
+
+impl<'a> PatternWildcard<'a> {
+    pub fn token(self) -> Option<SyntaxToken<'a>> {
+        Tokens::new(self.syntax).next_token()
+    }
+}
+
+impl<'a> PatternObject<'a> {
+    pub fn fields(self) -> AstChildren<'a, PatternField<'a>> {
+        self.syntax.children_as()
+    }
+}
+
+impl<'a> PatternField<'a> {
+    pub fn key(self) -> Option<SyntaxToken<'a>> {
+        Tokens::new(self.syntax).next_token()
+    }
+
+    pub fn pattern(self) -> Option<Pattern<'a>> {
+        self.syntax.child_as()
+    }
+
+    pub fn alias(self) -> Option<SyntaxToken<'a>> {
+        let mut tokens = Tokens::new(self.syntax);
+        while let Some(token) = tokens.next_token() {
+            if token.kind() == As {
+                return tokens.next_token().filter(|token| token.kind().is_name());
+            }
+        }
+        None
+    }
+}
+
+impl<'a> PatternType<'a> {
+    pub fn type_name(self) -> Option<SyntaxToken<'a>> {
+        Tokens::new(self.syntax).next_token()
+    }
+
+    pub fn binding(self) -> Option<SyntaxToken<'a>> {
+        self.syntax
+            .tokens()
+            .filter(|token| token.kind().is_name())
+            .nth(1)
+    }
+}
+
+impl<'a> MatchExpr<'a> {
+    pub fn scrutinee(self) -> Option<Expr<'a>> {
+        self.syntax.child_as()
+    }
+
+    pub fn arms(self) -> AstChildren<'a, MatchArm<'a>> {
+        self.syntax.children_as()
+    }
+}
+
+impl<'a> MatchArm<'a> {
+    pub fn pattern(self) -> Option<Pattern<'a>> {
+        self.syntax.child_as()
+    }
+
+    pub fn guard(self) -> Option<Expr<'a>> {
+        let mut exprs = self.syntax.children_as::<Expr<'a>>();
+        let first = exprs.next()?;
+        exprs.next().map(|_| first)
+    }
+
+    pub fn body(self) -> Option<Expr<'a>> {
+        self.syntax.children_as::<Expr<'a>>().next_back()
     }
 }
 

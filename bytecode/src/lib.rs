@@ -8,10 +8,25 @@ pub use builder::{
     RegList, RtArg, TempScope, TryBlock,
 };
 pub use opcodes::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
+
+/// Primitive kinds accepted by [`Opcode::TestType`]; `User` compares maps.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestTypeKind {
+    Object = 0,
+    Array = 1,
+    String = 2,
+    Number = 3,
+    Boolean = 4,
+    Null = 5,
+    Undefined = 6,
+    Function = 7,
+    User = 8,
+}
 pub use program::{
     CallableKind, Constant, FrontendDiagnostic, FrontendError, FrontendErrorKind, Function,
     FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program, ScopeLayout,
-    ScopeLocal, SourceMode,
+    ScopeLocal, SourceMode, SwitchTable,
 };
 pub use validate::{ValidationError, validate, validate_function};
 

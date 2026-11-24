@@ -102,6 +102,8 @@ pub enum ElementHit<'a> {
     Value(Tagged<'a, Value>),
     /// a single-code-unit string load (`"ab"[1]`); the caller allocates
     Char(u16),
+    /// a guarded missing element; only returned by the or-hole probe.
+    NotFound,
 }
 
 /// Result of a store hit.
@@ -830,12 +832,18 @@ fn apply_element_load<'a>(
     map: Tagged<'a, Map>,
     index: usize,
     payload: i64,
+    or_hole: bool,
 ) -> Option<ElementHit<'a>> {
     let holey = payload & ELEMENT_HOLEY != 0;
     let allow_oob = payload & ELEMENT_ALLOW_OOB != 0;
     let oob = |heap: &'a Heap| {
-        (allow_oob && map_chain_cell_valid(heap, map))
-            .then(|| ElementHit::Value(heap.known().undefined.get(heap).erase()))
+        (allow_oob && map_chain_cell_valid(heap, map)).then(|| {
+            if or_hole {
+                ElementHit::NotFound
+            } else {
+                ElementHit::Value(heap.known().undefined.get(heap).erase())
+            }
+        })
     };
     let len = obj.length();
     if index >= len {
@@ -864,6 +872,7 @@ fn apply_indexed_string<'a>(
     receiver: Tagged<'a, Value>,
     index: usize,
     payload: i64,
+    or_hole: bool,
 ) -> Option<ElementHit<'a>> {
     let s = receiver.get_as::<DenseString>(heap)?;
     if index >= s.len() {
@@ -872,7 +881,11 @@ fn apply_indexed_string<'a>(
                 .as_heap_object()
                 .is_some_and(|h| map_chain_cell_valid(heap, h.map(heap)))
         {
-            return Some(ElementHit::Value(heap.known().undefined.get(heap).erase()));
+            return Some(if or_hole {
+                ElementHit::NotFound
+            } else {
+                ElementHit::Value(heap.known().undefined.get(heap).erase())
+            });
         }
         return None;
     }
@@ -1178,8 +1191,30 @@ impl InlineCache {
         }
         let (obj, map, kind, payload) = probe_element_smi(heap, vector, slot, receiver)?;
         match kind {
-            KIND_ELEMENT => apply_element_load(heap, obj, map, index, payload),
-            KIND_INDEXED_STRING => apply_indexed_string(heap, receiver, index, payload),
+            KIND_ELEMENT => apply_element_load(heap, obj, map, index, payload, false),
+            KIND_INDEXED_STRING => apply_indexed_string(heap, receiver, index, payload, false),
+            _ => None,
+        }
+    }
+
+    /// Element load that reports a guarded miss as [`ElementHit::NotFound`].
+    pub fn try_load_element_or_hole<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+        receiver: Tagged<'a, Value>,
+        index: usize,
+    ) -> Option<ElementHit<'a>> {
+        if receiver
+            .as_heap_object()
+            .is_some_and(|o| o.map(heap).kind().is_arguments())
+        {
+            return None;
+        }
+        let (obj, map, kind, payload) = probe_element_smi(heap, vector, slot, receiver)?;
+        match kind {
+            KIND_ELEMENT => apply_element_load(heap, obj, map, index, payload, true),
+            KIND_INDEXED_STRING => apply_indexed_string(heap, receiver, index, payload, true),
             _ => None,
         }
     }

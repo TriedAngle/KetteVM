@@ -392,6 +392,33 @@ impl<'a> Planner<'a> {
                     }
                 }
             }
+            Expr::Match(expr) => {
+                if let Some(scrutinee) = expr.scrutinee() {
+                    self.expr(scrutinee, frame);
+                }
+                for arm in expr.arms() {
+                    let scope = self
+                        .resolved
+                        .scope_of(arm.syntax().id())
+                        .expect("match arm scope");
+                    self.inline_scope(frame, scope);
+                    if let Some(guard) = arm.guard() {
+                        self.expr(guard, frame);
+                    }
+                    if let Some(body) = arm.body() {
+                        match body {
+                            Expr::Object(object)
+                                if object.params().is_none()
+                                    && !object.has_slots()
+                                    && object.statements().next().is_some() =>
+                            {
+                                self.control_object(object, frame);
+                            }
+                            other => self.expr(other, frame),
+                        }
+                    }
+                }
+            }
         }
     }
 

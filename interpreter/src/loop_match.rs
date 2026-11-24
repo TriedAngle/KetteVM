@@ -1,51 +1,28 @@
-//! Sketch of the next match-loop interpreter: one stride-agnostic loop,
-//! `step::<1>` for narrow instructions and `step::<2>` for wide ones.
-//! Flow-free: hot state stays in locals; only `Ctx` owns interpreter state.
-
-use crate::{
-    RootsArg, match_op_add, match_op_add_immediate, match_op_add_loc, match_op_add_parent,
-    match_op_bind_this, match_op_bitwise_and, match_op_bitwise_and_immediate, match_op_bitwise_or,
-    match_op_bitwise_or_immediate, match_op_bitwise_xor, match_op_bitwise_xor_immediate,
-    match_op_call_native, match_op_compare_jump, match_op_create_block_context,
-    match_op_create_closure, match_op_create_empty_array_literal,
-    match_op_create_empty_object_literal, match_op_create_function_context,
-    match_op_create_rest_parameter, match_op_create_sized_array_literal, match_op_dec_loc,
-    match_op_define_keyed_own_property, match_op_define_named_own_property, match_op_div,
-    match_op_div_immediate, match_op_equal, match_op_equal_strict, match_op_exp,
-    match_op_exp_immediate, match_op_greater_than, match_op_greater_than_or_equal,
-    match_op_inc_loc, match_op_instance_of, match_op_jump, match_op_jump_if_falsy,
-    match_op_jump_if_not_undefined, match_op_jump_if_nullish, match_op_jump_if_truthy,
-    match_op_less_than, match_op_less_than_or_equal, match_op_load, match_op_load_constant,
-    match_op_load_context, match_op_load_context_slot, match_op_load_current_closure,
-    match_op_load_element_imm, match_op_load_false, match_op_load_global,
-    match_op_load_global_no_throw, match_op_load_hole, match_op_load_indexed,
-    match_op_load_keyed_property, match_op_load_keyed_property_reg, match_op_load_named_property,
-    match_op_load_new_target, match_op_load_null, match_op_load_smi, match_op_load_true,
-    match_op_load_undefined, match_op_load_zero, match_op_mod, match_op_mod_immediate,
-    match_op_move, match_op_mul, match_op_mul_immediate, match_op_negate, match_op_pop_context,
-    match_op_push_context, match_op_shift_left, match_op_shift_left_immediate,
-    match_op_shift_right, match_op_shift_right_immediate, match_op_shift_right_logical,
-    match_op_shift_right_logical_immediate, match_op_store, match_op_store_context_slot,
-    match_op_store_global, match_op_store_in_array_literal, match_op_store_indexed,
-    match_op_store_keyed_property, match_op_store_keyed_property_no_shadow,
-    match_op_store_named_property, match_op_store_named_property_no_shadow, match_op_sub,
-    match_op_sub_immediate, match_op_sub_loc, match_op_tail_guard, match_op_test_reference_equal,
-    match_op_test_typeof, match_op_throw, match_op_throw_reference_error_if_hole,
-    slow::match_slow_construct, utils::CallFault, utils::ConstructStart, utils::StagedCall,
-    utils::bound_apply_staged, utils::call_native_target, utils::call_scatter_start,
-    utils::call_window_start, utils::construct_native, utils::construct_start,
-    utils::proxy_apply_staged, utils::raise_fault, utils::resolve_target,
+use crate::RootsArg;
+use crate::handler;
+use crate::slow::match_slow_construct;
+use crate::utils::{
+    CallFault, ConstructStart, StagedCall, bound_apply_staged, call_native_target,
+    call_scatter_start, call_window_start, construct_native, construct_start, proxy_apply_staged,
+    raise_fault, resolve_target,
 };
+
 use bytecode::Opcode;
+use handler_derive::match_step;
 use vm_core::{
     Acc, CallTarget, Callee, Ctx, EntryFn, ErasedRuntimeState, Errors, FrameMeta, Handle,
     HandleSlice, Heap, Interpreter, Object, Ops, Regs, Result, Tagged, Termination, ThreadState,
     Thrown, Unwind, VM, Value, VmError, bail, interpreter::base, interpreter::unwind, raise,
 };
 
-pub struct MatchInterpreter;
+/// A dispatcher entry for the shared frame setup.
+pub type DispatchFn = for<'h> fn(&mut Ctx<'h, 'h>) -> Result<Acc>;
 
-impl Interpreter for MatchInterpreter {
+#[cfg(not(debug_assertions))]
+pub struct LoopMatchInterpreter;
+
+#[cfg(not(debug_assertions))]
+impl Interpreter for LoopMatchInterpreter {
     const EXECUTE: EntryFn = execute;
 }
 
@@ -153,6 +130,7 @@ macro_rules! raise {
     }};
 }
 
+#[cfg(not(debug_assertions))]
 pub fn execute<'a>(
     vm: &VM,
     runtime: &dyn ErasedRuntimeState,
@@ -161,6 +139,28 @@ pub fn execute<'a>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'_, Value>>,
+) -> Result<Tagged<'a, Value>> {
+    execute_with(
+        vm,
+        runtime,
+        heap,
+        state,
+        callable,
+        args,
+        new_target,
+        match_dispatch,
+    )
+}
+
+pub fn execute_with<'a>(
+    vm: &VM,
+    runtime: &dyn ErasedRuntimeState,
+    heap: &'a mut Heap,
+    state: &ThreadState,
+    callable: Handle<'_, Object>,
+    args: HandleSlice<'_>,
+    new_target: Option<Handle<'_, Value>>,
+    dispatch: DispatchFn,
 ) -> Result<Tagged<'a, Value>> {
     if state.rust_stack_exhausted() {
         bail!(vm, heap, state, VmError::StackOverflow);
@@ -172,7 +172,9 @@ pub fn execute<'a>(
     let outer = was_active.then(|| state.frame_base());
 
     state.handle_scope(|scope| {
-        let result = start(vm, runtime, heap, state, callable, args, new_target)?;
+        let result = start(
+            vm, runtime, heap, state, callable, args, new_target, dispatch,
+        )?;
         let rooted = scope.handle(result);
         let threw = rooted.as_tagged(heap) == heap.known().exception.get(heap);
 
@@ -198,6 +200,7 @@ fn start<'b>(
     callable: Handle<'_, Object>,
     args: HandleSlice<'_>,
     new_target: Option<Handle<'b, Value>>,
+    dispatch: DispatchFn,
 ) -> Result<Tagged<'b, Value>> {
     match callable.as_tagged(heap).erase().call_target(heap) {
         None => bail!(vm, heap, state, VmError::NotCallable),
@@ -256,7 +259,8 @@ fn start<'b>(
     }
 }
 
-fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
+#[cfg(not(debug_assertions))]
+fn match_dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
@@ -291,6 +295,7 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
     }
 }
 
+#[cfg(not(debug_assertions))]
 #[inline(always)]
 fn step<'h, const STRIDE: usize>(
     ctx: &mut Ctx<'h, 'h>,
@@ -302,233 +307,117 @@ fn step<'h, const STRIDE: usize>(
 ) {
     let op = unsafe { Opcode::from_byte_unchecked(*(*ip).add(if STRIDE == 2 { 1 } else { 0 })) };
 
-    *ip = match op {
-        Opcode::Load => match_op_load::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Move => match_op_move::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Store => match_op_store::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Add => match_op_add::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CallNative => {
-            let next = match_op_call_native::<STRIDE>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::Jump => match_op_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::JumpIfTruthy => match_op_jump_if_truthy::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::JumpIfFalsy => match_op_jump_if_falsy::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::JumpIfNotUndefined => {
-            match_op_jump_if_not_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::JumpIfNullish => match_op_jump_if_nullish::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BindThis => match_op_bind_this::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::JumpLoop => op_jump_loop::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Return => {
-            let next = op_return(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallNoFeedback => {
-            let next = op_call_no_feedback::<STRIDE>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::Call => {
-            let next = op_call::<STRIDE>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallMethod0 => {
-            let next = op_call_method::<STRIDE, 0>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallMethod1 => {
-            let next = op_call_method::<STRIDE, 1>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallMethod2 => {
-            let next = op_call_method::<STRIDE, 2>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallFunction0 => {
-            let next = op_call_function::<STRIDE, 0>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallFunction1 => {
-            let next = op_call_function::<STRIDE, 1>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CallFunction2 => {
-            let next = op_call_function::<STRIDE, 2>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::LoadSmi => match_op_load_smi::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadZero => match_op_load_zero::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadConstant => match_op_load_constant::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadUndefined => match_op_load_undefined::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadNull => match_op_load_null::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadTrue => match_op_load_true::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadFalse => match_op_load_false::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::TailGuard => match_op_tail_guard::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadGlobal => match_op_load_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Sub => match_op_sub::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Mul => match_op_mul::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Div => match_op_div::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Mod => match_op_mod::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Exp => match_op_exp::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Negate => match_op_negate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::AddImmediate => match_op_add_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::SubImmediate => match_op_sub_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::MulImmediate => match_op_mul_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::DivImmediate => match_op_div_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ModImmediate => match_op_mod_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ExpImmediate => match_op_exp_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::AddLoc => match_op_add_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::SubLoc => match_op_sub_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseOr => match_op_bitwise_or::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseXor => match_op_bitwise_xor::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::BitwiseAnd => match_op_bitwise_and::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ShiftLeft => match_op_shift_left::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ShiftRight => match_op_shift_right::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::ShiftRightLogical => {
-            match_op_shift_right_logical::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::BitwiseOrImmediate => {
-            match_op_bitwise_or_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::BitwiseXorImmediate => {
-            match_op_bitwise_xor_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::BitwiseAndImmediate => {
-            match_op_bitwise_and_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ShiftLeftImmediate => {
-            match_op_shift_left_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ShiftRightImmediate => {
-            match_op_shift_right_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ShiftRightLogicalImmediate => {
-            match_op_shift_right_logical_immediate::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::Equal => match_op_equal::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LessThan => match_op_less_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::GreaterThan => match_op_greater_than::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LessThanOrEqual => {
-            match_op_less_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::GreaterThanOrEqual => {
-            match_op_greater_than_or_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::EqualStrict => match_op_equal_strict::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::TestReferenceEqual => {
-            match_op_test_reference_equal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::TestTypeof => match_op_test_typeof::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::InstanceOf => match_op_instance_of::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CompareJump => match_op_compare_jump::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::IncLoc => match_op_inc_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::DecLoc => match_op_dec_loc::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadKeyedProperty => {
-            match_op_load_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadIndexed => match_op_load_indexed::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadKeyedPropertyReg => {
-            match_op_load_keyed_property_reg::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadElementImm => match_op_load_element_imm::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadNamedProperty => {
-            match_op_load_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreNamedProperty => {
-            match_op_store_named_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreKeyedProperty => {
-            match_op_store_keyed_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreIndexed => match_op_store_indexed::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::StoreNamedPropertyNoShadow => {
-            match_op_store_named_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreKeyedPropertyNoShadow => {
-            match_op_store_keyed_property_no_shadow::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreGlobal => match_op_store_global::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CreateClosure => match_op_create_closure::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::Throw => match_op_throw::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::AddParent => match_op_add_parent::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::DefineNamedOwnProperty => {
-            match_op_define_named_own_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::DefineKeyedOwnProperty => {
-            match_op_define_keyed_own_property::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreInArrayLiteral => {
-            match_op_store_in_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadContextSlot => {
-            match_op_load_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::StoreContextSlot => {
-            match_op_store_context_slot::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::PushContext => match_op_push_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::PopContext => match_op_pop_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::CreateFunctionContext => {
-            match_op_create_function_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::CreateEmptyArrayLiteral => {
-            match_op_create_empty_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::CreateSizedArrayLiteral => {
-            match_op_create_sized_array_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::CreateRestParameter => {
-            match_op_create_rest_parameter::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::Construct => {
-            let next = op_construct::<STRIDE>(*ip, *regs, acc, ctx, roots);
-            *regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            *frame_base = ctx.frame_base();
-            next
-        }
-        Opcode::CreateEmptyObjectLiteral => {
-            match_op_create_empty_object_literal::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::CreateBlockContext => {
-            match_op_create_block_context::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadHole => match_op_load_hole::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadNewTarget => match_op_load_new_target::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadContext => match_op_load_context::<STRIDE>(*ip, *regs, acc, ctx, roots),
-        Opcode::LoadCurrentClosure => {
-            match_op_load_current_closure::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::ThrowReferenceErrorIfHole => {
-            match_op_throw_reference_error_if_hole::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::LoadGlobalNoThrow => {
-            match_op_load_global_no_throw::<STRIDE>(*ip, *regs, acc, ctx, roots)
-        }
-        Opcode::Wide => {
-            step::<2>(ctx, ip, regs, acc, frame_base, roots);
-            *ip
-        }
-    };
+    match_step!(
+        Load => handler::match_op_load::<STRIDE>,
+        Move => handler::match_op_move::<STRIDE>,
+        Store => handler::match_op_store::<STRIDE>,
+        Add => handler::match_op_add::<STRIDE>,
+        CallNative => regs handler::match_op_call_native::<STRIDE>,
+        Jump => handler::match_op_jump::<STRIDE>,
+        JumpIfTruthy => handler::match_op_jump_if_truthy::<STRIDE>,
+        JumpIfFalsy => handler::match_op_jump_if_falsy::<STRIDE>,
+        JumpIfNotUndefined => handler::match_op_jump_if_not_undefined::<STRIDE>,
+        JumpIfNullish => handler::match_op_jump_if_nullish::<STRIDE>,
+        BindThis => handler::match_op_bind_this::<STRIDE>,
+        JumpLoop => op_jump_loop::<STRIDE>,
+        Return => regs step_return::<STRIDE>,
+        CallNoFeedback => regs op_call_no_feedback::<STRIDE>,
+        Call => regs op_call::<STRIDE>,
+        CallMethod0 => regs step_call_method0::<STRIDE>,
+        CallMethod1 => regs step_call_method1::<STRIDE>,
+        CallMethod2 => regs step_call_method2::<STRIDE>,
+        CallFunction0 => regs step_call_function0::<STRIDE>,
+        CallFunction1 => regs step_call_function1::<STRIDE>,
+        CallFunction2 => regs step_call_function2::<STRIDE>,
+        Construct => regs op_construct::<STRIDE>,
+        Wide => wide,
+        LoadSmi => handler::match_op_load_smi::<STRIDE>,
+        LoadZero => handler::match_op_load_zero::<STRIDE>,
+        LoadConstant => handler::match_op_load_constant::<STRIDE>,
+        LoadUndefined => handler::match_op_load_undefined::<STRIDE>,
+        LoadNull => handler::match_op_load_null::<STRIDE>,
+        LoadTrue => handler::match_op_load_true::<STRIDE>,
+        LoadFalse => handler::match_op_load_false::<STRIDE>,
+        TailGuard => handler::match_op_tail_guard::<STRIDE>,
+        TestType => handler::match_op_test_type::<STRIDE>,
+        LoadLength => handler::match_op_load_length::<STRIDE>,
+        LoadGlobal => handler::match_op_load_global::<STRIDE>,
+        Sub => handler::match_op_sub::<STRIDE>,
+        Mul => handler::match_op_mul::<STRIDE>,
+        Div => handler::match_op_div::<STRIDE>,
+        Mod => handler::match_op_mod::<STRIDE>,
+        Exp => handler::match_op_exp::<STRIDE>,
+        Negate => handler::match_op_negate::<STRIDE>,
+        AddImmediate => handler::match_op_add_immediate::<STRIDE>,
+        SubImmediate => handler::match_op_sub_immediate::<STRIDE>,
+        MulImmediate => handler::match_op_mul_immediate::<STRIDE>,
+        DivImmediate => handler::match_op_div_immediate::<STRIDE>,
+        ModImmediate => handler::match_op_mod_immediate::<STRIDE>,
+        ExpImmediate => handler::match_op_exp_immediate::<STRIDE>,
+        AddLoc => handler::match_op_add_loc::<STRIDE>,
+        SubLoc => handler::match_op_sub_loc::<STRIDE>,
+        BitwiseOr => handler::match_op_bitwise_or::<STRIDE>,
+        BitwiseXor => handler::match_op_bitwise_xor::<STRIDE>,
+        BitwiseAnd => handler::match_op_bitwise_and::<STRIDE>,
+        ShiftLeft => handler::match_op_shift_left::<STRIDE>,
+        ShiftRight => handler::match_op_shift_right::<STRIDE>,
+        ShiftRightLogical => handler::match_op_shift_right_logical::<STRIDE>,
+        BitwiseOrImmediate => handler::match_op_bitwise_or_immediate::<STRIDE>,
+        BitwiseXorImmediate => handler::match_op_bitwise_xor_immediate::<STRIDE>,
+        BitwiseAndImmediate => handler::match_op_bitwise_and_immediate::<STRIDE>,
+        ShiftLeftImmediate => handler::match_op_shift_left_immediate::<STRIDE>,
+        ShiftRightImmediate => handler::match_op_shift_right_immediate::<STRIDE>,
+        ShiftRightLogicalImmediate => handler::match_op_shift_right_logical_immediate::<STRIDE>,
+        Equal => handler::match_op_equal::<STRIDE>,
+        LessThan => handler::match_op_less_than::<STRIDE>,
+        GreaterThan => handler::match_op_greater_than::<STRIDE>,
+        LessThanOrEqual => handler::match_op_less_than_or_equal::<STRIDE>,
+        GreaterThanOrEqual => handler::match_op_greater_than_or_equal::<STRIDE>,
+        EqualStrict => handler::match_op_equal_strict::<STRIDE>,
+        TestReferenceEqual => handler::match_op_test_reference_equal::<STRIDE>,
+        TestTypeof => handler::match_op_test_typeof::<STRIDE>,
+        InstanceOf => handler::match_op_instance_of::<STRIDE>,
+        CompareJump => handler::match_op_compare_jump::<STRIDE>,
+        SwitchInt => handler::match_op_switch_int::<STRIDE>,
+        ArraySlice => handler::match_op_array_slice::<STRIDE>,
+        IncLoc => handler::match_op_inc_loc::<STRIDE>,
+        DecLoc => handler::match_op_dec_loc::<STRIDE>,
+        LoadKeyedProperty => handler::match_op_load_keyed_property::<STRIDE>,
+        LoadKeyedPropertyOrHole => handler::match_op_load_keyed_property_or_hole::<STRIDE>,
+        LoadIndexed => handler::match_op_load_indexed::<STRIDE>,
+        LoadKeyedPropertyReg => handler::match_op_load_keyed_property_reg::<STRIDE>,
+        LoadElementImm => handler::match_op_load_element_imm::<STRIDE>,
+        LoadNamedProperty => handler::match_op_load_named_property::<STRIDE>,
+        LoadNamedPropertyOrHole => handler::match_op_load_named_property_or_hole::<STRIDE>,
+        StoreNamedProperty => handler::match_op_store_named_property::<STRIDE>,
+        StoreKeyedProperty => handler::match_op_store_keyed_property::<STRIDE>,
+        StoreIndexed => handler::match_op_store_indexed::<STRIDE>,
+        StoreNamedPropertyNoShadow => handler::match_op_store_named_property_no_shadow::<STRIDE>,
+        StoreKeyedPropertyNoShadow => handler::match_op_store_keyed_property_no_shadow::<STRIDE>,
+        StoreGlobal => handler::match_op_store_global::<STRIDE>,
+        CreateClosure => handler::match_op_create_closure::<STRIDE>,
+        Throw => handler::match_op_throw::<STRIDE>,
+        AddParent => handler::match_op_add_parent::<STRIDE>,
+        DefineNamedOwnProperty => handler::match_op_define_named_own_property::<STRIDE>,
+        DefineKeyedOwnProperty => handler::match_op_define_keyed_own_property::<STRIDE>,
+        StoreInArrayLiteral => handler::match_op_store_in_array_literal::<STRIDE>,
+        LoadContextSlot => handler::match_op_load_context_slot::<STRIDE>,
+        StoreContextSlot => handler::match_op_store_context_slot::<STRIDE>,
+        PushContext => handler::match_op_push_context::<STRIDE>,
+        PopContext => handler::match_op_pop_context::<STRIDE>,
+        CreateFunctionContext => handler::match_op_create_function_context::<STRIDE>,
+        CreateEmptyArrayLiteral => handler::match_op_create_empty_array_literal::<STRIDE>,
+        CreateSizedArrayLiteral => handler::match_op_create_sized_array_literal::<STRIDE>,
+        CreateRestParameter => handler::match_op_create_rest_parameter::<STRIDE>,
+        CreateEmptyObjectLiteral => handler::match_op_create_empty_object_literal::<STRIDE>,
+        CreateBlockContext => handler::match_op_create_block_context::<STRIDE>,
+        LoadHole => handler::match_op_load_hole::<STRIDE>,
+        LoadNewTarget => handler::match_op_load_new_target::<STRIDE>,
+        LoadContext => handler::match_op_load_context::<STRIDE>,
+        LoadCurrentClosure => handler::match_op_load_current_closure::<STRIDE>,
+        ThrowReferenceErrorIfHole => handler::match_op_throw_reference_error_if_hole::<STRIDE>,
+        LoadGlobalNoThrow => handler::match_op_load_global_no_throw::<STRIDE>,
+    );
 }
 
 macro_rules! call_enter {
@@ -568,7 +457,7 @@ macro_rules! call_enter {
 }
 
 #[inline(always)]
-fn op_jump_loop<'h, const STRIDE: usize>(
+pub fn op_jump_loop<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -598,7 +487,7 @@ fn op_jump_loop<'h, const STRIDE: usize>(
 }
 
 #[inline(always)]
-fn op_call<'h, const STRIDE: usize>(
+pub fn op_call<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -621,7 +510,7 @@ fn op_call<'h, const STRIDE: usize>(
 }
 
 #[inline(always)]
-fn op_call_no_feedback<'h, const STRIDE: usize>(
+pub fn op_call_no_feedback<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -646,7 +535,7 @@ fn op_call_no_feedback<'h, const STRIDE: usize>(
     call_enter!(ctx, regs, acc, pc, next_pc, roots, result)
 }
 #[inline(always)]
-fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
+pub fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -706,7 +595,7 @@ fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
 }
 
 #[inline(always)]
-fn op_call_method<'h, const STRIDE: usize, const ARGC: usize>(
+pub fn op_call_method<'h, const STRIDE: usize, const ARGC: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -769,7 +658,7 @@ fn op_call_method<'h, const STRIDE: usize, const ARGC: usize>(
 }
 
 #[inline(always)]
-fn op_return<'h>(
+pub fn op_return<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
@@ -777,6 +666,7 @@ fn op_return<'h>(
     roots: RootsArg<'h>,
 ) -> *const u8 {
     let _ = ip;
+    let _ = STRIDE;
     if ctx.frame_base() == ctx.base_anchor() {
         return core::ptr::null();
     }
@@ -817,7 +707,84 @@ fn op_return<'h>(
 }
 
 #[inline(always)]
-fn op_construct<'h, const STRIDE: usize>(
+pub fn step_return<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_return::<STRIDE>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_method0<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_method::<STRIDE, 0>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_method1<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_method::<STRIDE, 1>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_method2<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_method::<STRIDE, 2>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_function0<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_function::<STRIDE, 0>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_function1<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_function::<STRIDE, 1>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_call_function2<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    op_call_function::<STRIDE, 2>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn op_construct<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
