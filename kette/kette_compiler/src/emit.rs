@@ -4,7 +4,7 @@ use bytecode::{
     TestTypeKind,
 };
 use kette_syntax::ast::{
-    AssignExpr, AstNode, BinaryExpr, CallExpr, ExportDecl, Expr, Field, ForExpr, GetExpr, IfExpr,
+    AssignExpr, AstNode, BinaryExpr, CallExpr, ExportDecl, Expr, ForExpr, GetExpr, IfExpr,
     IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern, PatternField, SendExpr,
     SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl, UseTree,
     WhileExpr,
@@ -1544,126 +1544,28 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn bind_pattern(&mut self, pattern: Pattern<'a>, value: Reg) -> Result<(), CompileError> {
-        match pattern {
-            Pattern::Name(pattern) => {
-                let Some(name) = pattern.name() else {
-                    return self.err_node(pattern.syntax().id(), "missing binding name");
-                };
-                let binding = self.binding(name)?;
-                self.b.load(value);
-                self.store_binding(binding)
-            }
-            Pattern::Fields(fields) => {
-                for field in fields.fields() {
-                    self.bind_field(value, field)?;
-                }
-                Ok(())
-            }
-            Pattern::Array(array) => {
-                let elements: Vec<_> = array.elements().collect();
-                self.bind_indexed(value, &elements, array.rest())?;
-                Ok(())
-            }
-            Pattern::Tuple(tuple) => {
-                let elements: Vec<_> = tuple.elements().collect();
-                self.bind_indexed(value, &elements, None)?;
-                Ok(())
-            }
-            Pattern::Alias(alias) => {
-                if let Some(inner) = alias.pattern() {
-                    self.bind_pattern(inner, value)?;
-                }
-                let Some(token) = alias.alias() else {
-                    return self.err_node(alias.syntax().id(), "missing pattern alias");
-                };
-                let binding = self.binding(token)?;
-                self.b.load(value);
-                self.store_binding(binding)
-            }
-            Pattern::Literal(_) | Pattern::Wildcard(_) => Ok(()),
-            Pattern::Object(_) | Pattern::Type(_) => self.err_node(
-                pattern.syntax().id(),
-                "unsupported pattern in this position",
-            ),
-        }
-    }
-
-    fn bind_field(&mut self, value: Reg, field: Field<'a>) -> Result<(), CompileError> {
-        let token = field.alias.unwrap_or(field.name);
-        let binding = self.binding(token)?;
-        let name = self.b.name(field.name.text().as_bytes());
-        let feedback = self.b.new_feedback();
-        self.b.load_named_property(value, name, feedback);
-        self.store_binding(binding)
-    }
-
-    fn bind_indexed(
-        &mut self,
-        value: Reg,
-        elements: &[Pattern<'a>],
-        rest: Option<SyntaxToken<'a>>,
-    ) -> Result<(), CompileError> {
         let temps = self.b.temp_scope();
-        let size = self.send_reg0(value, "size", &temps)?;
-        for (index, element) in elements.iter().enumerate() {
-            let missing = self.b.new_label();
-            let have = self.b.new_label();
-            self.b.load_smi(index as i32);
-            self.b.less_than(size);
-            self.b.jump_if_falsy(missing);
-            self.b.load_smi(index as i32);
-            let feedback = self.b.new_feedback();
-            self.b.load_indexed(value, feedback);
-            self.b.jump(have);
-            self.b.bind(missing);
-            self.b.load_undefined();
-            self.b.bind(have);
-            let element_value = self.b.stage_acc(&temps);
-            self.bind_pattern(*element, element_value)?;
+        let hole = temps.temp();
+        if Self::pattern_needs_hole(pattern) {
+            self.b.load_hole();
+            self.b.store(hole);
         }
-        if let Some(rest) = rest {
-            let tail = temps.temp();
-            self.b.create_empty_array_literal();
-            self.b.store(tail);
-            let index = temps.temp();
-            self.b.load_smi(elements.len() as i32);
-            self.b.store(index);
-            let start = self.b.new_label();
-            let end = self.b.new_label();
-            self.b.bind(start);
-            self.b.load(index);
-            self.b.less_than(size);
-            self.b.jump_if_falsy(end);
-            let key = temps.temp();
-            self.b.load_smi(elements.len() as i32);
-            self.b.sub(index);
-            self.b.store(key);
-            self.b.load(index);
-            let load_feedback = self.b.new_feedback();
-            self.b.load_indexed(value, load_feedback);
-            let store_feedback = self.b.new_feedback();
-            self.b.store_indexed(tail, key, store_feedback);
-            self.b.load_smi(1);
-            self.b.add(index);
-            self.b.store(index);
-            self.b.jump_loop(start);
-            self.b.bind(end);
-            let binding = self.binding(rest)?;
-            self.b.load(tail);
-            self.store_binding(binding)?;
-        }
+        let fail = self.b.new_label();
+        self.pattern_match(pattern, value, hole, fail)?;
+        let done = self.b.new_label();
+        self.b.jump(done);
+        self.b.bind(fail);
+        let message = Constant::String(b"pattern did not match value".to_vec().into_boxed_slice());
+        let message = self.b.constant(message);
+        self.b.load_constant(message);
+        self.b.throw();
+        self.b.bind(done);
         Ok(())
     }
 
     fn pattern_needs_hole(pattern: Pattern<'_>) -> bool {
         match pattern {
-            Pattern::Object(_) | Pattern::Fields(_) => true,
-            Pattern::Array(array) => array
-                .elements()
-                .any(|element| Self::pattern_needs_hole(element)),
-            Pattern::Tuple(tuple) => tuple
-                .elements()
-                .any(|element| Self::pattern_needs_hole(element)),
+            Pattern::Object(_) | Pattern::Array(_) => true,
             Pattern::Alias(alias) => alias
                 .pattern()
                 .is_some_and(|inner| Self::pattern_needs_hole(inner)),
@@ -1862,25 +1764,24 @@ impl<'a> FunctionGen<'a> {
                 }
                 Ok(())
             }
-            Pattern::Fields(fields) => {
-                self.test_object(value, fail);
-                let temps = self.b.temp_scope();
-                for field in fields.fields() {
-                    let token = field.alias.unwrap_or(field.name);
-                    let field_value = self.load_named_field(
-                        value,
-                        field.name.text().as_bytes(),
-                        hole,
-                        fail,
-                        &temps,
-                    )?;
-                    self.bind_token(token, field_value)?;
-                }
-                Ok(())
-            }
             Pattern::Object(object) => {
                 self.test_object(value, fail);
                 let temps = self.b.temp_scope();
+                if !object.has_rest() {
+                    let named = object
+                        .fields()
+                        .filter(|field| {
+                            field
+                                .key()
+                                .is_some_and(|key| key.kind() != SyntaxKind::Number)
+                        })
+                        .count();
+                    self.b.own_slot_count(value);
+                    let count = self.b.stage_acc(&temps);
+                    self.b.load_smi(named as i32);
+                    self.b.equal_strict(count);
+                    self.b.jump_if_falsy(fail);
+                }
                 for field in object.fields() {
                     let field_value = self.load_pattern_field(value, field, hole, fail, &temps)?;
                     if let Some(inner) = field.pattern() {
@@ -1897,10 +1798,6 @@ impl<'a> FunctionGen<'a> {
             Pattern::Array(array) => {
                 let elements: Vec<_> = array.elements().collect();
                 self.pattern_sequence(value, &elements, array.rest(), hole, fail)
-            }
-            Pattern::Tuple(tuple) => {
-                let elements: Vec<_> = tuple.elements().collect();
-                self.pattern_sequence(value, &elements, None, hole, fail)
             }
         }
     }
@@ -1978,6 +1875,29 @@ impl<'a> FunctionGen<'a> {
             self.b.equal_strict(length);
             self.b.jump_if_falsy(fail);
         }
+        let array = self.b.new_label();
+        let object = self.b.new_label();
+        let done = self.b.new_label();
+        let feedback = self.b.new_feedback();
+        self.b
+            .test_type(value, value, TestTypeKind::Array as u32, feedback);
+        self.b.jump_if_truthy(array);
+        self.b.jump(object);
+        self.b.bind(array);
+        for (index, element) in elements.iter().enumerate() {
+            self.b.load_smi(index as i32);
+            let feedback = self.b.new_feedback();
+            self.b.load_indexed_or_hole(value, feedback);
+            let element_value = self.b.stage_acc(&temps);
+            self.b.test_reference_equal(hole);
+            self.b.jump_if_truthy(fail);
+            self.pattern_match(*element, element_value, hole, fail)?;
+        }
+        if let Some(rest) = rest {
+            self.bind_rest(value, elements.len(), length, rest, &temps)?;
+        }
+        self.b.jump(done);
+        self.b.bind(object);
         for (index, element) in elements.iter().enumerate() {
             self.b.load_smi(index as i32);
             let feedback = self.b.new_feedback();
@@ -1988,6 +1908,7 @@ impl<'a> FunctionGen<'a> {
         if let Some(rest) = rest {
             self.bind_rest(value, elements.len(), length, rest, &temps)?;
         }
+        self.b.bind(done);
         Ok(())
     }
 
@@ -2085,39 +2006,22 @@ impl<'a> FunctionGen<'a> {
                 let index = key.text().parse::<i32>().unwrap_or(0);
                 self.b.load_smi(index);
                 let feedback = self.b.new_feedback();
-                self.b.load_keyed_property_or_hole(value, feedback);
+                self.b.load_indexed_or_hole(value, feedback);
             }
             SyntaxKind::String => {
                 let name = decode_string(key.text());
-                self.load_named_or_hole(value, &name);
+                let name = self.b.name(&name);
+                self.b.load_own_slot_or_hole(value, name);
             }
-            _ => self.load_named_or_hole(value, key.text().as_bytes()),
+            _ => {
+                let name = self.b.name(key.text().as_bytes());
+                self.b.load_own_slot_or_hole(value, name);
+            }
         }
         let field_value = self.b.stage_acc(temps);
         self.b.test_reference_equal(hole);
         self.b.jump_if_truthy(fail);
         Ok(field_value)
-    }
-
-    fn load_named_field(
-        &mut self,
-        value: Reg,
-        name: &[u8],
-        hole: Reg,
-        fail: Label,
-        temps: &TempScope,
-    ) -> Result<Reg, CompileError> {
-        self.load_named_or_hole(value, name);
-        let field_value = self.b.stage_acc(temps);
-        self.b.test_reference_equal(hole);
-        self.b.jump_if_truthy(fail);
-        Ok(field_value)
-    }
-
-    fn load_named_or_hole(&mut self, value: Reg, name: &[u8]) {
-        let name = self.b.name(name);
-        let feedback = self.b.new_feedback();
-        self.b.load_named_property_or_hole(value, name, feedback);
     }
 
     fn test_object(&mut self, value: Reg, fail: Label) {
@@ -2214,10 +2118,6 @@ impl<'a> FunctionGen<'a> {
         let result = temps.temp();
         let start = self.b.new_label();
         let end = self.b.new_label();
-        let keyed = matches!(
-            expr.pattern(),
-            Some(Pattern::Tuple(tuple)) if tuple.elements().count() >= 2
-        );
         self.expr(iterable)?;
         let source = self.b.stage_acc(&temps);
         let iterator = self.send_reg0(source, "iterator", &temps)?;
@@ -2231,8 +2131,7 @@ impl<'a> FunctionGen<'a> {
         let has_next = self.send_reg0(iterator, "hasNext", &temps)?;
         self.b.load(has_next);
         self.b.jump_if_falsy(end);
-        let next = if keyed { "nextKeyed" } else { "next" };
-        let value = self.send_reg0(iterator, next, &temps)?;
+        let value = self.send_reg0(iterator, "next", &temps)?;
         if body.is_callable()
             && let Some(pattern) = expr.pattern()
         {

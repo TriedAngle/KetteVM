@@ -1,5 +1,5 @@
 use ffi
-let (Ptr, void, i32, u32, i64, f32, f64, u8, u64, CString) = ffi
+let { Ptr, void, i32, u32, i64, f32, f64, u8, u64, CString, ... } = ffi
 
 let lib = globalThis.SysLib
 

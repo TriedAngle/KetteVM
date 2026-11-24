@@ -655,6 +655,14 @@ impl FnBuilder {
         );
     }
 
+    pub fn load_own_slot_or_hole(&mut self, obj: Reg, name: ConstIdx) {
+        self.emit_tracked(Opcode::LoadOwnSlotOrHole, &[obj.operand(), name.0]);
+    }
+
+    pub fn own_slot_count(&mut self, obj: Reg) {
+        self.emit_tracked(Opcode::OwnSlotCount, &[obj.operand()]);
+    }
+
     pub fn test_type(&mut self, value: Reg, type_value: Reg, kind: u32, fb: Feedback) {
         self.emit_tracked(
             Opcode::TestType,
@@ -687,6 +695,10 @@ impl FnBuilder {
 
     pub fn load_indexed(&mut self, obj: Reg, fb: Feedback) {
         self.emit_tracked(Opcode::LoadIndexed, &[obj.operand(), fb.0]);
+    }
+
+    pub fn load_indexed_or_hole(&mut self, obj: Reg, fb: Feedback) {
+        self.emit_tracked(Opcode::LoadIndexedOrHole, &[obj.operand(), fb.0]);
     }
 
     /// Keyed read with the key already in a register.

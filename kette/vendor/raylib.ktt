@@ -1,6 +1,6 @@
 use ffi
 use sys
-let (Ptr, struct, void, bool, i32, u32, f32, f64, u8, CString) = ffi
+let { Ptr, struct, void, bool, i32, u32, f32, f64, u8, CString, ... } = ffi
 
 let raylib_path = if sys.name == "macos" {
     "libraylib.dylib"

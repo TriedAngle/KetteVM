@@ -194,10 +194,16 @@ define_opcodes! {
     // by name through the runtime functions Load/StoreDynamicName
     LoadNamedProperty { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
     LoadNamedPropertyOrHole { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // like LoadNamedProperty; miss -> hole
+    /// Own enumerable data slot only; accessors, parents, and prototypes are holes.
+    LoadOwnSlotOrHole { operands: [Register, Index], acc: writes, indices: [Unchecked, ConstantPool] },
+    /// Number of non-index own enumerable data slots.
+    OwnSlotCount { operands: [Register], acc: writes, indices: [Unchecked] },
     LoadKeyedProperty { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // reg (obj) idx (feedback); key in acc -> acc
     LoadKeyedPropertyOrHole { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // like LoadKeyedProperty; miss -> hole
 
     LoadIndexed { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] },
+    /// Array element load that reports a hole/missing element as hole.
+    LoadIndexedOrHole { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] },
 
     /// new.target of the current frame (undefined for plain calls)
     LoadNewTarget { operands: [], acc: writes, indices: [] }, // -> acc

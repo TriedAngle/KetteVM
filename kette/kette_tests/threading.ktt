@@ -168,7 +168,7 @@ psleep.join()
 Test.assert(psleep.isInterrupted(), true)
 
 // C callbacks suspend on the task stack and return through C frames.
-let (void, i32, u64) = FFI
+let { void, i32, u64, ... } = FFI
 let libc = FFI.library(null)
 let Comparator = FFI.fn([FFI.Ptr, FFI.Ptr], i32)
 let qsort = libc.fn(

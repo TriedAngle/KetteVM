@@ -12,7 +12,7 @@ use sys
 use vendor.glfw
 use vendor.tgpu
 let Ptr = FFI.Ptr
-let (struct, u32, f32) = FFI
+let { struct, u32, f32, ... } = FFI
 
 let CAPACITY = 4096
 let FLOATS = 8

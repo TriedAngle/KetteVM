@@ -479,6 +479,52 @@ pub fn op_load_keyed_property_or_hole(frame: Frame) {
     tail!(slow_keyed_load_or_hole)
 }
 
+#[handler(LoadOwnSlotOrHole)]
+pub fn op_load_own_slot_or_hole(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let value = frame.regs().get(frame.signed::<0>(), heap);
+    let name_idx = frame.unsigned::<1>();
+    let name = frame.ctx().constants_ref(heap).at(heap, name_idx).as_name();
+    let hole = heap.known().the_hole.get(heap).erase();
+    let mut result = hole;
+    if let Some(object) = value.as_heap_object() {
+        for descriptor in object.as_ref().map(heap).descriptors() {
+            if descriptor.name(heap).ptr_eq(name) {
+                if descriptor.flags().is_enumerable() && !descriptor.flags().is_accessor() {
+                    result = object.as_ref().slot(heap, descriptor.offset()).get(heap);
+                }
+                break;
+            }
+        }
+    }
+    frame.set_acc(result);
+    next!()
+}
+
+#[handler(OwnSlotCount)]
+pub fn op_own_slot_count(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let value = frame.regs().get(frame.signed::<0>(), heap);
+    let count = value
+        .as_heap_object()
+        .map(|object| {
+            object
+                .as_ref()
+                .map(heap)
+                .descriptors()
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.flags().is_enumerable()
+                        && !descriptor.flags().is_accessor()
+                        && descriptor.name(heap).as_index().is_none()
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    frame.set_acc(Smi::new(count as i64).into_tagged());
+    next!()
+}
+
 #[handler(LoadIndexed)]
 pub fn op_load_indexed(frame: Frame) {
     let mut element_index = None;
@@ -537,6 +583,38 @@ pub fn op_load_indexed(frame: Frame) {
         }
     }
     tail!(slow_indexed_load)
+}
+
+#[handler(LoadIndexedOrHole)]
+pub fn op_load_indexed_or_hole(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let recv = frame.regs().get(frame.signed::<0>(), heap);
+    let hole = heap.known().the_hole.get(heap).erase();
+    let key = frame.acc();
+    let result = if let Some(index) = key.to_i64()
+        && index >= 0
+        && let Some(object) = recv.as_heap_object()
+    {
+        if let Some(value) = object.as_ref().element_value(heap, index as usize) {
+            value
+        } else {
+            let name = key.as_name();
+            let mut found = hole;
+            for descriptor in object.as_ref().map(heap).descriptors() {
+                if descriptor.name(heap).ptr_eq(name) {
+                    if descriptor.flags().is_enumerable() && !descriptor.flags().is_accessor() {
+                        found = object.as_ref().slot(heap, descriptor.offset()).get(heap);
+                    }
+                    break;
+                }
+            }
+            found
+        }
+    } else {
+        hole
+    };
+    frame.set_acc(result);
+    next!()
 }
 
 #[handler(LoadKeyedPropertyReg)]
@@ -1450,23 +1528,39 @@ pub fn op_array_slice(frame: Frame) {
         let Some(object) = value.as_heap_object() else {
             return heap.known().the_hole.get(heap).erase();
         };
-        if !object.as_ref().is_array_exotic(heap)
-            || !object.as_ref().map(heap).kind().is_dense_elements()
-        {
+        if !object.as_ref().is_array_exotic(heap) {
             return heap.known().the_hole.get(heap).erase();
         }
-        let length = object.as_ref().length();
+        let source = scope.handle(object);
+        let kind = source.as_tagged(heap).as_ref().map(heap).kind();
+        let length = source.as_tagged(heap).as_ref().length();
         let count = length.saturating_sub(from);
-        let mut values: Vec<Handle<'_, Value>> = Vec::with_capacity(count);
-        for index in 0..count {
-            let value = object
-                .as_ref()
-                .element_value_dense(heap, from + index)
-                .unwrap_or_else(|| roots.undefined.get(heap).erase());
-            values.push(scope.handle(value));
+        if kind.is_dense_elements() && !kind.is_holey() {
+            let mut values: Vec<Handle<'_, Value>> = Vec::with_capacity(count);
+            for index in 0..count {
+                let value = source
+                    .as_tagged(heap)
+                    .as_ref()
+                    .element_value_dense(heap, from + index)
+                    .expect("packed array element");
+                values.push(scope.handle(value));
+            }
+            let values = scope.stage_handles(&values);
+            return heap.new_array(&scope, values).erase();
         }
-        let values = scope.stage_handles(&values);
-        heap.new_array(&scope, values).erase()
+        let result = scope.handle(heap.new_array_with_capacity(&scope, count));
+        Object::set_array_length(heap, &scope, &result, count);
+        for index in 0..count {
+            if let Some(value) = source
+                .as_tagged(heap)
+                .as_ref()
+                .element_value(heap, from + index)
+            {
+                let value = scope.handle(value);
+                Object::store_array_element(heap, &scope, &result, index, &value);
+            }
+        }
+        result.as_tagged(heap).erase()
     });
     frame.set_acc(result);
     reenter!(pc)

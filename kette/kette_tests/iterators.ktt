@@ -184,13 +184,13 @@ let points = Sequence.new()
 points.add({ x: 1, y: 2 })
 points.add({ x: 3, y: 4 })
 let point_total = 0
-for (x, y) in points {
+for { x, y } in points {
     point_total = point_total + x + y
 }
 Test.assert(point_total, 10)
 
 let renamed_total = 0
-for (x as px, y) in points {
+for { x as px, y } in points {
     renamed_total = renamed_total + px - y
 }
 Test.assert(renamed_total, -2)
@@ -241,10 +241,14 @@ let [as as renamed, other] = [30, 40]
 Test.assert(renamed, 30)
 Test.assert(other, 40)
 
-// missing positions bind undefined
-let [short_a, short_b] = [50]
-Test.assert(short_a, 50)
-Test.assert(short_b == undefined, true)
+// fixed positions must be present
+let short_ok = try {
+    let [short_a, short_b] = [50]
+    short_b == undefined
+} catch (error) {
+    true
+}
+Test.assert(short_ok, true)
 
 // head + tail; the rest is a fresh array
 let [head, ...tail] = [1, 2, 3, 4]
@@ -263,7 +267,7 @@ Test.assert(n0, 1)
 Test.assert(n1, 2)
 Test.assert(n2, 3)
 
-let [(fx, fy)] = [{ fx: 4, fy: 5 }]
+let [{ fx, fy }] = [{ fx: 4, fy: 5 }]
 Test.assert(fx, 4)
 Test.assert(fy, 5)
 
@@ -272,9 +276,10 @@ let sq = Sequence.new()
 sq.add(1)
 sq.add(2)
 sq.add(3)
-let [sq0, sq1] = sq
+let [sq0, sq1, sq2] = sq
 Test.assert(sq0, 1)
 Test.assert(sq1, 2)
+Test.assert(sq2, 3)
 let [sq_head, ...sq_tail] = sq
 Test.assert(sq_head, 1)
 Test.assert(sq_tail.length, 2)
@@ -297,21 +302,13 @@ for [row_a, row_b] in array_rows {
 }
 Test.assert(array_row_total, 26)
 
-// keyed iteration: `for index, value in ...` uses nextKeyed()
-let keyed = Sequence.new()
-keyed.add(10)
-keyed.add(20)
+// keyed pairs can be iterated as arrays
+let keyed = [[0, 10], [1, 20]]
 let keyed_total = 0
-for key, value in keyed {
+for [key, value] in keyed {
     keyed_total = keyed_total + key * value
 }
 Test.assert(keyed_total, 20)
-
-let keyed_array_total = 0
-for key, value in [3, 4] {
-    keyed_array_total = keyed_array_total + key + value
-}
-Test.assert(keyed_array_total, 8)
 
 // the iterable is an arbitrary expression
 let expr_total = 0

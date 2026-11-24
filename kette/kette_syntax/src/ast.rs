@@ -68,9 +68,7 @@ ast_node!(UseTree, UseTree);
 ast_node!(ExportDecl, ExportDecl);
 ast_node!(Path, Path);
 ast_node!(PatternName, PatternName);
-ast_node!(PatternFields, PatternFields);
 ast_node!(PatternArray, PatternArray);
-ast_node!(PatternTuple, PatternTuple);
 ast_node!(PatternAlias, PatternAlias);
 ast_node!(PatternLiteral, PatternLiteral);
 ast_node!(PatternWildcard, PatternWildcard);
@@ -134,9 +132,7 @@ ast_enum!(Stmt {
 
 ast_enum!(Pattern {
     Name(PatternName),
-    Fields(PatternFields),
     Array(PatternArray),
-    Tuple(PatternTuple),
     Alias(PatternAlias),
     Literal(PatternLiteral),
     Wildcard(PatternWildcard),
@@ -299,6 +295,10 @@ impl<'a> PatternObject<'a> {
     pub fn fields(self) -> AstChildren<'a, PatternField<'a>> {
         self.syntax.children_as()
     }
+
+    pub fn has_rest(self) -> bool {
+        self.syntax.tokens().any(|token| token.kind() == Ellipsis)
+    }
 }
 
 impl<'a> PatternField<'a> {
@@ -360,14 +360,6 @@ impl<'a> MatchArm<'a> {
     }
 }
 
-impl<'a> PatternFields<'a> {
-    pub fn fields(self) -> Fields<'a> {
-        Fields {
-            tokens: Tokens::new(self.syntax),
-        }
-    }
-}
-
 impl<'a> PatternAlias<'a> {
     pub fn pattern(self) -> Option<Pattern<'a>> {
         self.syntax.child_as()
@@ -398,12 +390,6 @@ impl<'a> PatternArray<'a> {
             }
         }
         None
-    }
-}
-
-impl<'a> PatternTuple<'a> {
-    pub fn elements(self) -> AstChildren<'a, Pattern<'a>> {
-        self.syntax.children_as()
     }
 }
 

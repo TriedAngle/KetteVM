@@ -1,6 +1,6 @@
 use ffi
 use sys
-let (Ptr, void, i32, f64, CString) = ffi
+let { Ptr, void, i32, f64, CString, ... } = ffi
 let KEY_ESCAPE = 256
 let PRESS = 1
 let RELEASE = 0

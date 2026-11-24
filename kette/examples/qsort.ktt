@@ -4,7 +4,7 @@
 KetteTools.evalFile("kette/std/startup.ktt")
 
 let FFI = Modules.ffi
-let (void, i32, u64) = FFI
+let { void, i32, u64, ... } = FFI
 let libc = FFI.library(null)
 
 let Comparator = FFI.fn([FFI.Ptr, FFI.Ptr], i32)

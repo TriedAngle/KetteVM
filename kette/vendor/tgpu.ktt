@@ -1,6 +1,6 @@
 use ffi
 use sys
-let (Ptr, struct, void, bool, i32, u32, f32, u8, u64, CString) = ffi
+let { Ptr, struct, void, bool, i32, u32, f32, u8, u64, CString, ... } = ffi
 
 let tgpu_path = if sys.name == "macos" {
     "libtgpu.dylib"

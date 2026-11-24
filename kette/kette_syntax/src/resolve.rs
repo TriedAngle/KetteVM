@@ -257,14 +257,6 @@ impl<'a> Resolver<'a> {
                     out.push(binding);
                 }
             }
-            Pattern::Fields(fields) => {
-                for field in fields.fields() {
-                    let token = field.alias.unwrap_or(field.name);
-                    if let Some(binding) = self.token_bindings[token.id().0 as usize] {
-                        out.push(binding);
-                    }
-                }
-            }
             Pattern::Array(array) => {
                 for element in array.elements() {
                     self.pattern_bindings(element, out);
@@ -273,11 +265,6 @@ impl<'a> Resolver<'a> {
                     && let Some(binding) = self.token_bindings[rest.id().0 as usize]
                 {
                     out.push(binding);
-                }
-            }
-            Pattern::Tuple(tuple) => {
-                for element in tuple.elements() {
-                    self.pattern_bindings(element, out);
                 }
             }
             Pattern::Alias(alias) => {
@@ -444,23 +431,12 @@ impl<'a> Resolver<'a> {
                     );
                 }
             }
-            Pattern::Fields(fields) => {
-                for field in fields.fields() {
-                    let token = field.alias.unwrap_or(field.name);
-                    self.declare_token(scope, token, kind);
-                }
-            }
             Pattern::Array(array) => {
                 for element in array.elements() {
                     self.declare_pattern(scope, element, kind);
                 }
                 if let Some(rest) = array.rest() {
                     self.declare_token(scope, rest, BindingKind::Rest);
-                }
-            }
-            Pattern::Tuple(tuple) => {
-                for element in tuple.elements() {
-                    self.declare_pattern(scope, element, kind);
                 }
             }
             Pattern::Alias(alias) => {
@@ -728,6 +704,9 @@ impl<'a> Resolver<'a> {
     fn resolve_statement(&mut self, statement: Stmt<'a>, scope: ScopeId) {
         match statement {
             Stmt::Let(statement) => {
+                if let Some(pattern) = statement.pattern() {
+                    self.resolve_pattern_types(pattern, scope);
+                }
                 if let Some(value) = statement.value() {
                     let mut bindings = Vec::new();
                     if let Some(pattern) = statement.pattern() {
@@ -894,6 +873,10 @@ impl<'a> Resolver<'a> {
         }
         if let Some(body) = expr.body() {
             self.resolve_object(body, scope);
+            if let Some(pattern) = expr.pattern() {
+                let body_scope = self.node_scopes[body.syntax().id().0 as usize].unwrap_or(scope);
+                self.resolve_pattern_types(pattern, body_scope);
+            }
         }
     }
 
@@ -1004,17 +987,12 @@ impl<'a> Resolver<'a> {
                     self.resolve_pattern_types(element, scope);
                 }
             }
-            Pattern::Tuple(tuple) => {
-                for element in tuple.elements() {
-                    self.resolve_pattern_types(element, scope);
-                }
-            }
             Pattern::Alias(alias) => {
                 if let Some(inner) = alias.pattern() {
                     self.resolve_pattern_types(inner, scope);
                 }
             }
-            Pattern::Name(_) | Pattern::Fields(_) | Pattern::Literal(_) | Pattern::Wildcard(_) => {}
+            Pattern::Name(_) | Pattern::Literal(_) | Pattern::Wildcard(_) => {}
         }
     }
 

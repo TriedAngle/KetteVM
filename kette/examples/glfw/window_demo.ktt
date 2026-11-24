@@ -7,7 +7,7 @@ KetteTools.evalFile("kette/vendor/glfw.ktt")
 use ffi
 use sys
 use vendor.glfw
-let (void, i32, u32, f32, CString) = ffi
+let { void, i32, u32, f32, CString, ... } = ffi
 
 let gl_path = if sys.name == "macos" {
     "/System/Library/Frameworks/OpenGL.framework/OpenGL"

@@ -6,7 +6,7 @@ let FFI = Modules.ffi
 Test.assert(FFI.pointer, KetteTools.primitives.ffi.pointer)
 Test.assert(globalThis.FFI, undefined)
 
-let (struct, i32, u64, CString) = FFI
+let { struct, i32, u64, CString, ... } = FFI
 let I32x4 = FFI.array(i32, 4)
 let values = I32x4.new()
 values.set(0, 7)

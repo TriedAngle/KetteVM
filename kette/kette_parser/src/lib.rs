@@ -445,68 +445,6 @@ impl<'a> Parser<'a> {
         Ok(self.finish())
     }
 
-    fn parse_pattern(&mut self) -> Result<NodeId, ()> {
-        match self.peek().kind {
-            LParen => self.parse_field_pattern(),
-            LBracket => self.parse_array_pattern(),
-            _ => {
-                self.start(PatternName);
-                self.expect_name()?;
-                Ok(self.finish())
-            }
-        }
-    }
-
-    fn parse_field_pattern(&mut self) -> Result<NodeId, ()> {
-        self.start(PatternFields);
-        self.expect(LParen)?;
-        loop {
-            if self.peek().kind == RParen {
-                break;
-            }
-            self.expect_name()?;
-            if self.peek().kind == As {
-                self.bump();
-                self.expect_name()?;
-            }
-            if self.peek().kind != Comma {
-                break;
-            }
-            self.bump();
-        }
-        self.expect(RParen)?;
-        Ok(self.finish())
-    }
-
-    fn parse_array_pattern(&mut self) -> Result<NodeId, ()> {
-        self.start(PatternArray);
-        self.expect(LBracket)?;
-        loop {
-            if self.peek().kind == RBracket {
-                break;
-            }
-            if self.peek().kind == Ellipsis {
-                self.bump();
-                self.expect_name()?;
-                break;
-            }
-            let checkpoint = self.builder.checkpoint();
-            self.parse_pattern()?;
-            if self.peek().kind == As {
-                self.builder.start_node_at(checkpoint, PatternAlias);
-                self.bump();
-                self.expect_name()?;
-                self.finish();
-            }
-            if self.peek().kind != Comma {
-                break;
-            }
-            self.bump();
-        }
-        self.expect(RBracket)?;
-        Ok(self.finish())
-    }
-
     fn parse_expression(&mut self) -> Result<NodeId, ()> {
         if self.peek().kind == Throw {
             return self.parse_throw();
@@ -699,7 +637,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             self.start(MatchArm);
-            self.parse_match_pattern()?;
+            self.parse_pattern()?;
             if self.peek().kind == If {
                 self.bump();
                 self.parse_expression()?;
@@ -722,7 +660,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_match_pattern(&mut self) -> Result<NodeId, ()> {
+    fn parse_pattern(&mut self) -> Result<NodeId, ()> {
         let checkpoint = self.builder.checkpoint();
         self.flush_trivia();
         let token = self.peek();
@@ -764,8 +702,12 @@ impl<'a> Parser<'a> {
                 self.finish()
             }
             LBrace => self.parse_object_pattern()?,
-            LBracket => self.parse_match_array_pattern()?,
-            LParen => self.parse_field_pattern()?,
+            LBracket => self.parse_array_pattern()?,
+            kind if kind.is_name() => {
+                self.start(PatternName);
+                self.bump();
+                self.finish()
+            }
             _ => {
                 return self.fail(
                     token.range,
@@ -790,6 +732,16 @@ impl<'a> Parser<'a> {
             if token.kind == RBrace || token.kind == SyntaxKind::Eof {
                 break;
             }
+            if token.kind == Ellipsis {
+                self.bump();
+                if self.peek().kind != RBrace {
+                    self.record_error(
+                        token.range,
+                        "object patterns use `...` only as an ignore marker",
+                    );
+                }
+                break;
+            }
             self.start(PatternField);
             if !(token.kind.is_name() || token.kind == Number || token.kind == String) {
                 self.record_error(token.range, "expected a field key");
@@ -800,7 +752,7 @@ impl<'a> Parser<'a> {
             self.bump();
             if self.peek().kind == Colon {
                 self.bump();
-                self.parse_match_pattern()?;
+                self.parse_pattern()?;
             } else if self.peek().kind == As {
                 self.bump();
                 self.expect_name()?;
@@ -821,7 +773,7 @@ impl<'a> Parser<'a> {
         Ok(self.finish())
     }
 
-    fn parse_match_array_pattern(&mut self) -> Result<NodeId, ()> {
+    fn parse_array_pattern(&mut self) -> Result<NodeId, ()> {
         self.start(PatternArray);
         self.expect(LBracket)?;
         loop {
@@ -833,7 +785,7 @@ impl<'a> Parser<'a> {
                 self.expect_name()?;
                 break;
             }
-            self.parse_match_pattern()?;
+            self.parse_pattern()?;
             if self.peek().kind == Comma {
                 self.bump();
             } else {
@@ -872,19 +824,7 @@ impl<'a> Parser<'a> {
         self.start(ForExpr);
         self.expect(For)?;
         self.flush_trivia();
-        let checkpoint = self.builder.checkpoint();
         self.parse_pattern()?;
-        if self.peek().kind == Comma {
-            self.builder.start_node_at(checkpoint, PatternTuple);
-            loop {
-                if self.peek().kind != Comma {
-                    break;
-                }
-                self.bump();
-                self.parse_pattern()?;
-            }
-            self.finish();
-        }
         self.expect(In)?;
         self.parse_expression()?;
         self.parse_control_body()?;

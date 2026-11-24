@@ -103,16 +103,16 @@ let zero = { 0 }
 Test.assert(zero(), 0)
 Test.assert({ answer: 42 }.answer, 42)
 
-// multi binding: `let (a, b) = object` is sugar for one `let` per field
-let (mb_x, mb_y) = { mb_x: 1, mb_y: 2 }
+// object patterns bind one field at a time
+let { mb_x, mb_y } = { mb_x: 1, mb_y: 2 }
 Test.assert(mb_x + mb_y, 3)
 
 // inside a function the bindings are locals, and they can be captured
-let mb_add = { let (mb_a, mb_b) = { mb_a: 3, mb_b: 4 }; { mb_a + mb_b } }
+let mb_add = { let { mb_a, mb_b } = { mb_a: 3, mb_b: 4 }; { mb_a + mb_b } }
 Test.assert(mb_add()(), 7)
 
 // `as` renames the binding; the field is still read by the left name
-let (mb_src as mb_dst) = { mb_src: 5 }
+let { mb_src as mb_dst } = { mb_src: 5 }
 Test.assert(mb_dst, 5)
 
 // -- nested blocks capture the enclosing receiver -----------------------------
