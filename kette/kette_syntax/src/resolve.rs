@@ -3,8 +3,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use crate::ast::{
-    AstNode, ExportDecl, Expr, ForExpr, IfExpr, Object, ObjectEntry, ParamList, Pattern, Script,
-    SlotEntry, Stmt, TryExpr, UseDecl, UseTree, WhileExpr,
+    AstNode, ExportDecl, Expr, ForExpr, IfExpr, Object, ObjectEntry, ParamList, Pattern,
+    PatternValue, Script, SlotEntry, Stmt, TryExpr, UseDecl, UseTree, WhileExpr,
 };
 use crate::name::{NameId, NameTable, SELF_NAME};
 use crate::{AstChildren, NodeId, SyntaxToken, TextRange, TokenId, Tree};
@@ -267,6 +267,11 @@ impl<'a> Resolver<'a> {
                     out.push(binding);
                 }
             }
+            Pattern::Or(or) => {
+                if let Some(first) = or.alternatives().next() {
+                    self.pattern_bindings(first, out);
+                }
+            }
             Pattern::Alias(alias) => {
                 if let Some(inner) = alias.pattern() {
                     self.pattern_bindings(inner, out);
@@ -277,7 +282,7 @@ impl<'a> Resolver<'a> {
                     out.push(binding);
                 }
             }
-            Pattern::Literal(_) | Pattern::Wildcard(_) => {}
+            Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Value(_) | Pattern::Atom(_) => {}
             Pattern::Object(object) => {
                 for field in object.fields() {
                     if let Some(inner) = field.pattern() {
@@ -439,6 +444,27 @@ impl<'a> Resolver<'a> {
                     self.declare_token(scope, rest, BindingKind::Rest);
                 }
             }
+            Pattern::Or(or) => {
+                let mut alternatives = or.alternatives();
+                let Some(first) = alternatives.next() else {
+                    return;
+                };
+                self.declare_pattern(scope, first, kind);
+                let mut tokens = Vec::new();
+                self.pattern_binding_tokens(first, &mut tokens);
+                let mut by_name: HashMap<NameId, Vec<BindingId>> = HashMap::new();
+                for token in tokens {
+                    if let Some(name) = self.token_name(token)
+                        && let Some(binding) = self.token_bindings[token.id().0 as usize]
+                    {
+                        by_name.entry(name).or_default().push(binding);
+                    }
+                }
+                for alternative in alternatives {
+                    let mut used: HashMap<NameId, usize> = HashMap::new();
+                    self.declare_alternative(scope, alternative, kind, &mut by_name, &mut used);
+                }
+            }
             Pattern::Alias(alias) => {
                 if let Some(inner) = alias.pattern() {
                     self.declare_pattern(scope, inner, kind);
@@ -465,12 +491,144 @@ impl<'a> Resolver<'a> {
                     self.declare_token(scope, token, kind);
                 }
             }
+            Pattern::Value(_) | Pattern::Atom(_) => {}
         }
+    }
+
+    fn pattern_binding_tokens(&self, pattern: Pattern<'a>, out: &mut Vec<SyntaxToken<'a>>) {
+        match pattern {
+            Pattern::Name(name) => {
+                if let Some(token) = name.name() {
+                    out.push(token);
+                }
+            }
+            Pattern::Array(array) => {
+                for element in array.elements() {
+                    self.pattern_binding_tokens(element, out);
+                }
+                if let Some(rest) = array.rest() {
+                    out.push(rest);
+                }
+            }
+            Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.pattern_binding_tokens(inner, out);
+                }
+                if let Some(token) = alias.alias() {
+                    out.push(token);
+                }
+            }
+            Pattern::Object(object) => {
+                for field in object.fields() {
+                    if let Some(inner) = field.pattern() {
+                        self.pattern_binding_tokens(inner, out);
+                    } else if let Some(token) = field.alias().or_else(|| field.key()) {
+                        out.push(token);
+                    }
+                }
+            }
+            Pattern::Type(typed) => {
+                if let Some(token) = typed.binding() {
+                    out.push(token);
+                }
+            }
+            Pattern::Or(or) => {
+                for alternative in or.alternatives() {
+                    self.pattern_binding_tokens(alternative, out);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Value(_) | Pattern::Atom(_) => {}
+        }
+    }
+
+    fn declare_alternative(
+        &mut self,
+        scope: ScopeId,
+        pattern: Pattern<'a>,
+        kind: BindingKind,
+        by_name: &mut HashMap<NameId, Vec<BindingId>>,
+        used: &mut HashMap<NameId, usize>,
+    ) {
+        match pattern {
+            Pattern::Name(name) => {
+                if let Some(token) = name.name() {
+                    self.bind_alternative_token(scope, token, kind, by_name, used);
+                }
+            }
+            Pattern::Array(array) => {
+                for element in array.elements() {
+                    self.declare_alternative(scope, element, kind, by_name, used);
+                }
+                if let Some(rest) = array.rest() {
+                    self.bind_alternative_token(scope, rest, BindingKind::Rest, by_name, used);
+                }
+            }
+            Pattern::Alias(alias) => {
+                if let Some(inner) = alias.pattern() {
+                    self.declare_alternative(scope, inner, kind, by_name, used);
+                }
+                if let Some(token) = alias.alias() {
+                    self.bind_alternative_token(scope, token, kind, by_name, used);
+                }
+            }
+            Pattern::Object(object) => {
+                for field in object.fields() {
+                    if let Some(inner) = field.pattern() {
+                        self.declare_alternative(scope, inner, kind, by_name, used);
+                    } else if let Some(token) = field.alias().or_else(|| field.key()) {
+                        self.bind_alternative_token(scope, token, kind, by_name, used);
+                    }
+                }
+            }
+            Pattern::Type(typed) => {
+                if let Some(token) = typed.binding() {
+                    self.bind_alternative_token(scope, token, kind, by_name, used);
+                }
+            }
+            Pattern::Or(or) => {
+                for alternative in or.alternatives() {
+                    self.declare_alternative(scope, alternative, kind, by_name, used);
+                }
+            }
+            Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Value(_) | Pattern::Atom(_) => {}
+        }
+    }
+
+    fn bind_alternative_token(
+        &mut self,
+        scope: ScopeId,
+        token: SyntaxToken<'a>,
+        kind: BindingKind,
+        by_name: &mut HashMap<NameId, Vec<BindingId>>,
+        used: &mut HashMap<NameId, usize>,
+    ) {
+        let Some(name) = self.token_name(token) else {
+            return;
+        };
+        let index = used.entry(name).or_insert(0);
+        if let Some(bindings) = by_name.get(&name)
+            && *index < bindings.len()
+        {
+            let binding = bindings[*index];
+            self.token_bindings[token.id().0 as usize] = Some(binding);
+            *index += 1;
+            return;
+        }
+        let binding = self.bind(
+            scope,
+            name,
+            kind,
+            token.text_range(),
+            None,
+            Some(token.id()),
+        );
+        by_name.entry(name).or_default().push(binding);
+        *index += 1;
     }
 
     fn collect_expr(&mut self, expr: Expr<'a>, method_position: bool) {
         match expr {
-            Expr::Atom(_) => {}
+            Expr::Atom(_) | Expr::AtomLiteral(_) => {}
             Expr::Paren(paren) => {
                 if let Some(inner) = paren.expr() {
                     self.collect_expr(inner, false);
@@ -544,6 +702,7 @@ impl<'a> Resolver<'a> {
                     self.collect_expr(value, false);
                 }
             }
+            Expr::Continue(_) => {}
             Expr::Unary(expr) => {
                 if let Some(operand) = expr.operand() {
                     self.collect_expr(operand, false);
@@ -741,6 +900,7 @@ impl<'a> Resolver<'a> {
     fn resolve_expr(&mut self, expr: Expr<'a>, scope: ScopeId) {
         match expr {
             Expr::Atom(atom) => self.resolve_atom(atom, scope),
+            Expr::AtomLiteral(_) => {}
             Expr::Paren(paren) => {
                 if let Some(inner) = paren.expr() {
                     self.resolve_expr(inner, scope);
@@ -788,6 +948,7 @@ impl<'a> Resolver<'a> {
                     self.resolve_expr(value, scope);
                 }
             }
+            Expr::Continue(_) => {}
             Expr::Unary(expr) => {
                 if let Some(operand) = expr.operand() {
                     self.resolve_expr(operand, scope);
@@ -987,12 +1148,40 @@ impl<'a> Resolver<'a> {
                     self.resolve_pattern_types(element, scope);
                 }
             }
+            Pattern::Or(or) => {
+                for alternative in or.alternatives() {
+                    self.resolve_pattern_types(alternative, scope);
+                }
+            }
             Pattern::Alias(alias) => {
                 if let Some(inner) = alias.pattern() {
                     self.resolve_pattern_types(inner, scope);
                 }
             }
-            Pattern::Name(_) | Pattern::Literal(_) | Pattern::Wildcard(_) => {}
+            Pattern::Value(value) => self.resolve_pattern_value(value, scope),
+            Pattern::Name(_) | Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Atom(_) => {}
+        }
+    }
+
+    fn resolve_pattern_value(&mut self, value: PatternValue<'a>, scope: ScopeId) {
+        let Some(base) = value.segments().next() else {
+            return;
+        };
+        let node = value.syntax().id();
+        let Some(name) = self.token_name(base) else {
+            self.resolutions[node.0 as usize] = Some(Resolution::Global);
+            return;
+        };
+        let start = base.text_range().start;
+        let Some((binding, binding_scope)) = self.lookup(scope, name, start) else {
+            self.resolutions[node.0 as usize] = Some(Resolution::Global);
+            return;
+        };
+        if binding_scope == scope {
+            self.resolutions[node.0 as usize] = Some(Resolution::Local(binding));
+        } else {
+            self.record_upvar(scope, binding, binding_scope);
+            self.resolutions[node.0 as usize] = Some(Resolution::Upvar(binding));
         }
     }
 

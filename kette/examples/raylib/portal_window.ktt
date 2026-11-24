@@ -9,9 +9,13 @@ use vendor.raylib as rb
 
 // Release the external storage of a group of C values.
 let freeAll = |values| {
-    for value in values {
-        value.free()
+    let* free = |index| {
+        if index < values.length {
+            values[index].free()
+            free(index + 1)
+        }
     }
+    free(0)
 }
 
 let beginPortalMode3D = |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPlane| {
@@ -32,7 +36,7 @@ let beginPortalMode3D = |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPl
 
     rb.rlDrawRenderBatchActive()
 
-    rb.rlMatrixMode(rb.RL_PROJECTION)
+    rb.rlMatrixMode(rb.MatrixMode.projection)
     rb.rlPushMatrix()
     let frustum = rb.MatrixFrustum(
         rb.Vector3DotProduct(right, toBL) * scale,
@@ -43,7 +47,7 @@ let beginPortalMode3D = |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPl
         farPlane)
     rb.rlSetMatrixProjection(frustum)
 
-    rb.rlMatrixMode(rb.RL_MODELVIEW)
+    rb.rlMatrixMode(rb.MatrixMode.modelview)
     rb.rlLoadIdentity()
     let target = rb.Vector3Subtract(eye, normal)
     let view = rb.MatrixLookAt(eye, target, up)
@@ -60,9 +64,9 @@ let beginPortalMode3D = |eye, bottomLeft, bottomRight, topLeft, nearPlane, farPl
 
 let endPortalMode3D = {
     rb.rlDrawRenderBatchActive()
-    rb.rlMatrixMode(rb.RL_PROJECTION)
+    rb.rlMatrixMode(rb.MatrixMode.projection)
     rb.rlPopMatrix()
-    rb.rlMatrixMode(rb.RL_MODELVIEW)
+    rb.rlMatrixMode(rb.MatrixMode.modelview)
     rb.rlLoadIdentity()
     rb.rlDisableDepthTest()
 }
@@ -74,7 +78,7 @@ camera.position = rb.Vector3.new(0, 2.5, 7)
 camera.target = rb.Vector3.new(0, 1.8, 0)
 camera.up = rb.Vector3.new(0, 1, 0)
 camera.fovy = 45
-camera.projection = rb.CAMERA_PERSPECTIVE
+camera.projection = rb.CameraProjection.perspective
 
 // The archway opening, in Dimension A world space.
 let archBottomLeft = rb.Vector3.new(-1.5, 0, 0)
@@ -99,8 +103,24 @@ let archCenter = rb.Vector3.new(0, 2, 0)
 let archBase = rb.Vector3.new(0, 0.05, 0)
 let archWall = rb.Vector3.new(0, 2, -0.05)
 
+let drawCubes = |time| {
+    let i = 0
+    while i < 4 {
+        let angle = time * 1.5 + i * (rb.PI / 2)
+        let posOffset = rb.Vector3.new(
+            raw.sinf(angle) * 2.5,
+            2 + raw.cosf(time * 3 + i) * 0.5,
+            -4 + raw.cosf(angle) * 2.5)
+        let pos = rb.Vector3Add(portalB, posOffset)
+        rb.DrawCube(pos, 0.5, 0.5, 0.5, rb.LIME)
+        rb.DrawCubeWires(pos, 0.52, 0.52, 0.52, rb.DARKGREEN)
+        freeAll([posOffset, pos])
+        i = i + 1
+    }
+}
+
 while !rb.WindowShouldClose() {
-    rb.UpdateCamera(camera, rb.CAMERA_FREE)
+    rb.UpdateCamera(camera, rb.CameraMode.free)
     let time = rb.GetTime()
 
     // Shift the eye and window corners into Dimension B.
@@ -122,19 +142,7 @@ while !rb.WindowShouldClose() {
     rb.DrawSphereWires(corePos, 1.25, 16, 16, rb.MAGENTA)
     freeAll([coreOffset, corePos])
 
-    let i = 0
-    while i < 4 {
-        let angle = time * 1.5 + i * (rb.PI / 2)
-        let posOffset = rb.Vector3.new(
-            raw.sinf(angle) * 2.5,
-            2 + raw.cosf(time * 3 + i) * 0.5,
-            -4 + raw.cosf(angle) * 2.5)
-        let pos = rb.Vector3Add(portalB, posOffset)
-        rb.DrawCube(pos, 0.5, 0.5, 0.5, rb.LIME)
-        rb.DrawCubeWires(pos, 0.52, 0.52, 0.52, rb.DARKGREEN)
-        freeAll([posOffset, pos])
-        i = i + 1
-    }
+    drawCubes(time)
 
     endPortalMode3D()
     rb.EndTextureMode()
@@ -154,7 +162,7 @@ while !rb.WindowShouldClose() {
     rb.DrawCube(archWall, 3.1, 4.1, 0.05, rb.MAROON)
 
     rb.rlSetTexture(portalTextureId)
-    rb.rlBegin(rb.RL_QUADS)
+    rb.rlBegin(rb.PrimitiveType.quads)
     rb.rlColor4ub(255, 255, 255, 255)
     rb.rlNormal3f(0, 0, 1)
     rb.rlTexCoord2f(0, 0)

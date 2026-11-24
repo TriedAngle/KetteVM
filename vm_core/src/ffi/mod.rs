@@ -95,6 +95,9 @@ pub struct FfiState {
     accessors: (NativeIndex, NativeIndex),
     /// The native every C function value maps to.
     trampoline: NativeIndex,
+    /// Enum helper methods installed on each enum prototype.
+    enum_value: NativeIndex,
+    enum_from_value: NativeIndex,
     /// Guest callbacks and the libffi closures that call them.
     closures: Mutex<Vec<ClosureSlot>>,
 }
@@ -133,6 +136,19 @@ impl FfiState {
     #[inline(always)]
     pub fn trampoline(&self) -> NativeIndex {
         self.trampoline
+    }
+
+    pub fn set_enum_natives(&mut self, value: NativeIndex, from_value: NativeIndex) {
+        self.enum_value = value;
+        self.enum_from_value = from_value;
+    }
+
+    pub fn enum_value(&self) -> NativeIndex {
+        self.enum_value
+    }
+
+    pub fn enum_from_value(&self) -> NativeIndex {
+        self.enum_from_value
     }
 
     pub fn install(&self, heap: &mut Heap, scope: &HandleScope<'_>) {
@@ -278,6 +294,8 @@ impl Default for FfiState {
             types: TypeRegistry::new(),
             accessors: (NativeIndex(0), NativeIndex(0)),
             trampoline: NativeIndex(0),
+            enum_value: NativeIndex(0),
+            enum_from_value: NativeIndex(0),
             closures: Mutex::new(Vec::new()),
         }
     }
@@ -323,6 +341,8 @@ pub enum ParamKind {
     PointerTo(TypeId),
     /// A struct/union/array passed by value: the argument is its address.
     Aggregate(TypeId),
+    /// An enum passed as its underlying integer, with atom translation.
+    Enum(TypeId),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -437,6 +457,7 @@ pub fn param_kind(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<ParamKind> {
             }
         }
         TypeKind::Struct | TypeKind::Union | TypeKind::Array => ParamKind::Aggregate(ty.id()),
+        TypeKind::Enum => ParamKind::Enum(ty.id()),
         TypeKind::Void | TypeKind::Function => return Err(FfiError::UnsupportedType(ty.id())),
         kind => ParamKind::Scalar(kind),
     })
@@ -488,6 +509,10 @@ fn lower(heap: &Heap, ty: Tagged<TypeInfo>) -> FfiResult<Type> {
             Type::structure((0..ty.len()).map(|_| lowered.clone()))
         }
         // libffi has no union node.
+        TypeKind::Enum => {
+            let base = ty.element(heap).ok_or(FfiError::UnsupportedType(ty.id()))?;
+            return lower(heap, base);
+        }
         TypeKind::Void | TypeKind::Union | TypeKind::Function => {
             return Err(FfiError::UnsupportedType(ty.id()));
         }

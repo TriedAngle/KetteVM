@@ -193,13 +193,11 @@ define_opcodes! {
     // dynamic name resolution (direct eval) walks the frame context chain
     // by name through the runtime functions Load/StoreDynamicName
     LoadNamedProperty { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // reg (obj) idx (constant pool index string) idx (feedback) -> acc
-    LoadNamedPropertyOrHole { operands: [Register, Index, Index], acc: writes, indices: [Unchecked, ConstantPool, Feedback] }, // like LoadNamedProperty; miss -> hole
     /// Own enumerable data slot only; accessors, parents, and prototypes are holes.
     LoadOwnSlotOrHole { operands: [Register, Index], acc: writes, indices: [Unchecked, ConstantPool] },
     /// Number of non-index own enumerable data slots.
     OwnSlotCount { operands: [Register], acc: writes, indices: [Unchecked] },
     LoadKeyedProperty { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // reg (obj) idx (feedback); key in acc -> acc
-    LoadKeyedPropertyOrHole { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] }, // like LoadKeyedProperty; miss -> hole
 
     LoadIndexed { operands: [Register, Index], acc: reads_writes, indices: [Unchecked, Feedback] },
     /// Array element load that reports a hole/missing element as hole.
@@ -317,6 +315,9 @@ define_opcodes! {
     /// Dense integer switch: `reg` selects a relative target from the
     /// `Constant::SwitchTable`; entries are `[min, offsets..., default]`.
     SwitchInt { operands: [Register, Index], indices: [Unchecked, ConstantPool] },
+    /// Atom jump: `reg` selects a relative target from an
+    /// `Constant::AtomSwitchTable` by its intern id.
+    SwitchAtom { operands: [Register, Index], indices: [Unchecked, ConstantPool] },
     /// `acc = array[reg..]`: copy a real array's tail into a fresh array.
     ArraySlice { operands: [Register, UImmediate], acc: writes, indices: [Unchecked, Unchecked] },
     JumpLoop { operands: [Immediate], indices: [Unchecked] }, // imm (negative offset); safepoint-polls before jumping

@@ -24,8 +24,24 @@ try {
 }
 
 if tgpu_loaded {
-    Test.assert(Modules.vendor.tgpu.INVALID_HANDLE, 4294967295)
-    Test.assert(Modules.vendor.tgpu.instanceCreate != undefined, true)
+    let tgpu = Modules.vendor.tgpu
+    Test.assert(tgpu.INVALID_HANDLE, 4294967295)
+    Test.assert(tgpu.instanceCreate != undefined, true)
+    Test.assert(tgpu.PresentMode.fifo, :fifo)
+    Test.assert(tgpu.MemoryPreset[:dynamic], 3)
+    let buffer_desc = tgpu.BufferDesc.new()
+    buffer_desc.memory = tgpu.MemoryPreset.dynamic
+    buffer_desc.host_access = tgpu.HostAccess.readWriteRandom
+    Test.assert(buffer_desc.memory, :dynamic)
+    Test.assert(buffer_desc.host_access, :readWriteRandom)
+    buffer_desc.free()
+    let failed = false
+    try {
+        tgpu.bufferCreate(null, null, null, 0)
+    } catch (e) {
+        failed = true
+    }
+    Test.assert(failed, true)
 }
 
 let glfw_loaded = false
@@ -38,8 +54,12 @@ try {
 
 if glfw_loaded {
     Test.assert(Modules.vendor.glfw.Window.dispose != undefined, true)
-    Test.assert(Modules.vendor.glfw.Key.ESCAPE, 256)
-    Test.assert(Modules.vendor.glfw.ClientApi.NONE, 1)
+    Test.assert(Modules.vendor.glfw.Key.escape, :escape)
+    Test.assert(Modules.vendor.glfw.Key[:escape], 256)
+    Test.assert(Modules.vendor.glfw.ClientApi.none, :none)
+    Test.assert(Modules.vendor.glfw.ClientApi[:none], 1)
+    Test.assert(Modules.vendor.glfw.Key.fromValue(256), :escape)
+    Test.assert(Modules.vendor.glfw.Action.fromValue(1), :press)
     Test.assert(Modules.vendor.glfw.raw.default_window_hints != undefined, true)
     Test.assert(Modules.vendor.glfw.raw.lib != null, true)
 }
@@ -80,9 +100,16 @@ try {
 }
 
 if raylib_loaded {
-    Test.assert(Modules.vendor.raylib.InitWindow != undefined, true)
-    Test.assert(Modules.vendor.raylib.BeginDrawing != undefined, true)
-    Test.assert(Modules.vendor.raylib.Vector3.new != undefined, true)
-    Test.assert(Modules.vendor.raylib.CAMERA_PERSPECTIVE, 0)
-    Test.assert(Modules.vendor.raylib.RL_QUADS, 7)
+    let raylib = Modules.vendor.raylib
+    Test.assert(raylib.InitWindow != undefined, true)
+    Test.assert(raylib.BeginDrawing != undefined, true)
+    Test.assert(raylib.Vector3.new != undefined, true)
+    Test.assert(raylib.CameraProjection.perspective, :perspective)
+    Test.assert(raylib.CameraProjection[:perspective], 0)
+    Test.assert(raylib.PrimitiveType.quads, :quads)
+    Test.assert(raylib.PrimitiveType[:quads], 7)
+    let camera = raylib.Camera3D.new()
+    camera.projection = raylib.CameraProjection.orthographic
+    Test.assert(camera.projection, :orthographic)
+    camera.free()
 }

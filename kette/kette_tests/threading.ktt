@@ -3,7 +3,7 @@
 // Check: kette/kette_tests/check.py
 
 let AtomicI64 = atomic.AtomicI64
-let FFI = Modules.ffi
+use ffi
 
 // Main thread surface.
 Test.assert(Thread.name(), "main")
@@ -168,12 +168,12 @@ psleep.join()
 Test.assert(psleep.isInterrupted(), true)
 
 // C callbacks suspend on the task stack and return through C frames.
-let { void, i32, u64, ... } = FFI
-let libc = FFI.library(null)
-let Comparator = FFI.fn([FFI.Ptr, FFI.Ptr], i32)
+let { void, i32, u64, ... } = ffi
+let libc = ffi.library(null)
+let Comparator = ffi.fn([ffi.Ptr, ffi.Ptr], i32)
 let qsort = libc.fn(
     "qsort",
-    [FFI.pointer(i32), u64, u64, FFI.pointer(Comparator)],
+    [ffi.pointer(i32), u64, u64, ffi.pointer(Comparator)],
     void,
 )
 let compare = Comparator.callback({ |left, right|
@@ -188,7 +188,7 @@ let compare = Comparator.callback({ |left, right|
         0
     }
 })
-let ffi_values = FFI.array(i32, 4).new()
+let ffi_values = ffi.array(i32, 4).new()
 ffi_values.set(0, 3)
 ffi_values.set(1, 1)
 ffi_values.set(2, 2)

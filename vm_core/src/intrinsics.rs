@@ -122,6 +122,7 @@ impl Runtime for VmCore {
             vm.register_native(KetteTools::shutdown),
             vm.register_native(KetteTools::eval),
             vm.register_native(KetteTools::eval_file),
+            vm.register_native(KetteTools::bytecode),
         ];
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {

@@ -307,7 +307,7 @@ impl<'a> Planner<'a> {
 
     fn expr(&mut self, expr: Expr<'a>, frame: FrameId) {
         match expr {
-            Expr::Atom(_) => {}
+            Expr::Atom(_) | Expr::AtomLiteral(_) => {}
             Expr::Paren(paren) => {
                 if let Some(inner) = paren.expr() {
                     self.expr(inner, frame);
@@ -338,6 +338,7 @@ impl<'a> Planner<'a> {
                     self.expr(value, frame);
                 }
             }
+            Expr::Continue(_) => {}
             Expr::Unary(expr) => {
                 if let Some(operand) = expr.operand() {
                     self.expr(operand, frame);

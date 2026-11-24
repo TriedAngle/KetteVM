@@ -1,4 +1,5 @@
 pub mod array;
+pub mod atom;
 pub mod atomic;
 pub mod byte_array;
 pub mod callable;
@@ -23,6 +24,7 @@ pub mod symbol;
 pub mod thread;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
+pub use atom::Atom;
 pub use atomic::{AtomicI64Object, AtomicI64ObjectInit};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
@@ -200,6 +202,8 @@ pub enum ObjectKind {
     TaskStateObject = 37,
     /// Handle for a cooperative scheduler.
     SchedulerObject = 38,
+    /// A globally interned symbolic name (Kette atom).
+    Atom = 39,
 }
 
 impl ObjectKind {
@@ -247,6 +251,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::CallableInfo => (*addr.cast::<CallableInfoObject>().as_ptr()).layout(),
             ObjectKind::Float => (*addr.cast::<Float>().as_ptr()).layout(),
             ObjectKind::Symbol => (*addr.cast::<Symbol>().as_ptr()).layout(),
+            ObjectKind::Atom => (*addr.cast::<Atom>().as_ptr()).layout(),
             ObjectKind::HandlerTable => (*addr.cast::<HandlerTable>().as_ptr()).layout(),
             ObjectKind::ContextObject => (*addr.cast::<ContextObject>().as_ptr()).layout(),
             ObjectKind::ScopeInfo => (*addr.cast::<ScopeInfo>().as_ptr()).layout(),
@@ -305,6 +310,7 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             }
             ObjectKind::Float => (*addr.cast::<Float>().as_ptr()).visit_edges(visitor),
             ObjectKind::Symbol => (*addr.cast::<Symbol>().as_ptr()).visit_edges(visitor),
+            ObjectKind::Atom => (*addr.cast::<Atom>().as_ptr()).visit_edges(visitor),
             ObjectKind::HandlerTable => {
                 (*addr.cast::<HandlerTable>().as_ptr()).visit_edges(visitor)
             }

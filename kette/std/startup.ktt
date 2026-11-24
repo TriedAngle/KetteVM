@@ -8,6 +8,7 @@ let WINDOWS_SYS_PATH = "kette/std/sys/windows/sys.ktt"
 let WINDOWS_FILE_PATH = "kette/std/sys/windows/fs.ktt"
 let SYS_PATH = "kette/std/sys/sys.ktt"
 let FS_PATH = "kette/std/sys/fs.ktt"
+let RANDOM_PATH = "kette/std/random.ktt"
 let UI_PATH = "kette/std/ui/ui.ktt"
 let UI_VERIFY_PATH = "kette/std/ui/verify.ktt"
 
@@ -76,7 +77,7 @@ Object.addParent(Array.prototype, "array", {
 
 globalThis.ModuleRegistry = {
     registry: Object.create(null)
-    entryKey: Symbol.for("kette.modules.entry")
+    entryKey: :"kette.modules.entry"
     _lockBackend: null
 
     _installLock: |lock| {
@@ -469,6 +470,9 @@ if !Modules.sys or Modules.sys.raw == undefined {
 }
 if !Modules.sys or Modules.sys.file == undefined {
     KetteTools.evalFile(FS_PATH)
+}
+if !Modules.random {
+    KetteTools.evalFile(RANDOM_PATH)
 }
 if !Modules.ui {
     KetteTools.evalFile(UI_PATH)

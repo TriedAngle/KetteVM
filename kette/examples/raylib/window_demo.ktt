@@ -10,13 +10,15 @@ rb.InitWindow(800, 450, "kette + raylib")
 rb.SetTargetFPS(60)
 print(rb.GetScreenWidth())
 
-let frames = 0
-while frames < 90 {
-    rb.BeginDrawing()
-    rb.rlClearScreenBuffers()
-    rb.EndDrawing()
-    frames = frames + 1
+let* drawFrames = |frame| {
+    if frame < 90 {
+        rb.BeginDrawing()
+        rb.rlClearScreenBuffers()
+        rb.EndDrawing()
+        drawFrames(frame + 1)
+    }
 }
+drawFrames(0)
 print(rb.GetFrameTime())
 rb.CloseWindow()
 print("done")

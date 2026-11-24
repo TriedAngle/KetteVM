@@ -2,15 +2,33 @@ use ffi
 use sys
 let { Ptr, struct, void, bool, i32, u32, f32, f64, u8, CString, ... } = ffi
 
-let raylib_path = if sys.name == "macos" {
-    "libraylib.dylib"
-} else if sys.name == "windows" {
-    "raylib.dll"
-} else {
-    "libraylib.so"
+let raylib_path = match sys.name {
+    "macos" => "libraylib.dylib"
+    "windows" => "raylib.dll"
+    _ => "libraylib.so"
 }
 
 let lib = sys.lib(raylib_path)
+
+let CameraMode = ffi.enum({
+    custom: 0,
+    free: 1,
+    orbital: 2,
+    firstPerson: 3,
+    thirdPerson: 4,
+})
+let CameraProjection = ffi.enum({
+    perspective: 0,
+    orthographic: 1,
+})
+let PrimitiveType = ffi.enum({
+    quads: 7,
+})
+let MatrixMode = ffi.enum({
+    modelview: 5888,
+    projection: 5889,
+})
+let PI = 3.14159265358979323846
 
 let Vector2 = struct({
     x: f32,
@@ -56,23 +74,11 @@ let Camera3D = struct({
     target: Vector3,
     up: Vector3,
     fovy: f32,
-    projection: i32,
+    projection: CameraProjection.type,
 })
 
 let Matrix = ffi.array(f32, 16)
 let Float16 = ffi.array(f32, 16)
-
-let CAMERA_CUSTOM = 0
-let CAMERA_FREE = 1
-let CAMERA_ORBITAL = 2
-let CAMERA_FIRST_PERSON = 3
-let CAMERA_THIRD_PERSON = 4
-let CAMERA_PERSPECTIVE = 0
-let CAMERA_ORTHOGRAPHIC = 1
-let RL_QUADS = 7
-let RL_PROJECTION = 5889
-let RL_MODELVIEW = 5888
-let PI = 3.14159265358979323846
 
 let LIGHTGRAY = Color.new(200, 200, 200, 255)
 let GRAY = Color.new(130, 130, 130, 255)
@@ -132,7 +138,7 @@ let Fade = lib.fn("Fade", [Color, f32], Color)
 // 3d / render textures
 let BeginMode3D = lib.fn("BeginMode3D", [Camera3D], void)
 let EndMode3D = lib.fn("EndMode3D", [], void)
-let UpdateCamera = lib.fn("UpdateCamera", [Ptr, i32], void)
+let UpdateCamera = lib.fn("UpdateCamera", [Ptr, CameraMode.type], void)
 let LoadRenderTexture = lib.fn("LoadRenderTexture", [i32, i32], RenderTexture2D)
 let UnloadRenderTexture = lib.fn("UnloadRenderTexture", [RenderTexture2D], void)
 let BeginTextureMode = lib.fn("BeginTextureMode", [RenderTexture2D], void)
@@ -151,14 +157,14 @@ let MatrixToFloatV = lib.fn("MatrixToFloatV", [Matrix], Float16)
 // rlgl
 let rlClearScreenBuffers = lib.fn("rlClearScreenBuffers", [], void)
 let rlSetTexture = lib.fn("rlSetTexture", [u32], void)
-let rlBegin = lib.fn("rlBegin", [i32], void)
+let rlBegin = lib.fn("rlBegin", [PrimitiveType.type], void)
 let rlEnd = lib.fn("rlEnd", [], void)
 let rlColor4ub = lib.fn("rlColor4ub", [u8, u8, u8, u8], void)
 let rlNormal3f = lib.fn("rlNormal3f", [f32, f32, f32], void)
 let rlTexCoord2f = lib.fn("rlTexCoord2f", [f32, f32], void)
 let rlVertex3f = lib.fn("rlVertex3f", [f32, f32, f32], void)
 let rlDrawRenderBatchActive = lib.fn("rlDrawRenderBatchActive", [], void)
-let rlMatrixMode = lib.fn("rlMatrixMode", [i32], void)
+let rlMatrixMode = lib.fn("rlMatrixMode", [MatrixMode.type], void)
 let rlPushMatrix = lib.fn("rlPushMatrix", [], void)
 let rlPopMatrix = lib.fn("rlPopMatrix", [], void)
 let rlLoadIdentity = lib.fn("rlLoadIdentity", [], void)
@@ -178,16 +184,10 @@ mod vendor.raylib {
     export Matrix = Matrix
     export Float16 = Float16
 
-    export CAMERA_CUSTOM = CAMERA_CUSTOM
-    export CAMERA_FREE = CAMERA_FREE
-    export CAMERA_ORBITAL = CAMERA_ORBITAL
-    export CAMERA_FIRST_PERSON = CAMERA_FIRST_PERSON
-    export CAMERA_THIRD_PERSON = CAMERA_THIRD_PERSON
-    export CAMERA_PERSPECTIVE = CAMERA_PERSPECTIVE
-    export CAMERA_ORTHOGRAPHIC = CAMERA_ORTHOGRAPHIC
-    export RL_QUADS = RL_QUADS
-    export RL_PROJECTION = RL_PROJECTION
-    export RL_MODELVIEW = RL_MODELVIEW
+    export CameraMode = CameraMode
+    export CameraProjection = CameraProjection
+    export PrimitiveType = PrimitiveType
+    export MatrixMode = MatrixMode
     export PI = PI
 
     export LIGHTGRAY = LIGHTGRAY

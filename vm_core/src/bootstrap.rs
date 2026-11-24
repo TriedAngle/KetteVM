@@ -33,6 +33,7 @@ pub struct WellKnown {
     pub external_utf16_string_map: GcSlot<Map>,
     pub external_utf8_string_map: GcSlot<Map>,
     pub symbol_map: GcSlot<Map>,
+    pub atom_map: GcSlot<Map>,
     pub accessor_pair_map: GcSlot<Map>,
     pub accessor_info_map: GcSlot<Map>,
     pub callable_map: GcSlot<Map>,
@@ -126,6 +127,8 @@ pub struct WellKnown {
     /// `[key, symbol]` pairs in registration order.
     /// TODO: this can be done better probably
     pub global_symbol_registry: GcSlot<FixedArray>,
+    /// Agent-record-style registry of interned atoms: `[name, atom]` pairs.
+    pub atom_registry: GcSlot<FixedArray>,
     /// Agent-record `[[GlobalSymbolRegistry]]`: a `FixedArray` of
     /// `[key, symbol]` pairs in registration order.
     /// Initial map of `%Object.prototype%`: every fresh `{}` gets it
@@ -214,6 +217,7 @@ define_well_known_strings! {
     callee => "callee",
     to_string => "toString",
     value_of => "valueOf",
+    into_array => "intoArray",
     next => "next",
     value => "value",
     values => "values",
@@ -287,6 +291,7 @@ impl WellKnown {
             external_utf16_string_map: smi_slot::<Map>(),
             external_utf8_string_map: smi_slot::<Map>(),
             symbol_map: smi_slot::<Map>(),
+            atom_map: smi_slot::<Map>(),
             accessor_pair_map: smi_slot::<Map>(),
             accessor_info_map: smi_slot::<Map>(),
             callable_map: smi_slot::<Map>(),
@@ -345,6 +350,7 @@ impl WellKnown {
             global_object: smi_slot::<Object>(),
             script_context_table: smi_slot::<ScriptContextTable>(),
             global_symbol_registry: smi_slot::<FixedArray>(),
+            atom_registry: smi_slot::<FixedArray>(),
             object_initial_map: smi_slot::<Map>(),
             function_map: smi_slot::<Map>(),
             non_constructor_function_map: smi_slot::<Map>(),
@@ -386,6 +392,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.external_utf16_string_map.as_raw());
         visitor.visit(self.external_utf8_string_map.as_raw());
         visitor.visit(self.symbol_map.as_raw());
+        visitor.visit(self.atom_map.as_raw());
         visitor.visit(self.accessor_pair_map.as_raw());
         visitor.visit(self.accessor_info_map.as_raw());
         visitor.visit(self.callable_map.as_raw());
@@ -443,6 +450,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.global_object.as_raw());
         visitor.visit(self.script_context_table.as_raw());
         visitor.visit(self.global_symbol_registry.as_raw());
+        visitor.visit(self.atom_registry.as_raw());
         visitor.visit(self.object_initial_map.as_raw());
         visitor.visit(self.function_map.as_raw());
         visitor.visit(self.non_constructor_function_map.as_raw());
@@ -690,6 +698,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let external_utf8_string_map =
         alloc_map(heap, &scope, MapKind::EXTERNAL_STRING.union(MapKind::UTF8));
     let symbol_map = alloc_map(heap, &scope, MapKind::SYMBOL);
+    let atom_map = alloc_map(heap, &scope, MapKind::ATOM);
     let accessor_pair_map = alloc_map(heap, &scope, MapKind::ACCESSOR_PAIR);
     let accessor_info_map = alloc_map(heap, &scope, MapKind::ACCESSOR_INFO);
     let callable_map = alloc_map(heap, &scope, MapKind::CALLABLE_INFO);
@@ -767,6 +776,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
         .external_utf8_string_map
         .init(external_utf8_string_map.as_tagged(heap));
     known.symbol_map.init(symbol_map.as_tagged(heap));
+    known.atom_map.init(atom_map.as_tagged(heap));
     known
         .accessor_pair_map
         .init(accessor_pair_map.as_tagged(heap));
@@ -832,6 +842,7 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     known
         .global_symbol_registry
         .init(empty_slots.as_tagged(heap));
+    known.atom_registry.init(empty_slots.as_tagged(heap));
     let object_prototype = alloc_object(heap, &scope, object_prototype_map);
 
     let array_prototype_map = alloc_parent_map(

@@ -458,3 +458,102 @@ for [x, y] in [[5, 6], [7, 8]] {
     arrayTotal = arrayTotal + x + y
 }
 Test.assert(arrayTotal, 26)
+
+// Or-patterns: every alternative must bind the same names.
+Test.assert(match { a: 1, b: 2 } {
+    { a, b } | { a, c: b } => b
+    _ => 0
+}, 2)
+Test.assert(match { a: 1, c: 2 } {
+    { a, b } | { a, c: b } => b
+    _ => 0
+}, 2)
+Test.assert(match [1, 2] {
+    [a, 1] | [a, 2] => a
+    _ => 0
+}, 1)
+Test.assert(match { u: { a: 1, c: 2 } } {
+    { u: { a, b } | { a, c: b } } => b
+    _ => 0
+}, 2)
+
+// A failed guard skips the whole arm, not just one alternative.
+let or_calls = [0]
+let or_bump = {
+    or_calls[0] = or_calls[0] + 1
+    or_calls[0] > 1
+}
+Test.assert(match { a: 1 } {
+    { a } | { a } if or_bump() => "second"
+    _ => "first"
+}, "first")
+Test.assert(or_calls[0], 1)
+
+let or_mismatch_rejected = try {
+    KetteTools.eval("kette", "match 0 {\n    [a] | [a, b] => b\n    _ => 0\n}\n")
+    false
+} catch (e) {
+    true
+}
+Test.assert(or_mismatch_rejected, true)
+
+// Runtime value patterns compare an evaluated path.
+let RuntimeKinds = { One: 1, Two: 2 }
+Test.assert(match 1 {
+    RuntimeKinds.One => "one"
+    _ => "other"
+}, "one")
+Test.assert(match 2 {
+    RuntimeKinds.One | RuntimeKinds.Two => "small"
+    _ => "other"
+}, "small")
+
+// Four or more atom cases compile to an atom switch table.
+let atom_name = match |value| {
+    :red => 1
+    :green => 2
+    :blue => 3
+    :yellow => 4
+    _ => 0
+}
+Test.assert(atom_name(:red), 1)
+Test.assert(atom_name(:green), 2)
+Test.assert(atom_name(:blue), 3)
+Test.assert(atom_name(:yellow), 4)
+Test.assert(atom_name(:other), 0)
+Test.assert(atom_name("red"), 0)
+
+// A literal array subject compiles its elements directly as match subjects.
+Test.assert(match [:press, :escape] {
+    [:press, :escape] => "both"
+    _ => "other"
+}, "both")
+Test.assert(match [:release, :escape] {
+    [:press, :escape] => "both"
+    _ => "other"
+}, "other")
+Test.assert(match [1, 2] {
+    [a, b] => a + b
+    _ => 0
+}, 3)
+Test.assert(match [1, 2] {
+    [a, 2] | [a, 3] => a
+    _ => 0
+}, 1)
+Test.assert(match [{ x: 1 }, 2] {
+    [{ x }, b] => x + b
+    _ => 0
+}, 3)
+Test.assert(match [1, 2] {
+    [a, b] if a == b => "same"
+    _ => "different"
+}, "different")
+// Patterns that cannot use the multi-subject path still work via the array path.
+Test.assert(match [1, 2] {
+    [a] => a
+    _ => 0
+}, 0)
+Test.assert(match [1, 2, 3] {
+    [a, ...rest] => rest.length
+    _ => 0
+}, 2)

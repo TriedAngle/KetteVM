@@ -512,6 +512,11 @@ impl<'a> Parser<'a> {
                 }
                 Ok(self.finish())
             }
+            Continue => {
+                self.start(ContinueStmt);
+                self.bump();
+                Ok(self.finish())
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -568,6 +573,15 @@ impl<'a> Parser<'a> {
         match token.kind {
             Number | String | Ident | True | False | Null | SelfKw | SelfContext => {
                 self.start(Atom);
+                self.bump();
+                Ok(self.finish())
+            }
+            Colon
+                if (self.peek2().0.kind.is_name() || self.peek2().0.kind == String)
+                    && token.range.end == self.peek2().0.range.start =>
+            {
+                self.start(AtomLiteral);
+                self.bump();
                 self.bump();
                 Ok(self.finish())
             }
@@ -662,6 +676,20 @@ impl<'a> Parser<'a> {
 
     fn parse_pattern(&mut self) -> Result<NodeId, ()> {
         let checkpoint = self.builder.checkpoint();
+        let pattern = self.parse_pattern_atom()?;
+        if self.peek().kind != Pipe {
+            return Ok(pattern);
+        }
+        self.builder.start_node_at(checkpoint, PatternOr);
+        while self.peek().kind == Pipe {
+            self.bump();
+            self.parse_pattern_atom()?;
+        }
+        Ok(self.finish())
+    }
+
+    fn parse_pattern_atom(&mut self) -> Result<NodeId, ()> {
+        let checkpoint = self.builder.checkpoint();
         self.flush_trivia();
         let token = self.peek();
         let pattern = match token.kind {
@@ -676,6 +704,15 @@ impl<'a> Parser<'a> {
             {
                 self.start(PatternLiteral);
                 self.bump();
+                self.finish()
+            }
+            kind if kind.is_name() && self.peek2().0.kind == Period => {
+                self.start(PatternValue);
+                self.bump();
+                while self.peek().kind == Period {
+                    self.bump();
+                    self.expect_name()?;
+                }
                 self.finish()
             }
             Ident => {
@@ -703,6 +740,15 @@ impl<'a> Parser<'a> {
             }
             LBrace => self.parse_object_pattern()?,
             LBracket => self.parse_array_pattern()?,
+            Colon
+                if (self.peek2().0.kind.is_name() || self.peek2().0.kind == String)
+                    && token.range.end == self.peek2().0.range.start =>
+            {
+                self.start(PatternAtom);
+                self.bump();
+                self.bump();
+                self.finish()
+            }
             kind if kind.is_name() => {
                 self.start(PatternName);
                 self.bump();
@@ -1081,6 +1127,6 @@ fn expression_can_start(token: Sig, allow_newline: bool) -> bool {
     }
     !matches!(
         token.kind,
-        SyntaxKind::Eof | RBrace | RParen | RBracket | Semicolon | Comma | Colon | Else | Catch
+        SyntaxKind::Eof | RBrace | RParen | RBracket | Semicolon | Comma | Else | Catch
     )
 }

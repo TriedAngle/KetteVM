@@ -1,13 +1,15 @@
+use std::collections::HashMap;
+
 use bytecode::{
-    CallableKind, Constant, FnBuilder, Function, FunctionId, FunctionMeta, GlobalDeclarations,
-    Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode, TempScope,
-    TestTypeKind,
+    CallableKind, ConstIdx, Constant, FnBuilder, Function, FunctionId, FunctionMeta,
+    GlobalDeclarations, Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
+    TempScope, TestTypeKind,
 };
 use kette_syntax::ast::{
-    AssignExpr, AstNode, BinaryExpr, CallExpr, ExportDecl, Expr, ForExpr, GetExpr, IfExpr,
-    IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern, PatternField, SendExpr,
-    SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl, UseTree,
-    WhileExpr,
+    AssignExpr, AstNode, AtomLiteral, BinaryExpr, CallExpr, ExportDecl, Expr, ForExpr, GetExpr,
+    IfExpr, IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern, PatternValue,
+    SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl,
+    UseTree, WhileExpr,
 };
 use kette_syntax::ops::{AssignOp, BinaryOp, UnaryOp};
 use kette_syntax::resolve::{Binding, BindingId, BindingKind, Resolution, Resolved};
@@ -53,6 +55,7 @@ pub fn generate(
 #[derive(Clone, Copy)]
 struct LoopCtx {
     break_label: Label,
+    continue_label: Label,
     result: Reg,
 }
 
@@ -61,6 +64,129 @@ enum TailMode {
     None,
     Guard,
     Loop,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum MatchAccess {
+    Root(u32),
+    Slot(ConstIdx),
+    Index(usize),
+    ArraySource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MatchOccurrence {
+    base: Option<u32>,
+    access: MatchAccess,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum MatchLiteral {
+    Smi(i64),
+    Float(u64),
+    String(ConstIdx),
+    Atom(ConstIdx),
+    True,
+    False,
+    Null,
+    Undefined,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum MatchTestKind {
+    IsObject,
+    ArraySource,
+    LengthEq(usize),
+    LengthAtLeast(usize),
+    OwnSlotCountEq(usize),
+    Present,
+    Literal(MatchLiteral),
+    UserType(NodeId),
+    Value(u32),
+}
+
+struct MatchValue {
+    base: NodeId,
+    names: Vec<ConstIdx>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MatchTest {
+    occurrence: u32,
+    kind: MatchTestKind,
+}
+
+#[derive(Clone)]
+struct MatchPlan<'a> {
+    demands: Vec<u32>,
+    bindings: Vec<(BindingId, u32)>,
+    rests: Vec<(BindingId, u32, usize)>,
+    guard: Option<Expr<'a>>,
+    arm: Option<MatchArm<'a>>,
+    group: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MatchState {
+    facts: Vec<(u32, bool)>,
+    remaining: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum MatchNode<'a> {
+    Fail,
+    Test {
+        test: u32,
+        yes: u32,
+        no: u32,
+    },
+    Switch {
+        occurrence: u32,
+        switch: u32,
+        default: u32,
+    },
+    AtomSwitch {
+        occurrence: u32,
+        switch: u32,
+        default: u32,
+    },
+    Guard {
+        plan: usize,
+        expr: Expr<'a>,
+        pass: u32,
+        fail: u32,
+    },
+    Leaf {
+        plan: usize,
+        bound: bool,
+    },
+}
+
+struct MatchBuild<'a, 'f> {
+    function: &'f mut FunctionGen<'a>,
+    temps: TempScope,
+    hole: Reg,
+    plans: Vec<MatchPlan<'a>>,
+    fail_message: ConstIdx,
+    result: Option<Reg>,
+    tail: bool,
+    end: Label,
+    bind_done: Option<Label>,
+    occurrences: Vec<MatchOccurrence>,
+    occurrence_ids: HashMap<MatchOccurrence, u32>,
+    occurrence_regs: Vec<Reg>,
+    subjects: usize,
+    tests: Vec<MatchTest>,
+    test_ids: HashMap<MatchTest, u32>,
+    values: Vec<MatchValue>,
+    value_ids: HashMap<Vec<ConstIdx>, u32>,
+    nodes: Vec<MatchNode<'a>>,
+    switches: Vec<Vec<(i64, u32)>>,
+    atom_switches: Vec<Vec<(Box<[u8]>, u32)>>,
+    next_group: usize,
+    memo: HashMap<MatchState, u32>,
+    labels: Vec<Option<Label>>,
+    emitted: Vec<bool>,
 }
 
 struct FunctionGen<'a> {
@@ -586,6 +712,10 @@ impl<'a> FunctionGen<'a> {
     fn expr(&mut self, expr: Expr<'a>) -> Result<(), CompileError> {
         match expr {
             Expr::Atom(atom) => self.atom(atom),
+            Expr::AtomLiteral(atom) => {
+                self.atom_literal(atom);
+                Ok(())
+            }
             Expr::Paren(paren) => {
                 if let Some(expr) = paren.expr() {
                     self.expr(expr)?;
@@ -645,6 +775,13 @@ impl<'a> FunctionGen<'a> {
                 }
                 self.b.store(context.result);
                 self.b.jump(context.break_label);
+                Ok(())
+            }
+            Expr::Continue(statement) => {
+                let Some(context) = self.loops.last().copied() else {
+                    return self.err_node(statement.syntax().id(), "continue outside a loop");
+                };
+                self.b.jump(context.continue_label);
                 Ok(())
             }
             Expr::Unary(expr) => self.unary_expr(expr),
@@ -707,6 +844,18 @@ impl<'a> FunctionGen<'a> {
             let index = self.b.constant(Constant::Float(value));
             self.b.load_constant(index);
         }
+    }
+
+    fn atom_literal(&mut self, atom: AtomLiteral<'a>) {
+        let Some(token) = atom.name() else {
+            return;
+        };
+        let name = match token.kind() {
+            SyntaxKind::String => decode_string(token.text()),
+            _ => token.text().as_bytes().to_vec(),
+        };
+        let index = self.b.constant(Constant::Atom(name.into_boxed_slice()));
+        self.b.load_constant(index);
     }
 
     fn get_expr(&mut self, expr: GetExpr<'a>) -> Result<(), CompileError> {
@@ -1544,43 +1693,49 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn bind_pattern(&mut self, pattern: Pattern<'a>, value: Reg) -> Result<(), CompileError> {
-        let temps = self.b.temp_scope();
-        let hole = temps.temp();
-        if Self::pattern_needs_hole(pattern) {
-            self.b.load_hole();
-            self.b.store(hole);
-        }
-        let fail = self.b.new_label();
-        self.pattern_match(pattern, value, hole, fail)?;
         let done = self.b.new_label();
-        self.b.jump(done);
-        self.b.bind(fail);
         let message = Constant::String(b"pattern did not match value".to_vec().into_boxed_slice());
         let message = self.b.constant(message);
-        self.b.load_constant(message);
-        self.b.throw();
+        {
+            let mut build =
+                MatchBuild::new(self, vec![value], message, None, false, done, Some(done));
+            build.add_bind(pattern)?;
+            let root = build.build()?;
+            build.emit(root)?;
+        }
         self.b.bind(done);
         Ok(())
     }
 
-    fn pattern_needs_hole(pattern: Pattern<'_>) -> bool {
-        match pattern {
-            Pattern::Object(_) | Pattern::Array(_) => true,
-            Pattern::Alias(alias) => alias
-                .pattern()
-                .is_some_and(|inner| Self::pattern_needs_hole(inner)),
-            Pattern::Name(_) | Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Type(_) => {
-                false
-            }
-        }
-    }
-
     fn match_expr(&mut self, expr: MatchExpr<'a>, tail: bool) -> Result<(), CompileError> {
         let temps = self.b.temp_scope();
-        let subject = temps.temp();
+        let arms: Vec<MatchArm<'a>> = expr.arms().collect();
+        let mut subjects: Vec<Reg> = Vec::new();
         if let Some(scrutinee) = expr.scrutinee() {
-            self.expr(scrutinee)?;
-            self.b.store(subject);
+            let mut multi = false;
+            if let Expr::Array(array) = scrutinee {
+                let elements: Vec<Expr<'a>> = array.elements().collect();
+                if elements.len() > 1
+                    && arms.iter().all(|arm| {
+                        arm.pattern()
+                            .is_some_and(|pattern| supports_multi_pattern(pattern, elements.len()))
+                    })
+                {
+                    for element in elements {
+                        let reg = temps.temp();
+                        self.expr(element)?;
+                        self.b.store(reg);
+                        subjects.push(reg);
+                    }
+                    multi = true;
+                }
+            }
+            if !multi {
+                let subject = temps.temp();
+                self.expr(scrutinee)?;
+                self.b.store(subject);
+                subjects.push(subject);
+            }
         } else {
             if self.frame.params.len() != 1 {
                 return self.err_node(
@@ -1589,74 +1744,25 @@ impl<'a> FunctionGen<'a> {
                 );
             }
             let binding = self.frame.params[0];
+            let subject = temps.temp();
             self.load_binding(binding)?;
             self.b.store(subject);
+            subjects.push(subject);
         }
         let result = temps.temp();
         self.b.load_null();
         self.b.store(result);
-        let arms: Vec<MatchArm<'a>> = expr.arms().collect();
-        let hole = temps.temp();
-        if arms.iter().any(|arm| {
-            arm.pattern()
-                .is_some_and(|pattern| Self::pattern_needs_hole(pattern))
-        }) {
-            self.b.load_hole();
-            self.b.store(hole);
-        }
         let end = self.b.new_label();
-        let mut cases = Vec::new();
-        for arm in &arms {
-            if arm.guard().is_some() {
-                break;
-            }
-            let Some(pattern) = arm.pattern() else {
-                break;
-            };
-            let Some(value) = Self::integer_pattern_value(pattern) else {
-                break;
-            };
-            if cases.iter().any(|(existing, _)| *existing == value) {
-                break;
-            }
-            cases.push((value, *arm));
-        }
-        let mut consumed = 0;
-        if let Some(min) = Self::switch_min(&cases) {
-            let labels: Vec<Label> = cases.iter().map(|_| self.b.new_label()).collect();
-            let fallthrough = self.b.new_label();
-            let targets: Vec<(i64, Label)> = cases
-                .iter()
-                .zip(&labels)
-                .map(|((value, _), label)| (*value, *label))
-                .collect();
-            self.b
-                .switch_int(subject, min, &targets, fallthrough)
-                .map_err(|error| self.error(expr.syntax().id(), error.to_string()))?;
-            for ((_, arm), label) in cases.iter().zip(labels) {
-                self.b.bind(label);
-                self.match_arm_body(*arm, result, tail, end)?;
-            }
-            self.b.bind(fallthrough);
-            consumed = cases.len();
-        }
-        for arm in arms.into_iter().skip(consumed) {
-            let fail = self.b.new_label();
-            let Some(pattern) = arm.pattern() else {
-                return self.err_node(arm.syntax().id(), "match arm without a pattern");
-            };
-            self.pattern_match(pattern, subject, hole, fail)?;
-            if let Some(guard) = arm.guard() {
-                self.expr(guard)?;
-                self.b.jump_if_falsy(fail);
-            }
-            self.match_arm_body(arm, result, tail, end)?;
-            self.b.bind(fail);
-        }
         let message = Constant::String(b"match: no pattern matched".to_vec().into_boxed_slice());
         let message = self.b.constant(message);
-        self.b.load_constant(message);
-        self.b.throw();
+        {
+            let mut build = MatchBuild::new(self, subjects, message, Some(result), tail, end, None);
+            for arm in arms {
+                build.add_arm(arm)?;
+            }
+            let root = build.build()?;
+            build.emit(root)?;
+        }
         self.b.bind(end);
         self.b.load(result);
         Ok(())
@@ -1692,349 +1798,6 @@ impl<'a> FunctionGen<'a> {
         }
         self.b.jump(end);
         Ok(())
-    }
-
-    fn integer_pattern_value(pattern: Pattern<'a>) -> Option<i64> {
-        let Pattern::Literal(literal) = pattern else {
-            return None;
-        };
-        let mut tokens = literal
-            .syntax()
-            .tokens()
-            .filter(|token| !token.kind().is_trivia());
-        let first = tokens.next()?;
-        let negative = first.kind() == SyntaxKind::Minus;
-        let token = if negative { tokens.next()? } else { first };
-        if token.kind() != SyntaxKind::Number {
-            return None;
-        }
-        let value = token.text().parse::<f64>().ok()?;
-        let value = if negative { -value } else { value };
-        Smi::from_f64(value).map(|smi| smi.value())
-    }
-
-    fn switch_min(cases: &[(i64, MatchArm<'a>)]) -> Option<i64> {
-        if cases.len() < 4 {
-            return None;
-        }
-        let min = cases.iter().map(|(value, _)| *value).min()?;
-        let max = cases.iter().map(|(value, _)| *value).max()?;
-        let range = max.checked_sub(min)?.checked_add(1)?;
-        let count = cases.len() as i64;
-        (range <= count * 2 && range <= 1024).then_some(min)
-    }
-
-    fn pattern_match(
-        &mut self,
-        pattern: Pattern<'a>,
-        value: Reg,
-        hole: Reg,
-        fail: Label,
-    ) -> Result<(), CompileError> {
-        match pattern {
-            Pattern::Name(name) => {
-                let Some(token) = name.name() else {
-                    return self.err_node(name.syntax().id(), "missing binding name");
-                };
-                self.bind_token(token, value)
-            }
-            Pattern::Wildcard(_) => Ok(()),
-            Pattern::Literal(literal) => self.literal_pattern(literal, value, fail),
-            Pattern::Alias(alias) => {
-                if let Some(inner) = alias.pattern() {
-                    self.pattern_match(inner, value, hole, fail)?;
-                }
-                if let Some(token) = alias.alias() {
-                    self.bind_token(token, value)?;
-                }
-                Ok(())
-            }
-            Pattern::Type(typed) => {
-                self.load_resolution(typed.syntax().id())?;
-                let temps = self.b.temp_scope();
-                let type_value = self.b.stage_acc(&temps);
-                let feedback = self.b.new_feedback();
-                self.b
-                    .test_type(value, type_value, TestTypeKind::User as u32, feedback);
-                self.b.jump_if_falsy(fail);
-                if let Some(token) = typed.binding()
-                    && token.text() != "_"
-                {
-                    self.bind_token(token, value)?;
-                }
-                Ok(())
-            }
-            Pattern::Object(object) => {
-                self.test_object(value, fail);
-                let temps = self.b.temp_scope();
-                if !object.has_rest() {
-                    let named = object
-                        .fields()
-                        .filter(|field| {
-                            field
-                                .key()
-                                .is_some_and(|key| key.kind() != SyntaxKind::Number)
-                        })
-                        .count();
-                    self.b.own_slot_count(value);
-                    let count = self.b.stage_acc(&temps);
-                    self.b.load_smi(named as i32);
-                    self.b.equal_strict(count);
-                    self.b.jump_if_falsy(fail);
-                }
-                for field in object.fields() {
-                    let field_value = self.load_pattern_field(value, field, hole, fail, &temps)?;
-                    if let Some(inner) = field.pattern() {
-                        self.pattern_match(inner, field_value, hole, fail)?;
-                    } else {
-                        let Some(token) = field.alias().or_else(|| field.key()) else {
-                            return self.err_node(field.syntax().id(), "missing field binding");
-                        };
-                        self.bind_token(token, field_value)?;
-                    }
-                }
-                Ok(())
-            }
-            Pattern::Array(array) => {
-                let elements: Vec<_> = array.elements().collect();
-                self.pattern_sequence(value, &elements, array.rest(), hole, fail)
-            }
-        }
-    }
-
-    fn literal_pattern(
-        &mut self,
-        literal: kette_syntax::ast::PatternLiteral<'a>,
-        value: Reg,
-        fail: Label,
-    ) -> Result<(), CompileError> {
-        let mut tokens = literal
-            .syntax()
-            .tokens()
-            .filter(|token| !token.kind().is_trivia());
-        let Some(first) = tokens.next() else {
-            return self.err_node(literal.syntax().id(), "empty literal pattern");
-        };
-        let negative = first.kind() == SyntaxKind::Minus;
-        let Some(token) = (if negative { tokens.next() } else { Some(first) }) else {
-            return self.err_node(literal.syntax().id(), "empty literal pattern");
-        };
-        match token.kind() {
-            SyntaxKind::Number => {
-                let mut number = token.text().parse::<f64>().unwrap_or(0.0);
-                if negative {
-                    number = -number;
-                }
-                self.number(number);
-                self.b.equal_strict(value);
-            }
-            SyntaxKind::String => {
-                let text = decode_string(token.text());
-                let index = self.b.constant(Constant::String(text.into_boxed_slice()));
-                self.b.load_constant(index);
-                self.b.equal_strict(value);
-            }
-            SyntaxKind::True => {
-                self.b.load_true();
-                self.b.test_reference_equal(value);
-            }
-            SyntaxKind::False => {
-                self.b.load_false();
-                self.b.test_reference_equal(value);
-            }
-            SyntaxKind::Null => {
-                self.b.load_null();
-                self.b.test_reference_equal(value);
-            }
-            SyntaxKind::Ident if token.text() == "undefined" => {
-                self.b.load_undefined();
-                self.b.test_reference_equal(value);
-            }
-            _ => return self.err_node(literal.syntax().id(), "unsupported literal pattern"),
-        }
-        self.b.jump_if_falsy(fail);
-        Ok(())
-    }
-
-    fn pattern_sequence(
-        &mut self,
-        value: Reg,
-        elements: &[Pattern<'a>],
-        rest: Option<SyntaxToken<'a>>,
-        hole: Reg,
-        fail: Label,
-    ) -> Result<(), CompileError> {
-        self.test_object(value, fail);
-        let temps = self.b.temp_scope();
-        let length = self.sequence_length(value, &temps)?;
-        self.b.load_smi(elements.len() as i32);
-        if rest.is_some() {
-            self.b.greater_than(length);
-            self.b.jump_if_truthy(fail);
-        } else {
-            self.b.equal_strict(length);
-            self.b.jump_if_falsy(fail);
-        }
-        let array = self.b.new_label();
-        let object = self.b.new_label();
-        let done = self.b.new_label();
-        let feedback = self.b.new_feedback();
-        self.b
-            .test_type(value, value, TestTypeKind::Array as u32, feedback);
-        self.b.jump_if_truthy(array);
-        self.b.jump(object);
-        self.b.bind(array);
-        for (index, element) in elements.iter().enumerate() {
-            self.b.load_smi(index as i32);
-            let feedback = self.b.new_feedback();
-            self.b.load_indexed_or_hole(value, feedback);
-            let element_value = self.b.stage_acc(&temps);
-            self.b.test_reference_equal(hole);
-            self.b.jump_if_truthy(fail);
-            self.pattern_match(*element, element_value, hole, fail)?;
-        }
-        if let Some(rest) = rest {
-            self.bind_rest(value, elements.len(), length, rest, &temps)?;
-        }
-        self.b.jump(done);
-        self.b.bind(object);
-        for (index, element) in elements.iter().enumerate() {
-            self.b.load_smi(index as i32);
-            let feedback = self.b.new_feedback();
-            self.b.load_indexed(value, feedback);
-            let element_value = self.b.stage_acc(&temps);
-            self.pattern_match(*element, element_value, hole, fail)?;
-        }
-        if let Some(rest) = rest {
-            self.bind_rest(value, elements.len(), length, rest, &temps)?;
-        }
-        self.b.bind(done);
-        Ok(())
-    }
-
-    fn sequence_length(&mut self, value: Reg, temps: &TempScope) -> Result<Reg, CompileError> {
-        let length = temps.temp();
-        let feedback = self.b.new_feedback();
-        self.b.load_length(value, feedback);
-        self.b.store(length);
-        let call = self.b.new_label();
-        let have = self.b.new_label();
-        self.b.load(length);
-        let feedback = self.b.new_feedback();
-        self.b
-            .test_type(length, length, TestTypeKind::Function as u32, feedback);
-        self.b.jump_if_truthy(call);
-        self.b.jump(have);
-        self.b.bind(call);
-        self.send_reg0(value, "size", temps)?;
-        self.b.store(length);
-        self.b.bind(have);
-        Ok(length)
-    }
-
-    fn bind_rest(
-        &mut self,
-        value: Reg,
-        start: usize,
-        length: Reg,
-        token: SyntaxToken<'a>,
-        temps: &TempScope,
-    ) -> Result<(), CompileError> {
-        let copy = self.b.new_label();
-        let done = self.b.new_label();
-        if start <= u16::MAX as usize {
-            let feedback = self.b.new_feedback();
-            self.b
-                .test_type(value, value, TestTypeKind::Array as u32, feedback);
-            self.b.jump_if_falsy(copy);
-            self.b.array_slice(value, start as u32);
-            let sliced = temps.temp();
-            self.b.store(sliced);
-            self.b.load_hole();
-            self.b.test_reference_equal(sliced);
-            self.b.jump_if_truthy(copy);
-            self.b.load(sliced);
-            let binding = self.binding(token)?;
-            self.store_binding(binding)?;
-            self.b.jump(done);
-        }
-        self.b.bind(copy);
-        let tail = temps.temp();
-        self.b.create_empty_array_literal();
-        self.b.store(tail);
-        let index = temps.temp();
-        self.b.load_smi(start as i32);
-        self.b.store(index);
-        let begin = self.b.new_label();
-        let end = self.b.new_label();
-        self.b.bind(begin);
-        self.b.load(index);
-        self.b.less_than(length);
-        self.b.jump_if_falsy(end);
-        let key = temps.temp();
-        self.b.load_smi(start as i32);
-        self.b.sub(index);
-        self.b.store(key);
-        self.b.load(index);
-        let feedback = self.b.new_feedback();
-        self.b.load_indexed(value, feedback);
-        let feedback = self.b.new_feedback();
-        self.b.store_indexed(tail, key, feedback);
-        self.b.load_smi(1);
-        self.b.add(index);
-        self.b.store(index);
-        self.b.jump_loop(begin);
-        self.b.bind(end);
-        self.bind_token(token, tail)?;
-        self.b.bind(done);
-        Ok(())
-    }
-
-    fn load_pattern_field(
-        &mut self,
-        value: Reg,
-        field: PatternField<'a>,
-        hole: Reg,
-        fail: Label,
-        temps: &TempScope,
-    ) -> Result<Reg, CompileError> {
-        let Some(key) = field.key() else {
-            return self.err_node(field.syntax().id(), "missing pattern field key");
-        };
-        match key.kind() {
-            SyntaxKind::Number => {
-                let index = key.text().parse::<i32>().unwrap_or(0);
-                self.b.load_smi(index);
-                let feedback = self.b.new_feedback();
-                self.b.load_indexed_or_hole(value, feedback);
-            }
-            SyntaxKind::String => {
-                let name = decode_string(key.text());
-                let name = self.b.name(&name);
-                self.b.load_own_slot_or_hole(value, name);
-            }
-            _ => {
-                let name = self.b.name(key.text().as_bytes());
-                self.b.load_own_slot_or_hole(value, name);
-            }
-        }
-        let field_value = self.b.stage_acc(temps);
-        self.b.test_reference_equal(hole);
-        self.b.jump_if_truthy(fail);
-        Ok(field_value)
-    }
-
-    fn test_object(&mut self, value: Reg, fail: Label) {
-        let feedback = self.b.new_feedback();
-        self.b
-            .test_type(value, value, TestTypeKind::Object as u32, feedback);
-        self.b.jump_if_falsy(fail);
-    }
-
-    fn bind_token(&mut self, token: SyntaxToken<'a>, value: Reg) -> Result<(), CompileError> {
-        let binding = self.binding(token)?;
-        self.b.load(value);
-        self.store_binding(binding)
     }
 
     fn if_expr(&mut self, expr: IfExpr<'a>, tail: bool) -> Result<(), CompileError> {
@@ -2091,6 +1854,7 @@ impl<'a> FunctionGen<'a> {
         self.b.store(result);
         self.loops.push(LoopCtx {
             break_label: end,
+            continue_label: start,
             result,
         });
         self.b.bind(start);
@@ -2125,6 +1889,7 @@ impl<'a> FunctionGen<'a> {
         self.b.store(result);
         self.loops.push(LoopCtx {
             break_label: end,
+            continue_label: start,
             result,
         });
         self.b.bind(start);
@@ -2195,6 +1960,998 @@ impl<'a> FunctionGen<'a> {
             range: self.tree.node(node).range,
             message: message.into(),
         }
+    }
+}
+
+impl<'a, 'f> MatchBuild<'a, 'f> {
+    fn new(
+        function: &'f mut FunctionGen<'a>,
+        subjects: Vec<Reg>,
+        fail_message: ConstIdx,
+        result: Option<Reg>,
+        tail: bool,
+        end: Label,
+        bind_done: Option<Label>,
+    ) -> Self {
+        let temps = function.b.temp_scope();
+        let hole = temps.temp();
+        let mut occurrences = Vec::with_capacity(subjects.len());
+        let mut occurrence_ids = HashMap::new();
+        for (index, _) in subjects.iter().enumerate() {
+            let root = MatchOccurrence {
+                base: None,
+                access: MatchAccess::Root(index as u32),
+            };
+            occurrence_ids.insert(root, index as u32);
+            occurrences.push(root);
+        }
+        let subject_count = subjects.len();
+        Self {
+            function,
+            temps,
+            hole,
+            plans: Vec::new(),
+            fail_message,
+            result,
+            tail,
+            end,
+            bind_done,
+            occurrences,
+            occurrence_ids,
+            occurrence_regs: subjects,
+            subjects: subject_count,
+            tests: Vec::new(),
+            test_ids: HashMap::new(),
+            values: Vec::new(),
+            value_ids: HashMap::new(),
+            nodes: Vec::new(),
+            switches: Vec::new(),
+            atom_switches: Vec::new(),
+            next_group: 0,
+            memo: HashMap::new(),
+            labels: Vec::new(),
+            emitted: Vec::new(),
+        }
+    }
+
+    fn add_arm(&mut self, arm: MatchArm<'a>) -> Result<(), CompileError> {
+        let Some(pattern) = arm.pattern() else {
+            return self
+                .function
+                .err_node(arm.syntax().id(), "match arm without a pattern");
+        };
+        let plan = MatchPlan {
+            demands: Vec::new(),
+            bindings: Vec::new(),
+            rests: Vec::new(),
+            guard: arm.guard(),
+            arm: Some(arm),
+            group: 0,
+        };
+        self.add_plans(pattern, plan)?;
+        Ok(())
+    }
+
+    fn add_bind(&mut self, pattern: Pattern<'a>) -> Result<(), CompileError> {
+        let plan = MatchPlan {
+            demands: Vec::new(),
+            bindings: Vec::new(),
+            rests: Vec::new(),
+            guard: None,
+            arm: None,
+            group: 0,
+        };
+        self.add_plans(pattern, plan)?;
+        Ok(())
+    }
+
+    fn add_plans(&mut self, pattern: Pattern<'a>, plan: MatchPlan<'a>) -> Result<(), CompileError> {
+        let group = self.next_group;
+        self.next_group += 1;
+        let mut plans = if self.subjects > 1 {
+            self.lower_multi_pattern(pattern, vec![plan])?
+        } else {
+            self.lower_pattern(pattern, 0, vec![plan])?
+        };
+        let mut expected: Option<Vec<BindingId>> = None;
+        for plan in &mut plans {
+            plan.group = group;
+            let mut bindings: Vec<BindingId> =
+                plan.bindings.iter().map(|(binding, _)| *binding).collect();
+            bindings.sort();
+            if let Some(expected) = &expected {
+                if *expected != bindings {
+                    return self.function.err_node(
+                        pattern.syntax().id(),
+                        "or-pattern alternatives must bind the same names",
+                    );
+                }
+            } else {
+                expected = Some(bindings);
+            }
+        }
+        self.plans.extend(plans);
+        Ok(())
+    }
+
+    fn lower_multi_pattern(
+        &mut self,
+        pattern: Pattern<'a>,
+        mut plans: Vec<MatchPlan<'a>>,
+    ) -> Result<Vec<MatchPlan<'a>>, CompileError> {
+        match pattern {
+            Pattern::Wildcard(_) => Ok(plans),
+            Pattern::Array(array) => {
+                let elements: Vec<Pattern<'a>> = array.elements().collect();
+                if array.rest().is_some() || elements.len() != self.subjects {
+                    return self.function.err_node(
+                        array.syntax().id(),
+                        "multi-match array pattern has the wrong shape",
+                    );
+                }
+                for (index, element) in elements.into_iter().enumerate() {
+                    plans = self.lower_pattern(element, index as u32, plans)?;
+                }
+                Ok(plans)
+            }
+            Pattern::Or(or) => {
+                let mut result = Vec::new();
+                for alternative in or.alternatives() {
+                    let branch = plans.clone();
+                    let mut lowered = self.lower_multi_pattern(alternative, branch)?;
+                    result.append(&mut lowered);
+                }
+                Ok(result)
+            }
+            _ => self.function.err_node(
+                pattern.syntax().id(),
+                "multi-match arms must be array patterns",
+            ),
+        }
+    }
+
+    fn lower_pattern(
+        &mut self,
+        pattern: Pattern<'a>,
+        occurrence: u32,
+        mut plans: Vec<MatchPlan<'a>>,
+    ) -> Result<Vec<MatchPlan<'a>>, CompileError> {
+        match pattern {
+            Pattern::Name(name) => {
+                let Some(token) = name.name() else {
+                    return self
+                        .function
+                        .err_node(name.syntax().id(), "missing binding name");
+                };
+                if token.text() != "_" {
+                    let binding = self.function.binding(token)?;
+                    for plan in &mut plans {
+                        plan.bindings.push((binding, occurrence));
+                    }
+                }
+                Ok(plans)
+            }
+            Pattern::Wildcard(_) => Ok(plans),
+            Pattern::Literal(literal) => {
+                let literal = self.literal_key(literal)?;
+                let test = self.intern_test(occurrence, MatchTestKind::Literal(literal));
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                Ok(plans)
+            }
+            Pattern::Alias(alias) => {
+                let mut plans = if let Some(inner) = alias.pattern() {
+                    self.lower_pattern(inner, occurrence, plans)?
+                } else {
+                    plans
+                };
+                if let Some(token) = alias.alias() {
+                    let binding = self.function.binding(token)?;
+                    for plan in &mut plans {
+                        plan.bindings.push((binding, occurrence));
+                    }
+                }
+                Ok(plans)
+            }
+            Pattern::Type(typed) => {
+                let test =
+                    self.intern_test(occurrence, MatchTestKind::UserType(typed.syntax().id()));
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                if let Some(token) = typed.binding()
+                    && token.text() != "_"
+                {
+                    let binding = self.function.binding(token)?;
+                    for plan in &mut plans {
+                        plan.bindings.push((binding, occurrence));
+                    }
+                }
+                Ok(plans)
+            }
+            Pattern::Object(object) => {
+                let test = self.intern_test(occurrence, MatchTestKind::IsObject);
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                if !object.has_rest() {
+                    let named = object
+                        .fields()
+                        .filter(|field| {
+                            field
+                                .key()
+                                .is_some_and(|key| key.kind() != SyntaxKind::Number)
+                        })
+                        .count();
+                    let test = self.intern_test(occurrence, MatchTestKind::OwnSlotCountEq(named));
+                    for plan in &mut plans {
+                        Self::push_demand(plan, test);
+                    }
+                }
+                for field in object.fields() {
+                    let Some(key) = field.key() else {
+                        return self
+                            .function
+                            .err_node(field.syntax().id(), "missing pattern field key");
+                    };
+                    let child = match key.kind() {
+                        SyntaxKind::Number => {
+                            let index = key.text().parse::<usize>().unwrap_or(0);
+                            self.intern_occurrence(occurrence, MatchAccess::Index(index))
+                        }
+                        SyntaxKind::String => {
+                            let name = decode_string(key.text());
+                            let name = self.function.b.name(&name);
+                            self.intern_occurrence(occurrence, MatchAccess::Slot(name))
+                        }
+                        _ => {
+                            let name = self.function.b.name(key.text().as_bytes());
+                            self.intern_occurrence(occurrence, MatchAccess::Slot(name))
+                        }
+                    };
+                    let present = self.intern_test(child, MatchTestKind::Present);
+                    for plan in &mut plans {
+                        Self::push_demand(plan, present);
+                    }
+                    if let Some(inner) = field.pattern() {
+                        plans = self.lower_pattern(inner, child, plans)?;
+                    } else {
+                        let Some(token) = field.alias().or_else(|| field.key()) else {
+                            return self
+                                .function
+                                .err_node(field.syntax().id(), "missing field binding");
+                        };
+                        if token.kind().is_name() && token.text() != "_" {
+                            let binding = self.function.binding(token)?;
+                            for plan in &mut plans {
+                                plan.bindings.push((binding, child));
+                            }
+                        }
+                    }
+                }
+                Ok(plans)
+            }
+            Pattern::Array(array) => {
+                let source = self.intern_occurrence(occurrence, MatchAccess::ArraySource);
+                let test = self.intern_test(source, MatchTestKind::ArraySource);
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                let elements: Vec<Pattern<'a>> = array.elements().collect();
+                let rest = array.rest();
+                if rest.is_some() {
+                    if !elements.is_empty() {
+                        let test =
+                            self.intern_test(source, MatchTestKind::LengthAtLeast(elements.len()));
+                        for plan in &mut plans {
+                            Self::push_demand(plan, test);
+                        }
+                    }
+                } else {
+                    let test = self.intern_test(source, MatchTestKind::LengthEq(elements.len()));
+                    for plan in &mut plans {
+                        Self::push_demand(plan, test);
+                    }
+                }
+                for (index, element) in elements.iter().enumerate() {
+                    let child = self.intern_occurrence(source, MatchAccess::Index(index));
+                    let present = self.intern_test(child, MatchTestKind::Present);
+                    for plan in &mut plans {
+                        Self::push_demand(plan, present);
+                    }
+                    plans = self.lower_pattern(*element, child, plans)?;
+                }
+                if let Some(rest) = rest {
+                    if elements.len() > u16::MAX as usize {
+                        return self
+                            .function
+                            .err_node(array.syntax().id(), "array rest start is too large");
+                    }
+                    let binding = self.function.binding(rest)?;
+                    for plan in &mut plans {
+                        plan.rests.push((binding, source, elements.len()));
+                    }
+                }
+                Ok(plans)
+            }
+            Pattern::Atom(atom) => {
+                let Some(token) = atom.name() else {
+                    return self
+                        .function
+                        .err_node(atom.syntax().id(), "missing atom name");
+                };
+                let name = match token.kind() {
+                    SyntaxKind::String => decode_string(token.text()),
+                    _ => token.text().as_bytes().to_vec(),
+                };
+                let index = self
+                    .function
+                    .b
+                    .constant(Constant::Atom(name.into_boxed_slice()));
+                let test = self.intern_test(
+                    occurrence,
+                    MatchTestKind::Literal(MatchLiteral::Atom(index)),
+                );
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                Ok(plans)
+            }
+            Pattern::Value(value) => {
+                let value_id = self.intern_value(value.syntax().id())?;
+                let test = self.intern_test(occurrence, MatchTestKind::Value(value_id));
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                }
+                Ok(plans)
+            }
+            Pattern::Or(or) => {
+                let mut result = Vec::new();
+                for alternative in or.alternatives() {
+                    let branch = plans.clone();
+                    let mut lowered = self.lower_pattern(alternative, occurrence, branch)?;
+                    result.append(&mut lowered);
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    fn literal_key(
+        &mut self,
+        literal: kette_syntax::ast::PatternLiteral<'a>,
+    ) -> Result<MatchLiteral, CompileError> {
+        let mut tokens = literal
+            .syntax()
+            .tokens()
+            .filter(|token| !token.kind().is_trivia());
+        let Some(first) = tokens.next() else {
+            return self
+                .function
+                .err_node(literal.syntax().id(), "empty literal pattern");
+        };
+        let negative = first.kind() == SyntaxKind::Minus;
+        let Some(token) = (if negative { tokens.next() } else { Some(first) }) else {
+            return self
+                .function
+                .err_node(literal.syntax().id(), "empty literal pattern");
+        };
+        match token.kind() {
+            SyntaxKind::Number => {
+                let mut number = token.text().parse::<f64>().unwrap_or(0.0);
+                if negative {
+                    number = -number;
+                }
+                if let Some(smi) = Smi::from_f64(number) {
+                    Ok(MatchLiteral::Smi(smi.value()))
+                } else {
+                    Ok(MatchLiteral::Float(number.to_bits()))
+                }
+            }
+            SyntaxKind::String => {
+                let text = decode_string(token.text());
+                let index = self
+                    .function
+                    .b
+                    .constant(Constant::String(text.into_boxed_slice()));
+                Ok(MatchLiteral::String(index))
+            }
+            SyntaxKind::True => Ok(MatchLiteral::True),
+            SyntaxKind::False => Ok(MatchLiteral::False),
+            SyntaxKind::Null => Ok(MatchLiteral::Null),
+            SyntaxKind::Ident if token.text() == "undefined" => Ok(MatchLiteral::Undefined),
+            _ => self
+                .function
+                .err_node(literal.syntax().id(), "unsupported literal pattern"),
+        }
+    }
+
+    fn intern_value(&mut self, node: NodeId) -> Result<u32, CompileError> {
+        let syntax = SyntaxNode::new(self.function.tree, node);
+        let Some(value) = PatternValue::cast(syntax) else {
+            return self
+                .function
+                .err_node(node, "invalid runtime value pattern");
+        };
+        let names: Vec<ConstIdx> = value
+            .segments()
+            .map(|token| self.function.b.name(token.text().as_bytes()))
+            .collect();
+        if names.len() < 2 {
+            return self
+                .function
+                .err_node(node, "runtime value pattern needs a path");
+        }
+        if let Some(id) = self.value_ids.get(&names) {
+            return Ok(*id);
+        }
+        let id = self.values.len() as u32;
+        self.values.push(MatchValue {
+            base: node,
+            names: names.clone(),
+        });
+        self.value_ids.insert(names, id);
+        Ok(id)
+    }
+
+    fn intern_occurrence(&mut self, base: u32, access: MatchAccess) -> u32 {
+        let occurrence = MatchOccurrence {
+            base: Some(base),
+            access,
+        };
+        if let Some(id) = self.occurrence_ids.get(&occurrence) {
+            return *id;
+        }
+        let id = self.occurrences.len() as u32;
+        self.occurrences.push(occurrence);
+        self.occurrence_ids.insert(occurrence, id);
+        self.occurrence_regs.push(self.temps.temp());
+        id
+    }
+
+    fn intern_test(&mut self, occurrence: u32, kind: MatchTestKind) -> u32 {
+        let test = MatchTest { occurrence, kind };
+        if let Some(id) = self.test_ids.get(&test) {
+            return *id;
+        }
+        let id = self.tests.len() as u32;
+        self.tests.push(test);
+        self.test_ids.insert(test, id);
+        id
+    }
+
+    fn push_demand(plan: &mut MatchPlan<'a>, test: u32) {
+        if !plan.demands.contains(&test) {
+            plan.demands.push(test);
+        }
+    }
+
+    fn build(&mut self) -> Result<u32, CompileError> {
+        let state = MatchState {
+            facts: Vec::new(),
+            remaining: (0..self.plans.len()).collect(),
+        };
+        self.compile_state(&state)
+    }
+
+    fn compile_state(&mut self, state: &MatchState) -> Result<u32, CompileError> {
+        if let Some(node) = self.memo.get(state) {
+            return Ok(*node);
+        }
+        if state.remaining.is_empty() {
+            let node = self.new_node(MatchNode::Fail);
+            self.memo.insert(state.clone(), node);
+            return Ok(node);
+        }
+        let plan = state.remaining[0];
+        if self.plan_complete(state, plan) {
+            let node = if let Some(expr) = self.plans[plan].guard {
+                let pass = self.new_node(MatchNode::Leaf { plan, bound: true });
+                let group = self.plans[plan].group;
+                let mut fallback = state.clone();
+                fallback
+                    .remaining
+                    .retain(|&remaining| self.plans[remaining].group != group);
+                let fail = self.compile_state(&fallback)?;
+                self.new_node(MatchNode::Guard {
+                    plan,
+                    expr,
+                    pass,
+                    fail,
+                })
+            } else {
+                self.new_node(MatchNode::Leaf { plan, bound: false })
+            };
+            self.memo.insert(state.clone(), node);
+            return Ok(node);
+        }
+        let mut selected = None;
+        for &demand in &self.plans[plan].demands {
+            if self.fact(state, demand).is_none() {
+                selected = Some(demand);
+                break;
+            }
+        }
+        let Some(test) = selected else {
+            let node = self.new_node(MatchNode::Fail);
+            self.memo.insert(state.clone(), node);
+            return Ok(node);
+        };
+        if let Some(node) = self.try_switch(state, test)? {
+            self.memo.insert(state.clone(), node);
+            return Ok(node);
+        }
+        let mut yes = state.clone();
+        self.add_fact(&mut yes, test, true);
+        let mut no = state.clone();
+        self.add_fact(&mut no, test, false);
+        let yes = self.compile_state(&yes)?;
+        let no = self.compile_state(&no)?;
+        let node = self.new_node(MatchNode::Test { test, yes, no });
+        self.memo.insert(state.clone(), node);
+        Ok(node)
+    }
+
+    fn try_switch(&mut self, state: &MatchState, test: u32) -> Result<Option<u32>, CompileError> {
+        let selected = self.tests[test as usize];
+        let MatchTestKind::Literal(selected_literal) = selected.kind else {
+            return Ok(None);
+        };
+        if !matches!(
+            selected_literal,
+            MatchLiteral::Smi(_) | MatchLiteral::Atom(_)
+        ) {
+            return Ok(None);
+        }
+        let mut values: Vec<(MatchLiteral, u32)> = Vec::new();
+        for &plan in &state.remaining {
+            for &demand in &self.plans[plan].demands {
+                if self.fact(state, demand).is_some() {
+                    continue;
+                }
+                let candidate = self.tests[demand as usize];
+                if candidate.occurrence != selected.occurrence {
+                    continue;
+                }
+                let MatchTestKind::Literal(candidate_literal) = candidate.kind else {
+                    continue;
+                };
+                if !same_switch_literal_kind(selected_literal, candidate_literal) {
+                    continue;
+                }
+                if !values
+                    .iter()
+                    .any(|(existing, _)| *existing == candidate_literal)
+                {
+                    values.push((candidate_literal, demand));
+                }
+            }
+        }
+        if values.len() < 4 {
+            return Ok(None);
+        }
+        values.sort_by_key(|(value, _)| switch_literal_key(*value));
+        if let MatchLiteral::Smi(_) = selected_literal {
+            let min = switch_literal_key(values[0].0);
+            let max = switch_literal_key(values[values.len() - 1].0);
+            let range = max.checked_sub(min).and_then(|range| range.checked_add(1));
+            let Some(range) = range else {
+                return Ok(None);
+            };
+            if range > (values.len() as i64) * 2 || range > 1024 {
+                return Ok(None);
+            }
+        }
+        let mut cases: Vec<(MatchLiteral, u32)> = Vec::with_capacity(values.len());
+        for (value, _) in &values {
+            let mut branch = state.clone();
+            for (candidate_value, candidate) in &values {
+                self.add_fact(&mut branch, *candidate, candidate_value == value);
+            }
+            let node = self.compile_state(&branch)?;
+            cases.push((*value, node));
+        }
+        let mut default = state.clone();
+        for (_, candidate) in &values {
+            self.add_fact(&mut default, *candidate, false);
+        }
+        let default = self.compile_state(&default)?;
+        match selected_literal {
+            MatchLiteral::Smi(_) => {
+                let cases: Vec<(i64, u32)> = cases
+                    .into_iter()
+                    .map(|(value, node)| (switch_literal_key(value), node))
+                    .collect();
+                let switch = self.switches.len() as u32;
+                self.switches.push(cases);
+                Ok(Some(self.new_node(MatchNode::Switch {
+                    occurrence: selected.occurrence,
+                    switch,
+                    default,
+                })))
+            }
+            MatchLiteral::Atom(_) => {
+                let mut names: Vec<(Box<[u8]>, u32)> = Vec::with_capacity(cases.len());
+                for (value, node) in cases {
+                    let MatchLiteral::Atom(index) = value else {
+                        unreachable!("atom switch case");
+                    };
+                    let Some(Constant::Atom(name)) = self.function.b.constant_ref(index) else {
+                        return Err(self.function.error(
+                            self.function.tree.root_id(),
+                            "atom switch constant vanished",
+                        ));
+                    };
+                    names.push((name.clone(), node));
+                }
+                let switch = self.atom_switches.len() as u32;
+                self.atom_switches.push(names);
+                Ok(Some(self.new_node(MatchNode::AtomSwitch {
+                    occurrence: selected.occurrence,
+                    switch,
+                    default,
+                })))
+            }
+            _ => unreachable!("switch literal kind"),
+        }
+    }
+
+    fn plan_complete(&self, state: &MatchState, plan: usize) -> bool {
+        self.plans[plan]
+            .demands
+            .iter()
+            .all(|&test| self.fact(state, test) == Some(true))
+    }
+
+    fn fact(&self, state: &MatchState, test: u32) -> Option<bool> {
+        state
+            .facts
+            .binary_search_by_key(&test, |(id, _)| *id)
+            .ok()
+            .map(|index| state.facts[index].1)
+    }
+
+    fn add_fact(&self, state: &mut MatchState, test: u32, value: bool) {
+        match state.facts.binary_search_by_key(&test, |(id, _)| *id) {
+            Ok(index) => state.facts[index].1 = value,
+            Err(index) => state.facts.insert(index, (test, value)),
+        }
+        if !value {
+            state
+                .remaining
+                .retain(|&plan| !self.plans[plan].demands.contains(&test));
+        }
+    }
+
+    fn new_node(&mut self, node: MatchNode<'a>) -> u32 {
+        let id = self.nodes.len() as u32;
+        self.nodes.push(node);
+        id
+    }
+
+    fn emit(&mut self, root: u32) -> Result<(), CompileError> {
+        if self
+            .tests
+            .iter()
+            .any(|test| matches!(test.kind, MatchTestKind::Present))
+        {
+            self.function.b.load_hole();
+            self.function.b.store(self.hole);
+        }
+        self.labels = vec![None; self.nodes.len()];
+        self.emitted = vec![false; self.nodes.len()];
+        self.emit_node(root)
+    }
+
+    fn label_for(&mut self, node: u32) -> Label {
+        if let Some(label) = self.labels[node as usize] {
+            return label;
+        }
+        let label = self.function.b.new_label();
+        self.labels[node as usize] = Some(label);
+        label
+    }
+
+    fn emit_node(&mut self, node: u32) -> Result<(), CompileError> {
+        if self.emitted[node as usize] {
+            return Ok(());
+        }
+        self.emitted[node as usize] = true;
+        let label = self.label_for(node);
+        self.function.b.bind(label);
+        match self.nodes[node as usize] {
+            MatchNode::Fail => {
+                self.function.b.load_constant(self.fail_message);
+                self.function.b.throw();
+            }
+            MatchNode::Test { test, yes, no } => {
+                let no_label = self.label_for(no);
+                self.emit_test(test, no_label)?;
+                let yes_label = self.label_for(yes);
+                self.function.b.jump(yes_label);
+                self.emit_node(yes)?;
+                self.emit_node(no)?;
+            }
+            MatchNode::Switch {
+                occurrence,
+                switch,
+                default,
+            } => {
+                let cases = self.switches[switch as usize].clone();
+                let default_label = self.label_for(default);
+                let targets: Vec<(i64, Label)> = cases
+                    .iter()
+                    .map(|(value, node)| (*value, self.label_for(*node)))
+                    .collect();
+                let value = self.occurrence_regs[occurrence as usize];
+                self.function
+                    .b
+                    .switch_int(value, targets[0].0, &targets, default_label)
+                    .map_err(|error| {
+                        self.function
+                            .error(self.function.tree.root_id(), error.to_string())
+                    })?;
+                for (_, node) in cases {
+                    self.emit_node(node)?;
+                }
+                self.emit_node(default)?;
+            }
+            MatchNode::AtomSwitch {
+                occurrence,
+                switch,
+                default,
+            } => {
+                let cases = self.atom_switches[switch as usize].clone();
+                let default_label = self.label_for(default);
+                let targets: Vec<(Box<[u8]>, Label)> = cases
+                    .iter()
+                    .map(|(name, node)| (name.clone(), self.label_for(*node)))
+                    .collect();
+                let value = self.occurrence_regs[occurrence as usize];
+                self.function
+                    .b
+                    .switch_atom(value, &targets, default_label)
+                    .map_err(|error| {
+                        self.function
+                            .error(self.function.tree.root_id(), error.to_string())
+                    })?;
+                for (_, node) in cases {
+                    self.emit_node(node)?;
+                }
+                self.emit_node(default)?;
+            }
+            MatchNode::Guard {
+                plan,
+                expr,
+                pass,
+                fail,
+            } => {
+                self.emit_bindings(plan)?;
+                self.function.expr(expr)?;
+                let fail_label = self.label_for(fail);
+                self.function.b.jump_if_falsy(fail_label);
+                let pass_label = self.label_for(pass);
+                self.function.b.jump(pass_label);
+                self.emit_node(pass)?;
+                self.emit_node(fail)?;
+            }
+            MatchNode::Leaf { plan, bound } => {
+                self.emit_leaf(plan, bound)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_test(&mut self, test: u32, no: Label) -> Result<(), CompileError> {
+        let test = self.tests[test as usize];
+        let occurrence = self.occurrence_regs[test.occurrence as usize];
+        match test.kind {
+            MatchTestKind::IsObject => {
+                let feedback = self.function.b.new_feedback();
+                self.function.b.test_type(
+                    occurrence,
+                    occurrence,
+                    TestTypeKind::Object as u32,
+                    feedback,
+                );
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::ArraySource => {
+                let source = self.occurrences[test.occurrence as usize];
+                let base = source.base.expect("array source has a base");
+                let base = self.occurrence_regs[base as usize];
+                let array = self.function.b.new_label();
+                let done = self.function.b.new_label();
+                let feedback = self.function.b.new_feedback();
+                self.function
+                    .b
+                    .test_type(base, base, TestTypeKind::Array as u32, feedback);
+                self.function.b.jump_if_truthy(array);
+                let feedback = self.function.b.new_feedback();
+                self.function
+                    .b
+                    .test_type(base, base, TestTypeKind::IntoArray as u32, feedback);
+                self.function.b.jump_if_falsy(no);
+                let converted = self.function.send_reg0(base, "intoArray", &self.temps)?;
+                self.function.b.load(converted);
+                self.function.b.store(occurrence);
+                self.function.b.jump(done);
+                self.function.b.bind(array);
+                self.function.b.load(base);
+                self.function.b.store(occurrence);
+                self.function.b.bind(done);
+            }
+            MatchTestKind::LengthEq(length) => {
+                let feedback = self.function.b.new_feedback();
+                self.function.b.load_length(occurrence, feedback);
+                let current = self.function.b.stage_acc(&self.temps);
+                self.function.b.load_smi(length as i32);
+                self.function.b.equal_strict(current);
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::LengthAtLeast(length) => {
+                let feedback = self.function.b.new_feedback();
+                self.function.b.load_length(occurrence, feedback);
+                let current = self.function.b.stage_acc(&self.temps);
+                self.function.b.load_smi(length as i32);
+                self.function.b.less_than_or_equal(current);
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::OwnSlotCountEq(count) => {
+                self.function.b.own_slot_count(occurrence);
+                let current = self.function.b.stage_acc(&self.temps);
+                self.function.b.load_smi(count as i32);
+                self.function.b.equal_strict(current);
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::Present => {
+                let present = self.occurrences[test.occurrence as usize];
+                let base = present.base.expect("present occurrence has a base");
+                let base = self.occurrence_regs[base as usize];
+                match present.access {
+                    MatchAccess::Slot(name) => {
+                        self.function.b.load_own_slot_or_hole(base, name);
+                    }
+                    MatchAccess::Index(index) => {
+                        self.function.b.load_smi(index as i32);
+                        let feedback = self.function.b.new_feedback();
+                        self.function.b.load_indexed_or_hole(base, feedback);
+                    }
+                    MatchAccess::Root(_) | MatchAccess::ArraySource => {
+                        unreachable!("only slots and indexes are present tests")
+                    }
+                }
+                self.function.b.store(occurrence);
+                self.function.b.test_reference_equal(self.hole);
+                self.function.b.jump_if_truthy(no);
+            }
+            MatchTestKind::Literal(literal) => {
+                self.function.b.load(occurrence);
+                self.load_literal(literal);
+                match literal {
+                    MatchLiteral::Smi(_) | MatchLiteral::Float(_) => {
+                        self.function.b.equal_strict(occurrence);
+                    }
+                    MatchLiteral::String(_) => {
+                        self.function.b.equal_strict(occurrence);
+                    }
+                    MatchLiteral::Atom(_) => {
+                        self.function.b.test_reference_equal(occurrence);
+                    }
+                    MatchLiteral::True
+                    | MatchLiteral::False
+                    | MatchLiteral::Null
+                    | MatchLiteral::Undefined => {
+                        self.function.b.test_reference_equal(occurrence);
+                    }
+                }
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::UserType(node) => {
+                self.function.load_resolution(node)?;
+                let ty = self.function.b.stage_acc(&self.temps);
+                let feedback = self.function.b.new_feedback();
+                self.function
+                    .b
+                    .test_type(occurrence, ty, TestTypeKind::User as u32, feedback);
+                self.function.b.jump_if_falsy(no);
+            }
+            MatchTestKind::Value(id) => {
+                let value = &self.values[id as usize];
+                let base = value.base;
+                let names = value.names.clone();
+                self.function.load_resolution(base)?;
+                let mut current = self.function.b.stage_acc(&self.temps);
+                for name in names.iter().skip(1) {
+                    let feedback = self.function.b.new_feedback();
+                    self.function
+                        .b
+                        .load_named_property(current, *name, feedback);
+                    current = self.function.b.stage_acc(&self.temps);
+                }
+                self.function.b.load(current);
+                self.function.b.equal_strict(occurrence);
+                self.function.b.jump_if_falsy(no);
+            }
+        }
+        Ok(())
+    }
+
+    fn load_literal(&mut self, literal: MatchLiteral) {
+        match literal {
+            MatchLiteral::Smi(value) => self.function.number(value as f64),
+            MatchLiteral::Float(bits) => self.function.number(f64::from_bits(bits)),
+            MatchLiteral::String(index) => self.function.b.load_constant(index),
+            MatchLiteral::Atom(index) => self.function.b.load_constant(index),
+            MatchLiteral::True => self.function.b.load_true(),
+            MatchLiteral::False => self.function.b.load_false(),
+            MatchLiteral::Null => self.function.b.load_null(),
+            MatchLiteral::Undefined => self.function.b.load_undefined(),
+        }
+    }
+
+    fn emit_bindings(&mut self, plan: usize) -> Result<(), CompileError> {
+        let bindings = self.plans[plan].bindings.clone();
+        let rests = self.plans[plan].rests.clone();
+        for (binding, occurrence) in bindings {
+            self.function
+                .b
+                .load(self.occurrence_regs[occurrence as usize]);
+            self.function.store_binding(binding)?;
+        }
+        for (binding, occurrence, start) in rests {
+            let source = self.occurrence_regs[occurrence as usize];
+            self.function.b.array_slice(source, start as u32);
+            self.function.store_binding(binding)?;
+        }
+        Ok(())
+    }
+
+    fn emit_leaf(&mut self, plan: usize, bound: bool) -> Result<(), CompileError> {
+        if !bound {
+            self.emit_bindings(plan)?;
+        }
+        let arm = self.plans[plan].arm;
+        if let Some(arm) = arm {
+            let Some(result) = self.result else {
+                return Err(self
+                    .function
+                    .error(arm.syntax().id(), "missing match result register"));
+            };
+            self.function
+                .match_arm_body(arm, result, self.tail, self.end)?;
+        } else if let Some(done) = self.bind_done {
+            self.function.b.jump(done);
+        }
+        Ok(())
+    }
+}
+
+fn supports_multi_pattern(pattern: Pattern<'_>, count: usize) -> bool {
+    match pattern {
+        Pattern::Wildcard(_) => true,
+        Pattern::Array(array) => array.rest().is_none() && array.elements().count() == count,
+        Pattern::Or(or) => or
+            .alternatives()
+            .all(|alternative| supports_multi_pattern(alternative, count)),
+        _ => false,
+    }
+}
+
+fn same_switch_literal_kind(left: MatchLiteral, right: MatchLiteral) -> bool {
+    matches!(
+        (left, right),
+        (MatchLiteral::Smi(_), MatchLiteral::Smi(_))
+            | (MatchLiteral::Atom(_), MatchLiteral::Atom(_))
+    )
+}
+
+fn switch_literal_key(literal: MatchLiteral) -> i64 {
+    match literal {
+        MatchLiteral::Smi(value) => value,
+        MatchLiteral::Atom(_) => 0,
+        _ => 0,
     }
 }
 

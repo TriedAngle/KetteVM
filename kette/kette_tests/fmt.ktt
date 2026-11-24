@@ -1,12 +1,14 @@
+globalThis.KETTEFMT_LIBRARY = true
 KetteTools.evalFile("kette/vendor/kette/kette.ktt")
-KetteTools.evalFile("kette/vendor/kette/fmt.ktt")
+KetteTools.evalFile("kette/vendor/kette/syntax.ktt")
+KetteTools.evalFile("kette/tools/kettefmt.ktt")
 
-use kette.fmt
+use kettefmt
 
 let check = |source, expected| {
-    let actual = fmt.formatSource(source)
+    let actual = kettefmt.formatSource(source)
     Test.assert(actual, expected)
-    Test.assert(fmt.formatSource(actual), actual)
+    Test.assert(kettefmt.formatSource(actual), actual)
 }
 
 check("let x=1\n", "let x = 1\n")
@@ -32,3 +34,7 @@ check("for{x,y}in xs{y}\n", "for { x, y } in xs { y }\n")
 check("for[a,...r]in xs{r}\n", "for [a, ...r] in xs { r }\n")
 check("match x{\n{a,b}=>a\n_=>0\n}\n", "match x {\n    { a, b } => a\n    _ => 0\n}\n")
 check("match x{\n[a,...r]=>r\n_=>[]\n}\n", "match x {\n    [a, ...r] => r\n    _ => []\n}\n")
+check("match x{\n{a,b}|{a,c:b}=>b\n}\n", "match x {\n    { a, b } | { a, c: b } => b\n}\n")
+check("match x{\nK.One=>1\n_=>0\n}\n", "match x {\n    K.One => 1\n    _ => 0\n}\n")
+check("let a=:red\n", "let a = :red\n")
+check("match a{\n:red=>1\n_=>0\n}\n", "match a {\n    :red => 1\n    _ => 0\n}\n")

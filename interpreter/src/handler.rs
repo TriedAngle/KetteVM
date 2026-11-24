@@ -1,7 +1,7 @@
 use super::*;
 use crate::slow::*;
 use crate::utils::*;
-use vm_core::{Float, Handle};
+use vm_core::{Atom, Float, Handle};
 
 #[cfg(not(feature = "fast"))]
 use handler_derive::handler_loop_match as handler;
@@ -81,6 +81,38 @@ pub fn op_load_false(frame: Frame) {
 
 #[handler(TestType)]
 pub fn op_test_type(frame: Frame) {
+    let kind = frame.unsigned::<2>();
+    if kind == TestTypeKind::IntoArray as usize {
+        let vm = frame.ctx().vm();
+        let state = frame.ctx().state();
+        let same = state.handle_scope(|scope| {
+            let heap = frame.ctx().heap_mut();
+            let value = frame.regs().get(frame.signed::<0>(), heap);
+            if value
+                .as_heap_object()
+                .is_some_and(|object| object.as_ref().is_array_exotic(heap))
+            {
+                return true;
+            }
+            let Some(object) = value.as_heap_object() else {
+                return false;
+            };
+            let object = scope.handle(object);
+            let name = heap
+                .known()
+                .strings
+                .into_array
+                .get_handle(heap, &scope)
+                .erase();
+            Object::has_property(vm, heap, state, object.erase(), name).unwrap_or(false)
+        });
+        frame.set_acc(if same {
+            roots.true_object.get(frame.ctx().heap()).erase()
+        } else {
+            roots.false_object.get(frame.ctx().heap()).erase()
+        });
+        next!()
+    }
     let heap = frame.ctx().heap();
     let value = frame.regs().get(frame.signed::<0>(), heap);
     let ty = frame.regs().get(frame.signed::<1>(), heap);
@@ -371,46 +403,6 @@ pub fn op_load_named_property(frame: Frame) {
     tail!(slow_named_load)
 }
 
-#[handler(LoadNamedPropertyOrHole)]
-#[inline(never)]
-pub fn op_load_named_property_or_hole(frame: Frame) {
-    let heap = frame.ctx().heap();
-    let recv = frame.regs().get(frame.signed::<0>(), heap);
-    let fb = frame.unsigned::<2>();
-    let hit = match InlineCache::probe_mono(heap, frame.ctx().feedback_ref(heap), fb, recv) {
-        MonoProbe::Value(v) => Some(LoadHit::Value(v)),
-        MonoProbe::Handler(obj, handler) => InlineCache::apply_mono(heap, obj, handler),
-        MonoProbe::Poly {
-            obj,
-            map,
-            pairs,
-            start,
-        } => InlineCache::try_load_resume(heap, obj, map, pairs, start),
-        MonoProbe::Miss | MonoProbe::NotReceiver => None,
-    };
-    if let Some(hit) = hit {
-        match hit {
-            LoadHit::Value(v) => {
-                frame.set_acc(v);
-                next!()
-            }
-            LoadHit::Getter(getter) => {
-                frame.set_acc(getter);
-                tail!(slow_named_getter)
-            }
-            LoadHit::NativeGetter(accessor) => {
-                frame.set_acc(accessor);
-                tail!(slow_named_native_getter)
-            }
-            LoadHit::NotFound => {
-                frame.set_acc(heap.known().the_hole.get(heap).erase());
-                next!()
-            }
-        }
-    }
-    tail!(slow_named_load_or_hole)
-}
-
 #[handler(LoadKeyedProperty)]
 pub fn op_load_keyed_property(frame: Frame) {
     let heap = frame.ctx().heap();
@@ -438,45 +430,6 @@ pub fn op_load_keyed_property(frame: Frame) {
         }
     }
     tail!(slow_keyed_load)
-}
-
-#[handler(LoadKeyedPropertyOrHole)]
-#[inline(never)]
-pub fn op_load_keyed_property_or_hole(frame: Frame) {
-    let heap = frame.ctx().heap();
-    let recv = frame.regs().get(frame.signed::<0>(), heap);
-    let fb = frame.unsigned::<1>();
-    if let Some(idx) = frame.acc().to_i64()
-        && idx >= 0
-    {
-        if let Some(obj) = recv.as_heap_object()
-            && !obj.as_ref().map(heap).kind().is_arguments()
-            && let Some(v) = obj.as_ref().element_value_dense(heap, idx as usize)
-        {
-            frame.set_acc(v);
-            next!()
-        }
-        if let Some(hit) = InlineCache::try_load_element_or_hole(
-            heap,
-            frame.ctx().feedback_ref(heap),
-            fb,
-            recv,
-            idx as usize,
-        ) {
-            match hit {
-                ElementHit::Value(v) => {
-                    frame.set_acc(v);
-                    next!()
-                }
-                ElementHit::Char(_) => {}
-                ElementHit::NotFound => {
-                    frame.set_acc(heap.known().the_hole.get(heap).erase());
-                    next!()
-                }
-            }
-        }
-    }
-    tail!(slow_keyed_load_or_hole)
 }
 
 #[handler(LoadOwnSlotOrHole)]
@@ -1603,6 +1556,71 @@ pub fn op_switch_int(frame: Frame) {
             }
         }
         None => default,
+    };
+    dispatch!(frame.ip().wrapping_offset(offset as isize))
+}
+
+#[handler(SwitchAtom)]
+pub fn op_switch_atom(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let value = frame.regs().get(frame.signed::<0>(), heap);
+    let table_idx = frame.unsigned::<1>();
+    let switch_table = frame.ctx().constants_ref(heap).at(heap, table_idx);
+    let switch_table = switch_table
+        .get_as::<FixedArray>(heap)
+        .expect("atom switch table");
+    let header = Smi::decode(switch_table.at(heap, 0).raw())
+        .expect("atom switch header")
+        .value();
+    let atom = value.get_as::<Atom>(heap);
+    let offset = if header < 0 {
+        let count = Smi::decode(switch_table.at(heap, 1).raw())
+            .expect("atom switch count")
+            .value() as usize;
+        let default = Smi::decode(switch_table.at(heap, 2).raw())
+            .expect("atom switch default")
+            .value();
+        let Some(atom) = atom else {
+            dispatch!(frame.ip().wrapping_offset(default as isize))
+        };
+        let id = atom.id() as i64;
+        let mut lo = 0usize;
+        let mut hi = count;
+        let mut offset = default;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let key = Smi::decode(switch_table.at(heap, 3 + mid * 2).raw())
+                .expect("atom switch key")
+                .value();
+            if key == id {
+                offset = Smi::decode(switch_table.at(heap, 4 + mid * 2).raw())
+                    .expect("atom switch target")
+                    .value();
+                break;
+            }
+            if key < id {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        offset
+    } else {
+        let default = Smi::decode(switch_table.at(heap, switch_table.len() - 1).raw())
+            .expect("atom switch default")
+            .value();
+        let Some(atom) = atom else {
+            dispatch!(frame.ip().wrapping_offset(default as isize))
+        };
+        let count = switch_table.len() - 2;
+        let index = atom.id() as i64 - header;
+        if index >= 0 && (index as usize) < count {
+            Smi::decode(switch_table.at(heap, 1 + index as usize).raw())
+                .expect("atom switch target")
+                .value()
+        } else {
+            default
+        }
     };
     dispatch!(frame.ip().wrapping_offset(offset as isize))
 }

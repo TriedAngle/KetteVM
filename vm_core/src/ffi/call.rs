@@ -4,7 +4,7 @@ use crate::ffi::{
     FfiError, FfiResult, FfiState, ParamKind, ParamPlan, TypeId, TypeKind, param_kind,
 };
 use crate::{
-    Args, CValue, CValueFlags, CValueInit, Convert, DenseString, ErasedRuntimeState,
+    Args, Atom, CValue, CValueFlags, CValueInit, Convert, DenseString, ErasedRuntimeState,
     FixedByteArray, Float, ForeignLibrary, Handle, HandleScope, Heap, Smi, StringRef, Tagged,
     ThreadState, TypeInfo, Utf8String, VM, Value,
 };
@@ -155,6 +155,25 @@ impl FfiState {
                     }
                     value.base(heap)? as *const u8
                 }
+                ParamKind::Enum(type_id) => {
+                    let ty = self
+                        .types
+                        .get(heap, type_id)
+                        .ok_or(FfiError::UnsupportedType(type_id))?;
+                    let raw = enum_to_int(heap, ty, value)?;
+                    let base_ty = ty.element(heap).ok_or(FfiError::UnsupportedType(type_id))?;
+                    let slot = unsafe { base.add(param.offset) };
+                    // Safety: every scalar slot is 8 bytes inside the buffer.
+                    let bytes = unsafe { core::slice::from_raw_parts_mut(slot, 8) };
+                    encode_scalar(
+                        ParamKind::Scalar(base_ty.kind()),
+                        Smi::new(raw).into_tagged(),
+                        heap,
+                        bytes,
+                        Some(&mut scratch),
+                    )?;
+                    slot as *const u8
+                }
                 kind => {
                     let slot = unsafe { base.add(param.offset) };
                     // Safety: every scalar slot is 8 bytes inside the buffer.
@@ -238,11 +257,34 @@ impl FfiState {
         bytes: &[u8],
         library: Option<&Handle<'_, ForeignLibrary>>,
     ) -> Tagged<'a, Value> {
-        let (kind, size) = {
+        let (kind, size, is_enum) = {
             let info = ty.as_tagged(heap);
-            (info.kind(), info.size())
+            if info.kind() == TypeKind::Enum {
+                let base = info
+                    .element(heap)
+                    .expect("enum type has an underlying type");
+                (base.kind(), base.size(), true)
+            } else {
+                (info.kind(), info.size(), false)
+            }
         };
-        match kind {
+        if is_enum {
+            let raw = match kind {
+                TypeKind::Bool | TypeKind::U8 | TypeKind::Char => bytes[0] as i64,
+                TypeKind::I8 => bytes[0] as i8 as i64,
+                TypeKind::U16 | TypeKind::Char16 => {
+                    u16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64
+                }
+                TypeKind::I16 => i16::from_ne_bytes(bytes[..2].try_into().unwrap()) as i64,
+                TypeKind::U32 => u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64,
+                TypeKind::I32 => i32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64,
+                TypeKind::U64 => u64::from_ne_bytes(bytes[..8].try_into().unwrap()) as i64,
+                TypeKind::I64 => i64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+                _ => unreachable!("enum base is an integer"),
+            };
+            return enum_from_int(heap, ty.as_tagged(heap), raw);
+        }
+        let value = match kind {
             TypeKind::Void => heap.known().undefined.get(heap).erase(),
             TypeKind::Bool => Convert::boolean(heap, bytes[0] != 0),
             TypeKind::I8 => Smi::new(bytes[0] as i8 as i64).into_tagged(),
@@ -338,7 +380,9 @@ impl FfiState {
                 value.as_tagged(heap).erase()
             }
             TypeKind::Function => heap.known().undefined.get(heap).erase(),
-        }
+            TypeKind::Enum => unreachable!("enum base selected above"),
+        };
+        value
     }
 
     pub fn read_raw<'a>(
@@ -436,6 +480,27 @@ impl FfiState {
         guest: Tagged<Value>,
         out: &mut [u8],
     ) -> FfiResult<()> {
+        self.encode_value(heap, ty, guest, out)
+    }
+
+    fn encode_value(
+        &self,
+        heap: &Heap,
+        ty: Tagged<TypeInfo>,
+        guest: Tagged<Value>,
+        out: &mut [u8],
+    ) -> FfiResult<()> {
+        if ty.kind() == TypeKind::Enum {
+            let raw = enum_to_int(heap, ty, guest)?;
+            let base = ty.element(heap).ok_or(FfiError::UnsupportedType(ty.id()))?;
+            return encode_scalar(
+                ParamKind::Scalar(base.kind()),
+                Smi::new(raw).into_tagged(),
+                heap,
+                out,
+                None,
+            );
+        }
         encode_value(heap, ty, guest, out)
     }
 
@@ -450,7 +515,7 @@ impl FfiState {
         let base = value.base(heap)?;
         let size = ty.size();
         let mut slot = CallSlot::new(size.max(8));
-        encode_value(heap, ty, guest, slot.bytes_mut())?;
+        self.encode_value(heap, ty, guest, slot.bytes_mut())?;
         memory::copy_in_at(base, offset, &slot.bytes()[..size]);
         Ok(())
     }
@@ -502,7 +567,7 @@ impl FfiState {
             )
             .ok_or(FfiError::AddressOverflow)? as *mut u8;
         let mut slot = CallSlot::new(size.max(8));
-        encode_value(heap, element, guest, slot.bytes_mut())?;
+        self.encode_value(heap, element, guest, slot.bytes_mut())?;
         memory::copy_in_at(address, 0, &slot.bytes()[..size]);
         Ok(())
     }
@@ -622,9 +687,9 @@ fn encode_scalar(
             let address = encode_pointer(kind, value, heap, scratch)?;
             out[..8].copy_from_slice(&(address as usize).to_ne_bytes());
         }
-        ParamKind::Aggregate(_) => {
+        ParamKind::Aggregate(_) | ParamKind::Enum(_) => {
             return Err(FfiError::InvalidArgument(
-                "aggregate passed through a scalar slot",
+                "aggregate or enum passed through a scalar slot",
             ));
         }
     }
@@ -775,6 +840,40 @@ pub fn encode_value(
         kind => encode_scalar(kind, guest, heap, out, None)?,
     }
     Ok(())
+}
+
+fn enum_to_int(heap: &Heap, ty: Tagged<TypeInfo>, value: Tagged<Value>) -> FfiResult<i64> {
+    if let Some(atom) = value.get_as::<Atom>(heap)
+        && let Some(fields) = ty.fields(heap)
+    {
+        let mut index = 0;
+        while index + 1 < fields.len() {
+            if fields
+                .at(heap, index)
+                .get_as::<Atom>(heap)
+                .is_some_and(|candidate| candidate.ptr_eq(atom))
+            {
+                return Ok(fields.at(heap, index + 1).to_i64().unwrap_or(0));
+            }
+            index += 2;
+        }
+    }
+    int_from(heap, value)
+}
+
+fn enum_from_int<'a>(heap: &'a Heap, ty: Tagged<'a, TypeInfo>, raw: i64) -> Tagged<'a, Value> {
+    if let Some(fields) = ty.fields(heap) {
+        let mut index = 0;
+        while index + 1 < fields.len() {
+            if fields.at(heap, index + 1).to_i64() == Some(raw)
+                && let Some(atom) = fields.at(heap, index).get_as::<Atom>(heap)
+            {
+                return atom.erase();
+            }
+            index += 2;
+        }
+    }
+    Smi::new(raw).into_tagged()
 }
 
 fn int_from(heap: &Heap, value: Tagged<Value>) -> FfiResult<i64> {

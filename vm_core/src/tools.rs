@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use bytecode::{FunctionId, SourceMode, disassemble, disassemble_function};
+
 use crate::materialize::Materialize;
 use crate::{
     Args, CallInfo, Errors, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
@@ -96,6 +98,86 @@ impl KetteTools {
         )
     }
 
+    /// Compile `(language, source[, function])` and return its bytecode.
+    /// Without a function index, prints every function in the program.
+    pub fn bytecode<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+        let HostCtx {
+            vm, heap, state, ..
+        } = ctx;
+        if args.len() < 2 {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "bytecode expects (language, source[, function])",
+            );
+        }
+        let Some(language) = string_arg(heap, args, 0) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "bytecode expects a language string",
+            );
+        };
+        let Some(source) = string_arg(heap, args, 1) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "bytecode expects a source string",
+            );
+        };
+        let Some(info) = vm.eval_language(&language) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                &format!("unknown eval language '{language}'"),
+            );
+        };
+        let program = match (info.compile)(vm, &source, SourceMode::Script) {
+            Ok(program) => program,
+            Err(error) => {
+                return Errors::raise_with(vm, heap, state, VmError::EvalError, &error.to_string());
+            }
+        };
+        let text = if args.len() > 2 {
+            let Some(index) = args.get_handle(heap, 2).as_tagged(heap).to_i64() else {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::EvalError,
+                    "bytecode function index must be an integer",
+                );
+            };
+            if index < 0 || index as usize >= program.len() {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::EvalError,
+                    &format!(
+                        "bytecode function index {index} out of range (0..{})",
+                        program.len()
+                    ),
+                );
+            }
+            disassemble_function(&program, FunctionId(index as u32))
+        } else {
+            disassemble(&program)
+        };
+        state.handle_scope(|scope| {
+            let text = vm.interner().intern_str(heap, &scope, &text);
+            text.as_tagged(heap).erase()
+        })
+    }
+
     /// Read `path` and run it as an isolated file unit, inferring the
     /// language from the `.ktt` / `.js` extension.
     pub fn eval_file<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
@@ -151,7 +233,7 @@ impl KetteTools {
         roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
-        natives: [NativeIndex; 5],
+        natives: [NativeIndex; 6],
     ) {
         let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
@@ -166,12 +248,13 @@ impl KetteTools {
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
         let primitives = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
-        let methods: [(&str, NativeIndex); 5] = [
+        let methods: [(&str, NativeIndex); 6] = [
             ("forceMinorGC", natives[0]),
             ("forceMajorGC", natives[1]),
             ("shutdown", natives[2]),
             ("eval", natives[3]),
             ("evalFile", natives[4]),
+            ("bytecode", natives[5]),
         ];
         for (name, index) in methods {
             let method = Object::native_function(heap, scope, index, 0);

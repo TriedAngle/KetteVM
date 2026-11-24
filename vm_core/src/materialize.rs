@@ -9,12 +9,12 @@
 //! function table and knows nothing about the language that produced it.
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, DenseString,
+    Atom, CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, DenseString,
     FeedbackVector, FeedbackVectorInit, FixedArray, FunctionKind, Handle, HandleScope, HandleSlice,
     HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, RuntimeId, ScopeInfo,
     ScopeInfoInit, Smi, StringData, Thread, ThreadState, VM, Value, decode_wtf8, mode_from_strict,
 };
-use bytecode::{CallableKind, Constant, FunctionId, Program};
+use bytecode::{AtomSwitchTable, CallableKind, Constant, FunctionId, Program};
 
 /// Namespace for turning compiled programs into VM heap objects.
 pub struct Materialize;
@@ -104,6 +104,10 @@ fn materialize_function<'s>(
     for constant in constants {
         let value = match constant {
             Constant::String(bytes) => intern(heap, state, scope, vm, bytes).erase(),
+            Constant::Atom(bytes) => {
+                let name = intern(heap, state, scope, vm, bytes);
+                Atom::intern(heap, scope, name).erase()
+            }
             Constant::Smi(v) => scope.handle(Smi::new(*v)),
             Constant::Float(f) => scope.handle(heap.new_number(*f)),
             Constant::Callable(child) => {
@@ -176,6 +180,9 @@ fn materialize_function<'s>(
                 heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), scope)
                     .erase()
             }
+            Constant::AtomSwitchTable(table) => {
+                materialize_atom_switch(vm, heap, state, scope, table).erase()
+            }
         };
         materialized.push(value);
     }
@@ -243,6 +250,57 @@ fn materialize_function<'s>(
     );
     infos[fid.index()] = Some(info);
     info
+}
+
+fn materialize_atom_switch<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    table: &AtomSwitchTable,
+) -> Handle<'s, FixedArray> {
+    let default = *table.targets.last().expect("atom switch default");
+    let mut entries: Vec<(u32, i32)> = table
+        .atoms
+        .iter()
+        .zip(table.targets.iter())
+        .map(|(name, &target)| {
+            let name = intern(heap, state, scope, vm, name);
+            let atom = Atom::intern(heap, scope, name);
+            (atom.as_tagged(heap).as_ref().id(), target)
+        })
+        .collect();
+    entries.sort_by_key(|(id, _)| *id);
+    let min = entries.first().map_or(0, |(id, _)| *id);
+    let max = entries.last().map_or(0, |(id, _)| *id);
+    let range = max.saturating_sub(min) as usize + 1;
+    let mut values: Vec<Handle<'s, Value>> = Vec::new();
+    if range <= 1024 && range <= entries.len().saturating_mul(4) {
+        values.reserve(range + 2);
+        values.push(scope.handle(Smi::new(min as i64)));
+        let mut at = 0;
+        for offset in 0..range {
+            let target = if at < entries.len() && entries[at].0 == min + offset as u32 {
+                let target = entries[at].1;
+                at += 1;
+                target
+            } else {
+                default
+            };
+            values.push(scope.handle(Smi::new(target as i64)));
+        }
+        values.push(scope.handle(Smi::new(default as i64)));
+    } else {
+        values.reserve(entries.len() * 2 + 3);
+        values.push(scope.handle(Smi::new(-1)));
+        values.push(scope.handle(Smi::new(entries.len() as i64)));
+        values.push(scope.handle(Smi::new(default as i64)));
+        for (id, target) in entries {
+            values.push(scope.handle(Smi::new(id as i64)));
+            values.push(scope.handle(Smi::new(target as i64)));
+        }
+    }
+    heap.allocate_handle::<FixedArray>(scope.stage_handles(&values), scope)
 }
 
 fn intern<'s>(

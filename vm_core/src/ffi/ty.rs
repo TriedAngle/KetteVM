@@ -2,8 +2,8 @@ use crate::ffi::CallPlan;
 use crate::ffi::{FfiError, FfiResult};
 use crate::objects::FLAG_VARIADIC;
 use crate::{
-    EdgeVisitable, FixedArray, Handle, HandleScope, Heap, MaybeWeakGcSlot, Smi, Tagged, TypeInfo,
-    TypeInfoInit, VM, Value, Visitor,
+    Atom, EdgeVisitable, FixedArray, Handle, HandleScope, Heap, MaybeWeakGcSlot, Smi, Tagged,
+    TypeInfo, TypeInfoInit, VM, Value, Visitor,
 };
 use core::alloc::Layout;
 use std::collections::HashMap;
@@ -82,6 +82,8 @@ pub enum TypeKind {
     Union,
     Array,
     Function,
+    /// A C enum: an integer base type plus atom variants.
+    Enum,
 }
 
 impl TypeKind {
@@ -108,6 +110,7 @@ impl TypeKind {
             16 => Self::Union,
             17 => Self::Array,
             18 => Self::Function,
+            19 => Self::Enum,
             _ => panic!("invalid C type kind"),
         }
     }
@@ -133,6 +136,7 @@ impl TypeKind {
             Self::Union => "union",
             Self::Array => "array",
             Self::Function => "function",
+            Self::Enum => "enum",
         }
     }
 
@@ -146,7 +150,12 @@ impl TypeKind {
             // 8 on the 64-bit targets KetteVM builds for. i386 SysV aligns
             // `long long` and `double` to 4.
             Self::I64 | Self::U64 | Self::F64 => (8, 8),
-            Self::Pointer | Self::Struct | Self::Union | Self::Array | Self::Function => (
+            Self::Pointer
+            | Self::Struct
+            | Self::Union
+            | Self::Array
+            | Self::Function
+            | Self::Enum => (
                 core::mem::size_of::<*const ()>(),
                 core::mem::size_of::<*const ()>(),
             ),
@@ -461,6 +470,50 @@ impl TypeRegistry {
         fields: &[(Option<&str>, Handle<TypeInfo>)],
     ) -> FfiResult<Handle<'s, TypeInfo>> {
         self.define_composite(vm, heap, scope, name, fields, true)
+    }
+
+    pub fn define_enum<'s>(
+        &self,
+        vm: &VM,
+        heap: &mut Heap,
+        scope: &'s HandleScope<'_>,
+        base: &Handle<TypeInfo>,
+        variants: &[(Handle<'_, Atom>, i64)],
+    ) -> FfiResult<Handle<'s, TypeInfo>> {
+        let base_layout = require_object(base.as_tagged(heap)).map_err(FfiError::from)?;
+        let id = self.reserve_id();
+        let mut pairs: Vec<Tagged<Value>> = Vec::with_capacity(variants.len() * 2);
+        for (atom, value) in variants {
+            pairs.push(atom.as_tagged(heap).erase());
+            pairs.push(Smi::new(*value).into_tagged());
+        }
+        let pairs = scope.stage(&pairs);
+        let fields = heap.allocate_handle::<FixedArray>(pairs, scope);
+        let ty = heap.allocate_handle::<TypeInfo>(
+            TypeInfoInit {
+                kind: TypeKind::Enum,
+                id,
+                size: base_layout.size(),
+                align: base_layout.align(),
+                flags: 0,
+                name: None,
+                pointee: None,
+                element: Some(base.clone()),
+                len: 0,
+                fields: Some(fields),
+                params: None,
+                result: None,
+                cif: 0,
+            },
+            scope,
+        );
+        self.inner
+            .lock()
+            .expect("ffi type registry poisoned")
+            .types
+            .insert(id, MaybeWeakGcSlot::new_weak(ty.as_tagged(heap)));
+        let _ = vm;
+        Ok(ty)
     }
 
     fn define_composite<'s>(

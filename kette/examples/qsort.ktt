@@ -3,16 +3,16 @@
 
 KetteTools.evalFile("kette/std/startup.ktt")
 
-let FFI = Modules.ffi
-let { void, i32, u64, ... } = FFI
-let libc = FFI.library(null)
+use ffi
+let { void, i32, u64, ... } = ffi
+let libc = ffi.library(null)
 
-let Comparator = FFI.fn([FFI.Ptr, FFI.Ptr], i32)
-let ComparatorPointer = FFI.pointer(Comparator)
+let Comparator = ffi.fn([ffi.Ptr, ffi.Ptr], i32)
+let ComparatorPointer = ffi.pointer(Comparator)
 
 let qsort = libc.fn(
     "qsort",
-    [FFI.pointer(i32), u64, u64, ComparatorPointer],
+    [ffi.pointer(i32), u64, u64, ComparatorPointer],
     void
 )
 
@@ -30,7 +30,7 @@ let compare = Comparator.callback(|left, right| {
 })
 
 let count = 8
-let values = FFI.array(i32, count).new()
+let values = ffi.array(i32, count).new()
 let i = 0
 while i < count {
     values.set(i, (i * 37) % 17)

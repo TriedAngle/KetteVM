@@ -178,6 +178,8 @@ pub struct GlobalDeclarations {
 pub enum Constant {
     /// Interned string (property names, string literals)
     String(Box<[u8]>),
+    /// Interned symbolic name (Kette atom)
+    Atom(Box<[u8]>),
     /// Heap float (non-Smi number literals)
     Float(f64),
     /// Smi-range integer literals too big for the (at most 2-byte signed)
@@ -202,6 +204,8 @@ pub enum Constant {
     /// Sparse jump table for `SwitchInt`: min value plus one relative
     /// offset per entry and a default at the end.
     SwitchTable(SwitchTable),
+    /// Atom jump table: atom names plus the default-last relative offsets.
+    AtomSwitchTable(AtomSwitchTable),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -210,11 +214,18 @@ pub struct SwitchTable {
     pub targets: Box<[i32]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AtomSwitchTable {
+    pub atoms: Box<[Box<[u8]>]>,
+    pub targets: Box<[i32]>,
+}
+
 impl Constant {
     /// Key identity for pool deduplication: bit-exact for floats.
     fn key(&self) -> ConstantKey<'_> {
         match self {
             Self::String(bytes) => ConstantKey::String(bytes),
+            Self::Atom(bytes) => ConstantKey::Atom(bytes),
             Self::Float(f) => ConstantKey::Float(f.to_bits()),
             Self::Smi(v) => ConstantKey::Smi(*v),
             Self::Callable(id) => ConstantKey::Callable(*id),
@@ -224,6 +235,7 @@ impl Constant {
             Self::FunctionPrototype => ConstantKey::FunctionPrototype,
             Self::GlobalObject => ConstantKey::GlobalObject,
             Self::SwitchTable(table) => ConstantKey::SwitchTable(table),
+            Self::AtomSwitchTable(table) => ConstantKey::AtomSwitchTable(table),
         }
     }
 }
@@ -246,6 +258,7 @@ impl core::hash::Hash for Constant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ConstantKey<'a> {
     String(&'a [u8]),
+    Atom(&'a [u8]),
     Float(u64),
     Smi(i64),
     Callable(FunctionId),
@@ -255,6 +268,7 @@ enum ConstantKey<'a> {
     FunctionPrototype,
     GlobalObject,
     SwitchTable(&'a SwitchTable),
+    AtomSwitchTable(&'a AtomSwitchTable),
 }
 
 /// `layout [try_start, try_end, handler_pc]`: a half-open bytecode region.

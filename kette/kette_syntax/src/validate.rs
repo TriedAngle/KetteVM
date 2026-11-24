@@ -89,7 +89,7 @@ impl Validator {
 
     fn expr(&mut self, expr: Expr<'_>, in_module: bool) {
         match expr {
-            Expr::Atom(_) => {}
+            Expr::Atom(_) | Expr::AtomLiteral(_) => {}
             Expr::Paren(paren) => {
                 if let Some(inner) = paren.expr() {
                     self.expr(inner, in_module);
@@ -116,6 +116,7 @@ impl Validator {
                     self.expr(value, in_module);
                 }
             }
+            Expr::Continue(_) => {}
             Expr::Unary(expr) => self.unary_expr(expr, in_module),
             Expr::Binary(expr) => self.binary_expr(expr, in_module),
             Expr::Assign(expr) => {

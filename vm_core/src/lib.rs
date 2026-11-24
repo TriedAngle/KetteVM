@@ -90,7 +90,7 @@ pub use native::{
     CallInfo, HostCtx, NativeFn, NativeIndex, NativeRegistry, frame_context_value, raise_runtime,
 };
 pub use objects::{
-    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, AtomicI64Object,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, Atom, AtomicI64Object,
     AtomicI64ObjectInit, CValue, CValueFlags, CValueInit, CallTarget, CallableInfoInit,
     CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit, ContextObject,
     DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE,

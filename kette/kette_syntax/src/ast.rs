@@ -73,6 +73,10 @@ ast_node!(PatternAlias, PatternAlias);
 ast_node!(PatternLiteral, PatternLiteral);
 ast_node!(PatternWildcard, PatternWildcard);
 ast_node!(PatternObject, PatternObject);
+ast_node!(PatternOr, PatternOr);
+ast_node!(PatternValue, PatternValue);
+ast_node!(PatternAtom, PatternAtom);
+ast_node!(AtomLiteral, AtomLiteral);
 ast_node!(PatternField, PatternField);
 ast_node!(PatternType, PatternType);
 ast_node!(MatchExpr, MatchExpr);
@@ -92,6 +96,7 @@ ast_node!(UnaryExpr, Unary);
 ast_node!(BinaryExpr, Binary);
 ast_node!(ReturnStmt, ReturnStmt);
 ast_node!(BreakStmt, BreakStmt);
+ast_node!(ContinueStmt, ContinueStmt);
 ast_node!(ThrowExpr, ThrowExpr);
 ast_node!(TryExpr, TryExpr);
 ast_node!(IfExpr, IfExpr);
@@ -112,6 +117,7 @@ ast_enum!(Expr {
     Throw(ThrowExpr),
     Return(ReturnStmt),
     Break(BreakStmt),
+    Continue(ContinueStmt),
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Assign(AssignExpr),
@@ -120,6 +126,7 @@ ast_enum!(Expr {
     Send(SendExpr),
     Call(CallExpr),
     Match(MatchExpr),
+    AtomLiteral(AtomLiteral),
 });
 
 ast_enum!(Stmt {
@@ -137,6 +144,9 @@ ast_enum!(Pattern {
     Literal(PatternLiteral),
     Wildcard(PatternWildcard),
     Object(PatternObject),
+    Or(PatternOr),
+    Value(PatternValue),
+    Atom(PatternAtom),
     Type(PatternType),
 });
 
@@ -298,6 +308,34 @@ impl<'a> PatternObject<'a> {
 
     pub fn has_rest(self) -> bool {
         self.syntax.tokens().any(|token| token.kind() == Ellipsis)
+    }
+}
+
+impl<'a> PatternOr<'a> {
+    pub fn alternatives(self) -> AstChildren<'a, Pattern<'a>> {
+        self.syntax.children_as()
+    }
+}
+
+impl<'a> PatternValue<'a> {
+    pub fn segments(self) -> impl Iterator<Item = SyntaxToken<'a>> + 'a {
+        self.syntax.tokens().filter(|token| token.kind().is_name())
+    }
+}
+
+impl<'a> PatternAtom<'a> {
+    pub fn name(self) -> Option<SyntaxToken<'a>> {
+        self.syntax
+            .tokens()
+            .find(|token| !matches!(token.kind(), Colon))
+    }
+}
+
+impl<'a> AtomLiteral<'a> {
+    pub fn name(self) -> Option<SyntaxToken<'a>> {
+        self.syntax
+            .tokens()
+            .find(|token| !matches!(token.kind(), Colon))
     }
 }
 
@@ -645,6 +683,8 @@ impl<'a> BreakStmt<'a> {
         self.syntax.child_as()
     }
 }
+
+impl<'a> ContinueStmt<'a> {}
 
 impl<'a> ThrowExpr<'a> {
     pub fn value(self) -> Option<Expr<'a>> {

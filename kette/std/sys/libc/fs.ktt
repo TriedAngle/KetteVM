@@ -84,7 +84,7 @@ let FileTraits = {
         }
         let text = null
         try {
-            text = ffi.string_at(data)
+            text = ffi.string(data, size)
         } catch (e) {
             data.free()
             throw e
@@ -144,7 +144,10 @@ let readDir = |path| {
         throw "cannot open directory: " + path
     }
     // struct dirent: d_name is at byte 21 on macOS and 19 on glibc.
-    let name_offset = if KetteTools.primitives.os.name == "macos" { 21 } else { 19 }
+    let name_offset = match KetteTools.primitives.os.name {
+        "macos" => 21
+        _ => 19
+    }
     let names = []
     let failed = false
     let error = null

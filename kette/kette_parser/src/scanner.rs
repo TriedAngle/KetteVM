@@ -479,6 +479,7 @@ fn keyword(text: &str) -> Option<SyntaxKind> {
         "false" => False,
         "return" => Return,
         "break" => Break,
+        "continue" => Continue,
         "as" => As,
         "selfContext" => SelfContext,
         "try" => Try,

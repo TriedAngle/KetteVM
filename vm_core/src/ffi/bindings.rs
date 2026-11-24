@@ -1,6 +1,6 @@
 use crate::ffi::{FfiError, FfiResult, TypeId, TypeKind, ValueRead, callback, memory};
 use crate::{
-    AccessorInfo, Args, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
+    AccessorInfo, Args, Atom, CValue, CallInfo, Errors, FixedArray, FixedByteArray, ForeignLibrary,
     Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeFn, Object,
     PropertyDescriptor, SetupError, SlotName, Smi, StringRef, Tagged, ThreadState, Thrown,
     TypeInfo, Utf8String, VM, Value, VmError, raise_runtime, tools::KetteTools,
@@ -26,6 +26,8 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let lib_path = vm.register_native(library_path);
     let struct_type = vm.register_native(ffi_struct);
     let enum_type = vm.register_native(ffi_enum);
+    let enum_value = vm.register_native(ffi_enum_value);
+    let enum_from_value = vm.register_native(ffi_enum_from_value);
     let type_new = vm.register_native(c_type_new);
     let type_callback = vm.register_native(type_callback);
     let type_size = vm.register_native(c_type_size);
@@ -39,6 +41,8 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let value_add = vm.register_native(c_value_add);
     let value_cast = vm.register_native(c_value_cast);
     let value_free = vm.register_native(c_value_free);
+    let value_dispose = vm.register_native(c_value_dispose);
+    let value_size = vm.register_native(c_value_size);
     let type_wrap = vm.register_native(c_type_wrap);
     let buffer = vm.register_native(ffi_buffer);
     let read_bytes = vm.register_native(c_read_bytes);
@@ -49,6 +53,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
         .collect();
 
     vm.ffi_mut().set_natives(ffi_call, field_get, field_set);
+    vm.ffi_mut().set_enum_natives(enum_value, enum_from_value);
     let ffi = vm.ffi();
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
@@ -195,7 +200,25 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             heap,
             &scope,
             buffer_prototype,
+            "[]",
+            buffer_get,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
             "set",
+            buffer_set,
+            2,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "[]=",
             buffer_set,
             2,
         );
@@ -224,6 +247,24 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             buffer_prototype,
             "free",
             value_free,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "dispose",
+            value_dispose,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            buffer_prototype,
+            "size",
+            value_size,
             0,
         );
         Object::add_method(
@@ -916,7 +957,86 @@ fn enum_value_fits(value: i64, bits: u32, signed: bool) -> bool {
     }
 }
 
-/// `FFI.enum([underlying,] { NAME: value, ... })` -> named constants object.
+/// `enum.value(atom)` -> integer
+fn ffi_enum_value<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    state.handle_scope(|scope| {
+        let atom = args.get_handle(heap, 0).as_tagged(heap);
+        if atom.get_as::<Atom>(heap).is_none() {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::InvalidOperandType,
+                "enum.value expects an atom",
+            );
+        }
+        let receiver = scope.handle(call.receiver.as_tagged(heap));
+        let key = scope.handle(atom);
+        let undefined = scope.handle(heap.known().undefined.get(heap).erase());
+        let value = match Object::get_property(
+            vm,
+            heap,
+            state,
+            receiver.erase(),
+            receiver.erase(),
+            key.erase(),
+            false,
+        ) {
+            Ok(value) => scope.handle(value),
+            Err(_) => undefined,
+        };
+        value.as_tagged(heap).erase()
+    })
+}
+
+/// `enum.fromValue(integer)` -> atom
+fn ffi_enum_from_value<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let raw = args.get_handle(heap, 0).as_tagged(heap);
+    let Some(raw) = raw.to_i64() else {
+        return Errors::raise_with(
+            vm,
+            heap,
+            state,
+            VmError::InvalidOperandType,
+            "enum.fromValue expects an integer",
+        );
+    };
+    state.handle_scope(|scope| {
+        let receiver = scope.handle(call.receiver.as_tagged(heap));
+        let keys = Object::own_property_keys(vm, heap, state, &scope, receiver.erase())
+            .unwrap_or_default();
+        for key in keys {
+            if key.as_tagged(heap).get_as::<Atom>(heap).is_none() {
+                continue;
+            }
+            let value = Object::get_property(
+                vm,
+                heap,
+                state,
+                receiver.erase(),
+                receiver.erase(),
+                key,
+                false,
+            );
+            if let Ok(value) = value
+                && value.to_i64() == Some(raw)
+            {
+                return key.as_tagged(heap).erase();
+            }
+        }
+        heap.known().undefined.get(heap).erase()
+    })
+}
+
+/// `FFI.enum([underlying,] { NAME: value, ... })` -> C enum type object.
+/// `Enum.NAME` is atom `:NAME`; `Enum[:NAME]` is the raw integer; `.type`
+/// is the enum type consumed by FFI calls/structs; `.base` is the underlying type.
 fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -984,6 +1104,19 @@ fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a,
             constants.push((name, value));
         }
         let width_ty = scope.handle(width_ty);
+        let mut atom_variants = Vec::with_capacity(constants.len());
+        for (name, value) in &constants {
+            atom_variants.push((Atom::intern_str(heap, &scope, name), *value));
+        }
+        let enum_ty =
+            match vm
+                .ffi()
+                .types()
+                .define_enum(vm, heap, &scope, &width_ty, &atom_variants)
+            {
+                Ok(ty) => ty,
+                Err(error) => return raise_ffi(vm, heap, state, error),
+            };
 
         // `type` lives on a per-enum prototype so a variant may be named `type`.
         let object_prototype = scope.handle(heap.known().object_prototype.get(heap));
@@ -1003,7 +1136,7 @@ fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a,
             let name = vm.interner().intern_str(heap, &scope, "type");
             scope.handle(name.as_tagged(heap).erase().as_name())
         };
-        let width_value = scope.handle(width_ty.as_tagged(heap).erase());
+        let width_value = scope.handle(enum_ty.as_tagged(heap).erase());
         if Object::define_own_property_ordinary(
             heap,
             &scope,
@@ -1015,6 +1148,33 @@ fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a,
         {
             return raise_runtime(heap, Thrown);
         }
+        let base_name = {
+            let name = vm.interner().intern_str(heap, &scope, "base");
+            scope.handle(name.as_tagged(heap).erase().as_name())
+        };
+        let base_value = scope.handle(width_ty.as_tagged(heap).erase());
+        if Object::define_own_property_ordinary(
+            heap,
+            &scope,
+            wrapper.clone(),
+            base_name,
+            PropertyDescriptor::non_enumerable(base_value),
+        )
+        .is_err()
+        {
+            return raise_runtime(heap, Thrown);
+        }
+        let enum_value = vm.ffi().enum_value();
+        Object::add_method(vm, heap, &scope, wrapper.clone(), "value", enum_value, 1);
+        Object::add_method(
+            vm,
+            heap,
+            &scope,
+            wrapper.clone(),
+            "fromValue",
+            vm.ffi().enum_from_value(),
+            1,
+        );
 
         let target_map = heap.allocate_handle::<Map>(
             MapInit {
@@ -1028,18 +1188,41 @@ fn ffi_enum<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a,
         let target = heap
             .new_object(&scope, target_map, HandleSlice::EMPTY)
             .as_handle(&scope);
-        for (name, value) in constants {
-            let key = {
-                let name = vm.interner().intern_str(heap, &scope, &name);
+        for ((name, value), (atom, _)) in constants.iter().zip(&atom_variants) {
+            let atom_value = scope.handle(atom.as_tagged(heap).erase());
+            let string_key = {
+                let name = vm.interner().intern_str(heap, &scope, name);
                 scope.handle(name.as_tagged(heap).erase().as_name())
             };
-            let value = scope.handle(Smi::new(value).into_tagged());
             if Object::define_own_property_ordinary(
                 heap,
                 &scope,
                 target.clone(),
-                key,
-                PropertyDescriptor::data(value),
+                string_key,
+                PropertyDescriptor::Data {
+                    value: atom_value,
+                    writable: false,
+                    enumerable: true,
+                    configurable: false,
+                },
+            )
+            .is_err()
+            {
+                return raise_runtime(heap, Thrown);
+            }
+            let atom_key = scope.handle(atom.as_tagged(heap).erase().as_name());
+            let raw = scope.handle(Smi::new(*value).into_tagged());
+            if Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                target.clone(),
+                atom_key,
+                PropertyDescriptor::Data {
+                    value: raw,
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
             )
             .is_err()
             {
@@ -1539,6 +1722,46 @@ fn c_value_free<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
             Ok(()) => heap.known().undefined.get(heap).erase(),
             Err(error) => raise_ffi(vm, heap, state, error),
         }
+    })
+}
+
+fn c_value_size<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
+        return raise_ffi(
+            vm,
+            heap,
+            state,
+            FfiError::InvalidArgument("expected a C value"),
+        );
+    };
+    Smi::new(value.c_type(heap).size() as i64).into_tagged()
+}
+
+fn c_value_dispose<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let ffi = vm.ffi();
+    state.handle_scope(|scope| {
+        let Some(value) = call.receiver.as_tagged(heap).get_as::<CValue>(heap) else {
+            return raise_ffi(
+                vm,
+                heap,
+                state,
+                FfiError::InvalidArgument("expected a C value"),
+            );
+        };
+        let value = scope.handle(value);
+        if value.as_tagged(heap).is_owned() {
+            match ffi.free_value(heap, &value) {
+                Ok(()) => {}
+                Err(error) => return raise_ffi(vm, heap, state, error),
+            }
+        }
+        heap.known().undefined.get(heap).erase()
     })
 }
 

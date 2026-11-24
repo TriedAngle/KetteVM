@@ -1,6 +1,8 @@
 // Run:  cargo run -q -p vm -- kette/kette_tests/control_flow.ktt
 // Check: kette/kette_tests/check.py
 
+use collection { range }
+
 let n = 2
 
 let sign = if n < 0 { 0 - 1 } else { 1 }
@@ -108,3 +110,31 @@ let pick = { |flag|
 }
 Test.assert(pick(true), 1)
 Test.assert(pick(false), 2)
+
+// continue skips the rest of the current iteration
+let continued_sum = 0
+for value in [1, 2, 3, 4] {
+    if value == 2 {
+        continue
+    }
+    continued_sum = continued_sum + value
+}
+Test.assert(continued_sum, 8)
+
+let continued_count = 0
+let continued_total = 0
+while continued_count < 4 {
+    continued_count = continued_count + 1
+    if continued_count == 2 {
+        continue
+    }
+    continued_total = continued_total + continued_count
+}
+Test.assert(continued_total, 8)
+
+// range is a reusable integer iterator
+let range_sum = 0
+for value in range(0, 4) {
+    range_sum = range_sum + value
+}
+Test.assert(range_sum, 6)

@@ -1,11 +1,11 @@
 use std::io::Write;
 
 use vm_core::{
-    Args, CallInfo, CallableInfoObject, DenseString, EdgeVisitable, Errors, Handle, HandleScope,
-    HandleSlice, Heap, HostCtx, Key, Map, MapInit, MapKind, NativeIndex, Object, ObjectKind,
-    OwnProperty, OwnPropertyLocation, PartialDescriptor, PropertyDescriptor, Prototype, Runtime,
-    RuntimeId, SetupError, ShapeChange, ShouldThrow, Smi, StringRef, Symbol, Tagged, ThreadState,
-    VM, Value, Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime,
+    Args, Atom, CallInfo, CallableInfoObject, DenseString, EdgeVisitable, Errors, Handle,
+    HandleScope, HandleSlice, Heap, HostCtx, Key, Map, MapInit, MapKind, NativeIndex, Object,
+    ObjectKind, OwnProperty, OwnPropertyLocation, PartialDescriptor, PropertyDescriptor, Prototype,
+    Runtime, RuntimeId, SetupError, ShapeChange, ShouldThrow, Smi, StringRef, Symbol, Tagged,
+    ThreadState, VM, Value, Visitor, VmError, intrinsics::declare_globals, raise, raise_runtime,
     request_shutdown, rt_try, tools::KetteTools,
 };
 
@@ -54,6 +54,9 @@ impl Runtime for KetteRuntime {
         let define_in_place_from = state.define_in_place_from;
         let publish_flat_module = state.publish_flat_module;
         let is_tail_callable = vm.register_native(is_tail_callable);
+        let atom_to_string = vm.register_native(atom_to_string);
+        let atom_from_existing_string = vm.register_native(atom_from_existing_string);
+        let atom_is_atom = vm.register_native(atom_is_atom);
         let set_cwd = vm.register_native(os_set_cwd);
         let exit = vm.register_native(os_exit);
         let process = process::Process::capture();
@@ -185,6 +188,29 @@ impl Runtime for KetteRuntime {
                     1,
                 );
             }
+
+            let atom_name = thread_vm.interner().intern_str(heap, &scope, "Atom");
+            let atom_name = scope.handle(atom_name.as_tagged(heap).erase());
+            let atom = scope.handle(heap.new_object(&scope, map, HandleSlice::EMPTY));
+            Object::add_method(thread_vm, heap, &scope, atom, "toString", atom_to_string, 1);
+            Object::add_method(
+                thread_vm,
+                heap,
+                &scope,
+                atom,
+                "fromExistingString",
+                atom_from_existing_string,
+                1,
+            );
+            Object::add_method(thread_vm, heap, &scope, atom, "isAtom", atom_is_atom, 1);
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                global,
+                scope.handle(atom_name.as_tagged(heap).erase().as_name()),
+                PropertyDescriptor::data(atom.erase()),
+            )
+            .expect("install Atom global");
 
             let none_name = scope.handle(
                 thread_vm
@@ -745,6 +771,7 @@ fn tools_publish_flat_module<'a>(
                 continue;
             }
             if key.as_tagged(heap).get_as::<Symbol>(heap).is_none()
+                && key.as_tagged(heap).get_as::<Atom>(heap).is_none()
                 && (!preserve_extras
                     || Object::own_property_ordinary(heap, &scope, old_owners, key).is_some())
             {
@@ -1027,6 +1054,70 @@ fn install_accessor<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Ta
         );
         closure.as_tagged(heap)
     })
+}
+
+fn atom_to_string<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    if let Some(atom) = value.get_as::<Atom>(heap) {
+        return atom.as_ref().name(heap).erase();
+    }
+    Errors::raise_with(
+        vm,
+        heap,
+        state,
+        VmError::InvalidOperandType,
+        "Atom.toString expects an atom",
+    )
+}
+
+fn atom_from_existing_string<'a>(
+    ctx: HostCtx<'a>,
+    _call: CallInfo<'_>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    let Some(string) = StringRef::try_from(heap, value) else {
+        return Errors::raise_with(
+            vm,
+            heap,
+            state,
+            VmError::InvalidOperandType,
+            "Atom.fromExistingString expects a string",
+        );
+    };
+    let text = string.to_rust_string(heap);
+    let registry = heap.known().atom_registry.get(heap);
+    for index in (0..registry.as_ref().len()).step_by(2) {
+        let Some(name) = registry
+            .as_ref()
+            .at(heap, index)
+            .get_as::<DenseString>(heap)
+        else {
+            continue;
+        };
+        if StringRef::try_from(heap, name.erase())
+            .is_some_and(|name| name.to_rust_string(heap) == text)
+        {
+            return registry.as_ref().at(heap, index + 1);
+        }
+    }
+    heap.known().null.get(heap).erase()
+}
+
+fn atom_is_atom<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx { heap, .. } = ctx;
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    if value.get_as::<Atom>(heap).is_some() {
+        heap.known().true_object.get(heap).erase()
+    } else {
+        heap.known().false_object.get(heap).erase()
+    }
 }
 
 fn is_tail_callable<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

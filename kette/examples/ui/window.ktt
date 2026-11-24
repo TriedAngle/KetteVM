@@ -7,12 +7,11 @@ use ui { Hit, K_SPLITTER, Node, OP_CLIP, OP_CLIP_POP, OP_RECT, OP_SHADOW, rgb, S
 KetteTools.evalFile("kette/vendor/tgpu.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")
 
-let FFI = Modules.ffi
+use ffi
 use sys
 use vendor.glfw
 use vendor.tgpu
-let Ptr = FFI.Ptr
-let { struct, u32, f32, ... } = FFI
+let { struct, u32, f32, ... } = ffi
 
 let CAPACITY = 4096
 let FLOATS = 8
@@ -26,90 +25,58 @@ let UiPush = struct({
 })
 
 let window = glfw.Window.new("kette ui", 800, 600, {
-    clientApi: glfw.ClientApi.NONE,
+    clientApi: glfw.ClientApi.none,
 })
-let start_size = window.framebufferSize()
-let width = start_size.width
-let height = start_size.height
+let { width, height } = window.framebufferSize()
 if width <= 0 or height <= 0 {
-    print("window has no framebuffer")
-    sys.raw.exit(1)
+    throw "window has no framebuffer"
 }
 
 window.onKey(|key, action, mods| {
-    if action == glfw.Action.PRESS and key == glfw.Key.ESCAPE {
-        window.setShouldClose(true)
+    match [action, key] {
+        [:press, :escape] => {
+            window.setShouldClose(true)
+        }
+        _ => {}
     }
 })
 
-let instance = tgpu.instanceCreate(null)
-tgpu.check()
-let queues = FFI.array(Ptr, 1).new()
-let device = tgpu.deviceCreate(instance, null, queues, 1)
-tgpu.check()
-let queue = queues.get(0)
+let gpu = tgpu.GPU.new()
+let queue = gpu.queue
 
-let swapchain_desc = tgpu.SwapchainDesc.new()
-swapchain_desc.struct_size = tgpu.SwapchainDesc.size()
-swapchain_desc.window = window.tgpuWindow()
-swapchain_desc.width = width
-swapchain_desc.height = height
-swapchain_desc.image_count = 3
-swapchain_desc.present_mode = tgpu.PresentMode.FIFO
-let swapchain = tgpu.swapchainCreate(device, swapchain_desc)
-tgpu.check()
+let swapchain = gpu.swapchain({
+    window: window.tgpuWindow()
+    width: width
+    height: height
+    imageCount: 3
+    presentMode: tgpu.PresentMode.fifo
+})
 
-let extent = tgpu.Extent2D.new()
-tgpu.swapchainExtent(swapchain, extent)
-tgpu.check()
+let extent = gpu.swapchainExtent(swapchain)
 let color_format = tgpu.swapchainFormat(swapchain)
 
-let buffer_desc = tgpu.BufferDesc.new()
-buffer_desc.struct_size = tgpu.BufferDesc.size()
-buffer_desc.size = CAPACITY * INSTANCE_BYTES
-buffer_desc.usage = tgpu.BufferUsage.STORAGE
-buffer_desc.memory = tgpu.MemoryPreset.DYNAMIC
-buffer_desc.host_access = tgpu.HostAccess.READ_WRITE_RANDOM
-let instance_buffer = tgpu.bufferCreate(device, buffer_desc, null, 0)
-tgpu.check()
+let instance_buffer = gpu.buffer({
+    size: CAPACITY * INSTANCE_BYTES
+    usage: tgpu.BufferUsage.storage
+    memory: tgpu.MemoryPreset.dynamic
+    hostAccess: tgpu.HostAccess.readWriteRandom
+})
 
-let bindless_desc = tgpu.BindlessDesc.new()
-bindless_desc.struct_size = tgpu.BindlessDesc.size()
-bindless_desc.max_read_buffers = 1
-let bindless = tgpu.bindlessCreate(device, bindless_desc)
-tgpu.check()
+let bindless = gpu.bindless({ maxReadBuffers: 1 })
 let instance_index = tgpu.bindlessAddReadBuffer(bindless, instance_buffer)
 
-let shader = tgpu.loadSlang(device, "kette/examples/ui/shader.slang")
-tgpu.check()
-let vertex_entry = FFI.cstring("vertexMain")
-let fragment_entry = FFI.cstring("fragmentMain")
-
-let color_formats = FFI.array(FFI.i32, 1).new()
-color_formats.set(0, color_format)
-
-let pipeline_desc = tgpu.RenderPipelineDesc.new()
-pipeline_desc.struct_size = tgpu.RenderPipelineDesc.size()
-pipeline_desc.vertex_shader = shader
-pipeline_desc.vertex_entry = vertex_entry
-pipeline_desc.fragment_shader = shader
-pipeline_desc.fragment_entry = fragment_entry
-pipeline_desc.color_formats = color_formats
-pipeline_desc.color_format_count = 1
-pipeline_desc.depth_format = tgpu.Format.UNDEFINED
-pipeline_desc.depth_test = false
-pipeline_desc.depth_write = false
-pipeline_desc.depth_compare = 0
-pipeline_desc.bindless = bindless
-pipeline_desc.push_constant_size = UiPush.size()
-pipeline_desc.cull = 0
-pipeline_desc.front_face = tgpu.FrontFace.COUNTER_CLOCKWISE
-pipeline_desc.topology = tgpu.Topology.TRIANGLE_LIST
-pipeline_desc.blend = tgpu.Blend.ALPHA
-pipeline_desc.vertex_buffer_count = 0
-pipeline_desc.sample_count = 1
-let pipeline = tgpu.renderPipelineCreate(device, pipeline_desc)
-tgpu.check()
+let shader = gpu.shaderSlang("kette/examples/ui/shader.slang")
+let ui_push = gpu.pushConstants(UiPush)
+let pipeline = gpu.renderPipeline({
+    shader: shader
+    vertexEntry: "vertexMain"
+    fragmentEntry: "fragmentMain"
+    colorFormats: [color_format]
+    bindless: bindless
+    pushConstants: ui_push
+    cull: tgpu.CullMode.none
+    blend: tgpu.Blend.alpha
+})
 
 let space = Space.new(width, height)
 let toolbar = Splitter.row(
@@ -134,7 +101,7 @@ space.root.addChild(inspector)
 space.root.addChild(transcript)
 space.frame()
 
-let mouse = FFI.array(FFI.f32, 2).new()
+let mouse = { x: 0, y: 0 }
 let drag = {
     active: 0,
     mode: 0,
@@ -148,8 +115,8 @@ let drag = {
 window.onCursorFramebuffer(|x, y| {
     let mouse_x = x
     let mouse_y = y
-    mouse.set(0, mouse_x)
-    mouse.set(1, mouse_y)
+    mouse.x = mouse_x
+    mouse.y = mouse_y
     if drag.active == 1 {
         if drag.mode == 2 and drag.splitter != null {
             let delta = mouse_x - drag.startX
@@ -164,9 +131,9 @@ window.onCursorFramebuffer(|x, y| {
 })
 
 window.onMouseButton(|button, action, mods| {
-    if button == 0 {
-        if action == 1 {
-            let hit = Hit.test(space.root, mouse.get(0), mouse.get(1))
+    match [button, action] {
+        [0, :press] => {
+            let hit = Hit.test(space.root, mouse.x, mouse.y)
             if hit != null {
                 let win = Windows.rootOf(hit)
                 if win != null { Windows.raise(space.root, win) }
@@ -174,175 +141,162 @@ window.onMouseButton(|button, action, mods| {
                     drag.active = 1
                     drag.mode = 2
                     drag.splitter = hit
-                    drag.startX = mouse.get(0)
+                    drag.startX = mouse.x
                 } else if win != null {
                     drag.active = 1
                     drag.mode = 1
                     drag.window = win
-                    drag.dx = mouse.get(0) - win.x
-                    drag.dy = mouse.get(1) - win.y
+                    drag.dx = mouse.x - win.x
+                    drag.dy = mouse.y - win.y
                 }
             }
-        } else if action == 0 {
+        }
+        [0, :release] => {
             drag.active = 0
             drag.mode = 0
             drag.window = null
             drag.splitter = null
         }
+        _ => {}
     }
 })
 
-let instances = FFI.array(FFI.f32, CAPACITY * FLOATS).new()
+let instances = ffi.array(ffi.f32, CAPACITY * FLOATS).new()
 
 let fill_instances = |ops| {
     let count = 0
-    let i = 0
-    while i < ops.length {
-        let op = ops[i]
-        if op == OP_RECT {
-            if count < CAPACITY {
-                let x = ops[i + 1]
-                let y = ops[i + 2]
-                let w = ops[i + 3]
-                let h = ops[i + 4]
-                let color = ops[i + 5]
-                let r = Math.floor(color / 65536)
-                let g = Math.floor(color / 256) - r * 256
-                let b = color - r * 65536 - g * 256
-                let base = count * FLOATS
-                instances.set(base + 0, x)
-                instances.set(base + 1, y)
-                instances.set(base + 2, w)
-                instances.set(base + 3, h)
-                instances.set(base + 4, r / 255.0)
-                instances.set(base + 5, g / 255.0)
-                instances.set(base + 6, b / 255.0)
-                instances.set(base + 7, 1.0)
-                count = count + 1
+    let* visit = |i| {
+        if i < ops.length {
+            let op = ops[i]
+            if op == OP_RECT {
+                if count < CAPACITY {
+                    let x = ops[i + 1]
+                    let y = ops[i + 2]
+                    let w = ops[i + 3]
+                    let h = ops[i + 4]
+                    let color = ops[i + 5]
+                    let r = Math.floor(color / 65536)
+                    let g = Math.floor(color / 256) - r * 256
+                    let b = color - r * 65536 - g * 256
+                    let base = count * FLOATS
+                    instances.set(base + 0, x)
+                    instances.set(base + 1, y)
+                    instances.set(base + 2, w)
+                    instances.set(base + 3, h)
+                    instances.set(base + 4, r / 255.0)
+                    instances.set(base + 5, g / 255.0)
+                    instances.set(base + 6, b / 255.0)
+                    instances.set(base + 7, 1.0)
+                    count = count + 1
+                }
+                visit(i + 6)
+            } else if op == OP_SHADOW {
+                visit(i + 6)
+            } else if op == OP_CLIP {
+                visit(i + 5)
+            } else {
+                visit(i + 1)
             }
-            i = i + 6
-        } else if op == OP_SHADOW {
-            i = i + 6
-        } else if op == OP_CLIP {
-            i = i + 5
-        } else if op == OP_CLIP_POP {
-            i = i + 1
-        } else {
-            i = i + 1
         }
     }
+    visit(0)
     count
 }
 
-let frame = tgpu.Frame.new()
-let attachment = tgpu.ColorAttachment.new()
-let attachments = FFI.array(tgpu.ColorAttachment, 1).new()
-let render_info = tgpu.RenderDesc.new()
-render_info.struct_size = tgpu.RenderDesc.size()
-render_info.color_count = 1
-render_info.colors = attachments
-let commands = FFI.array(Ptr, 1).new()
-let ui_push = UiPush.new()
+let attachments = gpu.array(tgpu.ColorAttachment, 1)
+let render_info = gpu.own(tgpu.renderDesc({ colorCount: 1, colors: attachments }))
 ui_push.instances = instance_index
 
 while window.isOpen() {
     window.poll()
 
-    let frame_size = window.framebufferSize()
-    let frame_width = frame_size.width
-    let frame_height = frame_size.height
+    let { width: frame_width, height: frame_height } = window.framebufferSize()
 
-    if frame_width > 0 and frame_height > 0 {
-        if frame_width != extent.width or frame_height != extent.height {
-            extent.width = frame_width
-            extent.height = frame_height
-            tgpu.swapchainSetExtent(swapchain, extent)
-            tgpu.swapchainRecreate(swapchain)
-            tgpu.check()
-            space.root.w = frame_width
-            space.root.h = frame_height
-            space.root.markLayout()
-        }
-
-        tgpu.swapchainBeginFrame(queue, swapchain, frame)
-        tgpu.check()
-        tgpu.swapchainExtent(swapchain, extent)
-        tgpu.check()
-
-        let ops = space.frame()
-        let count = fill_instances(ops)
-        if count > 0 {
-            tgpu.bufferWrite(
-                instance_buffer,
-                0,
-                instances.cast(FFI.u8),
-                count * INSTANCE_BYTES
-            )
-        }
-
-        ui_push.screen_width = extent.width
-        ui_push.screen_height = extent.height
-
-        let recorder = tgpu.recorderBegin(queue)
-        tgpu.recorderTransitionFrame(recorder, swapchain, frame, tgpu.ImageLayout.COLOR)
-
-        attachment.view = tgpu.swapchainView(swapchain, frame)
-        attachment.layout = tgpu.ImageLayout.COLOR
-        attachment.load = tgpu.LoadOp.CLEAR
-        attachment.store = tgpu.StoreOp.STORE
-        attachment.clear_color.set(0, 0.05)
-        attachment.clear_color.set(1, 0.05)
-        attachment.clear_color.set(2, 0.06)
-        attachment.clear_color.set(3, 1.0)
-        attachments.set(0, attachment)
-
-        render_info.width = extent.width
-        render_info.height = extent.height
-
-        tgpu.recorderBindRender(recorder, pipeline, bindless, ui_push, UiPush.size())
-        tgpu.recorderBeginRender(recorder, render_info)
-        tgpu.recorderDraw(recorder, 0, 6, 0, count)
-        tgpu.recorderEndRender(recorder)
-        tgpu.recorderTransitionFrame(recorder, swapchain, frame, tgpu.ImageLayout.PRESENT)
-        tgpu.check()
-
-        let command = tgpu.recorderFinish(recorder)
-        commands.set(0, command)
-        tgpu.swapchainEndFrame(queue, swapchain, frame, commands, 1)
-        tgpu.commandBufferDestroy(command)
-        tgpu.check()
-
-        space.tick(16)
+    if frame_width <= 0 or frame_height <= 0 {
+        continue
     }
+    if frame_width != extent.width or frame_height != extent.height {
+        extent.width = frame_width
+        extent.height = frame_height
+        gpu.swapchainSetExtent(swapchain, extent)
+        gpu.swapchainRecreate({ swapchain: swapchain })
+        space.root.w = frame_width
+        space.root.h = frame_height
+        space.root.markLayout()
+    }
+
+    let { frame, extent: current, resized } = gpu.acquireFrame(swapchain)
+    extent = current
+
+    let ops = space.frame()
+    let count = fill_instances(ops)
+    if count > 0 {
+        tgpu.bufferWrite(
+            instance_buffer,
+            0,
+            instances.cast(ffi.u8),
+            count * INSTANCE_BYTES
+        )
+    }
+
+    ui_push.screen_width = extent.width
+    ui_push.screen_height = extent.height
+
+    let recorder = gpu.recorderBegin({ queue: queue })
+    gpu.recorderTransitionFrame({
+        recorder: recorder
+        swapchain: swapchain
+        frame: frame
+        layout: tgpu.ImageLayout.color
+    })
+
+    gpu.writeColorAttachment({
+        attachments: attachments
+        index: 0
+        view: gpu.swapchainView({ swapchain: swapchain, frame: frame })
+        layout: tgpu.ImageLayout.color
+        load: tgpu.LoadOp.clear
+        store: tgpu.StoreOp.store
+        clearColor: [0.05, 0.05, 0.06, 1.0]
+    })
+
+    render_info.width = extent.width
+    render_info.height = extent.height
+
+    gpu.render({
+        recorder: recorder
+        desc: render_info
+        pipeline: pipeline
+        bindless: bindless
+        pushConstants: ui_push
+    }, |recorder| {
+        gpu.recorderDraw({
+            recorder: recorder
+            firstVertex: 0
+            vertexCount: count
+            firstInstance: 0
+            instanceCount: 1
+        })
+    })
+    gpu.recorderTransitionFrame({
+        recorder: recorder
+        swapchain: swapchain
+        frame: frame
+        layout: tgpu.ImageLayout.present
+    })
+
+    let command = gpu.recorderFinish({ recorder: recorder })
+    gpu.swapchainEndFrame({
+        queue: queue
+        swapchain: swapchain
+        frame: frame
+        command: command
+    })
+
+    space.tick(16)
 }
 
-tgpu.deviceWaitIdle(device)
-
-tgpu.bindlessDestroy(bindless)
-tgpu.bufferDestroy(instance_buffer)
-tgpu.renderPipelineDestroy(pipeline)
-tgpu.shaderDestroy(shader)
-tgpu.swapchainDestroy(swapchain)
-tgpu.queueDestroy(queue)
-tgpu.deviceDestroy(device)
-tgpu.instanceDestroy(instance)
-
 instances.free()
-mouse.free()
-queues.free()
-color_formats.free()
-attachments.free()
-swapchain_desc.free()
-buffer_desc.free()
-bindless_desc.free()
-pipeline_desc.free()
-render_info.free()
-frame.free()
-extent.free()
-attachment.free()
-commands.free()
-ui_push.free()
-vertex_entry.free()
-fragment_entry.free()
+gpu.dispose()
 
 window.dispose()

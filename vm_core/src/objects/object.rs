@@ -1,5 +1,5 @@
 use crate::{
-    AccessorPair, CValue, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
+    AccessorPair, Atom, CValue, CallableInfoObject, ContextObject, Convert, DETAILS_ACCESSOR,
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
     EdgeVisitable, ElementsKind, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, MapInit, MapKind, NativeIndex,
@@ -1551,6 +1551,9 @@ impl Object {
             return Ok(Tagged::from(Smi::new(i as i64)));
         }
         state.handle_scope(|scope| {
+            if v.as_tagged(heap).get_as::<Atom>(heap).is_some() {
+                return Ok(v.as_tagged(heap).as_name());
+            }
             if v.as_tagged(heap).get_as::<Symbol>(heap).is_some() {
                 return Ok(v.as_tagged(heap).as_name());
             }

@@ -33,6 +33,12 @@ let enum = ffi.enum
 let array = ffi.array
 let buffer = ffi.buffer
 
+let freeAll = |values| {
+    for value in values {
+        value.free()
+    }
+}
+
 mod ffi {
     export void = void
     export bool = bool
@@ -66,4 +72,5 @@ mod ffi {
     export enum = enum
     export array = array
     export buffer = buffer
+    export freeAll = freeAll
 }

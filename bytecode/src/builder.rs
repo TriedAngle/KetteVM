@@ -1,6 +1,6 @@
 use crate::{
-    CallableKind, Opcode, Operand, Scale, emit, program::Constant, program::Function,
-    program::HandlerEntry, program::SwitchTable,
+    CallableKind, Opcode, Operand, Scale, emit, program::AtomSwitchTable, program::Constant,
+    program::Function, program::HandlerEntry, program::SwitchTable,
 };
 use core::cell::Cell;
 use std::{collections::HashMap, sync::atomic::AtomicU32, sync::atomic::Ordering};
@@ -493,6 +493,11 @@ impl FnBuilder {
         ConstIdx(idx)
     }
 
+    /// The constant at `index`, if it is still in the pool.
+    pub fn constant_ref(&self, index: ConstIdx) -> Option<&Constant> {
+        self.constants.get(index.0 as usize)
+    }
+
     /// Number of pool entries interned so far.
     pub fn constants_len(&self) -> usize {
         self.constants.len()
@@ -648,13 +653,6 @@ impl FnBuilder {
         self.emit_tracked(Opcode::LoadNamedProperty, &[obj.operand(), name.0, fb.0]);
     }
 
-    pub fn load_named_property_or_hole(&mut self, obj: Reg, name: ConstIdx, fb: Feedback) {
-        self.emit_tracked(
-            Opcode::LoadNamedPropertyOrHole,
-            &[obj.operand(), name.0, fb.0],
-        );
-    }
-
     pub fn load_own_slot_or_hole(&mut self, obj: Reg, name: ConstIdx) {
         self.emit_tracked(Opcode::LoadOwnSlotOrHole, &[obj.operand(), name.0]);
     }
@@ -677,10 +675,6 @@ impl FnBuilder {
     /// Keyed load: the key is in the accumulator, the result replaces it.
     /// A directly preceding `LoadSmi` with an in-range non-negative value
     /// fuses into [`Opcode::LoadElementImm`].
-    pub fn load_keyed_property_or_hole(&mut self, obj: Reg, fb: Feedback) {
-        self.emit_tracked(Opcode::LoadKeyedPropertyOrHole, &[obj.operand(), fb.0]);
-    }
-
     pub fn load_keyed_property(&mut self, obj: Reg, fb: Feedback) {
         if let LastOp::LoadSmi { at, imm } = self.last
             && (0..=u16::MAX as i32).contains(&imm)
@@ -1013,6 +1007,42 @@ impl FnBuilder {
         Ok(())
     }
 
+    /// Emit an atom jump. `cases` must have unique atom names; the default
+    /// is the final target.
+    pub fn switch_atom(
+        &mut self,
+        value: Reg,
+        cases: &[(Box<[u8]>, Label)],
+        default: Label,
+    ) -> Result<(), BuildError> {
+        self.check_label(default);
+        let mut labels = Vec::with_capacity(cases.len() + 1);
+        let mut atoms = Vec::with_capacity(cases.len());
+        for (atom, label) in cases {
+            self.check_label(*label);
+            atoms.push(atom.clone());
+            labels.push(*label);
+        }
+        labels.push(default);
+        let const_idx = self.constants.len() as u32;
+        self.constants
+            .push(Constant::AtomSwitchTable(AtomSwitchTable {
+                atoms: atoms.into_boxed_slice(),
+                targets: vec![0i32; labels.len()].into_boxed_slice(),
+            }));
+        let at = self.new_label();
+        self.bind(at);
+        self.emit_tracked(Opcode::SwitchAtom, &[value.operand(), const_idx]);
+        self.acc = Acc::Dead;
+        self.last = LastOp::None;
+        self.switch_tables.push(SwitchRec {
+            at,
+            const_idx,
+            labels,
+        });
+        Ok(())
+    }
+
     pub fn jump_if_truthy(&mut self, target: Label) {
         self.emit_cond_jump(Opcode::JumpIfTruthy, target);
     }
@@ -1122,6 +1152,9 @@ impl FnBuilder {
             }
             match &mut self.constants[switch.const_idx as usize] {
                 Constant::SwitchTable(table) => table.targets = targets.into_boxed_slice(),
+                Constant::AtomSwitchTable(table) => {
+                    table.targets = targets.into_boxed_slice();
+                }
                 _ => unreachable!("switch table constant was replaced"),
             }
         }

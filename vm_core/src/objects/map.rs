@@ -1,5 +1,5 @@
 use crate::{
-    AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, Cell, Compare, DenseString,
+    Atom, AtomicGcSlot, AtomicMaybeWeakGcSlot, AtomicOptionGcSlot, Cell, Compare, DenseString,
     EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, MaybeWeak, NativeIndex,
     ObjectKind, OptionGcSlot, PrototypeInfo, Smi, StringRef, Symbol, Tagged, Value, Visitor,
     WeakFixedArray,
@@ -503,6 +503,7 @@ impl MapKind {
     pub const CALLABLE_INFO: MapKind = MapKind(ObjectKind::CallableInfo as u64);
     pub const FLOAT: MapKind = MapKind(ObjectKind::Float as u64);
     pub const SYMBOL: MapKind = MapKind(ObjectKind::Symbol as u64);
+    pub const ATOM: MapKind = MapKind(ObjectKind::Atom as u64);
     pub const HANDLER_TABLE: MapKind = MapKind(ObjectKind::HandlerTable as u64);
     pub const CONTEXT: MapKind = MapKind(ObjectKind::ContextObject as u64);
     pub const SCOPE_INFO: MapKind = MapKind(ObjectKind::ScopeInfo as u64);
@@ -563,6 +564,7 @@ impl MapKind {
             Self::CALLABLE_INFO => ObjectKind::CallableInfo,
             Self::FLOAT => ObjectKind::Float,
             Self::SYMBOL => ObjectKind::Symbol,
+            Self::ATOM => ObjectKind::Atom,
             Self::HANDLER_TABLE => ObjectKind::HandlerTable,
             Self::CONTEXT => ObjectKind::ContextObject,
             Self::SCOPE_INFO => ObjectKind::ScopeInfo,
@@ -801,6 +803,9 @@ impl<'a> Tagged<'a, Value> {
         if let Some(s) = self.get_as::<Symbol>(heap) {
             return Some(Key::Name(s.into()));
         }
+        if let Some(atom) = self.get_as::<Atom>(heap) {
+            return Some(Key::Name(atom.into()));
+        }
         None
     }
 }
@@ -824,6 +829,13 @@ impl<'a> From<Tagged<'a, DenseString>> for Tagged<'a, SlotName> {
     fn from(string: Tagged<'a, DenseString>) -> Self {
         // Safety: type-level narrowing
         unsafe { string.cast() }
+    }
+}
+
+impl<'a> From<Tagged<'a, Atom>> for Tagged<'a, SlotName> {
+    fn from(atom: Tagged<'a, Atom>) -> Self {
+        // Safety: type-level narrowing
+        unsafe { atom.cast() }
     }
 }
 

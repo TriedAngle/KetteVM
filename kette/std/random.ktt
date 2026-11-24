@@ -1,0 +1,21 @@
+use sys
+
+let seed = |value| {
+    sys.raw.srand(value)
+}
+let unit = {
+    sys.raw.rand() / 2147483647.0
+}
+let between = |from, to| {
+    from + unit() * (to - from)
+}
+let int = |from, to| {
+    from + Math.floor(unit() * (to - from + 1))
+}
+
+mod random {
+    export seed = seed
+    export unit = unit
+    export between = between
+    export int = int
+}

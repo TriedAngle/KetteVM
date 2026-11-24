@@ -9,12 +9,10 @@ use sys
 use vendor.glfw
 let { void, i32, u32, f32, CString, ... } = ffi
 
-let gl_path = if sys.name == "macos" {
-    "/System/Library/Frameworks/OpenGL.framework/OpenGL"
-} else if sys.name == "windows" {
-    "opengl32.dll"
-} else {
-    "libGL.so.1"
+let gl_path = match sys.name {
+    "macos" => "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+    "windows" => "opengl32.dll"
+    _ => "libGL.so.1"
 }
 
 let gl = ffi.library(gl_path)
@@ -27,11 +25,11 @@ let GL_COLOR_BUFFER_BIT = 16384
 with(glfw.Window.new("kette + glfw", 640, 480), |window| {
     window.makeContextCurrent()
     window.onKey(|key, action, mods| {
-        if action == Action.PRESS {
-            print(key)
-            if key == Key.ESCAPE {
+        match [action, key] {
+            [:press, :escape] => {
                 window.setShouldClose(true)
             }
+            _ => {}
         }
     })
 

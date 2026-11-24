@@ -1,4 +1,5 @@
 mod builder;
+mod disasm;
 mod opcodes;
 mod program;
 mod validate;
@@ -7,6 +8,7 @@ pub use builder::{
     BuildError, ConstIdx, Feedback, FnBuilder, FunctionMeta, Label, REGISTER_FILE_START, Reg,
     RegList, RtArg, TempScope, TryBlock,
 };
+pub use disasm::{disassemble, disassemble_function};
 pub use opcodes::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
 
 /// Primitive kinds accepted by [`Opcode::TestType`]; `User` compares maps.
@@ -22,11 +24,12 @@ pub enum TestTypeKind {
     Undefined = 6,
     Function = 7,
     User = 8,
+    IntoArray = 9,
 }
 pub use program::{
-    CallableKind, Constant, FrontendDiagnostic, FrontendError, FrontendErrorKind, Function,
-    FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program, ScopeLayout,
-    ScopeLocal, SourceMode, SwitchTable,
+    AtomSwitchTable, CallableKind, Constant, FrontendDiagnostic, FrontendError, FrontendErrorKind,
+    Function, FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program,
+    ScopeLayout, ScopeLocal, SourceMode, SwitchTable,
 };
 pub use validate::{ValidationError, validate, validate_function};
 

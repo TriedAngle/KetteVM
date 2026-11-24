@@ -2,6 +2,7 @@
 // Check: kette/kette_tests/check.py
 
 use ffi
+use random
 use sys
 use sys.file { File, Seek }
 
@@ -71,3 +72,9 @@ let moved = sys.setCwd(before)
 Test.assert(moved, before)
 Test.assert(sys.cwd, before)
 Test.assert(sys.getcwd(), before)
+
+// random is a thin std wrapper around sys.rand/srand.
+random.seed(1)
+let value = random.unit()
+Test.assert(value >= 0.0 and value <= 1.0, true)
+Test.assert(random.int(3, 5) >= 3, true)

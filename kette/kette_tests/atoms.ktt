@@ -1,0 +1,51 @@
+// Atoms: interned names, patterns, and distinct property keys.
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/atoms.ktt
+// Check: kette/kette_tests/check.py
+
+Test.assert(:red == :red, true)
+Test.assert(:red != :blue, true)
+Test.assert(Atom.isAtom(:red), true)
+Test.assert(Atom.isAtom("red"), false)
+Test.assert(Atom.toString(:red), "red")
+Test.assert(Atom.toString(:"with spaces"), "with spaces")
+Test.assert(Atom.fromExistingString("red") == :red, true)
+Test.assert(Atom.fromExistingString("not_registered"), null)
+
+Test.assert(match :red {
+    :red => 1
+    :blue => 2
+    _ => 0
+}, 1)
+
+Test.assert(match { kind: :red } {
+    { kind: :red } => "atom"
+    _ => "other"
+}, "atom")
+
+let object = {}
+object[:key] = "atom"
+object["key"] = "string"
+Test.assert(object[:key], "atom")
+Test.assert(object["key"], "string")
+Test.assert(object[Atom.toString(:key)], "string")
+
+let Color = {
+    red: :red
+    green: :green
+    blue: :blue
+    value: match |color| {
+        :red => 0
+        :green => 1
+        :blue => 2
+        _ => -1
+    }
+    fromValue: match |n| {
+        0 => :red
+        1 => :green
+        2 => :blue
+        _ => null
+    }
+}
+Test.assert(Color.red, :red)
+Test.assert(Color.value(:green), 1)
+Test.assert(Color.fromValue(2), :blue)

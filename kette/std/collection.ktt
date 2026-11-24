@@ -6,6 +6,22 @@ let ConcurrentModificationError = errors.ConcurrentModificationError
 let NoSuchElementError = errors.NoSuchElementError
 let IllegalStateError = errors.IllegalStateError
 
+let range = |from, to| {
+    {
+        iterator: {
+            let value = from
+            {
+                hasNext: { value < to }
+                next: {
+                    let current = value
+                    value = value + 1
+                    current
+                }
+            }
+        }
+    }
+}
+
 let Collection = {
     size: { throw UnimplementedError("size") }
     iterator: { Iter.newWithSource(self) }
@@ -16,6 +32,11 @@ let Collection = {
     isEmpty: { self.size() == 0 }
     nonEmpty: { self.size() > 0 }
     emptyCopy: { throw UnimplementedError("emptyCopy") }
+    intoArray: {
+        let result = []
+        self.forEach(|value| { result.push(value) })
+        result
+    }
     contains: |value| {
         let found = false
         self.forEach(|item| {
@@ -590,6 +611,20 @@ let SequenceTraits = {
     }
     emptyCopy: { Sequence.new() }
     asSequence: { self }
+    intoArray: {
+        let result = []
+        if self.count > 0 {
+            result[self.count - 1] = undefined
+        }
+        let* copy = |i| {
+            if i < self.count {
+                result[i] = self.items[self.start + i]
+                copy(i + 1)
+            }
+        }
+        copy(0)
+        result
+    }
     size: { self.count }
     get: |index| {
         if index < 0 or index >= self.count {
@@ -893,6 +928,7 @@ let Iter = {
 }
 
 mod collection {
+    export range = range
     export Sequence = Sequence
     export Iter = Iter
 

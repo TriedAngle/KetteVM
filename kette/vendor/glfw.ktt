@@ -1,89 +1,68 @@
 use ffi
 use sys
 let { Ptr, void, i32, f64, CString, ... } = ffi
-let KEY_ESCAPE = 256
-let PRESS = 1
-let RELEASE = 0
-let REPEAT = 2
 let CLIENT_API = 139265
 let NO_API = 0
-let OPENGL_API = 196609
 
-let ClientApi = {
-    OPENGL: 0,
-    NONE: 1,
-}
-let Key = {
-    ESCAPE: KEY_ESCAPE,
-}
-let Action = {
-    PRESS: PRESS,
-    RELEASE: RELEASE,
-    REPEAT: REPEAT,
-}
+let ClientApi = ffi.enum({
+    opengl: 0,
+    none: 1,
+})
+let Key = ffi.enum({
+    escape: 256,
+})
+let Action = ffi.enum({
+    release: 0,
+    press: 1,
+    repeat: 2,
+})
 
-let glfw_path = if sys.name == "macos" {
-    "libglfw.dylib"
-} else if sys.name == "windows" {
-    "glfw3.dll"
-} else {
-    "libglfw.so.3"
+let glfw_path = match sys.name {
+    "macos" => "libglfw.dylib"
+    "windows" => "glfw3.dll"
+    _ => "libglfw.so.3"
 }
 
 let lib = sys.lib(glfw_path)
 
-let glfwGetCocoaWindow = if sys.name == "macos" {
-    lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
-} else {
-    null
+let glfwGetCocoaWindow = match sys.name {
+    "macos" => lib.fn("glfwGetCocoaWindow", [Ptr], Ptr)
+    _ => null
 }
 
-let glfwGetX11Display = if sys.name == "linux" {
-    lib.fn("glfwGetX11Display", [], Ptr)
-} else {
-    null
+let glfwGetX11Display = match sys.name {
+    "linux" => lib.fn("glfwGetX11Display", [], Ptr)
+    _ => null
 }
 
-let glfwGetX11Window = if sys.name == "linux" {
-    lib.fn("glfwGetX11Window", [Ptr], Ptr)
-} else {
-    null
+let glfwGetX11Window = match sys.name {
+    "linux" => lib.fn("glfwGetX11Window", [Ptr], Ptr)
+    _ => null
 }
 
-let glfwGetWin32Window = if sys.name == "windows" {
-    lib.fn("glfwGetWin32Window", [Ptr], Ptr)
-} else {
-    null
+let glfwGetWin32Window = match sys.name {
+    "windows" => lib.fn("glfwGetWin32Window", [Ptr], Ptr)
+    _ => null
 }
 
-let objc = if sys.name == "macos" {
-    ffi.library("/usr/lib/libobjc.A.dylib")
-} else {
-    null
+let objc = match sys.name {
+    "macos" => ffi.library("/usr/lib/libobjc.A.dylib")
+    _ => null
 }
 
-let sel_registerName = if sys.name == "macos" {
-    objc.fn("sel_registerName", [CString], Ptr)
-} else {
-    null
+let sel_registerName = match sys.name {
+    "macos" => objc.fn("sel_registerName", [CString], Ptr)
+    _ => null
 }
 
-let objc_msgSend = if sys.name == "macos" {
-    objc.fn("objc_msgSend", [Ptr, Ptr], Ptr)
-} else {
-    null
+let objc_msgSend = match sys.name {
+    "macos" => objc.fn("objc_msgSend", [Ptr, Ptr], Ptr)
+    _ => null
 }
 
 let raw = {
     lib: lib,
     objc: objc,
-    KEY_ESCAPE: KEY_ESCAPE,
-    PRESS: PRESS,
-    RELEASE: RELEASE,
-    REPEAT: REPEAT,
-    CLIENT_API: CLIENT_API,
-    NO_API: NO_API,
-    OPENGL_API: OPENGL_API,
     init: lib.fn("glfwInit", [], i32),
     terminate: lib.fn("glfwTerminate", [], void),
     default_window_hints: lib.fn("glfwDefaultWindowHints", [], void),
@@ -149,13 +128,14 @@ let WindowTraits = {
         }
 
         raw.default_window_hints()
-        let client_api = if options.clientApi == null {
-            ClientApi.OPENGL
-        } else {
-            options.clientApi
+        let client_api = match options.clientApi {
+            null => ClientApi.opengl
+            undefined => ClientApi.opengl
+            value => value
         }
-        if client_api == ClientApi.NONE {
-            raw.window_hint(CLIENT_API, NO_API)
+        match client_api {
+            :none => raw.window_hint(CLIENT_API, NO_API)
+            _ => {}
         }
 
         let window = self.clone()
@@ -236,7 +216,7 @@ let WindowTraits = {
     }
 
     mouseButton: |button| {
-        raw.get_mouse_button(self.handle, button) == PRESS
+        raw.get_mouse_button(self.handle, button) == Action.value(:press)
     }
 
     onKey: |callback| {
@@ -244,7 +224,11 @@ let WindowTraits = {
             [Ptr, i32, i32, i32, i32],
             void,
             |handle, key, scancode, action, mods| {
-                callback(key, action, mods)
+                let key_name = Key.fromValue(key)
+                if key_name == undefined {
+                    key_name = key
+                }
+                callback(key_name, Action.fromValue(action), mods)
             }
         )
         self.keyCallback = wrapped
@@ -274,7 +258,7 @@ let WindowTraits = {
 
     onMouseButton: |callback| {
         let wrapped = ffi.callback([Ptr, i32, i32, i32], void, |handle, button, action, mods| {
-            callback(button, action, mods)
+            callback(button, Action.fromValue(action), mods)
         })
         self.mouseCallback = wrapped
         raw.set_mouse_button_callback(self.handle, wrapped)
@@ -299,19 +283,24 @@ let WindowTraits = {
             throw "vendor.tgpu is not loaded"
         }
         let result = tgpu.Window.new()
-        if sys.name == "macos" {
-            result.kind = tgpu.WindowKind.APP_KIT
-            let ns_window = raw.glfwGetCocoaWindow(self.handle)
-            // [ns_window contentView]
-            let view = raw.objc_msgSend(ns_window, raw.sel_registerName("contentView"))
-            result.window = view
-        } else if sys.name == "linux" {
-            result.kind = tgpu.WindowKind.XLIB
-            result.display = raw.glfwGetX11Display()
-            result.window = raw.glfwGetX11Window(self.handle)
-        } else if sys.name == "windows" {
-            result.kind = tgpu.WindowKind.WIN32
-            result.window = raw.glfwGetWin32Window(self.handle)
+        match sys.name {
+            "macos" => {
+                result.kind = tgpu.WindowKind.appKit
+                let ns_window = raw.glfwGetCocoaWindow(self.handle)
+                // [ns_window contentView]
+                let view = raw.objc_msgSend(ns_window, raw.sel_registerName("contentView"))
+                result.window = view
+            }
+            "linux" => {
+                result.kind = tgpu.WindowKind.xlib
+                result.display = raw.glfwGetX11Display()
+                result.window = raw.glfwGetX11Window(self.handle)
+            }
+            "windows" => {
+                result.kind = tgpu.WindowKind.win32
+                result.window = raw.glfwGetWin32Window(self.handle)
+            }
+            _ => {}
         }
         result
     }

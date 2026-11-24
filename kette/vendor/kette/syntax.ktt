@@ -1,0 +1,189 @@
+use collection.traits { Collection }
+use ffi
+use kette
+
+let raw = kette.raw
+
+let TOKEN_BIT = 2147483648
+let NO_NODE = 4294967295
+
+// One atom per SyntaxKind, in declaration order.
+let KINDS = [
+    :Tombstone, :Error, :Missing, :Eof, :Whitespace, :Newline, :LineComment,
+    :BlockComment, :Ident, :Number, :String, :QuotedName, :LParen, :RParen,
+    :LBrace, :RBrace, :LBracket, :RBracket, :Comma, :Period, :Colon,
+    :Semicolon, :Star, :Assign, :Pipe, :And, :Or, :EqEq, :NotEq, :Lt, :Gt,
+    :LtEq, :GtEq, :Plus, :Minus, :Slash, :Percent, :Bang, :LtLt, :GtGt,
+    :Let, :Mod, :If, :Else, :While, :For, :In, :SelfKw, :Null, :True,
+    :False, :Return, :Break, :Continue, :As, :SelfContext, :Try, :Catch, :Throw,
+    :LetStar, :Ellipsis, :PlusEq, :MinusEq, :StarEq, :SlashEq, :PercentEq,
+    :AndEq, :OrEq, :LtLtEq, :GtGtEq, :FatArrow, :Match, :Script, :Body,
+    :ExprStmt, :LetStmt, :Object, :Slot, :SlotMulti, :ParamList, :ArgList,
+    :Array, :PatternName, :PatternArray, :Get, :Index, :Send, :Call,
+    :AssignExpr, :Unary, :Binary, :ReturnStmt, :BreakStmt, :ContinueStmt, :ThrowExpr,
+    :TryExpr, :IfExpr, :WhileExpr, :ForExpr, :ModDecl, :UseDecl, :UseTree,
+    :ExportDecl, :Paren, :Atom, :Path, :ErrorNode, :PatternAlias,
+    :MatchExpr, :MatchArm, :PatternLiteral, :PatternWildcard,
+    :PatternObject, :PatternField, :PatternType, :PatternOr, :PatternValue,
+    :PatternAtom, :AtomLiteral,
+]
+
+if raw.kindCount() != KINDS.length {
+    throw "kette: syntax kind table is out of date"
+}
+
+let isTrivia = match |kind| {
+    :Whitespace | :Newline | :LineComment | :BlockComment => true
+    _ => false
+}
+
+let Token = {
+    tree: null
+    index: 0
+
+    kind>>: { self.tree.tokenKind(self.index) }
+    text>>: { self.tree.tokenText(self.index) }
+    start>>: { self.tree.tokenStart(self.index) }
+    end>>: { self.tree.tokenEnd(self.index) }
+    parentId>>: { self.tree.tokenParent(self.index) }
+    parent>>: { self.tree.nodeKind(self.parentId) }
+    isTrivia>>: { isTrivia(self.kind) }
+}
+
+let Tokens = {
+    collection*: Collection
+
+    tree: null
+    start: 0
+    end: 0
+    version: 0
+
+    size: { self.end - self.start }
+    tokenAt: |index| {
+        let token = Token.clone()
+        token.tree = self.tree
+        token.index = index
+        token
+    }
+    get: |index| { self.tokenAt(self.start + index) }
+    forEach: |block| {
+        let* visit = |index| {
+            if index < self.end {
+                block(self.tokenAt(index))
+                visit(index + 1)
+            }
+        }
+        visit(self.start)
+        self
+    }
+    firstWhere: |predicate| {
+        let* visit = |index| {
+            if index < self.end {
+                let token = self.tokenAt(index)
+                if predicate(token) {
+                    return token
+                }
+                visit(index + 1)
+            } else {
+                null
+            }
+        }
+        visit(self.start)
+    }
+}
+
+let Tree = {
+    ptr: null
+
+    root>>: { raw.root(self.ptr) }
+    source>>: { ffi.string(raw.sourcePtr(self.ptr), raw.sourceLen(self.ptr)) }
+    nodeCount>>: { raw.nodeCount(self.ptr) }
+    tokenCount>>: { raw.tokenCount(self.ptr) }
+    errorCount>>: { raw.errorCount(self.ptr) }
+
+    nodeKind: |node| { KINDS[raw.nodeKind(self.ptr, node)] }
+    nodeStart: |node| { raw.nodeStart(self.ptr, node) }
+    nodeEnd: |node| { raw.nodeEnd(self.ptr, node) }
+    nodeParent: |node| { raw.nodeParent(self.ptr, node) }
+    nodeChildCount: |node| { raw.nodeChildCount(self.ptr, node) }
+    nodeChild: |node, index| { raw.nodeChild(self.ptr, node, index) }
+    nodeText: |node| {
+        ffi.string(raw.nodeTextPtr(self.ptr, node), raw.nodeTextLen(self.ptr, node))
+    }
+
+    tokenKind: |token| { KINDS[raw.tokenKind(self.ptr, token)] }
+    tokenStart: |token| { raw.tokenStart(self.ptr, token) }
+    tokenEnd: |token| { raw.tokenEnd(self.ptr, token) }
+    tokenParent: |token| { raw.tokenParent(self.ptr, token) }
+    tokenText: |token| {
+        ffi.string(raw.tokenTextPtr(self.ptr, token), raw.tokenTextLen(self.ptr, token))
+    }
+
+    tokens>>: {
+        let tokens = Tokens.clone()
+        tokens.tree = self
+        tokens.start = 0
+        tokens.end = self.tokenCount
+        tokens
+    }
+    tokensFrom: |start| {
+        let tokens = Tokens.clone()
+        tokens.tree = self
+        tokens.start = start
+        tokens.end = self.tokenCount
+        tokens
+    }
+
+    errorStart: |index| { raw.errorStart(self.ptr, index) }
+    errorEnd: |index| { raw.errorEnd(self.ptr, index) }
+    errorMessage: |index| {
+        ffi.string(raw.errorMessagePtr(self.ptr, index), raw.errorMessageLen(self.ptr, index))
+    }
+
+    dispose: {
+        if !ffi.isNull(self.ptr) {
+            raw.free(self.ptr)
+            self.ptr = null
+        }
+    }
+}
+
+let isTokenChild = |child| {
+    child >= TOKEN_BIT
+}
+let childId = |child| {
+    if child >= TOKEN_BIT {
+        return child - TOKEN_BIT
+    }
+    child
+}
+
+let parse = |source| {
+    let ptr = raw.parse(source)
+    if ffi.isNull(ptr) {
+        throw "kette: cannot parse source"
+    }
+    let tree = Tree.clone()
+    tree.ptr = ptr
+    tree
+}
+
+let parseFile = |path| {
+    let ptr = raw.parseFile(path)
+    if ffi.isNull(ptr) {
+        throw "kette: cannot read or parse " + path
+    }
+    let tree = Tree.clone()
+    tree.ptr = ptr
+    tree
+}
+
+mod kette.syntax {
+    export TOKEN_BIT = TOKEN_BIT
+    export NO_NODE = NO_NODE
+    export isTrivia = isTrivia
+    export isTokenChild = isTokenChild
+    export childId = childId
+    export parse = parse
+    export parseFile = parseFile
+}

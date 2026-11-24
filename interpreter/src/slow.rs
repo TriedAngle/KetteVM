@@ -927,43 +927,6 @@ pub fn slow_keyed_load(frame: Frame) {
     reenter!(pc)
 }
 
-#[handler(LoadKeyedPropertyOrHole)]
-#[cold]
-pub fn slow_keyed_load_or_hole(frame: Frame) {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let fb = frame.unsigned::<1>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let raw_key = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        if recv.as_tagged(heap).is_nullish(heap) {
-            raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
-        }
-        let key = scope.handle(rt_try!(
-            heap,
-            Object::to_property_key(vm, heap, state, raw_key)
-        ));
-        load_keyed_body(
-            vm,
-            heap,
-            state,
-            roots,
-            &scope,
-            base,
-            fb,
-            recv,
-            key.erase(),
-            false,
-            true,
-        )
-    });
-    frame.set_acc(v);
-    reenter!(pc)
-}
-
 #[handler(LoadIndexed)]
 #[cold]
 pub fn slow_indexed_load(frame: Frame) {
@@ -1134,7 +1097,7 @@ pub fn slow_global_getter(frame: Frame) {
 }
 
 macro_rules! named_load_slow {
-    ($op:ident, $name:ident, $or_hole:expr) => {
+    ($op:ident, $name:ident) => {
         #[handler($op)]
         pub fn $name(frame: Frame) {
             let pc = frame.pc();
@@ -1152,11 +1115,7 @@ macro_rules! named_load_slow {
                         .callable(heap, base)
                         .constant_slot_name(heap, name_idx),
                 );
-                let out = if $or_hole {
-                    Object::get_property_or_hole(vm, heap, state, recv, recv, name.erase())
-                } else {
-                    Object::get_property(vm, heap, state, recv, recv, name.erase(), false)
-                };
+                let out = Object::get_property(vm, heap, state, recv, recv, name.erase(), false);
                 let out = match out {
                     Ok(v) => scope.handle(v),
                     Err(e) => return Acc::set(raise_runtime(heap, e)),
@@ -1184,8 +1143,7 @@ macro_rules! named_load_slow {
     };
 }
 
-named_load_slow!(LoadNamedProperty, slow_named_load, false);
-named_load_slow!(LoadNamedPropertyOrHole, slow_named_load_or_hole, true);
+named_load_slow!(LoadNamedProperty, slow_named_load);
 
 #[allow(clippy::too_many_arguments)]
 pub fn global_load_body<'a>(

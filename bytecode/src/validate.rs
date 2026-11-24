@@ -143,7 +143,7 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
                     offset: ops.imm(2),
                 });
             }
-            Opcode::SwitchInt => {
+            Opcode::SwitchInt | Opcode::SwitchAtom => {
                 switches.push(SwitchSite {
                     pc,
                     table: ops.idx(1) as u32,
@@ -157,7 +157,12 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
 
     match last {
         Some(
-            Opcode::Return | Opcode::Jump | Opcode::JumpLoop | Opcode::Throw | Opcode::SwitchInt,
+            Opcode::Return
+            | Opcode::Jump
+            | Opcode::JumpLoop
+            | Opcode::Throw
+            | Opcode::SwitchInt
+            | Opcode::SwitchAtom,
         ) => {}
         _ => return Err(ValidationError::MissingTerminal),
     }
@@ -179,11 +184,12 @@ pub fn validate_function(f: &Function, program_len: usize) -> Result<(), Validat
     }
 
     for site in &switches {
-        let table = match f.constants.get(site.table as usize) {
-            Some(Constant::SwitchTable(table)) => table,
+        let targets = match f.constants.get(site.table as usize) {
+            Some(Constant::SwitchTable(table)) => &table.targets,
+            Some(Constant::AtomSwitchTable(table)) => &table.targets,
             _ => return Err(ValidationError::BadSwitchTable { pc: site.pc }),
         };
-        for &offset in table.targets.iter() {
+        for &offset in targets.iter() {
             let target = site.pc as i64 + offset as i64;
             if target < 0
                 || target as usize >= f.code.len()
