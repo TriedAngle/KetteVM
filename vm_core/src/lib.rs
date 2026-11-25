@@ -28,6 +28,7 @@ pub mod ic;
 pub mod interner;
 pub mod interpreter;
 pub mod intrinsics;
+pub mod json;
 pub mod language;
 pub mod lookup;
 pub mod materialize;

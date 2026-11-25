@@ -3,6 +3,7 @@
 //! the array exotic object's `length` accessor.
 
 use crate::ffi::bindings;
+use crate::json;
 use crate::{
     AccessorInfo, Args, CallInfo, CallableInfoInit, CallableInfoObject, ContextObject, Convert,
     EdgeVisitable, FixedArray, FunctionKind, Handle, HandleScope, Heap, HostCtx, INFO_GLOBAL,
@@ -115,6 +116,8 @@ impl Runtime for VmCore {
         let throw_index = vm.register_native(throw_type_error);
         let getter = vm.register_native(array_length_get);
         let setter = vm.register_native(array_length_set);
+        let json_parse = vm.register_native(json::parse_native);
+        let json_stringify = vm.register_native(json::stringify_native);
         debug_assert_eq!(setter.0, getter.0 + 1);
         let tools = [
             vm.register_native(KetteTools::force_minor_gc),
@@ -247,6 +250,7 @@ impl Runtime for VmCore {
             {
                 info.as_ref().set_natives(heap, Some(getter), Some(setter));
             }
+            json::install(heap, &scope, vm.interner(), json_parse, json_stringify);
             KetteTools::install(thread.heap(), vm.known(), vm.interner(), &scope, tools)
         });
         drop(thread);
