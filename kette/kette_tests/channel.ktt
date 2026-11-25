@@ -1,0 +1,153 @@
+// Thread-safe channel.
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/channel.ktt
+// Check: kette/kette_tests/check.py
+
+use collection.channel { Channel }
+use collection.sequence { Sequence }
+use sync { Mutex }
+
+let channel = Channel.newWithCapacity(2)
+Test.assert(channel.capacity(), 2)
+Test.assert(channel.size(), 0)
+Test.assert(channel.isEmpty(), true)
+Test.assert(channel.isFull(), false)
+Test.assert(channel.tryReceive(), None)
+Test.assert(channel.trySend("a"), true)
+Test.assert(channel.trySend("b"), true)
+Test.assert(channel.trySend("c"), false)
+Test.assert(channel.size(), 2)
+Test.assert(channel.isFull(), true)
+Test.assert(channel.receive(), "a")
+Test.assert(channel.receive(), "b")
+Test.assert(channel.tryReceive(), None)
+Test.assert(channel.isEmpty(), true)
+
+let closed = Channel.newWithCapacity(1)
+Test.assert(closed.send("x"), true)
+Test.assert(closed.close() == closed, true)
+Test.assert(closed.isClosed(), true)
+Test.assert(closed.send("y"), false)
+Test.assert(closed.receive(), "x")
+let threw = false
+try {
+    closed.receive()
+} catch (e) {
+    threw = e.name == "ChannelClosed"
+}
+Test.assert(threw, true)
+
+let blocking = Channel.newWithCapacity(1)
+let received = Sequence.new()
+let receivedLock = Mutex.new()
+let producer = Thread.newVirtual("producer", {
+    let i = 0
+    while i < 4 {
+        blocking.send(i)
+        i = i + 1
+    }
+})
+let consumer = Thread.newVirtual("consumer", {
+    let i = 0
+    while i < 4 {
+        let value = blocking.receive()
+        receivedLock.lock()
+        received.add(value)
+        receivedLock.unlock()
+        i = i + 1
+    }
+})
+consumer.start()
+producer.start()
+producer.join()
+consumer.join()
+Test.assert(received.size(), 4)
+Test.assert(received.get(0), 0)
+Test.assert(received.get(1), 1)
+Test.assert(received.get(2), 2)
+Test.assert(received.get(3), 3)
+
+let shared = Channel.newWithCapacity(4)
+let collected = Sequence.new()
+let collectedLock = Mutex.new()
+let producerA = Thread.newVirtual("producer-a", {
+    let i = 0
+    while i < 5 {
+        shared.send(i)
+        i = i + 1
+    }
+})
+let producerB = Thread.newVirtual("producer-b", {
+    let i = 0
+    while i < 5 {
+        shared.send(100 + i)
+        i = i + 1
+    }
+})
+let consumerA = Thread.newVirtual("consumer-a", {
+    let i = 0
+    while i < 5 {
+        let value = shared.receive()
+        collectedLock.lock()
+        collected.add(value)
+        collectedLock.unlock()
+        i = i + 1
+    }
+})
+let consumerB = Thread.newVirtual("consumer-b", {
+    let i = 0
+    while i < 5 {
+        let value = shared.receive()
+        collectedLock.lock()
+        collected.add(value)
+        collectedLock.unlock()
+        i = i + 1
+    }
+})
+consumerA.start()
+consumerB.start()
+producerA.start()
+producerB.start()
+producerA.join()
+producerB.join()
+consumerA.join()
+consumerB.join()
+Test.assert(collected.size(), 10)
+Test.assert(collected.contains(0), true)
+Test.assert(collected.contains(4), true)
+Test.assert(collected.contains(100), true)
+Test.assert(collected.contains(104), true)
+
+let closing = Channel.newWithCapacity(1)
+let waiterClosed = { value: false }
+let waiter = Thread.newVirtual("waiter", {
+    try {
+        closing.receive()
+    } catch (e) {
+        waiterClosed.value = e.name == "ChannelClosed"
+    }
+})
+waiter.start()
+closing.close()
+waiter.join()
+Test.assert(waiterClosed.value, true)
+
+let full = Channel.newWithCapacity(1)
+full.send("x")
+let sendResult = { value: true }
+let blocked = Thread.newVirtual("blocked-sender", {
+    sendResult.value = full.send("y")
+})
+blocked.start()
+Thread.yield()
+full.close()
+blocked.join()
+Test.assert(sendResult.value, false)
+
+let disposable = Channel.newWithCapacity(1)
+Test.assert(disposable.dispose != undefined, true)
+let disposedValue = with(disposable, |channel| {
+    Test.assert(channel, disposable)
+    7
+})
+Test.assert(disposedValue, 7)
+Test.assert(disposable.isClosed(), true)

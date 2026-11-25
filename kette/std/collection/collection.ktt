@@ -6,22 +6,6 @@ let ConcurrentModificationError = errors.ConcurrentModificationError
 let NoSuchElementError = errors.NoSuchElementError
 let IllegalStateError = errors.IllegalStateError
 
-let range = |from, to| {
-    {
-        iterator: {
-            let value = from
-            {
-                hasNext: { value < to }
-                next: {
-                    let current = value
-                    value = value + 1
-                    current
-                }
-            }
-        }
-    }
-}
-
 let Collection = {
     size: { throw UnimplementedError("size") }
     iterator: { Iter.newWithSource(self) }
@@ -203,7 +187,7 @@ let Collection = {
     copyFilteredBy: |block| {
         self.filter(self.emptyCopy(), block)
     }
-    asSequence: { Sequence.from(self) }
+    asSequence: { Modules.collection.sequence.Sequence.from(self) }
 }
 
 let MutableCollection = {
@@ -222,8 +206,8 @@ let MutableCollection = {
         self
     }
     mapSelf: |block| {
-        let values = Sequence.new()
-        let keys = Sequence.new()
+        let values = Modules.collection.sequence.Sequence.new()
+        let keys = Modules.collection.sequence.Sequence.new()
         self.forEachWithKey(|value, key| {
             values.add(value)
             keys.add(key)
@@ -235,8 +219,8 @@ let MutableCollection = {
         self
     }
     filterSelf: |block| {
-        let values = Sequence.new()
-        let keys = Sequence.new()
+        let values = Modules.collection.sequence.Sequence.new()
+        let keys = Modules.collection.sequence.Sequence.new()
         self.forEachWithKey(|value, key| {
             values.add(value)
             keys.add(key)
@@ -309,7 +293,7 @@ let Indexable = {
         }
     }
     keys: {
-        self.map(Sequence.new(), |value, key| { key })
+        self.map(Modules.collection.sequence.Sequence.new(), |value, key| { key })
     }
     indexOf: |value| {
         let iterator = self.iterator()
@@ -575,310 +559,6 @@ let MutableIndexable = {
     }
 }
 
-// A growable sequence: a vector with a movable start.
-let SequenceTraits = {
-    indexable*: MutableIndexable
-    collection*: MutableCollection
-    new: {
-        self.newWithSize(0)
-    }
-    newWithSize: |size| {
-        self.newWithSizeFill(size, undefined)
-    }
-    newWithSizeFill: |size, fill| {
-        if size < 0 or size % 1 != 0 {
-            throw IndexOutOfBounds("sequence size out of range", size, 0)
-        }
-        let sequence = self.clone()
-        let items = []
-        let* visit = |i| {
-            if i < size {
-                items[i] = fill
-                visit(i + 1)
-            }
-        }
-        visit(0)
-        sequence.items = items
-        sequence.start = 0
-        sequence.count = size
-        sequence.version = 0
-        sequence
-    }
-    from: |collection| {
-        let result = Sequence.new()
-        collection.forEach(|item| { result.add(item) })
-        result
-    }
-    emptyCopy: { Sequence.new() }
-    asSequence: { self }
-    intoArray: {
-        let result = []
-        if self.count > 0 {
-            result[self.count - 1] = undefined
-        }
-        let* copy = |i| {
-            if i < self.count {
-                result[i] = self.items[self.start + i]
-                copy(i + 1)
-            }
-        }
-        copy(0)
-        result
-    }
-    size: { self.count }
-    get: |index| {
-        if index < 0 or index >= self.count {
-            throw IndexOutOfBounds("index out of range", index, self.size())
-        }
-        self.items[self.start + index]
-    }
-    setAt: |index, value| {
-        if index < 0 or index >= self.count {
-            throw IndexOutOfBounds("index out of range", index, self.size())
-        }
-        self.items[self.start + index] = value
-        value
-    }
-    add: |value| { self.addLast(value) }
-    addFirst: |value| {
-        self.ensureHead(1)
-        self.start = self.start - 1
-        self.items[self.start] = value
-        self.count = self.count + 1
-        self.version = self.version + 1
-        self
-    }
-    addLast: |value| {
-        self.ensureTail(1)
-        self.items[self.start + self.count] = value
-        self.count = self.count + 1
-        self.version = self.version + 1
-        self
-    }
-    addAllFirst: |collection| {
-        let collection_copy = Sequence.from(collection)
-        let* visit = |i| {
-            if i >= 0 {
-                self.addFirst(collection_copy.get(i))
-                visit(i - 1)
-            }
-        }
-        visit(collection_copy.size() - 1)
-        self
-    }
-    addAllLast: |collection| { self.addAll(collection) }
-    removeFirst: {
-        if self.count == 0 {
-            throw ElementDoesNotExist("removeFirst from empty sequence")
-        }
-        let value = self.items[self.start]
-        self.items[self.start] = null
-        self.start = self.start + 1
-        self.count = self.count - 1
-        if self.count == 0 {
-            self.start = 0
-        }
-        self.version = self.version + 1
-        value
-    }
-    removeFirst?: {
-        if self.count == 0 {
-            None
-        } else {
-            self.removeFirst()
-        }
-    }
-    removeLast: {
-        if self.count == 0 {
-            throw ElementDoesNotExist("removeLast from empty sequence")
-        }
-        self.count = self.count - 1
-        let value = self.items[self.start + self.count]
-        self.items[self.start + self.count] = null
-        if self.count == 0 {
-            self.start = 0
-        }
-        self.version = self.version + 1
-        value
-    }
-    removeLast?: {
-        if self.count == 0 {
-            None
-        } else {
-            self.removeLast()
-        }
-    }
-    insert: |index, value| {
-        if index < 0 or index > self.count {
-            throw IndexOutOfBounds("insert index out of range", index, self.count)
-        }
-        if index == 0 {
-            return self.addFirst(value)
-        }
-        if index == self.count {
-            return self.addLast(value)
-        }
-        self.ensureTail(1)
-        let* visit = |i| {
-            if i > index {
-                self.items[self.start + i] = self.items[self.start + i - 1]
-                visit(i - 1)
-            }
-        }
-        visit(self.count)
-        self.items[self.start + index] = value
-        self.count = self.count + 1
-        self.version = self.version + 1
-        self
-    }
-    removeAt: |index| {
-        if index < 0 or index >= self.count {
-            throw IndexOutOfBounds("index out of range", index, self.size())
-        }
-        if index == 0 {
-            return self.removeFirst()
-        }
-        if index == self.count - 1 {
-            return self.removeLast()
-        }
-        let value = self.items[self.start + index]
-        let* visit = |i| {
-            if i < self.count - 1 {
-                self.items[self.start + i] = self.items[self.start + i + 1]
-                visit(i + 1)
-            }
-        }
-        visit(index)
-        self.items[self.start + self.count - 1] = null
-        self.count = self.count - 1
-        self.version = self.version + 1
-        value
-    }
-    removeRange: |start, stop| {
-        if start < 0 or stop < start or stop > self.count {
-            throw IndexOutOfBounds("range out of bounds", start, self.count)
-        }
-        let count = stop - start
-        let* visit = |i| {
-            if i < count {
-                self.removeAt(start)
-                visit(i + 1)
-            }
-        }
-        visit(0)
-        self
-    }
-    clear: {
-        let* visit = |i| {
-            if i < self.count {
-                self.items[self.start + i] = null
-                visit(i + 1)
-            }
-        }
-        visit(0)
-        self.start = 0
-        self.count = 0
-        self.version = self.version + 1
-        self
-    }
-    compress: {
-        let capacity = self.count
-        if capacity == 0 {
-            self.items = []
-        } else {
-            let next = []
-            next[capacity - 1] = null
-            let* visit = |i| {
-                if i < self.count {
-                    next[i] = self.items[self.start + i]
-                    visit(i + 1)
-                }
-            }
-            visit(0)
-            self.items = next
-        }
-        self.start = 0
-        self
-    }
-    ensureTail: |space| {
-        if self.start + self.count + space <= self.items.length {
-            return 0
-        }
-        if self.count + space <= self.items.length {
-            let* move = |i| {
-                if i < self.count {
-                    self.items[i] = self.items[self.start + i]
-                    move(i + 1)
-                }
-            }
-            move(0)
-            self.start = 0
-            return 0
-        }
-        let capacity = self.items.length * 2
-        if capacity < 4 {
-            capacity = 4
-        }
-        if capacity < self.count + space {
-            capacity = self.count + space
-        }
-        let next = []
-        next[capacity - 1] = null
-        let* copy = |i| {
-            if i < self.count {
-                next[i] = self.items[self.start + i]
-                copy(i + 1)
-            }
-        }
-        copy(0)
-        self.items = next
-        self.start = 0
-    }
-    ensureHead: |space| {
-        if self.start >= space {
-            return 0
-        }
-        if self.count + space <= self.items.length {
-            let new_start = self.items.length - self.count
-            let* move = |i| {
-                if i >= 0 {
-                    self.items[new_start + i] = self.items[self.start + i]
-                    move(i - 1)
-                }
-            }
-            move(self.count - 1)
-            self.start = new_start
-            return 0
-        }
-        let capacity = self.items.length * 2
-        if capacity < 4 {
-            capacity = 4
-        }
-        if capacity < self.count + space {
-            capacity = self.count + space
-        }
-        let new_start = capacity - self.count
-        let next = []
-        next[capacity - 1] = null
-        let* copy = |i| {
-            if i < self.count {
-                next[new_start + i] = self.items[self.start + i]
-                copy(i + 1)
-            }
-        }
-        copy(0)
-        self.items = next
-        self.start = new_start
-    }
-}
-
-let Sequence = {
-    traits*: SequenceTraits
-    items, start, count: undefined
-    // Own slot: parent writes mutate the holder.
-    version: 0
-}
-
 // The built-in iterator; custom iterables only need hasNext/next.
 let IteratorTraits = {
     hasNext: { self.index < self.source.size() }
@@ -927,17 +607,10 @@ let Iter = {
     }
 }
 
-mod collection {
-    export range = range
-    export Sequence = Sequence
-    export Iter = Iter
-
-    mod collection.traits {
-        export Collection = Collection
-        export MutableCollection = MutableCollection
-        export Indexable = Indexable
-        export MutableIndexable = MutableIndexable
-        export SequenceTraits = SequenceTraits
-        export IteratorTraits = IteratorTraits
-    }
+mod collection.traits {
+    export Collection = Collection
+    export MutableCollection = MutableCollection
+    export Indexable = Indexable
+    export MutableIndexable = MutableIndexable
+    export IteratorTraits = IteratorTraits
 }

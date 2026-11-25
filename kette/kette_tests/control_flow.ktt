@@ -1,7 +1,7 @@
 // Run:  cargo run -q -p vm -- kette/kette_tests/control_flow.ktt
 // Check: kette/kette_tests/check.py
 
-use collection { range }
+use collection.sequence { range }
 
 let n = 2
 

@@ -3,7 +3,7 @@
 // Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/match.ktt
 // Check: kette/kette_tests/check.py
 
-use collection { Sequence }
+use collection.sequence { Sequence }
 
 Test.assert(match 2 {
     0 => "zero"

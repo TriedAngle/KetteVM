@@ -1,4 +1,4 @@
-use collection { Sequence }
+use collection.sequence { Sequence }
 
 let seq = |values| {
     let result = Sequence.new()

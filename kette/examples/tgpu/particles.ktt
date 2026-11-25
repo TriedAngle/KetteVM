@@ -5,7 +5,7 @@ KetteTools.evalFile("kette/std/startup.ktt")
 KetteTools.evalFile("kette/vendor/tgpu.ktt")
 KetteTools.evalFile("kette/vendor/glfw.ktt")
 
-use collection { range }
+use collection.sequence { range }
 use ffi
 use random
 use sys

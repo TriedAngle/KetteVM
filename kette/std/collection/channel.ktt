@@ -1,0 +1,142 @@
+use error { IndexOutOfBounds }
+use error.traits { ErrorTraits }
+use sync { Condition, Mutex }
+
+let ChannelClosed = {
+    traits*: ErrorTraits
+    name: "ChannelClosed"
+    message: ""
+}
+
+let ChannelTraits = {
+    disposable*: Disposable
+    new: { self.newWithCapacity(16) }
+    newWithCapacity: |capacity| {
+        if capacity < 1 or capacity % 1 != 0 {
+            throw IndexOutOfBounds("channel capacity out of range", capacity, 1)
+        }
+        let channel = self.clone()
+        channel.items = []
+        channel.items[capacity - 1] = undefined
+        channel.head = 0
+        channel.count = 0
+        channel.limit = capacity
+        channel.closed = false
+        channel.lock = Mutex.new()
+        channel.notEmpty = Condition.new()
+        channel.notFull = Condition.new()
+        channel
+    }
+    send: |value| {
+        self.lock.lock()
+        while self.count == self.limit and !self.closed {
+            self.notFull.await(self.lock)
+        }
+        if self.closed {
+            self.lock.unlock()
+            return false
+        }
+        let index = (self.head + self.count) % self.limit
+        self.items[index] = value
+        self.count = self.count + 1
+        self.notEmpty.signal()
+        self.lock.unlock()
+        true
+    }
+    receive: {
+        self.lock.lock()
+        while self.count == 0 and !self.closed {
+            self.notEmpty.await(self.lock)
+        }
+        if self.count == 0 {
+            self.lock.unlock()
+            throw ChannelClosed.new("receive from closed channel")
+        }
+        let value = self.items[self.head]
+        self.items[self.head] = undefined
+        self.head = (self.head + 1) % self.limit
+        self.count = self.count - 1
+        self.notFull.signal()
+        self.lock.unlock()
+        value
+    }
+    trySend: |value| {
+        self.lock.lock()
+        if self.closed or self.count == self.limit {
+            self.lock.unlock()
+            return false
+        }
+        let index = (self.head + self.count) % self.limit
+        self.items[index] = value
+        self.count = self.count + 1
+        self.notEmpty.signal()
+        self.lock.unlock()
+        true
+    }
+    tryReceive: {
+        self.lock.lock()
+        if self.count == 0 {
+            self.lock.unlock()
+            return None
+        }
+        let value = self.items[self.head]
+        self.items[self.head] = undefined
+        self.head = (self.head + 1) % self.limit
+        self.count = self.count - 1
+        self.notFull.signal()
+        self.lock.unlock()
+        value
+    }
+    close: {
+        self.lock.lock()
+        if !self.closed {
+            self.closed = true
+            self.notEmpty.signalAll()
+            self.notFull.signalAll()
+        }
+        self.lock.unlock()
+        self
+    }
+    dispose: { self.close() }
+    isClosed: {
+        self.lock.lock()
+        let closed = self.closed
+        self.lock.unlock()
+        closed
+    }
+    size: {
+        self.lock.lock()
+        let count = self.count
+        self.lock.unlock()
+        count
+    }
+    capacity: {
+        self.lock.lock()
+        let capacity = self.limit
+        self.lock.unlock()
+        capacity
+    }
+    isEmpty: {
+        self.lock.lock()
+        let empty = self.count == 0
+        self.lock.unlock()
+        empty
+    }
+    isFull: {
+        self.lock.lock()
+        let full = self.count == self.limit
+        self.lock.unlock()
+        full
+    }
+}
+
+let Channel = {
+    traits*: ChannelTraits
+    items, head, count, limit, closed, lock, notEmpty, notFull: undefined
+}
+
+mod collection.channel {
+    export Channel = Channel
+    export ChannelClosed = ChannelClosed
+    export ChannelTraits = ChannelTraits
+}

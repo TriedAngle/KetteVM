@@ -2,7 +2,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/std/functional.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/iterators.ktt
 // Check: kette/kette_tests/check.py
 
-use collection { Sequence }
+use collection.sequence { Sequence }
 
 let s = Sequence.new()
 s.add(1)
