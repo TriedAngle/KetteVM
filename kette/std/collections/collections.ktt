@@ -187,7 +187,7 @@ let Collection = {
     copyFilteredBy: |block| {
         self.filter(self.emptyCopy(), block)
     }
-    asSequence: { Modules.collection.sequence.Sequence.from(self) }
+    asSequence: { Modules.collections.sequence.Sequence.from(self) }
 }
 
 let MutableCollection = {
@@ -206,8 +206,8 @@ let MutableCollection = {
         self
     }
     mapSelf: |block| {
-        let values = Modules.collection.sequence.Sequence.new()
-        let keys = Modules.collection.sequence.Sequence.new()
+        let values = Modules.collections.sequence.Sequence.new()
+        let keys = Modules.collections.sequence.Sequence.new()
         self.forEachWithKey(|value, key| {
             values.add(value)
             keys.add(key)
@@ -219,8 +219,8 @@ let MutableCollection = {
         self
     }
     filterSelf: |block| {
-        let values = Modules.collection.sequence.Sequence.new()
-        let keys = Modules.collection.sequence.Sequence.new()
+        let values = Modules.collections.sequence.Sequence.new()
+        let keys = Modules.collections.sequence.Sequence.new()
         self.forEachWithKey(|value, key| {
             values.add(value)
             keys.add(key)
@@ -293,7 +293,7 @@ let Indexable = {
         }
     }
     keys: {
-        self.map(Modules.collection.sequence.Sequence.new(), |value, key| { key })
+        self.map(Modules.collections.sequence.Sequence.new(), |value, key| { key })
     }
     indexOf: |value| {
         let iterator = self.iterator()
@@ -607,7 +607,7 @@ let Iter = {
     }
 }
 
-mod collection.traits {
+mod collections.traits {
     export Collection = Collection
     export MutableCollection = MutableCollection
     export Indexable = Indexable

@@ -19,6 +19,7 @@ pub mod map;
 pub mod object;
 pub mod prototype_info;
 pub mod proxy;
+mod range;
 pub mod script_context;
 pub mod string;
 pub mod symbol;
@@ -57,6 +58,7 @@ pub use map::{
 pub use object::{ArgumentsCreate, CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::PrototypeInfo;
 pub use proxy::{ProxyInit, ProxyObject};
+pub use range::{Range, RangeInit};
 pub use script_context::{
     GlobalLexicalBinding, NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable,
     ScriptContextTableInit,
@@ -208,6 +210,8 @@ pub enum ObjectKind {
     Atom = 39,
     /// An immutable bit string (inline bytes or a view into a root).
     BitArray = 40,
+    /// An integer range with an iteration cursor.
+    Range = 41,
 }
 
 impl ObjectKind {
@@ -257,6 +261,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::Symbol => (*addr.cast::<Symbol>().as_ptr()).layout(),
             ObjectKind::Atom => (*addr.cast::<Atom>().as_ptr()).layout(),
             ObjectKind::BitArray => (*addr.cast::<BitArray>().as_ptr()).layout(),
+            ObjectKind::Range => (*addr.cast::<Range>().as_ptr()).layout(),
             ObjectKind::HandlerTable => (*addr.cast::<HandlerTable>().as_ptr()).layout(),
             ObjectKind::ContextObject => (*addr.cast::<ContextObject>().as_ptr()).layout(),
             ObjectKind::ScopeInfo => (*addr.cast::<ScopeInfo>().as_ptr()).layout(),
@@ -317,6 +322,7 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::Symbol => (*addr.cast::<Symbol>().as_ptr()).visit_edges(visitor),
             ObjectKind::Atom => (*addr.cast::<Atom>().as_ptr()).visit_edges(visitor),
             ObjectKind::BitArray => (*addr.cast::<BitArray>().as_ptr()).visit_edges(visitor),
+            ObjectKind::Range => (*addr.cast::<Range>().as_ptr()).visit_edges(visitor),
             ObjectKind::HandlerTable => {
                 (*addr.cast::<HandlerTable>().as_ptr()).visit_edges(visitor)
             }

@@ -12,6 +12,7 @@ use vm_core::{
 pub mod bitops;
 pub mod ops;
 pub mod process;
+pub mod range_ops;
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
 #[derive(Default)]
@@ -95,6 +96,19 @@ impl Runtime for KetteRuntime {
         let bit_concat = vm.register_native(bitops::concat);
         let bit_xor = vm.register_native(bitops::xor);
         let bit_text = vm.register_native(bitops::to_string);
+        let range_new = vm.register_native(range_ops::new);
+        let range_inclusive = vm.register_native(range_ops::inclusive);
+        let range_exclusive = vm.register_native(range_ops::exclusive);
+        let range_iterator = vm.register_native(range_ops::iterator);
+        let range_has_next = vm.register_native(range_ops::has_next);
+        let range_next = vm.register_native(range_ops::next);
+        let range_size = vm.register_native(range_ops::size);
+        let range_is_empty = vm.register_native(range_ops::is_empty);
+        let range_get = vm.register_native(range_ops::get);
+        let range_contains = vm.register_native(range_ops::contains);
+        let range_start = vm.register_native(range_ops::start);
+        let range_end = vm.register_native(range_ops::end);
+        let range_text = vm.register_native(range_ops::to_string);
         let process = process::Process::capture();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -271,6 +285,98 @@ impl Runtime for KetteRuntime {
                 PropertyDescriptor::data(bit_module.erase()),
             )
             .expect("install BitArray global");
+
+            let range_map = heap.known().range_map.get_handle(heap, &scope);
+            let range_proto_map = heap.allocate_handle::<Map>(
+                MapInit {
+                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                    value_slot_count: 0,
+                    descriptors: &[],
+                    prototype: object_prototype.erase(),
+                },
+                &scope,
+            );
+            let range_prototype =
+                scope.handle(heap.new_object(&scope, range_proto_map, HandleSlice::EMPTY));
+            range_map.as_tagged(heap).prototype.set(
+                heap,
+                range_map.as_tagged(heap).erase(),
+                range_prototype.as_tagged(heap).erase(),
+            );
+            for (name, index, length) in [
+                ("iterator", range_iterator, 0),
+                ("hasNext", range_has_next, 0),
+                ("next", range_next, 0),
+                ("size", range_size, 0),
+                ("isEmpty", range_is_empty, 0),
+                ("get", range_get, 1),
+                ("[]", range_get, 1),
+                ("contains", range_contains, 1),
+                ("start", range_start, 0),
+                ("end", range_end, 0),
+                ("toString", range_text, 0),
+            ] {
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    range_prototype,
+                    name,
+                    index,
+                    length,
+                );
+            }
+            let range_module = scope.handle(heap.new_object(&scope, proto_map, HandleSlice::EMPTY));
+            Object::add_method(thread_vm, heap, &scope, range_module, "new", range_new, 3);
+            Object::add_method(
+                thread_vm,
+                heap,
+                &scope,
+                range_module,
+                "inclusive",
+                range_inclusive,
+                2,
+            );
+            Object::add_method(
+                thread_vm,
+                heap,
+                &scope,
+                range_module,
+                "exclusive",
+                range_exclusive,
+                2,
+            );
+            let prototype_name = thread_vm.interner().intern_str(heap, &scope, "prototype");
+            let prototype_name = scope.handle(prototype_name.as_tagged(heap));
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                range_module,
+                prototype_name,
+                PropertyDescriptor::data(range_prototype.erase()),
+            )
+            .expect("install Range.prototype");
+            let parent_name = thread_vm.interner().intern_str(heap, &scope, "parent");
+            let parent_name = scope.handle(parent_name.as_tagged(heap));
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                range_module,
+                parent_name,
+                PropertyDescriptor::data(range_prototype.erase()),
+            )
+            .expect("install Range.parent");
+
+            let range_name = thread_vm.interner().intern_str(heap, &scope, "Range");
+            let range_name = scope.handle(range_name.as_tagged(heap));
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                global,
+                range_name,
+                PropertyDescriptor::data(range_module.erase()),
+            )
+            .expect("install Range global");
 
             let object_key = thread_vm.interner().intern_str(heap, &scope, "Object");
             let object_key = scope.handle(object_key.as_tagged(heap).erase());

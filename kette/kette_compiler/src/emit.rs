@@ -1305,6 +1305,12 @@ impl<'a> FunctionGen<'a> {
             return self.err_node(expr.syntax().id(), "incomplete binary expression");
         };
         let temps = self.b.temp_scope();
+        if op == BinaryOp::Pipe {
+            return self.pipe_expr(lhs, rhs);
+        }
+        if matches!(op, BinaryOp::RangeExclusive | BinaryOp::RangeInclusive) {
+            return self.range_expr(lhs, rhs, op == BinaryOp::RangeInclusive);
+        }
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
             self.expr(lhs)?;
             let value = self.b.stage_acc(&temps);
@@ -1334,6 +1340,125 @@ impl<'a> FunctionGen<'a> {
         let name = self.b.name(op.text().as_bytes());
         let feedback = self.b.new_feedback();
         self.b.binary_op(callee, lhs, rhs, name, feedback);
+    }
+
+    fn range_expr(
+        &mut self,
+        lhs: Expr<'a>,
+        rhs: Expr<'a>,
+        inclusive: bool,
+    ) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        self.expr(lhs)?;
+        let start = self.b.stage_acc(&temps);
+        self.expr(rhs)?;
+        let end = self.b.stage_acc(&temps);
+        self.load_global("Range");
+        let receiver = self.b.stage_acc(&temps);
+        let name = self.b.name(b"new");
+        let feedback = self.b.new_feedback();
+        self.b.load_named_property(receiver, name, feedback);
+        let callee = self.b.stage_acc(&temps);
+        if inclusive {
+            self.b.load_true();
+        } else {
+            self.b.load_false();
+        }
+        let flag = self.b.stage_acc(&temps);
+        self.call_regs(&temps, callee, receiver, &[start, end, flag])
+    }
+
+    fn pipe_expr(&mut self, lhs: Expr<'a>, rhs: Expr<'a>) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        self.expr(lhs)?;
+        let prefix = self.b.stage_acc(&temps);
+        match rhs {
+            Expr::Match(match_expr) => {
+                if match_expr.scrutinee().is_some() {
+                    return self.err_node(
+                        match_expr.syntax().id(),
+                        "pipe into match requires a subjectless match",
+                    );
+                }
+                self.match_expr_with_subject(match_expr, Some(prefix), false)
+            }
+            Expr::Call(call) => {
+                let Some(callee_expr) = call.receiver() else {
+                    return self.err_node(call.syntax().id(), "missing callee");
+                };
+                let Some(args) = call.args() else {
+                    return self.err_node(call.syntax().id(), "missing arguments");
+                };
+                let args: Vec<_> = args.args().collect();
+                self.expr(callee_expr)?;
+                let callee = self.b.stage_acc(&temps);
+                self.call_args_with_prefix(&temps, callee, None, prefix, &args)
+            }
+            Expr::Send(send) => {
+                let Some(receiver_expr) = send.receiver() else {
+                    return self.err_node(send.syntax().id(), "missing receiver");
+                };
+                let Some(name) = send.name() else {
+                    return self.err_node(send.syntax().id(), "missing method name");
+                };
+                let Some(args) = send.args() else {
+                    return self.err_node(send.syntax().id(), "missing arguments");
+                };
+                let args: Vec<_> = args.args().collect();
+                self.expr(receiver_expr)?;
+                let receiver = self.b.stage_acc(&temps);
+                let name = self.b.name(name.text().as_bytes());
+                let feedback = self.b.new_feedback();
+                self.b.load_named_property(receiver, name, feedback);
+                let callee = self.b.stage_acc(&temps);
+                self.call_args_with_prefix(&temps, callee, Some(receiver), prefix, &args)
+            }
+            rhs => {
+                self.expr(rhs)?;
+                let callee = self.b.stage_acc(&temps);
+                self.call_args_with_prefix(&temps, callee, None, prefix, &[])
+            }
+        }
+    }
+
+    fn call_args_with_prefix(
+        &mut self,
+        temps: &TempScope,
+        callee: Reg,
+        receiver: Option<Reg>,
+        prefix: Reg,
+        args: &[Expr<'a>],
+    ) -> Result<(), CompileError> {
+        let receiver = receiver.unwrap_or(callee);
+        let feedback = self.b.new_feedback();
+        match args.len() {
+            0 => self.b.call_method1(callee, receiver, prefix, feedback),
+            1 => {
+                self.expr(args[0])?;
+                let arg = self.b.stage_acc(temps);
+                self.b.call_method2(callee, receiver, prefix, arg, feedback)
+            }
+            count => {
+                let count = count + 1;
+                let base = temps.reserve(count as u32 + 2);
+                let top = base.index() + count as i32;
+                let window_callee = Reg::new(top + 1);
+                self.b.move_reg(window_callee, callee);
+                self.b.move_reg(Reg::new(top), receiver);
+                self.b.load(prefix);
+                self.b.store(Reg::new(top - 1));
+                for (index, arg) in args.iter().enumerate() {
+                    self.expr(*arg)?;
+                    self.b.store(Reg::new(top - 2 - index as i32));
+                }
+                self.b.call(
+                    window_callee,
+                    RegList::new(base, count as u32 + 1),
+                    feedback,
+                )
+            }
+        }
+        Ok(())
     }
 
     fn unary_expr(&mut self, expr: UnaryExpr<'a>) -> Result<(), CompileError> {
@@ -1864,10 +1989,21 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn match_expr(&mut self, expr: MatchExpr<'a>, tail: bool) -> Result<(), CompileError> {
+        self.match_expr_with_subject(expr, None, tail)
+    }
+
+    fn match_expr_with_subject(
+        &mut self,
+        expr: MatchExpr<'a>,
+        subject: Option<Reg>,
+        tail: bool,
+    ) -> Result<(), CompileError> {
         let temps = self.b.temp_scope();
         let arms: Vec<MatchArm<'a>> = expr.arms().collect();
         let mut subjects: Vec<Reg> = Vec::new();
-        if let Some(scrutinee) = expr.scrutinee() {
+        if let Some(subject) = subject {
+            subjects.push(subject);
+        } else if let Some(scrutinee) = expr.scrutinee() {
             let mut multi = false;
             if let Expr::Array(array) = scrutinee {
                 let elements: Vec<Expr<'a>> = array.elements().collect();

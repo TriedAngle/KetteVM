@@ -2,8 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/channel.ktt
 // Check: kette/kette_tests/check.py
 
-use collection.channel { Channel }
-use collection.sequence { Sequence }
+use collections.channel { Channel }
+use collections.sequence { Sequence }
 use sync { Mutex }
 
 let channel = Channel.newWithCapacity(2)

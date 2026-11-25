@@ -18,6 +18,9 @@ pub enum BinaryOp {
     ShiftLeft,
     ShiftRight,
     Concat,
+    Pipe,
+    RangeExclusive,
+    RangeInclusive,
     Plus,
     Minus,
     Star,
@@ -42,6 +45,9 @@ impl BinaryOp {
             LtLtLt => Self::ShiftLeft,
             GtGtGt => Self::ShiftRight,
             LtGt => Self::Concat,
+            PipeGt => Self::Pipe,
+            DotDot => Self::RangeExclusive,
+            DotDotEq => Self::RangeInclusive,
             Plus => Self::Plus,
             Minus => Self::Minus,
             Star => Self::Star,
@@ -67,6 +73,9 @@ impl BinaryOp {
             Self::ShiftLeft => LtLtLt,
             Self::ShiftRight => GtGtGt,
             Self::Concat => LtGt,
+            Self::Pipe => PipeGt,
+            Self::RangeExclusive => DotDot,
+            Self::RangeInclusive => DotDotEq,
             Self::Plus => Plus,
             Self::Minus => Minus,
             Self::Star => Star,
@@ -91,6 +100,9 @@ impl BinaryOp {
             Self::ShiftLeft => "<<<",
             Self::ShiftRight => ">>>",
             Self::Concat => "<>",
+            Self::Pipe => "|>",
+            Self::RangeExclusive => "..",
+            Self::RangeInclusive => "..=",
             Self::Plus => "+",
             Self::Minus => "-",
             Self::Star => "*",
@@ -110,6 +122,7 @@ impl BinaryOp {
             Self::BitXor => 6,
             Self::BitAnd => 7,
             Self::ShiftLeft | Self::ShiftRight | Self::Concat => 8,
+            Self::Pipe | Self::RangeExclusive | Self::RangeInclusive => 1,
             Self::Plus | Self::Minus => 9,
             Self::Star | Self::Slash | Self::Percent => 10,
         }
@@ -117,7 +130,10 @@ impl BinaryOp {
 
     /// Whether the operator is lowered to a method send.
     pub fn is_dispatch(self) -> bool {
-        !matches!(self, Self::And | Self::Or)
+        !matches!(
+            self,
+            Self::And | Self::Or | Self::Pipe | Self::RangeExclusive | Self::RangeInclusive
+        )
     }
 }
 

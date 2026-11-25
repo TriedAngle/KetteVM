@@ -135,7 +135,7 @@ let Channel = {
     items, head, count, limit, closed, lock, notEmpty, notFull: undefined
 }
 
-mod collection.channel {
+mod collections.channel {
     export Channel = Channel
     export ChannelClosed = ChannelClosed
     export ChannelTraits = ChannelTraits

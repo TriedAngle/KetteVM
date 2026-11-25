@@ -35,6 +35,7 @@ pub struct WellKnown {
     pub symbol_map: GcSlot<Map>,
     pub atom_map: GcSlot<Map>,
     pub bit_array_map: GcSlot<Map>,
+    pub range_map: GcSlot<Map>,
     pub accessor_pair_map: GcSlot<Map>,
     pub accessor_info_map: GcSlot<Map>,
     pub callable_map: GcSlot<Map>,
@@ -294,6 +295,7 @@ impl WellKnown {
             symbol_map: smi_slot::<Map>(),
             atom_map: smi_slot::<Map>(),
             bit_array_map: smi_slot::<Map>(),
+            range_map: smi_slot::<Map>(),
             accessor_pair_map: smi_slot::<Map>(),
             accessor_info_map: smi_slot::<Map>(),
             callable_map: smi_slot::<Map>(),
@@ -396,6 +398,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.symbol_map.as_raw());
         visitor.visit(self.atom_map.as_raw());
         visitor.visit(self.bit_array_map.as_raw());
+        visitor.visit(self.range_map.as_raw());
         visitor.visit(self.accessor_pair_map.as_raw());
         visitor.visit(self.accessor_info_map.as_raw());
         visitor.visit(self.callable_map.as_raw());
@@ -703,6 +706,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let symbol_map = alloc_map(heap, &scope, MapKind::SYMBOL);
     let atom_map = alloc_map(heap, &scope, MapKind::ATOM);
     let bit_array_map = alloc_map(heap, &scope, MapKind::BIT_ARRAY);
+    let range_map = alloc_map(heap, &scope, MapKind::RANGE);
     let accessor_pair_map = alloc_map(heap, &scope, MapKind::ACCESSOR_PAIR);
     let accessor_info_map = alloc_map(heap, &scope, MapKind::ACCESSOR_INFO);
     let callable_map = alloc_map(heap, &scope, MapKind::CALLABLE_INFO);
@@ -782,6 +786,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known.symbol_map.init(symbol_map.as_tagged(heap));
     known.atom_map.init(atom_map.as_tagged(heap));
     known.bit_array_map.init(bit_array_map.as_tagged(heap));
+    known.range_map.init(range_map.as_tagged(heap));
     known
         .accessor_pair_map
         .init(accessor_pair_map.as_tagged(heap));

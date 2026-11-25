@@ -623,7 +623,14 @@ impl<'a> Parser<'a> {
             }
             self.builder.start_node_at(checkpoint, Binary);
             self.bump();
-            self.parse_binary(precedence + 1)?;
+            if token.kind == PipeGt && self.peek().kind == Match && self.peek2().0.kind == LBrace {
+                self.start(MatchExpr);
+                self.bump();
+                self.parse_match_arms()?;
+                self.finish();
+            } else {
+                self.parse_binary(precedence + 1)?;
+            }
             lhs = self.finish();
         }
         Ok(lhs)

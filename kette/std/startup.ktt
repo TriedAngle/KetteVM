@@ -1,7 +1,7 @@
 let SYNC_PATH = "kette/std/sync.ktt"
-let COLLECTION_TRAITS_PATH = "kette/std/collection/collection.ktt"
-let COLLECTION_SEQUENCE_PATH = "kette/std/collection/sequence.ktt"
-let COLLECTION_CHANNEL_PATH = "kette/std/collection/channel.ktt"
+let COLLECTIONS_TRAITS_PATH = "kette/std/collections/collections.ktt"
+let COLLECTIONS_SEQUENCE_PATH = "kette/std/collections/sequence.ktt"
+let COLLECTIONS_CHANNEL_PATH = "kette/std/collections/channel.ktt"
 let ERROR_PATH = "kette/std/error.ktt"
 let FFI_PATH = "kette/std/ffi.ktt"
 let LIBC_SYS_PATH = "kette/std/sys/libc/sys.ktt"
@@ -432,14 +432,14 @@ if !Modules.error {
 if !Modules.sync {
     KetteTools.evalFile(SYNC_PATH)
 }
-if !Modules.collection or !Modules.collection.traits {
-    KetteTools.evalFile(COLLECTION_TRAITS_PATH)
+if !Modules.collections or !Modules.collections.traits {
+    KetteTools.evalFile(COLLECTIONS_TRAITS_PATH)
 }
-if !Modules.collection or !Modules.collection.sequence {
-    KetteTools.evalFile(COLLECTION_SEQUENCE_PATH)
+if !Modules.collections or !Modules.collections.sequence {
+    KetteTools.evalFile(COLLECTIONS_SEQUENCE_PATH)
 }
-if !Modules.collection or !Modules.collection.channel {
-    KetteTools.evalFile(COLLECTION_CHANNEL_PATH)
+if !Modules.collections or !Modules.collections.channel {
+    KetteTools.evalFile(COLLECTIONS_CHANNEL_PATH)
 }
 if !Modules.ffi {
     KetteTools.evalFile(FFI_PATH)

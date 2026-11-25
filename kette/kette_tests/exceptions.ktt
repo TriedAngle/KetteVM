@@ -2,7 +2,7 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/exceptions.ktt
 // Check: kette/kette_tests/check.py
 
-use collection.traits { Collection }
+use collections.traits { Collection }
 
 let errors = Modules.error
 let Error = errors.Error

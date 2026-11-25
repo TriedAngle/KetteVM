@@ -2,8 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/collection.ktt
 // Check: kette/kette_tests/check.py
 
-use collection.sequence { Sequence }
-use collection.traits { Collection, Indexable }
+use collections.sequence { Sequence }
+use collections.traits { Collection, Indexable }
 
 let seq = |values| {
     let result = Sequence.new()

@@ -65,12 +65,12 @@ let closes = match |kind| {
 }
 
 let tightBefore = match |kind| {
-    :Period | :RParen | :RBracket | :Comma | :Semicolon => true
+    :Period | :DotDot | :DotDotEq | :RParen | :RBracket | :Comma | :Semicolon => true
     _ => false
 }
 
 let tightAfter = match |kind| {
-    :Period | :LParen | :LBracket => true
+    :Period | :DotDot | :DotDotEq | :LParen | :LBracket => true
     _ => false
 }
 

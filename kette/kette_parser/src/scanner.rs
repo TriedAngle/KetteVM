@@ -262,10 +262,17 @@ impl Scanner<'_> {
             ':' => Colon,
             ';' => Semicolon,
             '.' => {
-                if self.peek() == Some('.') && self.peek_second() == Some('.') {
+                if self.peek() == Some('.') {
                     self.bump();
-                    self.bump();
-                    Ellipsis
+                    if self.peek() == Some('.') {
+                        self.bump();
+                        Ellipsis
+                    } else if self.peek() == Some('=') {
+                        self.bump();
+                        DotDotEq
+                    } else {
+                        DotDot
+                    }
                 } else {
                     Period
                 }

@@ -1,4 +1,4 @@
-use collection.traits { Collection }
+use collections.traits { Collection }
 use ffi
 use kette
 
@@ -11,7 +11,7 @@ let NO_NODE = 4294967295
 let KINDS = [
     :Tombstone, :Error, :Missing, :Eof, :Whitespace, :Newline, :LineComment,
     :BlockComment, :Ident, :Number, :String, :QuotedName, :LParen, :RParen,
-    :LBrace, :RBrace, :LBracket, :RBracket, :Comma, :Period, :Colon,
+    :LBrace, :RBrace, :LBracket, :RBracket, :Comma, :Period, :DotDot, :DotDotEq, :Colon,
     :Semicolon, :Star, :Assign, :Pipe, :And, :Or, :EqEq, :NotEq, :Lt, :Gt,
     :LtEq, :GtEq, :Plus, :Minus, :Slash, :Percent, :Bang, :LtLt, :GtGt,
     :LtLtLt, :GtGtGt, :AmpAmpAmp, :PipePipePipe, :CaretCaretCaret,

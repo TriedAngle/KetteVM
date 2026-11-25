@@ -1,20 +1,8 @@
-use collection.traits { MutableCollection, MutableIndexable }
+use collections.traits { MutableCollection, MutableIndexable }
 use error { ElementDoesNotExist, IndexOutOfBounds }
 
 let range = |from, to| {
-    {
-        iterator: {
-            let value = from
-            {
-                hasNext: { value < to }
-                next: {
-                    let current = value
-                    value = value + 1
-                    current
-                }
-            }
-        }
-    }
+    Range.exclusive(from, to)
 }
 
 // A growable sequence: a vector with a movable start.
@@ -321,7 +309,7 @@ let Sequence = {
     version: 0
 }
 
-mod collection.sequence {
+mod collections.sequence {
     export range = range
     export Sequence = Sequence
     export SequenceTraits = SequenceTraits

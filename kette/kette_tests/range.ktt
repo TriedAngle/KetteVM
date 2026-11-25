@@ -1,0 +1,118 @@
+// Range literals, direction, and array slicing.
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/range.ktt
+// Check: kette/kette_tests/check.py
+
+use collections.sequence { range }
+
+let up = []
+for value in 0..4 {
+    up.push(value)
+}
+Test.assert(up.length, 4)
+Test.assert(up[0], 0)
+Test.assert(up[1], 1)
+Test.assert(up[2], 2)
+Test.assert(up[3], 3)
+
+let inclusive = []
+for value in 0..=4 {
+    inclusive.push(value)
+}
+Test.assert(inclusive.length, 5)
+Test.assert(inclusive[4], 4)
+
+let down = []
+for value in 4..0 {
+    down.push(value)
+}
+Test.assert(down.length, 4)
+Test.assert(down[0], 4)
+Test.assert(down[3], 1)
+
+let downInclusive = []
+for value in 4..=0 {
+    downInclusive.push(value)
+}
+Test.assert(downInclusive.length, 5)
+Test.assert(downInclusive[0], 4)
+Test.assert(downInclusive[4], 0)
+
+Test.assert((0..4).size(), 4)
+Test.assert((0..=4).size(), 5)
+Test.assert((4..0).size(), 4)
+Test.assert((4..=0).size(), 5)
+Test.assert((5..5).size(), 0)
+Test.assert((5..=5).size(), 1)
+Test.assert((0..4).isEmpty(), false)
+Test.assert((0..0).isEmpty(), true)
+Test.assert((0..4).contains(3), true)
+Test.assert((0..4).contains(4), false)
+Test.assert((4..0).contains(1), true)
+Test.assert((4..=0).contains(0), true)
+
+let fromFunction = []
+for value in range(0, 3) {
+    fromFunction.push(value)
+}
+Test.assert(fromFunction.length, 3)
+Test.assert(fromFunction[2], 2)
+
+let slice = [10, 20, 30, 40, 50]
+let firstSlice = slice[1..3]
+Test.assert(firstSlice.length, 2)
+Test.assert(firstSlice[0], 20)
+Test.assert(firstSlice[1], 30)
+let inclusiveSlice = slice[1..=3]
+Test.assert(inclusiveSlice.length, 3)
+Test.assert(inclusiveSlice[2], 40)
+let descendingSlice = slice[3..0]
+Test.assert(descendingSlice.length, 3)
+Test.assert(descendingSlice[0], 40)
+Test.assert(descendingSlice[2], 20)
+let descendingInclusiveSlice = slice[3..=1]
+Test.assert(descendingInclusiveSlice.length, 3)
+Test.assert(descendingInclusiveSlice[2], 20)
+Test.assert(slice[2..2].length, 0)
+Test.assert(slice[2..=2].length, 1)
+Test.assert(slice[2..=2][0], 30)
+
+let outOfBounds = false
+try {
+    slice[0..9]
+} catch (e) {
+    outOfBounds = e.name == "RangeError"
+}
+Test.assert(outOfBounds, true)
+
+Test.assert(Range.exclusive(2, 5).toString(), "2..5")
+Test.assert(Range.inclusive(2, 5).toString(), "2..=5")
+
+let indexed = 0..10
+Test.assert(indexed[0], 0)
+Test.assert(indexed[9], 9)
+Test.assert(indexed.get(4), 4)
+let descendingIndexed = 10..0
+Test.assert(descendingIndexed[0], 10)
+Test.assert(descendingIndexed[9], 1)
+Test.assert((0..=4)[4], 4)
+Test.assert(Range.parent == Range.prototype, true)
+let outOfRange = false
+try {
+    indexed[10]
+} catch (e) {
+    outOfRange = e.name == "RangeError"
+}
+Test.assert(outOfRange, true)
+
+Range.prototype.twice = |value| { value * 2 }
+Test.assert((0..1).twice(4), 8)
+
+let collectedRange = 3..0
+KetteTools.forceMajorGC()
+let collectedValues = []
+for value in collectedRange {
+    collectedValues.push(value)
+}
+Test.assert(collectedValues.length, 3)
+Test.assert(collectedValues[0], 3)
+Test.assert(collectedValues[2], 1)

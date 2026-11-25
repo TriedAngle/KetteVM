@@ -7,10 +7,10 @@ use handler_derive::handler_tail_call as handler;
 use vm_core::{
     AccessorInfo, AccessorPair, Args, CallInfo, Compare, ContextInit, ContextObject, Convert,
     DenseString, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
-    Object, PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi,
-    StoreSemantics, StringRef, Tagged, ThreadState, VM, Value, VmError, global_lexical_get,
-    global_lexical_set, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind, lookup::Hit,
-    lookup::Lookup, proxy::Proxy, raise, raise_runtime, rt_try,
+    Object, PartialDescriptor, PropertyDescriptor, Prototype, Range, SetApplied, SlotName, Smi,
+    StoreSemantics, StringRef, Tagged, ThreadState, VM, Value, VmError, extend_lifetime,
+    global_lexical_get, global_lexical_set, ic::InlineCache, ic::StoreHit, ic::StoreOutcomeKind,
+    lookup::Hit, lookup::Lookup, proxy::Proxy, raise, raise_runtime, rt_try,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -927,6 +927,50 @@ pub fn slow_keyed_load(frame: Frame) {
     reenter!(pc)
 }
 
+fn array_slice<'a>(
+    heap: &'a mut Heap,
+    scope: &HandleScope<'_>,
+    recv: Handle<'_, Value>,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+) -> Option<Result<Tagged<'a, Value>, VmError>> {
+    let object = recv.as_tagged(heap).as_heap_object()?;
+    let object = scope.handle(object);
+    if !object.as_tagged(heap).is_array_exotic(heap) {
+        return None;
+    }
+    let length = object.as_tagged(heap).length() as i64;
+    let step = if start <= end { 1 } else { -1 };
+    let mut current = start;
+    let mut values = Vec::new();
+    let hole = heap.known().the_hole.get(heap).erase();
+    while if step > 0 {
+        if inclusive {
+            current <= end
+        } else {
+            current < end
+        }
+    } else if inclusive {
+        current >= end
+    } else {
+        current > end
+    } {
+        if current < 0 || current >= length {
+            return Some(Err(VmError::IndexOutOfBounds));
+        }
+        let value = object
+            .as_tagged(heap)
+            .element_value(heap, current as usize)
+            .unwrap_or(hole);
+        values.push(scope.handle(value));
+        current = current.saturating_add(step);
+    }
+    // TODO: return a view instead of copying the elements.
+    let staged = scope.stage_handles(&values);
+    Some(Ok(heap.new_array(scope, staged).erase()))
+}
+
 #[handler(LoadIndexed)]
 #[cold]
 pub fn slow_indexed_load(frame: Frame) {
@@ -939,6 +983,18 @@ pub fn slow_indexed_load(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
+        let bounds = raw_key.as_tagged(heap).get_as::<Range>(heap).map(|range| {
+            let range = range.as_ref();
+            (range.start(), range.end(), range.inclusive())
+        });
+        if let Some((start, end, inclusive)) = bounds
+            && let Some(result) = array_slice(&mut *heap, &scope, recv, start, end, inclusive)
+        {
+            return match result {
+                Ok(value) => extend_lifetime!(heap, value),
+                Err(error) => raise!(vm, heap, state, error),
+            };
+        }
         if recv.as_tagged(heap).is_nullish(heap) {
             raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
         }
@@ -976,6 +1032,18 @@ pub fn slow_keyed_load_reg(frame: Frame) {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
+        let bounds = raw_key.as_tagged(heap).get_as::<Range>(heap).map(|range| {
+            let range = range.as_ref();
+            (range.start(), range.end(), range.inclusive())
+        });
+        if let Some((start, end, inclusive)) = bounds
+            && let Some(result) = array_slice(&mut *heap, &scope, recv, start, end, inclusive)
+        {
+            return match result {
+                Ok(value) => extend_lifetime!(heap, value),
+                Err(error) => raise!(vm, heap, state, error),
+            };
+        }
         // GetValue's ToObject(base) runs before ToPropertyKey(key)
         if recv.as_tagged(heap).is_nullish(heap) {
             raise!(vm, heap, state, VmError::CannotGetPropertyOfNullish);
