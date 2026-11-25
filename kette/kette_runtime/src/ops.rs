@@ -35,6 +35,12 @@ fn equals(heap: &vm_core::Heap, a: Tagged<'_, Value>, b: Tagged<'_, Value>) -> b
     if a.is_nullish(heap) && b.is_nullish(heap) {
         return true;
     }
+    if let (Some(a), Some(b)) = (
+        a.get_as::<vm_core::BitArray>(heap),
+        b.get_as::<vm_core::BitArray>(heap),
+    ) {
+        return crate::bitops::equals(heap, a, b);
+    }
     if let (Some(x), Some(y)) = (a.to_i64(), b.to_i64()) {
         return x == y;
     }

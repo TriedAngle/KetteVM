@@ -121,6 +121,7 @@ fn short_constant(constant: &Constant) -> String {
         Constant::String(bytes) => {
             format!("{:?}", String::from_utf8_lossy(bytes))
         }
+        Constant::Bytes(bytes) => format!("bytes[{}]", bytes.len()),
         Constant::Atom(bytes) => {
             format!(":{}", String::from_utf8_lossy(bytes))
         }
@@ -144,6 +145,7 @@ fn constant_summary(constant: &Constant) -> String {
         Constant::String(bytes) => {
             format!("String({:?})", String::from_utf8_lossy(bytes))
         }
+        Constant::Bytes(bytes) => format!("Bytes({} bytes)", bytes.len()),
         Constant::Atom(bytes) => {
             format!("Atom(:{})", String::from_utf8_lossy(bytes))
         }

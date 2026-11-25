@@ -528,6 +528,7 @@ impl MapKind {
     pub const TASK_STATE: MapKind = MapKind(ObjectKind::TaskStateObject as u64);
     pub const SCHEDULER: MapKind = MapKind(ObjectKind::SchedulerObject as u64);
     pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
+    pub const BIT_ARRAY: MapKind = MapKind(ObjectKind::BitArray as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -589,6 +590,7 @@ impl MapKind {
             Self::TASK_STATE => ObjectKind::TaskStateObject,
             Self::SCHEDULER => ObjectKind::SchedulerObject,
             Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
+            Self::BIT_ARRAY => ObjectKind::BitArray,
             _ => panic!("invalid object kind"),
         }
     }

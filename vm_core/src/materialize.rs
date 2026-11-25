@@ -10,9 +10,10 @@
 
 use crate::{
     Atom, CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, DenseString,
-    FeedbackVector, FeedbackVectorInit, FixedArray, FunctionKind, Handle, HandleScope, HandleSlice,
-    HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, RuntimeId, ScopeInfo,
-    ScopeInfoInit, Smi, StringData, Thread, ThreadState, VM, Value, decode_wtf8, mode_from_strict,
+    FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, FunctionKind, Handle,
+    HandleScope, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object,
+    RuntimeId, ScopeInfo, ScopeInfoInit, Smi, StringData, Thread, ThreadState, VM, Value,
+    decode_wtf8, mode_from_strict,
 };
 use bytecode::{AtomSwitchTable, CallableKind, Constant, FunctionId, Program};
 
@@ -104,6 +105,9 @@ fn materialize_function<'s>(
     for constant in constants {
         let value = match constant {
             Constant::String(bytes) => intern(heap, state, scope, vm, bytes).erase(),
+            Constant::Bytes(bytes) => heap
+                .allocate_handle::<FixedByteArray>(bytes.as_ref(), scope)
+                .erase(),
             Constant::Atom(bytes) => {
                 let name = intern(heap, state, scope, vm, bytes);
                 Atom::intern(heap, scope, name).erase()

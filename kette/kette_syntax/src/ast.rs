@@ -76,6 +76,10 @@ ast_node!(PatternObject, PatternObject);
 ast_node!(PatternOr, PatternOr);
 ast_node!(PatternValue, PatternValue);
 ast_node!(PatternAtom, PatternAtom);
+ast_node!(BitString, BitString);
+ast_node!(BitStringSegment, BitStringSegment);
+ast_node!(PatternBitString, PatternBitString);
+ast_node!(PatternBitStringSegment, PatternBitStringSegment);
 ast_node!(AtomLiteral, AtomLiteral);
 ast_node!(PatternField, PatternField);
 ast_node!(PatternType, PatternType);
@@ -127,6 +131,7 @@ ast_enum!(Expr {
     Call(CallExpr),
     Match(MatchExpr),
     AtomLiteral(AtomLiteral),
+    BitString(BitString),
 });
 
 ast_enum!(Stmt {
@@ -148,6 +153,7 @@ ast_enum!(Pattern {
     Value(PatternValue),
     Atom(PatternAtom),
     Type(PatternType),
+    BitString(PatternBitString),
 });
 
 ast_enum!(SlotEntry {
@@ -985,5 +991,65 @@ impl<'a> Tokens<'a> {
 
     fn peek_kind(&self) -> Option<SyntaxKind> {
         self.clone().next_token().map(|token| token.kind())
+    }
+}
+
+impl<'a> BitString<'a> {
+    pub fn segments(self) -> AstChildren<'a, BitStringSegment<'a>> {
+        self.syntax.children_as()
+    }
+}
+
+impl<'a> BitStringSegment<'a> {
+    pub fn value(self) -> Option<Expr<'a>> {
+        self.syntax.children_as().next()
+    }
+
+    pub fn size(self) -> Option<Expr<'a>> {
+        self.syntax.children_as().nth(1)
+    }
+
+    pub fn type_tokens(self) -> Vec<SyntaxToken<'a>> {
+        let mut out = Vec::new();
+        let mut tokens = Tokens::new(self.syntax);
+        let mut in_type = false;
+        while let Some(token) = tokens.next_token() {
+            if token.kind() == Slash {
+                in_type = true;
+            } else if in_type {
+                out.push(token);
+            }
+        }
+        out
+    }
+}
+
+impl<'a> PatternBitString<'a> {
+    pub fn segments(self) -> AstChildren<'a, PatternBitStringSegment<'a>> {
+        self.syntax.children_as()
+    }
+}
+
+impl<'a> PatternBitStringSegment<'a> {
+    pub fn pattern(self) -> Option<Pattern<'a>> {
+        self.syntax.children_as().next()
+    }
+
+    pub fn size(self) -> Option<Expr<'a>> {
+        self.syntax.children_as().next()
+    }
+
+    pub fn type_tokens(self) -> Vec<SyntaxToken<'a>> {
+        let mut out = Vec::new();
+        let mut tokens = Tokens::new(self.syntax);
+        let mut in_type = false;
+        while let Some(token) = tokens.next_token() {
+            if token.kind() == Slash {
+                in_type = true;
+            } else if in_type {
+                out.push(token);
+            }
+        }
+        out
     }
 }

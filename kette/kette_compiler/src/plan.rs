@@ -319,6 +319,16 @@ impl<'a> Planner<'a> {
                     self.expr(element, frame);
                 }
             }
+            Expr::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(value) = segment.value() {
+                        self.expr(value, frame);
+                    }
+                    if let Some(size) = segment.size() {
+                        self.expr(size, frame);
+                    }
+                }
+            }
             Expr::If(expr) => self.if_expr(expr, frame),
             Expr::While(expr) => self.while_expr(expr, frame),
             Expr::For(expr) => self.for_expr(expr, frame),

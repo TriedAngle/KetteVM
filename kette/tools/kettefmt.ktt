@@ -94,6 +94,16 @@ let isUnaryParent = match |kind| {
     _ => false
 }
 
+let isBitParent = match |kind| {
+    :BitString | :PatternBitString => true
+    _ => false
+}
+
+let isBitSegment = match |kind| {
+    :BitStringSegment | :PatternBitStringSegment => true
+    _ => false
+}
+
 let startsNewLine = |tree, index| {
     let token = tree.tokensFrom(index + 1).firstWhere(|token| {
         token.kind == :Newline or !token.isTrivia
@@ -166,6 +176,18 @@ let spaceBetween = |prev, cur, prevParent, curParent, prevPipeOpening, curPipeOp
     }
     if prev == :Pipe and prevParent == :PatternOr {
         return true
+    }
+    if prev == :LtLt and isBitParent(prevParent) {
+        return false
+    }
+    if cur == :GtGt and isBitParent(curParent) {
+        return false
+    }
+    if isBitSegment(curParent) and (cur == :Colon or cur == :Slash or cur == :Minus) {
+        return false
+    }
+    if isBitSegment(prevParent) and (prev == :Colon or prev == :Slash or prev == :Minus) {
+        return false
     }
     if cur == :LParen and curParent == :ArgList {
         return false

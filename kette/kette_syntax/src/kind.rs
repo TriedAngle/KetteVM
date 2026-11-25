@@ -138,6 +138,10 @@ pub enum SyntaxKind {
     PatternValue,
     PatternAtom,
     AtomLiteral,
+    BitString,
+    BitStringSegment,
+    PatternBitString,
+    PatternBitStringSegment,
 }
 
 impl SyntaxKind {
@@ -275,6 +279,10 @@ impl SyntaxKind {
         Self::PatternValue,
         Self::PatternAtom,
         Self::AtomLiteral,
+        Self::BitString,
+        Self::BitStringSegment,
+        Self::PatternBitString,
+        Self::PatternBitStringSegment,
     ];
 
     /// The variant name as written in the enum.
@@ -412,6 +420,10 @@ impl SyntaxKind {
             Self::PatternValue => "PatternValue",
             Self::PatternAtom => "PatternAtom",
             Self::AtomLiteral => "AtomLiteral",
+            Self::BitString => "BitString",
+            Self::BitStringSegment => "BitStringSegment",
+            Self::PatternBitString => "PatternBitString",
+            Self::PatternBitStringSegment => "PatternBitStringSegment",
         }
     }
 

@@ -101,6 +101,16 @@ impl Validator {
                     self.expr(element, in_module);
                 }
             }
+            Expr::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(value) = segment.value() {
+                        self.expr(value, in_module);
+                    }
+                    if let Some(size) = segment.size() {
+                        self.expr(size, in_module);
+                    }
+                }
+            }
             Expr::If(expr) => self.if_expr(expr, in_module),
             Expr::While(expr) => self.while_expr(expr, in_module),
             Expr::For(expr) => self.for_expr(expr, in_module),

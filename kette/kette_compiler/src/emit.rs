@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, Function, FunctionId, FunctionMeta,
@@ -6,16 +6,17 @@ use bytecode::{
     TempScope, TestTypeKind,
 };
 use kette_syntax::ast::{
-    AssignExpr, AstNode, AtomLiteral, BinaryExpr, CallExpr, ExportDecl, Expr, ForExpr, GetExpr,
-    IfExpr, IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern, PatternValue,
-    SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl,
-    UseTree, WhileExpr,
+    AssignExpr, AstNode, AtomLiteral, BinaryExpr, BitString, CallExpr, ExportDecl, Expr, ForExpr,
+    GetExpr, IfExpr, IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern,
+    PatternValue, SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr,
+    UseDecl, UseTree, WhileExpr,
 };
 use kette_syntax::ops::{AssignOp, BinaryOp};
 use kette_syntax::resolve::{Binding, BindingId, BindingKind, Resolution, Resolved};
 use kette_syntax::{NodeId, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree};
 use vm_core::{
     INFO_GLOBAL, MODE_LET, MODE_VAR, NativeIndex, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, Smi,
+    bit_program,
 };
 
 use crate::CompileError;
@@ -103,6 +104,7 @@ enum MatchTestKind {
     Literal(MatchLiteral),
     UserType(NodeId),
     Value(u32),
+    BitMatch(ConstIdx, u32),
 }
 
 struct MatchValue {
@@ -120,6 +122,7 @@ struct MatchTest {
 struct MatchPlan<'a> {
     demands: Vec<u32>,
     bindings: Vec<(BindingId, u32)>,
+    bit_bindings: Vec<(BindingId, u32, u32)>,
     rests: Vec<(BindingId, u32, usize)>,
     guard: Option<Expr<'a>>,
     arm: Option<MatchArm<'a>>,
@@ -178,6 +181,8 @@ struct MatchBuild<'a, 'f> {
     subjects: usize,
     tests: Vec<MatchTest>,
     test_ids: HashMap<MatchTest, u32>,
+    capture_regs: Vec<Reg>,
+    bit_args: Vec<Vec<Reg>>,
     values: Vec<MatchValue>,
     value_ids: HashMap<Vec<ConstIdx>, u32>,
     nodes: Vec<MatchNode<'a>>,
@@ -792,7 +797,192 @@ impl<'a> FunctionGen<'a> {
             Expr::Send(expr) => self.send_expr(expr, false),
             Expr::Call(expr) => self.call_expr(expr, false),
             Expr::Match(expr) => self.match_expr(expr, false),
+            Expr::BitString(bits) => self.bit_string_expr(bits),
         }
+    }
+
+    fn bit_string_expr(&mut self, bits: BitString<'a>) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        enum BitArg<'a> {
+            Expr(Expr<'a>),
+            Bytes(ConstIdx),
+        }
+        let mut segments: Vec<bit_program::Segment> = Vec::new();
+        let mut args: Vec<BitArg<'a>> = Vec::new();
+        let mut next_arg = 1u32;
+        for segment in bits.segments() {
+            let Some(value) = segment.value() else {
+                return self.err_node(segment.syntax().id(), "missing bit segment value");
+            };
+            let type_tokens = segment.type_tokens();
+            let (mut kind, signed, mut little, mut unit) =
+                self.bit_type(segment.syntax().id(), type_tokens.clone())?;
+            let string_literal = match value {
+                Expr::Atom(atom) => atom
+                    .token()
+                    .filter(|token| token.kind() == SyntaxKind::String)
+                    .map(|token| decode_string(token.text())),
+                _ => None,
+            };
+            let mut string_literal = string_literal;
+            if let Some(bytes) = string_literal.as_deref()
+                && matches!(
+                    kind,
+                    bit_program::KIND_UTF8 | bit_program::KIND_UTF16 | bit_program::KIND_UTF32
+                )
+            {
+                let Some(encoded) = encode_utf_string(bytes, kind, little) else {
+                    return self.err_node(segment.syntax().id(), "string is not valid UTF-8");
+                };
+                string_literal = Some(encoded);
+                kind = bit_program::KIND_BINARY;
+                unit = 8;
+                little = false;
+            }
+            if string_literal.is_some() && type_tokens.is_empty() {
+                kind = bit_program::KIND_BINARY;
+                unit = 8;
+                little = false;
+            }
+            let mut descriptor = bit_program::Segment {
+                kind,
+                flags: 0,
+                size_form: bit_program::SIZE_DEFAULT,
+                size: 0,
+                unit,
+                literal: 0,
+            };
+            if signed {
+                descriptor.flags |= bit_program::FLAG_SIGNED;
+            }
+            if little {
+                descriptor.flags |= bit_program::FLAG_LITTLE;
+            }
+            match string_literal {
+                Some(bytes) => {
+                    if kind != bit_program::KIND_BINARY && kind != bit_program::KIND_BITSTRING {
+                        return self
+                            .err_node(segment.syntax().id(), "a string segment is binary data");
+                    }
+                    let bytes = self.b.constant(Constant::Bytes(bytes.into_boxed_slice()));
+                    args.push(BitArg::Bytes(bytes));
+                }
+                None => args.push(BitArg::Expr(value)),
+            }
+            next_arg += 1;
+            if let Some(size) = segment.size() {
+                descriptor.size_form = bit_program::SIZE_ARG;
+                descriptor.size = next_arg;
+                args.push(BitArg::Expr(size));
+                next_arg += 1;
+            }
+            segments.push(descriptor);
+        }
+        let program = self.b.constant(Constant::Bytes(
+            bit_program::encode(&segments).into_boxed_slice(),
+        ));
+        self.b.load_constant(program);
+        let program = self.b.stage_acc(&temps);
+        self.load_global("BitArray");
+        let receiver = self.b.stage_acc(&temps);
+        let name = self.b.name(b"build");
+        let feedback = self.b.new_feedback();
+        self.b.load_named_property(receiver, name, feedback);
+        let callee = self.b.stage_acc(&temps);
+        let mut regs = Vec::with_capacity(args.len() + 1);
+        regs.push(program);
+        for arg in args {
+            match arg {
+                BitArg::Expr(expr) => self.expr(expr)?,
+                BitArg::Bytes(index) => self.b.load_constant(index),
+            }
+            regs.push(self.b.stage_acc(&temps));
+        }
+        self.call_regs(&temps, callee, receiver, &regs)
+    }
+
+    fn bit_type(
+        &mut self,
+        node: NodeId,
+        tokens: Vec<SyntaxToken<'a>>,
+    ) -> Result<(u8, bool, bool, u32), CompileError> {
+        let mut kind = bit_program::KIND_INTEGER;
+        let mut signed = false;
+        let mut little = false;
+        let mut unit = 1u32;
+        let mut unit_explicit = false;
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = tokens[index];
+            match token.kind() {
+                SyntaxKind::Minus => {
+                    index += 1;
+                    continue;
+                }
+                SyntaxKind::Ident => {}
+                _ => {
+                    return Err(self.error(node, "invalid bit type specifier"));
+                }
+            }
+            match token.text() {
+                "integer" => kind = bit_program::KIND_INTEGER,
+                "float" => kind = bit_program::KIND_FLOAT,
+                "binary" | "bytes" => {
+                    kind = bit_program::KIND_BINARY;
+                    if !unit_explicit {
+                        unit = 8;
+                    }
+                }
+                "bitstring" | "bits" => {
+                    kind = bit_program::KIND_BITSTRING;
+                    if !unit_explicit {
+                        unit = 1;
+                    }
+                }
+                "utf8" => kind = bit_program::KIND_UTF8,
+                "utf16" => kind = bit_program::KIND_UTF16,
+                "utf32" => kind = bit_program::KIND_UTF32,
+                "signed" => signed = true,
+                "unsigned" => signed = false,
+                "big" => little = false,
+                "little" => little = true,
+                "native" => little = cfg!(target_endian = "little"),
+                "unit" => {
+                    index += 1;
+                    if tokens.get(index).map(|token| token.kind()) != Some(SyntaxKind::Colon) {
+                        return Err(self.error(node, "expected `unit:<n>`"));
+                    }
+                    index += 1;
+                    let Some(value) = tokens.get(index) else {
+                        return Err(self.error(node, "expected a unit value"));
+                    };
+                    let parsed = value.text().parse::<u32>().unwrap_or(0);
+                    if parsed == 0 || parsed > 256 {
+                        return Err(self.error(node, "unit must be 1..256"));
+                    }
+                    unit = parsed;
+                    unit_explicit = true;
+                }
+                other => {
+                    return Err(self.error(node, format!("unknown bit type `{other}`")));
+                }
+            }
+            index += 1;
+        }
+        if kind == bit_program::KIND_BITSTRING && unit != 1 {
+            return Err(self.error(node, "bitstring segments only support unit 1"));
+        }
+        if matches!(
+            kind,
+            bit_program::KIND_FLOAT
+                | bit_program::KIND_UTF8
+                | bit_program::KIND_UTF16
+                | bit_program::KIND_UTF32
+        ) && unit != 1
+        {
+            return Err(self.error(node, "this bit type only supports unit 1"));
+        }
+        Ok((kind, signed, little, unit))
     }
 
     fn atom(&mut self, atom: kette_syntax::ast::Atom<'a>) -> Result<(), CompileError> {
@@ -1968,6 +2158,8 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
             subjects: subject_count,
             tests: Vec::new(),
             test_ids: HashMap::new(),
+            capture_regs: Vec::new(),
+            bit_args: Vec::new(),
             values: Vec::new(),
             value_ids: HashMap::new(),
             nodes: Vec::new(),
@@ -1989,6 +2181,7 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
         let plan = MatchPlan {
             demands: Vec::new(),
             bindings: Vec::new(),
+            bit_bindings: Vec::new(),
             rests: Vec::new(),
             guard: arm.guard(),
             arm: Some(arm),
@@ -2002,6 +2195,7 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
         let plan = MatchPlan {
             demands: Vec::new(),
             bindings: Vec::new(),
+            bit_bindings: Vec::new(),
             rests: Vec::new(),
             guard: None,
             arm: None,
@@ -2022,8 +2216,12 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
         let mut expected: Option<Vec<BindingId>> = None;
         for plan in &mut plans {
             plan.group = group;
-            let mut bindings: Vec<BindingId> =
-                plan.bindings.iter().map(|(binding, _)| *binding).collect();
+            let mut bindings: Vec<BindingId> = plan
+                .bindings
+                .iter()
+                .map(|(binding, _)| *binding)
+                .chain(plan.bit_bindings.iter().map(|(binding, _, _)| *binding))
+                .collect();
             bindings.sort();
             if let Some(expected) = &expected {
                 if *expected != bindings {
@@ -2241,6 +2439,173 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
                 }
                 Ok(plans)
             }
+            Pattern::BitString(bits) => {
+                let mut segments: Vec<bit_program::Segment> = Vec::new();
+                let mut captures: Vec<(BindingId, u32)> = Vec::new();
+                let mut earlier: Vec<(String, u32)> = Vec::new();
+                let mut extra: Vec<Reg> = Vec::new();
+                let mut declared: HashSet<String> = HashSet::new();
+                for segment in bits.segments() {
+                    if let Some(Pattern::Name(name)) = segment.pattern()
+                        && let Some(token) = name.name()
+                    {
+                        declared.insert(token.text().to_string());
+                    }
+                }
+                let mut capture_index = 0u32;
+                for segment in bits.segments() {
+                    let Some(pattern) = segment.pattern() else {
+                        return self
+                            .function
+                            .err_node(segment.syntax().id(), "missing bit segment pattern");
+                    };
+                    let (kind, signed, little, unit) = self
+                        .function
+                        .bit_type(segment.syntax().id(), segment.type_tokens())?;
+                    let mut descriptor = bit_program::Segment {
+                        kind,
+                        flags: 0,
+                        size_form: bit_program::SIZE_DEFAULT,
+                        size: 0,
+                        unit,
+                        literal: 0,
+                    };
+                    if signed {
+                        descriptor.flags |= bit_program::FLAG_SIGNED;
+                    }
+                    if little {
+                        descriptor.flags |= bit_program::FLAG_LITTLE;
+                    }
+                    match pattern {
+                        Pattern::Name(name) => {
+                            let Some(token) = name.name() else {
+                                return self
+                                    .function
+                                    .err_node(name.syntax().id(), "missing bit segment name");
+                            };
+                            if token.text() != "_" {
+                                let binding = self.function.binding(token)?;
+                                descriptor.flags |= bit_program::FLAG_CAPTURE;
+                                captures.push((binding, capture_index));
+                                earlier.push((token.text().to_string(), capture_index));
+                            }
+                        }
+                        Pattern::Wildcard(_) => {}
+                        Pattern::Literal(literal) => {
+                            let mut tokens = literal.syntax().tokens();
+                            let mut negative = false;
+                            let Some(token) = tokens.next() else {
+                                return self
+                                    .function
+                                    .err_node(literal.syntax().id(), "empty segment literal");
+                            };
+                            let value = if token.kind() == SyntaxKind::Minus {
+                                negative = true;
+                                let Some(token) = tokens.next() else {
+                                    return self
+                                        .function
+                                        .err_node(literal.syntax().id(), "empty segment literal");
+                                };
+                                token
+                            } else {
+                                token
+                            };
+                            if value.kind() != SyntaxKind::Number {
+                                return self.function.err_node(
+                                    literal.syntax().id(),
+                                    "only numeric bit segment literals are supported",
+                                );
+                            }
+                            if kind == bit_program::KIND_FLOAT {
+                                let mut parsed = value.text().parse::<f64>().unwrap_or(f64::NAN);
+                                if negative {
+                                    parsed = -parsed;
+                                }
+                                descriptor.flags |= bit_program::FLAG_FLOAT_LITERAL;
+                                descriptor.literal = parsed.to_bits();
+                            } else {
+                                let mut parsed = value.text().parse::<i64>().unwrap_or(0);
+                                if negative {
+                                    parsed = -parsed;
+                                }
+                                descriptor.flags |= bit_program::FLAG_LITERAL;
+                                descriptor.literal = parsed as u64;
+                            }
+                        }
+                        _ => {
+                            return self.function.err_node(
+                                segment.syntax().id(),
+                                "unsupported bit segment pattern",
+                            );
+                        }
+                    }
+                    if let Some(size) = segment.size() {
+                        match size {
+                            Expr::Atom(atom) => {
+                                let Some(token) = atom.token() else {
+                                    return self
+                                        .function
+                                        .err_node(size.syntax().id(), "empty bit size");
+                                };
+                                match token.kind() {
+                                    SyntaxKind::Number => {
+                                        descriptor.size_form = bit_program::SIZE_LITERAL;
+                                        descriptor.size = token.text().parse::<u32>().unwrap_or(0);
+                                    }
+                                    SyntaxKind::Ident => {
+                                        if let Some((_, index)) =
+                                            earlier.iter().find(|(name, _)| name == token.text())
+                                        {
+                                            descriptor.size_form = bit_program::SIZE_CAPTURE;
+                                            descriptor.size = *index;
+                                        } else if declared.contains(token.text()) {
+                                            return self.function.err_node(
+                                                size.syntax().id(),
+                                                "bit size must reference an earlier segment",
+                                            );
+                                        } else {
+                                            self.function.load_resolution(atom.syntax().id())?;
+                                            let reg = self.function.b.stage_acc(&self.temps);
+                                            descriptor.size_form = bit_program::SIZE_ARG;
+                                            descriptor.size = 2 + extra.len() as u32;
+                                            extra.push(reg);
+                                        }
+                                    }
+                                    _ => {
+                                        return self.function.err_node(
+                                            size.syntax().id(),
+                                            "unsupported bit size expression",
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                return self.function.err_node(
+                                    size.syntax().id(),
+                                    "unsupported bit size expression",
+                                );
+                            }
+                        }
+                    }
+                    if descriptor.flags & bit_program::FLAG_CAPTURE != 0 {
+                        capture_index += 1;
+                    }
+                    segments.push(descriptor);
+                }
+                let program = self.function.b.constant(Constant::Bytes(
+                    bit_program::encode(&segments).into_boxed_slice(),
+                ));
+                let args = self.bit_args.len() as u32;
+                self.bit_args.push(extra);
+                let test = self.intern_test(occurrence, MatchTestKind::BitMatch(program, args));
+                for plan in &mut plans {
+                    Self::push_demand(plan, test);
+                    for (binding, index) in &captures {
+                        plan.bit_bindings.push((*binding, test, *index));
+                    }
+                }
+                Ok(plans)
+            }
             Pattern::Atom(atom) => {
                 let Some(token) = atom.name() else {
                     return self
@@ -2382,6 +2747,12 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
             return *id;
         }
         let id = self.tests.len() as u32;
+        self.capture_regs
+            .push(if matches!(kind, MatchTestKind::BitMatch(..)) {
+                self.temps.temp()
+            } else {
+                Reg::new(0)
+            });
         self.tests.push(test);
         self.test_ids.insert(test, id);
         id
@@ -2710,7 +3081,8 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
     }
 
     fn emit_test(&mut self, test: u32, no: Label) -> Result<(), CompileError> {
-        let test = self.tests[test as usize];
+        let test_id = test as usize;
+        let test = self.tests[test_id];
         let occurrence = self.occurrence_regs[test.occurrence as usize];
         match test.kind {
             MatchTestKind::IsObject => {
@@ -2814,6 +3186,27 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
                 }
                 self.function.b.jump_if_falsy(no);
             }
+            MatchTestKind::BitMatch(program, args) => {
+                self.function.b.load_constant(program);
+                let program_reg = self.function.b.stage_acc(&self.temps);
+                self.function.load_global("BitArray");
+                let receiver = self.function.b.stage_acc(&self.temps);
+                let name = self.function.b.name(b"match");
+                let feedback = self.function.b.new_feedback();
+                self.function
+                    .b
+                    .load_named_property(receiver, name, feedback);
+                let callee = self.function.b.stage_acc(&self.temps);
+                let extra = self.bit_args[args as usize].clone();
+                let mut call_args = Vec::with_capacity(extra.len() + 2);
+                call_args.push(occurrence);
+                call_args.push(program_reg);
+                call_args.extend(extra);
+                self.function
+                    .call_regs(&self.temps, callee, receiver, &call_args)?;
+                self.function.b.jump_if_nullish(no);
+                self.function.b.store(self.capture_regs[test_id]);
+            }
             MatchTestKind::UserType(node) => {
                 self.function.load_resolution(node)?;
                 let ty = self.function.b.stage_acc(&self.temps);
@@ -2869,6 +3262,14 @@ impl<'a, 'f> MatchBuild<'a, 'f> {
         for (binding, occurrence, start) in rests {
             let source = self.occurrence_regs[occurrence as usize];
             self.function.b.array_slice(source, start as u32);
+            self.function.store_binding(binding)?;
+        }
+        for (binding, test, index) in self.plans[plan].bit_bindings.clone() {
+            let capture = self.capture_regs[test as usize];
+            self.function.b.load(capture);
+            self.function.b.load_smi(index as i32);
+            let feedback = self.function.b.new_feedback();
+            self.function.b.load_indexed(capture, feedback);
             self.function.store_binding(binding)?;
         }
         Ok(())
@@ -2976,4 +3377,34 @@ fn decode_string(text: &str) -> Vec<u8> {
         index += 1;
     }
     out
+}
+
+fn encode_utf_string(bytes: &[u8], kind: u8, little: bool) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut out = Vec::new();
+    match kind {
+        bit_program::KIND_UTF8 => out.extend_from_slice(bytes),
+        bit_program::KIND_UTF16 => {
+            for unit in text.encode_utf16() {
+                let encoded = if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                };
+                out.extend_from_slice(&encoded);
+            }
+        }
+        bit_program::KIND_UTF32 => {
+            for ch in text.chars() {
+                let encoded = if little {
+                    (ch as u32).to_le_bytes()
+                } else {
+                    (ch as u32).to_be_bytes()
+                };
+                out.extend_from_slice(&encoded);
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
 }

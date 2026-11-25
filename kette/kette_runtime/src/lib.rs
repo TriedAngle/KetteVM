@@ -9,6 +9,7 @@ use vm_core::{
     request_shutdown, rt_try, tools::KetteTools,
 };
 
+pub mod bitops;
 pub mod ops;
 pub mod process;
 
@@ -83,6 +84,17 @@ impl Runtime for KetteRuntime {
         let eq = vm.register_native(ops::any_eq);
         let ne = vm.register_native(ops::any_ne);
         let not = vm.register_native(ops::any_not);
+        let bit_build = vm.register_native(bitops::bit_build);
+        let bit_match = vm.register_native(bitops::bit_match);
+        let bit_size = vm.register_native(bitops::bit_size);
+        let byte_size = vm.register_native(bitops::byte_size);
+        let is_binary = vm.register_native(bitops::is_binary);
+        let bit_at = vm.register_native(bitops::bit_at);
+        let bit_slice = vm.register_native(bitops::slice);
+        let bit_copy = vm.register_native(bitops::copy);
+        let bit_concat = vm.register_native(bitops::concat);
+        let bit_xor = vm.register_native(bitops::xor);
+        let bit_text = vm.register_native(bitops::to_string);
         let process = process::Process::capture();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -214,6 +226,51 @@ impl Runtime for KetteRuntime {
                     length,
                 );
             }
+
+            let bit_array_map = heap.known().bit_array_map.get_handle(heap, &scope);
+            let proto_map = heap.allocate_handle::<Map>(
+                MapInit {
+                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                    value_slot_count: 0,
+                    descriptors: &[],
+                    prototype: object_prototype.erase(),
+                },
+                &scope,
+            );
+            let bit_prototype =
+                scope.handle(heap.new_object(&scope, proto_map, HandleSlice::EMPTY));
+            bit_array_map.as_tagged(heap).prototype.set(
+                heap,
+                bit_array_map.as_tagged(heap).erase(),
+                bit_prototype.as_tagged(heap).erase(),
+            );
+            for (name, index, length) in [
+                ("bitSize", bit_size, 0),
+                ("byteSize", byte_size, 0),
+                ("isBinary", is_binary, 0),
+                ("at", bit_at, 1),
+                ("slice", bit_slice, 2),
+                ("copy", bit_copy, 0),
+                ("concat", bit_concat, 1),
+                ("xor", bit_xor, 1),
+                ("<>", bit_concat, 1),
+                ("toString", bit_text, 0),
+            ] {
+                Object::add_method(thread_vm, heap, &scope, bit_prototype, name, index, length);
+            }
+            let bit_module = scope.handle(heap.new_object(&scope, proto_map, HandleSlice::EMPTY));
+            Object::add_method(thread_vm, heap, &scope, bit_module, "build", bit_build, 1);
+            Object::add_method(thread_vm, heap, &scope, bit_module, "match", bit_match, 2);
+            let bit_array_name = thread_vm.interner().intern_str(heap, &scope, "BitArray");
+            let bit_array_name = scope.handle(bit_array_name.as_tagged(heap));
+            Object::define_own_property_ordinary(
+                heap,
+                &scope,
+                global,
+                bit_array_name,
+                PropertyDescriptor::data(bit_module.erase()),
+            )
+            .expect("install BitArray global");
 
             let object_key = thread_vm.interner().intern_str(heap, &scope, "Object");
             let object_key = scope.handle(object_key.as_tagged(heap).erase());

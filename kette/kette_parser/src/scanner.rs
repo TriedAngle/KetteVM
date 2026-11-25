@@ -348,9 +348,6 @@ impl Scanner<'_> {
                         } else {
                             LtLtLt
                         }
-                    } else if self.peek() == Some('=') {
-                        self.bump();
-                        LtLtEq
                     } else {
                         LtLt
                     }
@@ -372,9 +369,6 @@ impl Scanner<'_> {
                         } else {
                             GtGtGt
                         }
-                    } else if self.peek() == Some('=') {
-                        self.bump();
-                        GtGtEq
                     } else {
                         GtGt
                     }

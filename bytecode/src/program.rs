@@ -178,6 +178,8 @@ pub struct GlobalDeclarations {
 pub enum Constant {
     /// Interned string (property names, string literals)
     String(Box<[u8]>),
+    /// Raw bytes (Kette bit-string programs); materialized as a byte array.
+    Bytes(Box<[u8]>),
     /// Interned symbolic name (Kette atom)
     Atom(Box<[u8]>),
     /// Heap float (non-Smi number literals)
@@ -225,6 +227,7 @@ impl Constant {
     fn key(&self) -> ConstantKey<'_> {
         match self {
             Self::String(bytes) => ConstantKey::String(bytes),
+            Self::Bytes(bytes) => ConstantKey::Bytes(bytes),
             Self::Atom(bytes) => ConstantKey::Atom(bytes),
             Self::Float(f) => ConstantKey::Float(f.to_bits()),
             Self::Smi(v) => ConstantKey::Smi(*v),
@@ -258,6 +261,7 @@ impl core::hash::Hash for Constant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ConstantKey<'a> {
     String(&'a [u8]),
+    Bytes(&'a [u8]),
     Atom(&'a [u8]),
     Float(u64),
     Smi(i64),

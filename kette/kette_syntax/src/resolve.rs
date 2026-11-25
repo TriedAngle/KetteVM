@@ -304,6 +304,13 @@ impl<'a> Resolver<'a> {
                     out.push(binding);
                 }
             }
+            Pattern::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(inner) = segment.pattern() {
+                        self.pattern_bindings(inner, out);
+                    }
+                }
+            }
         }
     }
 
@@ -491,6 +498,13 @@ impl<'a> Resolver<'a> {
                     self.declare_token(scope, token, kind);
                 }
             }
+            Pattern::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(inner) = segment.pattern() {
+                        self.declare_pattern(scope, inner, kind);
+                    }
+                }
+            }
             Pattern::Value(_) | Pattern::Atom(_) => {}
         }
     }
@@ -535,6 +549,13 @@ impl<'a> Resolver<'a> {
             Pattern::Or(or) => {
                 for alternative in or.alternatives() {
                     self.pattern_binding_tokens(alternative, out);
+                }
+            }
+            Pattern::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(inner) = segment.pattern() {
+                        self.pattern_binding_tokens(inner, out);
+                    }
                 }
             }
             Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Value(_) | Pattern::Atom(_) => {}
@@ -590,6 +611,13 @@ impl<'a> Resolver<'a> {
                     self.declare_alternative(scope, alternative, kind, by_name, used);
                 }
             }
+            Pattern::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(inner) = segment.pattern() {
+                        self.declare_alternative(scope, inner, kind, by_name, used);
+                    }
+                }
+            }
             Pattern::Literal(_) | Pattern::Wildcard(_) | Pattern::Value(_) | Pattern::Atom(_) => {}
         }
     }
@@ -640,6 +668,16 @@ impl<'a> Resolver<'a> {
             Expr::Array(array) => {
                 for element in array.elements() {
                     self.collect_expr(element, false);
+                }
+            }
+            Expr::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(value) = segment.value() {
+                        self.collect_expr(value, false);
+                    }
+                    if let Some(size) = segment.size() {
+                        self.collect_expr(size, false);
+                    }
                 }
             }
             Expr::If(expr) => {
@@ -912,6 +950,16 @@ impl<'a> Resolver<'a> {
                     self.resolve_expr(element, scope);
                 }
             }
+            Expr::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(value) = segment.value() {
+                        self.resolve_expr(value, scope);
+                    }
+                    if let Some(size) = segment.size() {
+                        self.resolve_expr(size, scope);
+                    }
+                }
+            }
             Expr::If(expr) => self.resolve_if(expr, scope),
             Expr::While(expr) => self.resolve_while(expr, scope),
             Expr::For(expr) => self.resolve_for(expr, scope),
@@ -1139,6 +1187,16 @@ impl<'a> Resolver<'a> {
             Pattern::Object(object) => {
                 for field in object.fields() {
                     if let Some(inner) = field.pattern() {
+                        self.resolve_pattern_types(inner, scope);
+                    }
+                }
+            }
+            Pattern::BitString(bits) => {
+                for segment in bits.segments() {
+                    if let Some(size) = segment.size() {
+                        self.resolve_expr(size, scope);
+                    }
+                    if let Some(inner) = segment.pattern() {
                         self.resolve_pattern_types(inner, scope);
                     }
                 }

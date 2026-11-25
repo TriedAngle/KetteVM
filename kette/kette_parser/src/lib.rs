@@ -435,6 +435,148 @@ impl<'a> Parser<'a> {
         Ok(self.finish())
     }
 
+    fn parse_bit_string(&mut self) -> Result<NodeId, ()> {
+        self.start(BitString);
+        self.bump();
+        if self.peek().kind == GtGt {
+            self.bump();
+            return Ok(self.finish());
+        }
+        loop {
+            self.start(BitStringSegment);
+            self.parse_bit_operand()?;
+            if self.peek().kind == Colon {
+                self.bump();
+                self.parse_bit_operand()?;
+            }
+            if self.peek().kind == Slash {
+                self.bump();
+                self.parse_bit_type_spec()?;
+            }
+            self.finish();
+            match self.peek().kind {
+                Comma => {
+                    self.bump();
+                }
+                GtGt => break,
+                other => {
+                    self.record_error(
+                        self.peek().range,
+                        format!("expected `,` or `>>` in a bit string, found {other:?}"),
+                    );
+                    break;
+                }
+            }
+        }
+        self.expect(GtGt)?;
+        Ok(self.finish())
+    }
+
+    fn parse_bit_string_pattern(&mut self) -> Result<NodeId, ()> {
+        self.start(PatternBitString);
+        self.bump();
+        if self.peek().kind == GtGt {
+            self.bump();
+            return Ok(self.finish());
+        }
+        loop {
+            self.start(PatternBitStringSegment);
+            self.parse_bit_pattern_value()?;
+            if self.peek().kind == Colon {
+                self.bump();
+                self.parse_bit_operand()?;
+            }
+            if self.peek().kind == Slash {
+                self.bump();
+                self.parse_bit_type_spec()?;
+            }
+            self.finish();
+            match self.peek().kind {
+                Comma => {
+                    self.bump();
+                }
+                GtGt => break,
+                other => {
+                    self.record_error(
+                        self.peek().range,
+                        format!("expected `,` or `>>` in a bit string pattern, found {other:?}"),
+                    );
+                    break;
+                }
+            }
+        }
+        self.expect(GtGt)?;
+        Ok(self.finish())
+    }
+
+    fn parse_bit_operand(&mut self) -> Result<NodeId, ()> {
+        let token = self.peek();
+        if matches!(token.kind, Minus | Bang | TildeTildeTilde) {
+            self.start(Unary);
+            self.bump();
+            self.parse_bit_operand()?;
+            Ok(self.finish())
+        } else {
+            self.parse_postfix()
+        }
+    }
+
+    fn parse_bit_pattern_value(&mut self) -> Result<NodeId, ()> {
+        let token = self.peek();
+        match token.kind {
+            Ident if &self.source[token.range.start as usize..token.range.end as usize] == "_" => {
+                self.start(PatternWildcard);
+                self.bump();
+                Ok(self.finish())
+            }
+            Number | String | True | False | Null => {
+                self.start(PatternLiteral);
+                self.bump();
+                Ok(self.finish())
+            }
+            Minus if self.peek2().0.kind == Number => {
+                self.start(PatternLiteral);
+                self.bump();
+                self.bump();
+                Ok(self.finish())
+            }
+            Ident => {
+                self.start(PatternName);
+                self.bump();
+                Ok(self.finish())
+            }
+            Colon
+                if (self.peek2().0.kind.is_name() || self.peek2().0.kind == String)
+                    && token.range.end == self.peek2().0.range.start =>
+            {
+                self.start(PatternAtom);
+                self.bump();
+                self.bump();
+                Ok(self.finish())
+            }
+            _ => self.fail(
+                token.range,
+                format!("expected a bit segment pattern, found {:?}", token.kind),
+            ),
+        }
+    }
+
+    fn parse_bit_type_spec(&mut self) -> Result<(), ()> {
+        loop {
+            let token = self.expect_name()?;
+            let name = &self.source[token.range.start as usize..token.range.end as usize];
+            if name == "unit" && self.peek().kind == Colon {
+                self.bump();
+                self.expect(Number)?;
+            }
+            if self.peek().kind == Minus {
+                self.bump();
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
     fn parse_path(&mut self) -> Result<NodeId, ()> {
         self.start(Path);
         self.expect_name()?;
@@ -594,6 +736,7 @@ impl<'a> Parser<'a> {
             }
             LBrace => self.parse_object(),
             LBracket => self.parse_array(),
+            LtLt => self.parse_bit_string(),
             Pipe => self.parse_prefixed_function(),
             If => self.parse_if(),
             While => self.parse_while(),
@@ -740,6 +883,7 @@ impl<'a> Parser<'a> {
             }
             LBrace => self.parse_object_pattern()?,
             LBracket => self.parse_array_pattern()?,
+            LtLt => self.parse_bit_string_pattern()?,
             Colon
                 if (self.peek2().0.kind.is_name() || self.peek2().0.kind == String)
                     && token.range.end == self.peek2().0.range.start =>

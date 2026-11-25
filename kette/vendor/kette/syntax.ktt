@@ -30,6 +30,7 @@ let KINDS = [
     :MatchExpr, :MatchArm, :PatternLiteral, :PatternWildcard,
     :PatternObject, :PatternField, :PatternType, :PatternOr, :PatternValue,
     :PatternAtom, :AtomLiteral,
+    :BitString, :BitStringSegment, :PatternBitString, :PatternBitStringSegment,
 ]
 
 if raw.kindCount() != KINDS.length {
