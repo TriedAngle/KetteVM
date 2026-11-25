@@ -29,3 +29,5 @@ stress-minor-gc = ["vm_core/stress-minor-gc"]
 # Select the tail-call ("become") interpreter over the match-loop one.
 # Requires a nightly toolchain (explicit_tail_calls / rust_preserve_none_cc).
 fast = ["interpreter/fast"]
+# Keep TSan's fiber tracking in sync with stackful continuations.
+tsan = ["vm_core/tsan"]

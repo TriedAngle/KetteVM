@@ -68,13 +68,11 @@ pub use string::{
     Utf8String, decode_wtf8, flatten, string_content_hash, string_content_hash_units,
 };
 pub use symbol::Symbol;
-pub use thread::{
-    TaskStateObject, TaskStateObjectInit, ThreadKind, ThreadObject, ThreadObjectInit, ThreadStatus,
-};
+pub use thread::{ThreadKind, ThreadObject, ThreadObjectInit, ThreadStatus};
 
 use crate::{
     AtomicGcSlot, EdgeVisitable, Heap, ObjectAddr, STRONG_PTR, Tagged, Value, Visitor, WEAK_PTR,
-    Word, simple_scheduler::SchedulerObject,
+    Word,
 };
 use core::{alloc::Layout, ptr::NonNull};
 use std::sync::atomic::Ordering;
@@ -202,10 +200,6 @@ pub enum ObjectKind {
     ThreadObject = 35,
     /// A shared cell with an atomically accessed `Value` payload.
     AtomicI64Object = 36,
-    /// GC-visible execution state of a virtual thread.
-    TaskStateObject = 37,
-    /// Handle for a cooperative scheduler.
-    SchedulerObject = 38,
     /// A globally interned symbolic name (Kette atom).
     Atom = 39,
     /// An immutable bit string (inline bytes or a view into a root).
@@ -282,8 +276,6 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::CValue => (*addr.cast::<CValue>().as_ptr()).layout(),
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
             ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
-            ObjectKind::TaskStateObject => (*addr.cast::<TaskStateObject>().as_ptr()).layout(),
-            ObjectKind::SchedulerObject => (*addr.cast::<SchedulerObject>().as_ptr()).layout(),
             ObjectKind::AtomicI64Object => (*addr.cast::<AtomicI64Object>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
@@ -358,12 +350,6 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).visit_edges(visitor),
             ObjectKind::ThreadObject => {
                 (*addr.cast::<ThreadObject>().as_ptr()).visit_edges(visitor)
-            }
-            ObjectKind::TaskStateObject => {
-                (*addr.cast::<TaskStateObject>().as_ptr()).visit_edges(visitor)
-            }
-            ObjectKind::SchedulerObject => {
-                (*addr.cast::<SchedulerObject>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::AtomicI64Object => {
                 (*addr.cast::<AtomicI64Object>().as_ptr()).visit_edges(visitor)

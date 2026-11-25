@@ -39,14 +39,14 @@ Test.assert(threw, true)
 let blocking = Channel.newWithCapacity(1)
 let received = Sequence.new()
 let receivedLock = Mutex.new()
-let producer = Thread.newVirtual("producer", {
+let producer = Thread.newPlatform("producer", {
     let i = 0
     while i < 4 {
         blocking.send(i)
         i = i + 1
     }
 })
-let consumer = Thread.newVirtual("consumer", {
+let consumer = Thread.newPlatform("consumer", {
     let i = 0
     while i < 4 {
         let value = blocking.receive()
@@ -69,21 +69,21 @@ Test.assert(received.get(3), 3)
 let shared = Channel.newWithCapacity(4)
 let collected = Sequence.new()
 let collectedLock = Mutex.new()
-let producerA = Thread.newVirtual("producer-a", {
+let producerA = Thread.newPlatform("producer-a", {
     let i = 0
     while i < 5 {
         shared.send(i)
         i = i + 1
     }
 })
-let producerB = Thread.newVirtual("producer-b", {
+let producerB = Thread.newPlatform("producer-b", {
     let i = 0
     while i < 5 {
         shared.send(100 + i)
         i = i + 1
     }
 })
-let consumerA = Thread.newVirtual("consumer-a", {
+let consumerA = Thread.newPlatform("consumer-a", {
     let i = 0
     while i < 5 {
         let value = shared.receive()
@@ -93,7 +93,7 @@ let consumerA = Thread.newVirtual("consumer-a", {
         i = i + 1
     }
 })
-let consumerB = Thread.newVirtual("consumer-b", {
+let consumerB = Thread.newPlatform("consumer-b", {
     let i = 0
     while i < 5 {
         let value = shared.receive()
@@ -119,7 +119,7 @@ Test.assert(collected.contains(104), true)
 
 let closing = Channel.newWithCapacity(1)
 let waiterClosed = { value: false }
-let waiter = Thread.newVirtual("waiter", {
+let waiter = Thread.newPlatform("waiter", {
     try {
         closing.receive()
     } catch (e) {
@@ -134,7 +134,7 @@ Test.assert(waiterClosed.value, true)
 let full = Channel.newWithCapacity(1)
 full.send("x")
 let sendResult = { value: true }
-let blocked = Thread.newVirtual("blocked-sender", {
+let blocked = Thread.newPlatform("blocked-sender", {
     sendResult.value = full.send("y")
 })
 blocked.start()

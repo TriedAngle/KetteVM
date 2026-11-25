@@ -40,6 +40,21 @@ Combine with the fast interpreter:
 
     cargo +nightly build --release -p vm --features fast,stress-minor-gc
 
+TSan (nightly; `--features tsan` enables fiber tracking):
+
+    RUSTFLAGS="-Zsanitizer=thread" \
+    cargo +nightly build -Zbuild-std \
+      --target aarch64-apple-darwin -p vm --features tsan
+
+    TSAN_OPTIONS="halt_on_error=0:history_size=7" \
+    target/aarch64-apple-darwin/debug/kettevm \
+      kette/kette_tests/test_runner.ktt \
+      kette/std/startup.ktt \
+      kette/std/functional.ktt \
+      kette/kette_tests/pool.ktt
+
+`fast,tsan` is unsupported: `preserve-none` has an open ARMv8 sanitizer bug ([LLVM #177519](https://github.com/llvm/llvm-project/issues/177519)), and TSan fibers do not make it reliable either; use the match-loop TSan build.
+
 Kette tgpu particles example (build `tgpu-native` first; needs `slangc` and libglfw):
 
     cargo run -q -p vm -- kette/examples/tgpu/particles.ktt

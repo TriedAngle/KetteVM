@@ -1,0 +1,58 @@
+// Unbounded thread-safe queue.
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/queue.ktt
+// Check: kette/kette_tests/check.py
+
+use collections.queue { Queue }
+
+let queue = Queue.new()
+Test.assert(queue.isEmpty(), true)
+Test.assert(queue.size(), 0)
+Test.assert(queue.tryTake(), null)
+Test.assert(queue.push("a"), true)
+Test.assert(queue.push("b"), true)
+Test.assert(queue.size(), 2)
+Test.assert(queue.take(), "a")
+Test.assert(queue.take(), "b")
+queue.close()
+Test.assert(queue.take(), null)
+
+let blocking = Queue.new()
+let received = []
+let producer = Thread.newPlatform("producer", {
+    blocking.push(1)
+    blocking.push(2)
+    blocking.push(3)
+    blocking.close()
+})
+let consumer = Thread.newPlatform("consumer", {
+    while true {
+        let value = blocking.take()
+        if value == null {
+            break
+        }
+        received.push(value)
+    }
+})
+consumer.start()
+producer.start()
+producer.join()
+consumer.join()
+Test.assert(received.length, 3)
+Test.assert(received[0], 1)
+Test.assert(received[2], 3)
+Test.assert(blocking.isClosed(), true)
+Test.assert(blocking.push(4), false)
+
+let growing = Queue.newWithCapacity(1)
+let expected = 0
+while expected < 100 {
+    Test.assert(growing.push(expected), true)
+    expected = expected + 1
+}
+Test.assert(growing.size(), 100)
+let actual = 0
+while actual < 100 {
+    Test.assert(growing.take(), actual)
+    actual = actual + 1
+}
+Test.assert(growing.isEmpty(), true)

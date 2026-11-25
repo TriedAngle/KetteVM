@@ -1,7 +1,11 @@
 let SYNC_PATH = "kette/std/sync.ktt"
+let THREADING_PATH = "kette/std/threading.ktt"
 let COLLECTIONS_TRAITS_PATH = "kette/std/collections/collections.ktt"
 let COLLECTIONS_SEQUENCE_PATH = "kette/std/collections/sequence.ktt"
 let COLLECTIONS_CHANNEL_PATH = "kette/std/collections/channel.ktt"
+let COLLECTIONS_QUEUE_PATH = "kette/std/collections/queue.ktt"
+let COLLECTIONS_TIMER_PATH = "kette/std/collections/timer.ktt"
+let COLLECTIONS_POOL_PATH = "kette/std/collections/pool.ktt"
 let ERROR_PATH = "kette/std/error.ktt"
 let FFI_PATH = "kette/std/ffi.ktt"
 let LIBC_SYS_PATH = "kette/std/sys/libc/sys.ktt"
@@ -429,6 +433,9 @@ globalThis.ModuleRegistry = {
 if !Modules.error {
     KetteTools.evalFile(ERROR_PATH)
 }
+if !Modules.threading {
+    KetteTools.evalFile(THREADING_PATH)
+}
 if !Modules.sync {
     KetteTools.evalFile(SYNC_PATH)
 }
@@ -440,6 +447,15 @@ if !Modules.collections or !Modules.collections.sequence {
 }
 if !Modules.collections or !Modules.collections.channel {
     KetteTools.evalFile(COLLECTIONS_CHANNEL_PATH)
+}
+if !Modules.collections or !Modules.collections.queue {
+    KetteTools.evalFile(COLLECTIONS_QUEUE_PATH)
+}
+if !Modules.collections or !Modules.collections.timer {
+    KetteTools.evalFile(COLLECTIONS_TIMER_PATH)
+}
+if !Modules.collections or !Modules.collections.pool {
+    KetteTools.evalFile(COLLECTIONS_POOL_PATH)
 }
 if !Modules.ffi {
     KetteTools.evalFile(FFI_PATH)

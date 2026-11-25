@@ -16,7 +16,7 @@ use vm_core::{
 };
 
 /// A dispatcher entry for the shared frame setup.
-pub type DispatchFn = for<'h> fn(&mut Ctx<'h, 'h>) -> Result<Acc>;
+pub type DispatchFn = for<'h> fn(&mut Ctx<'h>) -> Result<Acc>;
 
 #[cfg(not(debug_assertions))]
 pub struct LoopMatchInterpreter;
@@ -27,7 +27,7 @@ impl Interpreter for LoopMatchInterpreter {
 }
 
 #[inline(always)]
-pub fn offset(ctx: &Ctx<'_, '_>, pc: usize) -> *const u8 {
+pub fn offset(ctx: &Ctx<'_>, pc: usize) -> *const u8 {
     unsafe { ctx.code_ptr().add(pc) }
 }
 
@@ -260,7 +260,7 @@ fn start<'b>(
 }
 
 #[cfg(not(debug_assertions))]
-fn match_dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
+fn match_dispatch<'h>(ctx: &mut Ctx<'h>) -> Result<Acc> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
@@ -298,7 +298,7 @@ fn match_dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
 #[cfg(not(debug_assertions))]
 #[inline(always)]
 fn step<'h, const STRIDE: usize>(
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     ip: &mut *const u8,
     regs: &mut Regs,
     acc: &mut Acc,
@@ -431,7 +431,7 @@ pub fn call_enter<'h>(
     next_pc: usize,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     match staged {
@@ -470,7 +470,7 @@ pub fn op_jump_loop<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(JumpLoop, ip, ctx, ops, _next, pc, _next_pc);
@@ -500,7 +500,7 @@ pub fn op_call<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(Call, ip, ctx, ops, _next, pc, next_pc);
@@ -523,7 +523,7 @@ pub fn op_call_no_feedback<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(CallNoFeedback, ip, ctx, ops, _next, pc, next_pc);
@@ -548,7 +548,7 @@ pub fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     match ARGC {
@@ -608,7 +608,7 @@ pub fn op_call_method<'h, const STRIDE: usize, const ARGC: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     match ARGC {
@@ -671,7 +671,7 @@ pub fn op_return<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     let _ = ip;
@@ -720,7 +720,7 @@ pub fn step_return<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_return::<STRIDE>(ip, regs, acc, ctx, roots)
@@ -731,7 +731,7 @@ pub fn step_call_method0<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_method::<STRIDE, 0>(ip, regs, acc, ctx, roots)
@@ -742,7 +742,7 @@ pub fn step_call_method1<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_method::<STRIDE, 1>(ip, regs, acc, ctx, roots)
@@ -753,7 +753,7 @@ pub fn step_call_method2<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_method::<STRIDE, 2>(ip, regs, acc, ctx, roots)
@@ -764,7 +764,7 @@ pub fn step_call_function0<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_function::<STRIDE, 0>(ip, regs, acc, ctx, roots)
@@ -775,7 +775,7 @@ pub fn step_call_function1<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_function::<STRIDE, 1>(ip, regs, acc, ctx, roots)
@@ -786,7 +786,7 @@ pub fn step_call_function2<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_function::<STRIDE, 2>(ip, regs, acc, ctx, roots)
@@ -797,7 +797,7 @@ pub fn step_binary_op<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(BinaryOp, ip, ctx, ops, _next, pc, next_pc);
@@ -837,7 +837,7 @@ pub fn step_unary_op<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(UnaryOp, ip, ctx, ops, _next, pc, next_pc);
@@ -875,7 +875,7 @@ pub fn op_construct<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     decode!(Construct, ip, ctx, ops, _next, pc, next_pc);

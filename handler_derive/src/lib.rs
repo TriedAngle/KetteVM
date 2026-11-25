@@ -19,7 +19,7 @@
 //! #[rustfmt::skip]
 //! #[rustc_align(32)]
 //! extern "rust-preserve-none" fn op_add<'h, const STRIDE: usize>(
-//!     ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>,
+//!     ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_>,
 //!     table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg,
 //! ) -> Acc { /* body with receiver calls and exit macros expanded */ }
 //! ```
@@ -311,7 +311,7 @@ fn expand(form: HandlerForm, func: &syn::ItemFn) -> syn::Result<TokenStream2> {
             ip: *const u8,
             regs: Regs,
             #acc: Acc,
-            ctx: &mut Ctx<'_, 'h>,
+            ctx: &mut Ctx<'_>,
             table: TableArg<'h>,
             roots: RootsArg<'h>,
             #float: FloatReg,
@@ -781,7 +781,7 @@ fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<T
             ip: *const u8,
             regs: vm_core::Regs,
             acc: &mut vm_core::Acc,
-            ctx: &mut vm_core::Ctx<'h, 'h>,
+            ctx: &mut vm_core::Ctx<'h>,
             roots: crate::RootsArg<'h>,
             #float_param
         ) -> *const u8 {

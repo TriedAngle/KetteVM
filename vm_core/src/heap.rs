@@ -783,7 +783,8 @@ impl EdgeVisitable for () {
 
 /// Type-erased per-thread heap.
 pub struct Heap {
-    local: Box<dyn LocalHeap>,
+    /// The carrier's allocator. A suspended task's stable view has `None` until a carrier swaps its allocator in.
+    local: Option<Box<dyn LocalHeap>>,
     tlab: Tlab,
     known: *const WellKnown,
     prototype_registry: *const PrototypeRegistry,
@@ -794,6 +795,31 @@ pub struct Heap {
 unsafe impl Send for Heap {}
 
 impl Heap {
+    #[inline(always)]
+    fn local(&self) -> &dyn LocalHeap {
+        self.local
+            .as_deref()
+            .expect("heap used while its task is suspended")
+    }
+
+    /// A stable per-task view: same known objects, no allocator yet.
+    pub fn task_view(&self) -> Heap {
+        Heap {
+            local: None,
+            tlab: Tlab::empty(),
+            known: self.known,
+            prototype_registry: self.prototype_registry,
+            #[cfg(feature = "stress-minor-gc")]
+            stress_armed: std::sync::Arc::clone(&self.stress_armed),
+        }
+    }
+
+    /// Move the allocator between a carrier and a task view.
+    pub fn swap_allocator(&mut self, other: &mut Heap) {
+        std::mem::swap(&mut self.local, &mut other.local);
+        std::mem::swap(&mut self.tlab, &mut other.tlab);
+    }
+
     #[inline]
     pub fn allocate_raw(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         debug_assert!(
@@ -814,7 +840,7 @@ impl Heap {
         // The collector may park or collect below, reclaiming the current
         // window: drop it before crossing the boundary.
         self.tlab.invalidate();
-        let mut tlab = self.local.allocate_slow(size)?;
+        let mut tlab = self.local().allocate_slow(size)?;
         let ptr = tlab
             .try_alloc(size)
             .expect("collector must supply a TLAB of at least min_size");
@@ -834,23 +860,23 @@ impl Heap {
     }
 
     pub fn write_barrier(&self, host: Tagged<'_, Value>, slot: &RawCell, value: Tagged<'_, Value>) {
-        self.local
+        self.local()
             .write_barrier(host.raw().to_bits(), slot, value.raw().to_bits())
     }
 
     #[inline]
     pub fn collection_requested(&self) -> bool {
-        self.local.collection_requested()
+        self.local().collection_requested()
     }
 
     #[inline]
     pub fn park_for_collection(&self) -> bool {
-        self.local.park_for_collection()
+        self.local().park_for_collection()
     }
 
     #[inline]
     pub fn take_cancel(&self) -> bool {
-        self.local.take_cancel()
+        self.local().take_cancel()
     }
 
     /// Run a host wait without blocking a collection: the mutator becomes
@@ -867,8 +893,9 @@ impl Heap {
         }
 
         self.tlab.invalidate();
-        let _cancelled = self.local.block();
-        let guard = Unblock(self.local.as_ref());
+        let local = self.local();
+        let _cancelled = local.block();
+        let guard = Unblock(local);
         let result = f();
         drop(guard);
         result
@@ -876,11 +903,11 @@ impl Heap {
 
     pub fn cancel_executions(&mut self, protocol: &dyn Fn()) {
         self.tlab.invalidate();
-        self.local.cancel_executions(protocol)
+        self.local().cancel_executions(protocol)
     }
 
     pub fn gc_in_progress(&self) -> bool {
-        self.local.gc_in_progress()
+        self.local().gc_in_progress()
     }
 
     #[inline]
@@ -895,12 +922,12 @@ impl Heap {
 
     pub fn collect(&mut self) {
         self.tlab.invalidate();
-        self.local.force_collect();
+        self.local().force_collect();
     }
 
     pub fn collect_minor(&mut self) {
         self.tlab.invalidate();
-        self.local.collect_minor();
+        self.local().collect_minor();
     }
 
     /// Run `work` with every other mutator parked. `work` receives an
@@ -908,10 +935,10 @@ impl Heap {
     /// heap updates and cache invalidation belong inside.
     pub fn exclusive(&mut self, work: impl FnOnce(&Heap)) {
         self.tlab.invalidate();
+        let local = self.local();
         let heap: &Heap = self;
         let mut work = Some(work);
-        self.local
-            .exclusive(&mut || (work.take().expect("exclusive work runs once"))(heap));
+        local.exclusive(&mut || (work.take().expect("exclusive work runs once"))(heap));
     }
 
     /// Allocate a fresh `T`. The returned `Tagged` is anchored at this
@@ -1291,7 +1318,7 @@ impl GlobalHeap {
 
     pub fn new_local(&self, known: &WellKnown, prototype_registry: &PrototypeRegistry) -> Heap {
         Heap {
-            local: self.shared.new_local(),
+            local: Some(self.shared.new_local()),
             tlab: Tlab::empty(),
             known: known as *const WellKnown,
             prototype_registry: prototype_registry as *const PrototypeRegistry,

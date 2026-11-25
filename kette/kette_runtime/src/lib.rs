@@ -180,11 +180,6 @@ impl Runtime for KetteRuntime {
                 atom_map.erase(),
                 object_prototype.as_tagged(heap).erase(),
             );
-            let object_prototype_value = object_prototype.as_tagged(heap).erase();
-            let scheduler_map = heap.known().scheduler_object_map.get(heap);
-            scheduler_map
-                .prototype
-                .set(heap, scheduler_map.erase(), object_prototype_value);
             for (name, index, length) in [("==", eq, 1), ("!=", ne, 1), ("!", not, 0)] {
                 Object::add_method(
                     thread_vm,

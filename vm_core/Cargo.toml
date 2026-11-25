@@ -13,3 +13,5 @@ trace = { path = "../trace" }
 
 [features]
 stress-minor-gc = []
+# ThreadSanitizer fiber annotations (see vm_core::tsan).
+tsan = []

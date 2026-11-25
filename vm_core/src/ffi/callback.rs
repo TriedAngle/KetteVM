@@ -195,7 +195,7 @@ fn invoke(
         });
         let value = vm.execute(
             runtime,
-            heap,
+            &mut *heap,
             state,
             entry.callback.root_handle(),
             staged,

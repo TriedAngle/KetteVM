@@ -1,0 +1,41 @@
+// Deadline timer queue and virtual-thread parking.
+// Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/timer.ktt
+// Check: kette/kette_tests/check.py
+
+use collections.timer { TimerQueue }
+use collections.queue { Queue }
+
+let timers = TimerQueue.new()
+timers.start()
+
+let fired = Queue.new()
+let record = { |value|
+    fired.push(value)
+}
+
+timers.addAfter(20000000, { record("late") })
+timers.addAfter(5000000, { record("early") })
+while fired.size() < 2 {
+    Thread.sleep(1)
+}
+Test.assert(fired.take(), "early")
+Test.assert(fired.take(), "late")
+
+let cancelled = atomic.AtomicI64.new(0)
+let timer = timers.addAfter(20000000, {
+    cancelled.store(1)
+})
+timers.cancel(timer)
+Thread.sleep(30)
+Test.assert(cancelled.load(), 0)
+
+let start = Thread.nanoTime()
+timers.parkNanos(10000000)
+Test.assert(Thread.nanoTime() - start >= 5000000, true)
+
+let sleepStart = Thread.nanoTime()
+timers.sleep(5000000)
+Test.assert(Thread.nanoTime() - sleepStart >= 3000000, true)
+
+timers.shutdown()
+Test.assert(timers.isClosed(), true)

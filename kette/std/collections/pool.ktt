@@ -1,0 +1,96 @@
+use collections.queue { Queue }
+use collections.timer { TimerQueue }
+
+let ThreadPoolTraits = {
+    disposable*: Disposable
+    new: { self.newWithSize(Thread.availableProcessors()) }
+    newWithSize: |workers| {
+        let pool = self.clone()
+        pool.size = if workers < 1 { 1 } else { workers }
+        pool.queue = Queue.new()
+        pool.timers = TimerQueue.new()
+        pool.threads = []
+        pool.closed = false
+        pool.timers.start()
+        let startWorker = |name| {
+            let thread = Thread.newPlatform(name, {
+                pool.work()
+            })
+            pool.threads.push(thread)
+            thread.start()
+        }
+        let index = 0
+        while index < pool.size {
+            startWorker("pool-worker-" + index)
+            index = index + 1
+        }
+        pool
+    }
+    spawn: |target| {
+        self.spawnNamed("task", target)
+    }
+    spawnNamed: |name, target| {
+        let thread = Thread.newVirtual(name, target)
+        thread.scheduler = self
+        thread.queued = atomic.AtomicI64.new(0)
+        thread.start()
+        self.enqueue(thread)
+        thread
+    }
+    enqueue: |thread| {
+        if thread.queued.compareExchange(0, 1) != 0 {
+            return false
+        }
+        if !self.queue.push(thread) {
+            thread.queued.store(0)
+            return false
+        }
+        true
+    }
+    // Any worker may mount a runnable task; the continuation rebinds its
+    // carrier heap when it resumes.
+    work: {
+        while true {
+            let thread = self.queue.take()
+            if thread == null {
+                return 0
+            }
+            thread.queued.store(0)
+            if thread.isReady() and thread.mount() {
+                self.enqueue(thread)
+            }
+        }
+    }
+    parkNanos: |nanos| {
+        self.timers.parkNanos(nanos)
+    }
+    sleep: |nanos| {
+        self.timers.sleep(nanos)
+    }
+    isClosed: { self.closed }
+    shutdown: {
+        if !self.closed {
+            self.closed = true
+            self.queue.close()
+            self.timers.close()
+        }
+        let index = 0
+        while index < self.threads.length {
+            self.threads[index].join()
+            index = index + 1
+        }
+        self.timers.shutdown()
+        self
+    }
+    dispose: { self.shutdown() }
+}
+
+let ThreadPool = {
+    traits*: ThreadPoolTraits
+    size, queue, timers, threads, closed: undefined
+}
+
+mod collections.pool {
+    export ThreadPool = ThreadPool
+    export ThreadPoolTraits = ThreadPoolTraits
+}

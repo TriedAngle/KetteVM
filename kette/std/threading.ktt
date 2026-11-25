@@ -1,0 +1,27 @@
+// Make a blocked thread runnable, resubmitting virtual threads to their scheduler.
+let wake = { |thread|
+    if thread.unpark() {
+        let scheduler = thread.scheduler
+        if scheduler != null {
+            scheduler.enqueue(thread)
+        }
+    }
+}
+
+// Timed park routed through the current thread's scheduler when it has one.
+// The timer deadline is authoritative, so a scheduler wake reports `false`.
+let parkNanos = { |nanos|
+    let me = Thread.current()
+    let scheduler = me.scheduler
+    if scheduler != null {
+        scheduler.parkNanos(nanos)
+        false
+    } else {
+        me.parkNanos(nanos)
+    }
+}
+
+mod threading {
+    export wake = wake
+    export parkNanos = parkNanos
+}

@@ -344,15 +344,16 @@ fn eval_source<'a>(
     state.handle_scope(|scope| {
         let context = eval_global_context(vm, heap, &scope);
         let closure = Materialize::closure_vm(vm, heap, state, &scope, &program, runtime, context);
-        match HostCtx::enter(
+        let result = HostCtx::enter(
             vm,
             vm.runtime_by_id(runtime),
-            heap,
+            &mut *heap,
             state,
             closure.erase(),
             HandleSlice::EMPTY,
             None,
-        ) {
+        );
+        match result {
             Ok(value) => scope.handle(value),
             Err(thrown) => return raise_runtime(heap, thrown),
         }

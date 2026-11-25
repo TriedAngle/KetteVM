@@ -27,22 +27,39 @@ print(atomic_counter.load())
 print("racy")
 print(racy_counter.load())
 
-// Virtual threads run cooperatively on the default scheduler object.
-let scheduler = Thread.scheduler()
+// Virtual threads run under a userspace scheduler.
+let queue = {}
+let head = 0
+let tail = 0
+let enqueue = |thread| {
+    queue[tail] = thread
+    tail = tail + 1
+}
+let run_scheduler = {
+    while head < tail {
+        let thread = queue[head]
+        head = head + 1
+        if thread.isReady() and thread.mount() {
+            enqueue(thread)
+        }
+    }
+}
+
 let order = ""
-let va = Thread.newVirtual("va", scheduler, {
+let va = Thread.newVirtual("va", {
     order = order + "a1"
     Thread.yield()
     order = order + "a2"
 })
-let vb = Thread.newVirtual("vb", scheduler, {
+let vb = Thread.newVirtual("vb", {
     order = order + "b1"
     Thread.yield()
     order = order + "b2"
 })
-va.start()
-vb.start()
-va.join()
-vb.join()
+enqueue(va)
+enqueue(vb)
+let scheduler = Thread.newPlatform("scheduler", run_scheduler)
+scheduler.start()
+scheduler.join()
 print("virtual")
 print(order)

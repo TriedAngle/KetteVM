@@ -64,7 +64,7 @@ pub enum CallFault {
 }
 
 #[inline(always)]
-pub fn raise_fault<'a>(ctx: &'a mut Ctx<'_, '_>, fault: CallFault) -> Tagged<'a, Value> {
+pub fn raise_fault<'a>(ctx: &'a mut Ctx<'_>, fault: CallFault) -> Tagged<'a, Value> {
     match fault {
         CallFault::Threw => ctx.vm().known().exception.get(ctx.heap()).erase(),
         CallFault::Raise(err) => ctx.raise(err),
@@ -76,7 +76,7 @@ pub fn raise_fault<'a>(ctx: &'a mut Ctx<'_, '_>, fault: CallFault) -> Tagged<'a,
 /// Entry is at pc 0 with the accumulator seeded undefined.
 #[inline(always)]
 pub fn push_callee_frame<'a>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
@@ -100,7 +100,7 @@ pub fn push_callee_frame<'a>(
 /// parameter slots, no intermediate staging window.
 #[inline(always)]
 pub fn push_callee_frame_values<'a>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
@@ -158,7 +158,7 @@ pub fn call_target_miss<'a>(
 /// `CallHit` fields directly.
 #[inline(always)]
 pub fn resolve_target<'a>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
@@ -208,7 +208,7 @@ pub fn resolve_target<'a>(
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     fb: usize,
@@ -229,7 +229,7 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn call_scatter_start_sized<'a, const STRIDE: usize, const METHOD: bool, const CACHE: bool>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     size: usize,
@@ -306,7 +306,7 @@ pub fn call_scatter_start_sized<'a, const STRIDE: usize, const METHOD: bool, con
 /// Resolve the receiver's operator method into `callee_reg`.
 #[inline(always)]
 pub fn load_operator(
-    ctx: &mut Ctx<'_, '_>,
+    ctx: &mut Ctx<'_>,
     regs: Regs,
     recv_reg: i32,
     name_idx: usize,
@@ -349,7 +349,7 @@ pub fn load_operator(
 #[cold]
 #[inline(never)]
 fn resolve_operator(
-    ctx: &mut Ctx<'_, '_>,
+    ctx: &mut Ctx<'_>,
     regs: Regs,
     recv_reg: i32,
     name_idx: usize,
@@ -407,7 +407,7 @@ fn resolve_operator(
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn call_window_start<'a, const STRIDE: usize>(
-    x: &'a Ctx<'_, '_>,
+    x: &'a Ctx<'_>,
     roots: RootsArg<'_>,
     pc: usize,
     fb: usize,
@@ -463,7 +463,7 @@ pub fn call_window_start<'a, const STRIDE: usize>(
 #[cold]
 #[inline(never)]
 pub fn proxy_apply_staged(
-    x: &mut Ctx<'_, '_>,
+    x: &mut Ctx<'_>,
     roots: RootsArg<'_>,
     regs: Regs,
     callee_reg: i32,
@@ -488,7 +488,7 @@ pub fn proxy_apply_staged(
 }
 
 pub fn bound_apply_staged(
-    x: &mut Ctx<'_, '_>,
+    x: &mut Ctx<'_>,
     roots: RootsArg<'_>,
     regs: Regs,
     callee_reg: i32,
@@ -582,7 +582,7 @@ pub enum ConstructStart {
 /// Synthesize the `this` (or stage the hole for a derived constructor)
 /// and stage the `[receiver, args...]` parameter window at the stack top.
 fn construct_receiver_args(
-    x: &mut Ctx<'_, '_>,
+    x: &mut Ctx<'_>,
     base: usize,
     args_base: i32,
     count: usize,
@@ -651,7 +651,7 @@ fn construct_receiver_args(
 /// constructors are called with `new_target`; everything else falls back
 /// to `cold::construct` in `slow_construct`.
 pub fn construct_start(
-    x: &mut Ctx<'_, '_>,
+    x: &mut Ctx<'_>,
     pc: usize,
     size: usize,
     regs: Regs,
@@ -716,7 +716,7 @@ pub fn construct_start(
 /// Invoke a native constructor: `undefined` receiver at the window's
 /// element 0, `new_target` rooted over the callee register.
 pub fn construct_native<'a>(
-    x: &'a mut Ctx<'_, '_>,
+    x: &'a mut Ctx<'_>,
     rt: NativeIndex,
     callee_reg: i32,
     args_base: i32,

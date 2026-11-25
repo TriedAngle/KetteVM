@@ -155,10 +155,11 @@ fn frame_runtime_id(state: &ThreadState, heap: &Heap, base: usize) -> RuntimeId 
         .runtime()
 }
 
-pub struct Ctx<'s, 'h> {
+pub struct Ctx<'s> {
     vm: &'s VM,
     state: &'s ThreadState,
-    heap: &'h mut Heap,
+    /// The task's stable heap view; its allocator follows the carrier.
+    heap: *mut Heap,
     /// Anchor of the frame `execute` entered
     base_anchor: usize,
     /// Data pointer of the current frame's bytecode (`ip - code`)
@@ -174,16 +175,16 @@ pub struct Ctx<'s, 'h> {
     runtime: Cell<(RuntimeId, &'s dyn ErasedRuntimeState)>,
 }
 
-impl<'s, 'h> Ctx<'s, 'h> {
+impl<'s> Ctx<'s> {
     #[inline(always)]
-    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
+    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &mut Heap, base_anchor: usize) -> Self {
         let code = state.stack().frame_header(base_anchor).code(heap).as_ptr();
         let runtime_id = frame_runtime_id(state, heap, base_anchor);
         let runtime = vm.runtime_by_id(runtime_id);
         Ctx {
             vm,
             state,
-            heap,
+            heap: heap as *mut Heap,
             base_anchor,
             code: Cell::new(code),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
@@ -200,12 +201,18 @@ impl<'s, 'h> Ctx<'s, 'h> {
 
     #[inline(always)]
     pub fn heap(&self) -> &Heap {
-        self.heap
+        debug_assert!(!self.heap.is_null(), "task has no heap view");
+        // Safety: the task heap view lives with the task and its allocator
+        // is swapped by the carrier.
+        unsafe { &*self.heap }
     }
 
     #[inline(always)]
     pub fn heap_mut(&mut self) -> &mut Heap {
-        self.heap
+        debug_assert!(!self.heap.is_null(), "task has no heap view");
+        // Safety: the task heap view lives with the task and its allocator
+        // is swapped by the carrier.
+        unsafe { &mut *self.heap }
     }
 
     #[inline(always)]
@@ -246,7 +253,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn set_frame_base(&self, base: usize) {
         self.state.set_frame_base(base);
-        self.set_frame_runtime(frame_runtime_id(self.state, self.heap, base));
+        self.set_frame_runtime(frame_runtime_id(self.state, self.heap(), base));
     }
 
     /// The current frame's pc origin (one load; the header chain runs
@@ -264,7 +271,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
         let code = state
             .stack()
             .frame_header(state.frame_base())
-            .code(self.heap);
+            .code(self.heap());
         self.code.set(code.as_ptr());
     }
 
@@ -272,7 +279,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn switch_frame(&self, base: usize) {
         let state = self.state;
-        let code = state.stack().frame_header(base).code(self.heap);
+        let code = state.stack().frame_header(base).code(self.heap());
         self.state.set_frame_base(base);
         self.code.set(code.as_ptr());
         self.set_frame_runtime(code.as_ref().runtime());
@@ -297,9 +304,9 @@ impl<'s, 'h> Ctx<'s, 'h> {
             "language mode read without an active frame"
         );
         let header = self.state.stack().frame_header(self.state.frame_base());
-        let callable = header.callable(self.heap);
+        let callable = header.callable(self.heap());
         let info = callable
-            .callable_info(self.heap)
+            .callable_info(self.heap())
             .expect("a bytecode frame's callable must have callable info");
         info.mode()
     }
@@ -432,7 +439,7 @@ pub enum Unwind<'h> {
 /// and the current frame is the handler's.
 #[cold]
 #[inline(never)]
-pub fn unwind<'c>(ctx: &'c Ctx<'_, '_>, fault_pc: usize) -> Unwind<'c> {
+pub fn unwind<'c>(ctx: &'c Ctx<'_>, fault_pc: usize) -> Unwind<'c> {
     let heap = ctx.heap();
     let mut pc = fault_pc;
     loop {

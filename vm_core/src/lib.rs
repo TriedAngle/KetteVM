@@ -1,4 +1,4 @@
-use crate::simple_scheduler::{Carrier, Scheduler, SchedulerObject};
+use crate::continuation::Continuation;
 use crate::threading::{ThreadRegistry, create_thread_object};
 use core::{
     cell::{Cell as StdCell, UnsafeCell},
@@ -15,6 +15,7 @@ pub mod api;
 pub mod bootstrap;
 pub mod compare;
 pub mod continuation;
+pub mod tsan;
 
 /// Native stack reserved for one task.
 /// TODO: make this dynamic
@@ -36,7 +37,6 @@ pub mod materialize;
 pub mod native;
 pub mod objects;
 pub mod prototype;
-pub mod simple_scheduler;
 pub mod stack;
 pub mod threading;
 pub mod tools;
@@ -105,11 +105,11 @@ pub use objects::{
     NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
     ProxyInit, ProxyObject, Range, RangeInit, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
     ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SiteRead, SlotDescriptor,
-    SlotFlags, SlotName, StringData, StringOwn, StringRef, Symbol, TaskStateObject,
-    TaskStateObjectInit, ThreadKind, ThreadObject, ThreadObjectInit, ThreadStatus, TypeInfo,
-    TypeInfoInit, Utf8String, WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8,
-    flatten, info_is_immutable, info_is_lexical, info_mode, object_kind, object_layout,
-    string_content_hash, string_content_hash_units, visit_object,
+    SlotFlags, SlotName, StringData, StringOwn, StringRef, Symbol, ThreadKind, ThreadObject,
+    ThreadObjectInit, ThreadStatus, TypeInfo, TypeInfoInit, Utf8String, WeakFixedArray,
+    WeakFixedArrayInit, WrapperKind, decode_wtf8, flatten, info_is_immutable, info_is_lexical,
+    info_mode, object_kind, object_layout, string_content_hash, string_content_hash_units,
+    visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry, ShapeChange};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
@@ -174,14 +174,8 @@ pub struct SharedVM {
     /// Core C FFI: type table, call plans, callbacks.
     ffi: FfiState,
     known: WellKnown,
-    // TODO: investiage if Mutex is fine, maybe a lock-free mechanism exists
-    thread_states: Mutex<Vec<Weak<ThreadState>>>,
-    /// Guest `Thread` host state: join handles and cross-thread roots.
+    /// Live thread states, id allocation, and the per-OS-thread attach cache.
     threads: ThreadRegistry,
-    /// Scheduler used when a virtual thread does not name one.
-    default_scheduler: AtomicOptionGcSlot<SchedulerObject>,
-    /// Live scheduler objects; their native queues are off-heap roots.
-    schedulers: Mutex<Vec<AtomicOptionGcSlot<SchedulerObject>>>,
     interner: StringInterner,
     prototype_registry: PrototypeRegistry,
     natives: NativeRegistry,
@@ -215,7 +209,6 @@ pub struct VM {
 /// First-run data carried into a task's stack.
 pub struct TaskRun {
     vm: VM,
-    heap: *mut Heap,
     state: *const ThreadState,
     callable: Value,
     args: Vec<Value>,
@@ -227,6 +220,8 @@ pub struct TaskRun {
 struct ParkState {
     permit: bool,
     blocked: bool,
+    /// Set by the carrier once the continuation has actually suspended.
+    parked: bool,
     timed_out: bool,
 }
 
@@ -241,18 +236,12 @@ pub enum ResumeOutcome {
     Finished(Result<Value, Thrown>),
 }
 
-pub fn prepare_task(
-    state: &ThreadState,
-    vm: &VM,
-    heap: &mut Heap,
-    start: TaskStart,
-) -> *mut TaskRun {
+pub fn prepare_task(state: &ThreadState, vm: &VM, start: TaskStart) -> *mut TaskRun {
     if state.is_continuation_started() {
         return state.task_run();
     }
     let run = Box::new(TaskRun {
         vm: vm.clone(),
-        heap: heap as *mut Heap,
         state: state as *const ThreadState,
         callable: start.callable,
         args: start.args,
@@ -287,7 +276,8 @@ pub fn release_task_run(state: &ThreadState) {
 extern "C" fn kette_task_entry(arg: *mut ()) -> ! {
     let run = unsafe { &mut *(arg as *mut TaskRun) };
     let state = unsafe { &*run.state };
-    let heap = unsafe { &mut *run.heap };
+    // The mounter swapped the carrier's allocator into our stable view.
+    let heap = state.task_heap();
     let outcome = state.handle_scope(|scope| {
         // Safety: the callable and arguments are rooted by the caller or
         // by the task's thread object; no collection ran since they were
@@ -314,8 +304,27 @@ extern "C" fn kette_task_entry(arg: *mut ()) -> ! {
         outcome
     });
     // Safety: the carrier continuation is the active target.
+    tsan::switch_to(state.resume_fiber());
     unsafe { continuation::switch(state.continuation_ptr(), state.resume_target()) };
     unreachable!()
+}
+
+/// Parking, join and waiter synchronization for one task.
+#[derive(Default)]
+struct SyncState {
+    finished: Mutex<bool>,
+    finished_event: Condvar,
+    /// Tasks blocked on this thread's join.
+    waiters: Mutex<Vec<AtomicOptionGcSlot<ThreadObject>>>,
+    /// Parker state: one permit bit plus whether the task is parked.
+    park_state: Mutex<ParkState>,
+    park_event: Condvar,
+}
+
+impl Drop for ThreadState {
+    fn drop(&mut self) {
+        tsan::destroy_fiber(self.fiber);
+    }
 }
 
 pub struct ThreadState {
@@ -330,8 +339,6 @@ pub struct ThreadState {
     mounted_by_task: StdCell<bool>,
     /// First-run data while the task is alive.
     task_run: StdCell<*mut TaskRun>,
-    /// Carrier that owns this execution.
-    carrier_id: StdCell<usize>,
     /// The current (innermost) interpreter frame's anchor. Frames are
     /// self-describing (see [`Stack`]): this cell is the only shadow
     /// state, written by push/pop/unwind frame switches.
@@ -361,18 +368,28 @@ pub struct ThreadState {
     construct_cache: Register,
     /// The guest `Thread` object mounted on this execution context.
     thread_object: Register,
-    /// Tasks blocked on this thread's join.
-    waiters: Mutex<Vec<AtomicOptionGcSlot<ThreadObject>>>,
-    /// Parker state: one permit bit plus whether the task is parked.
-    park_state: Mutex<ParkState>,
+    /// Stable heap view for this task. Its allocator is swapped with the
+    /// running carrier around every mount, so captured `&mut Heap` values
+    /// stay valid across migration.
+    task_heap: UnsafeCell<Heap>,
+    /// TSan logical-stack token for this task (null without `tsan`).
+    fiber: *mut core::ffi::c_void,
+    /// TSan fiber to return to when the task suspends or finishes.
+    resume_fiber: StdCell<*mut core::ffi::c_void>,
+    /// Debug guard: a task may be mounted by at most one carrier.
+    mounting: AtomicBool,
+    id: u64,
+    sync: SyncState,
 }
 
 impl ThreadState {
-    pub fn new(heap: &Heap) -> Self {
+    pub fn new(heap: &Heap, id: u64) -> Self {
         // Safety: root-slot reads stored straight into rooted fill cells.
         let the_hole = heap.known().the_hole.get(heap).erase();
         let undefined = heap.known().undefined.get(heap).erase();
         Self {
+            id,
+            sync: SyncState::default(),
             handles: HandleData::new(the_hole),
             stack: Stack::new(STACK_SLOTS, undefined),
             continuation: UnsafeCell::new(continuation::Continuation::zeroed()),
@@ -380,7 +397,6 @@ impl ThreadState {
             resume_target: StdCell::new(core::ptr::null()),
             mounted_by_task: StdCell::new(false),
             task_run: StdCell::new(core::ptr::null_mut()),
-            carrier_id: StdCell::new(0),
             frame_base: StdCell::new(0),
             frame_active: StdCell::new(false),
             acc: unsafe { Register::from_value(undefined) },
@@ -391,8 +407,26 @@ impl ThreadState {
             rust_stack_base: StdCell::new(0),
             construct_cache: unsafe { Register::from_value(the_hole) },
             thread_object: unsafe { Register::from_value(the_hole) },
-            waiters: Mutex::new(Vec::new()),
-            park_state: Mutex::new(ParkState::default()),
+            task_heap: UnsafeCell::new(heap.task_view()),
+            fiber: tsan::create_fiber(),
+            resume_fiber: StdCell::new(core::ptr::null_mut()),
+            mounting: AtomicBool::new(false),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn mark_finished(&self) {
+        *self.sync.finished.lock().unwrap() = true;
+        self.sync.finished_event.notify_all();
+    }
+
+    pub fn wait_finished(&self, heap: &mut Heap) {
+        let mut finished = self.sync.finished.lock().unwrap();
+        while !*finished {
+            finished = heap.block_on(|| self.sync.finished_event.wait(finished).unwrap());
         }
     }
 
@@ -449,6 +483,80 @@ impl ThreadState {
         self.mounted_by_task.get()
     }
 
+    /// The task's stable heap view. Only the carrier currently running the
+    /// task may touch it.
+    #[inline(always)]
+    pub fn task_heap(&self) -> &mut Heap {
+        // Safety: the task runs on one carrier at a time (`mounting`).
+        unsafe { &mut *self.task_heap.get() }
+    }
+
+    /// Run the raw continuation switch with this task's allocator installed,
+    /// then give the allocator back to the carrier. `switch` must perform the
+    /// continuation switch itself.
+    pub fn run_on_heap<R>(&self, carrier: &mut Heap, switch: impl FnOnce() -> R) -> R {
+        {
+            let task_heap = self.task_heap();
+            carrier.swap_allocator(task_heap);
+        }
+        tsan::switch_to(self.fiber());
+        let result = switch();
+        {
+            let task_heap = self.task_heap();
+            carrier.swap_allocator(task_heap);
+        }
+        result
+    }
+
+    #[inline(always)]
+    pub fn fiber(&self) -> *mut core::ffi::c_void {
+        self.fiber
+    }
+
+    #[inline(always)]
+    pub fn resume_fiber(&self) -> *mut core::ffi::c_void {
+        self.resume_fiber.get()
+    }
+
+    #[inline(always)]
+    pub fn set_resume_fiber(&self, fiber: *mut core::ffi::c_void) {
+        self.resume_fiber.set(fiber);
+    }
+
+    /// Claim the single mount slot. Returns false on a concurrent mount.
+    #[inline(always)]
+    pub fn begin_mount(&self) -> bool {
+        self.mounting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    #[inline(always)]
+    pub fn end_mount(&self) {
+        self.mounting.store(false, Ordering::Release);
+    }
+
+    /// Called by the carrier after the continuation yielded. Publishes the
+    /// park and returns true when this carrier owns resubmission (yield, or a
+    /// permit that arrived while still parking). A fully parked task is left
+    /// to its waker.
+    pub fn after_mount(&self) -> bool {
+        let mut park = self.sync.park_state.lock().unwrap();
+        if !park.blocked {
+            // Yielded (or finished): the mounting carrier owns resubmission.
+            return true;
+        }
+        park.parked = true;
+        if park.permit {
+            park.permit = false;
+            park.blocked = false;
+            park.parked = false;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Park the current task. `unpark` either leaves a permit or wakes it.
     pub fn park(&self, heap: &mut Heap) {
         let Some(thread) = self
@@ -460,9 +568,15 @@ impl ThreadState {
         if !self.is_continuation_started() {
             return;
         }
+        if !thread.as_ref().is_virtual(heap) {
+            let thread = thread.raw();
+            self.park_platform(heap, thread, None);
+            return;
+        }
         {
-            let mut park = self.park_state.lock().unwrap();
+            let mut park = self.sync.park_state.lock().unwrap();
             park.timed_out = false;
+            park.parked = false;
             if park.permit {
                 park.permit = false;
                 return;
@@ -470,14 +584,15 @@ impl ThreadState {
             park.blocked = true;
             thread.as_ref().set_state(ThreadStatus::Blocked);
         }
-        self.suspend(heap);
-        let mut park = self.park_state.lock().unwrap();
+        self.suspend();
+        let mut park = self.sync.park_state.lock().unwrap();
         park.blocked = false;
+        park.parked = false;
         park.permit = false;
         park.timed_out = false;
     }
 
-    pub fn park_timed(&self, heap: &mut Heap, scheduler: &Scheduler, duration: Duration) -> bool {
+    pub fn park_timed(&self, heap: &mut Heap, duration: Duration) -> bool {
         let Some(thread) = self
             .thread_object(heap)
             .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
@@ -487,56 +602,81 @@ impl ThreadState {
         if !self.is_continuation_started() {
             return false;
         }
-        {
-            let mut park = self.park_state.lock().unwrap();
-            park.timed_out = false;
-            if park.permit {
-                park.permit = false;
-                return false;
-            }
-            if duration.is_zero() {
-                park.timed_out = true;
-                return true;
-            }
-            park.blocked = true;
-            thread.as_ref().set_state(ThreadStatus::Blocked);
+        if !thread.as_ref().is_virtual(heap) {
+            let thread = thread.raw();
+            return self.park_platform(heap, thread, Some(duration));
         }
-        scheduler.park_timeout(heap, thread, duration);
-        self.suspend(heap);
-        let mut park = self.park_state.lock().unwrap();
-        park.blocked = false;
-        park.permit = false;
-        let timed_out = park.timed_out;
+        let mut park = self.sync.park_state.lock().unwrap();
         park.timed_out = false;
+        if park.permit {
+            park.permit = false;
+            return false;
+        }
+        if duration.is_zero() {
+            park.timed_out = true;
+            return true;
+        }
+        drop(park);
+        std::thread::sleep(duration);
+        true
+    }
+
+    fn park_platform(&self, heap: &mut Heap, thread: Value, timeout: Option<Duration>) -> bool {
+        let thread = unsafe { Tagged::<ThreadObject>::from_value_unchecked(thread) };
+        let mut park = self.sync.park_state.lock().unwrap();
+        park.timed_out = false;
+        if park.permit {
+            park.permit = false;
+            return false;
+        }
+        park.blocked = true;
+        park.parked = true;
+        thread.as_ref().set_state(ThreadStatus::Blocked);
+        let timed_out = match timeout {
+            Some(duration) => heap.block_on(|| {
+                let (guard, result) = self.sync.park_event.wait_timeout(park, duration).unwrap();
+                let outcome = result.timed_out() || guard.timed_out;
+                (guard, outcome)
+            }),
+            None => heap.block_on(|| {
+                let mut park = park;
+                while park.blocked {
+                    park = self.sync.park_event.wait(park).unwrap();
+                }
+                (park, false)
+            }),
+        };
+        let (mut park, timed_out) = match timed_out {
+            (park, timed_out) => (park, timed_out),
+        };
+        park.blocked = false;
+        park.parked = false;
+        park.timed_out = false;
+        park.permit = false;
         timed_out
     }
 
-    /// Returns true when a blocked task must be made runnable.
+    /// Returns true when a parked task must be made runnable. A request that
+    /// arrives while the task is still parking only leaves a permit; the
+    /// carrier resubmits it after the yield (see `after_mount`).
     pub fn unpark(&self) -> bool {
-        let mut park = self.park_state.lock().unwrap();
-        if park.blocked {
+        let mut park = self.sync.park_state.lock().unwrap();
+        let woke = if park.blocked && park.parked {
             park.blocked = false;
+            park.parked = false;
             park.timed_out = false;
             true
         } else {
             park.permit = true;
             false
-        }
+        };
+        drop(park);
+        self.sync.park_event.notify_one();
+        woke
     }
 
     pub fn is_park_blocked(&self) -> bool {
-        self.park_state.lock().unwrap().blocked
-    }
-
-    pub fn complete_park_timeout(&self) -> bool {
-        let mut park = self.park_state.lock().unwrap();
-        if park.blocked {
-            park.blocked = false;
-            park.timed_out = true;
-            true
-        } else {
-            false
-        }
+        self.sync.park_state.lock().unwrap().blocked
     }
 
     pub fn add_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
@@ -544,16 +684,16 @@ impl ThreadState {
         // collection, so its slots need no generational barrier.
         let slot = unsafe { AtomicOptionGcSlot::from_value(heap.known().the_hole.raw()) };
         slot.store(waiter);
-        self.waiters.lock().unwrap().push(slot);
+        self.sync.waiters.lock().unwrap().push(slot);
     }
 
     pub fn take_waiter_slots(&self) -> Vec<AtomicOptionGcSlot<ThreadObject>> {
-        core::mem::take(&mut *self.waiters.lock().unwrap())
+        core::mem::take(&mut *self.sync.waiters.lock().unwrap())
     }
 
     pub fn remove_waiter(&self, heap: &Heap, waiter: Tagged<'_, ThreadObject>) {
         let raw = waiter.raw().to_bits();
-        let mut waiters = self.waiters.lock().unwrap();
+        let mut waiters = self.sync.waiters.lock().unwrap();
         let mut i = 0;
         while i < waiters.len() {
             if waiters[i].load_word(heap) == raw {
@@ -562,16 +702,6 @@ impl ThreadState {
                 i += 1;
             }
         }
-    }
-
-    #[inline(always)]
-    pub fn carrier_id(&self) -> usize {
-        self.carrier_id.get()
-    }
-
-    #[inline(always)]
-    pub fn set_carrier_id(&self, id: usize) {
-        self.carrier_id.set(id);
     }
 
     #[inline(always)]
@@ -591,11 +721,12 @@ impl ThreadState {
 
     /// Suspend the current task until the carrier resumes it.
     #[inline]
-    pub fn suspend(&self, _heap: &mut Heap) {
+    pub fn suspend(&self) {
         let target = self.resume_target();
         debug_assert!(!target.is_null(), "suspend without a resume target");
         // Safety: the target is the active switch target and the task has
         // a prepared continuation.
+        tsan::switch_to(self.resume_fiber());
         unsafe { continuation::switch(self.continuation_ptr(), target) };
     }
 
@@ -858,29 +989,7 @@ impl SharedVM {
         for state in &self.runtimes {
             state.visit_edges(visitor);
         }
-        for state in self
-            .thread_states
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(Weak::upgrade)
-        {
-            state.visit_edges(visitor);
-        }
         self.threads.visit_edges(visitor);
-        visitor.visit(self.default_scheduler.as_raw());
-        for slot in self.schedulers.lock().unwrap().iter() {
-            visitor.visit(slot.as_raw());
-            let word = slot.as_raw().load_atomic(Ordering::Acquire);
-            let value = Value::from_bits(word);
-            if !value.is_strong_ptr() {
-                continue;
-            }
-            // Safety: the root slot keeps the object (or its from-space
-            // copy) valid for this collection.
-            let scheduler = unsafe { &*(value.raw_addr() as *const SchedulerObject) };
-            scheduler.scheduler().visit_edges(visitor);
-        }
     }
 
     fn gc_host(&self) -> GcHost {
@@ -914,7 +1023,7 @@ impl EdgeVisitable for ThreadState {
         visitor.visit(self.pending_exception.as_raw());
         visitor.visit(self.construct_cache.as_raw());
         visitor.visit(self.thread_object.as_raw());
-        for waiter in self.waiters.lock().unwrap().iter() {
+        for waiter in self.sync.waiters.lock().unwrap().iter() {
             visitor.visit(waiter.as_raw());
         }
     }
@@ -985,69 +1094,44 @@ impl Thread {
         if main_state.thread_object(&self.heap).is_none() {
             create_thread_object(&self.vm, &mut self.heap, &main_state);
         }
-        let scheduler = {
-            let object = self.vm.default_scheduler(&self.heap);
-            Arc::clone(object.as_ref().scheduler())
-        };
-        let carrier = scheduler.register_carrier();
+        let mut continuation = Continuation::zeroed();
         let result = main_state.handle_scope(|scope| {
-            let scheduler_object = {
-                let object = self.vm.default_scheduler(&self.heap);
-                scope.handle(object)
-            };
             let object = main_state
                 .thread_object(&self.heap)
                 .and_then(|object| object.erase().get_as::<ThreadObject>(&self.heap))
                 .expect("thread object must be installed");
             let object = scope.handle(object);
             let is_virtual = object.as_tagged(&self.heap).is_virtual(&self.heap);
-            let task = if is_virtual {
-                let task = object
-                    .as_tagged(&self.heap)
-                    .task(&self.heap)
-                    .expect("virtual thread without task state");
-                scope.handle(task)
+            let state = if is_virtual {
+                let id = object.as_tagged(&self.heap).tid(&self.heap);
+                let Some(state) = self.vm.thread_state(id as u64) else {
+                    let heap = &self.heap;
+                    return Ok(self.vm.known().undefined.get(heap).raw());
+                };
+                state
             } else {
-                let task = self.heap.allocate_handle::<TaskStateObject>(
-                    TaskStateObjectInit {
-                        state: Arc::clone(&main_state),
-                    },
-                    &scope,
+                debug_assert_eq!(
+                    object.as_tagged(&self.heap).tid(&self.heap) as u64,
+                    main_state.id()
                 );
-                object
-                    .as_tagged(&self.heap)
-                    .set_task(&self.heap, task.as_tagged(&self.heap));
-                task.as_tagged(&self.heap)
-                    .set_scheduler(&self.heap, scheduler_object.as_tagged(&self.heap));
-                task
+                Arc::clone(&main_state)
             };
-            task.as_tagged(&self.heap).set_runtime(runtime);
+            object.as_tagged(&self.heap).set_runtime(runtime);
             object
                 .as_tagged(&self.heap)
                 .set_state(ThreadStatus::Running);
-            task.as_tagged(&self.heap).set_carrier(carrier.id());
-            carrier.set_current(object.as_tagged(&self.heap));
+            let thread = object.as_tagged(&self.heap).raw();
 
             let start = TaskStart {
                 callable: callable.raw(),
                 args: args.to_vec(),
                 runtime,
             };
-            match self.resume_task(&carrier, Some(start)) {
+            match self.resume_task(thread, state, &mut continuation, Some(start)) {
                 ResumeOutcome::Finished(result) => {
                     let keep_exception = result.is_err();
-                    self.finish_task(
-                        &scheduler,
-                        object.as_tagged(&self.heap),
-                        task.as_tagged(&self.heap),
-                        &main_state,
-                        !keep_exception,
-                    );
+                    self.finish_task(object.as_tagged(&self.heap), &main_state, !keep_exception);
                     self.state = Arc::clone(&main_state);
-                    carrier.clear_current();
-                    if !is_virtual {
-                        object.as_tagged(&self.heap).clear_task(&self.heap);
-                    }
                     if self.state.termination().is_some() {
                         let _ = self.state.take_pending_exception();
                         let heap = &self.heap;
@@ -1056,49 +1140,40 @@ impl Thread {
                     result
                 }
                 ResumeOutcome::Suspended => {
-                    if object.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Running {
-                        scheduler.yield_current(&self.heap, object.as_tagged(&self.heap));
-                    }
-                    let result = self.run_scheduler(&scheduler, &carrier, object, task);
                     self.state = Arc::clone(&main_state);
-                    carrier.clear_current();
-                    if !is_virtual {
-                        object.as_tagged(&self.heap).clear_task(&self.heap);
-                    }
-                    result
+                    let heap = &self.heap;
+                    Ok(self.vm.known().undefined.get(heap).raw())
                 }
             }
         });
-        scheduler.unregister_carrier(&carrier);
         result
     }
 
-    fn resume_task(&mut self, carrier: &Carrier, start: Option<TaskStart>) -> ResumeOutcome {
-        let state = {
-            let Some(thread) = carrier.current(&self.heap) else {
-                let heap = &self.heap;
-                return ResumeOutcome::Finished(Ok(self.vm.known().undefined.get(heap).raw()));
-            };
-            let Some(task) = thread.task(&self.heap) else {
-                let heap = &self.heap;
-                return ResumeOutcome::Finished(Ok(self.vm.known().undefined.get(heap).raw()));
-            };
-            let state = Arc::clone(task.state());
-            state.set_thread_object(thread);
-            state
-        };
+    fn resume_task(
+        &mut self,
+        thread: Value,
+        state: Arc<ThreadState>,
+        continuation: &mut Continuation,
+        start: Option<TaskStart>,
+    ) -> ResumeOutcome {
+        // Safety: the caller holds the thread object's handle rooted; no
+        // collection runs before the task state is read.
+        let thread = unsafe { Tagged::<ThreadObject>::from_value_unchecked(thread) };
+        state.set_thread_object(thread);
         self.state = Arc::clone(&state);
-        state.set_carrier_id(carrier.id());
-        state.set_resume_target(carrier.continuation_ptr(), false);
+        state.set_resume_target(continuation, false);
+        state.set_resume_fiber(tsan::current_fiber());
 
         if !state.is_continuation_started() {
             let start = start.expect("fresh task without start data");
-            prepare_task(&state, &self.vm, &mut self.heap, start);
+            prepare_task(&state, &self.vm, start);
         }
 
-        // Safety: the carrier yields its heap borrow until the task
+        // Safety: the continuation yields its heap borrow until the task
         // suspends or finishes.
-        unsafe { continuation::switch(carrier.continuation_ptr(), state.continuation_ptr()) };
+        state.run_on_heap(&mut self.heap, || unsafe {
+            continuation::switch(continuation, state.continuation_ptr())
+        });
 
         match task_outcome(&state) {
             Some(result) => {
@@ -1115,91 +1190,24 @@ impl Thread {
 
     fn finish_task(
         &self,
-        scheduler: &Scheduler,
         thread: Tagged<'_, ThreadObject>,
-        task: Tagged<'_, TaskStateObject>,
         state: &ThreadState,
         take_exception: bool,
     ) {
+        if take_exception && let Some(exception) = state.take_pending_exception_tagged(&self.heap) {
+            thread.set_exception(&self.heap, exception);
+        }
+        thread.set_state(ThreadStatus::Terminated);
+        state.mark_finished();
         if thread.is_virtual(&self.heap) {
-            if take_exception
-                && let Some(exception) = state.take_pending_exception_tagged(&self.heap)
-            {
-                task.set_exception(&self.heap, exception);
-            }
-            thread.set_state(ThreadStatus::Terminated);
+            self.vm.remove_thread_state(state.id());
         }
-        scheduler.terminate(&self.heap, thread);
+        for slot in state.take_waiter_slots() {
+            if let Some(waiter) = slot.load(&self.heap) {
+                waiter.set_state(ThreadStatus::Ready);
+            }
+        }
         Self::release_task(state);
-    }
-
-    fn run_scheduler(
-        &mut self,
-        scheduler: &Scheduler,
-        carrier: &Carrier,
-        main: Handle<'_, ThreadObject>,
-        main_task: Handle<'_, TaskStateObject>,
-    ) -> Result<Value, Thrown> {
-        loop {
-            let _ = self.heap.safepoint_poll();
-            if main.as_tagged(&self.heap).state(&self.heap) == ThreadStatus::Terminated {
-                let state = Arc::clone(main_task.as_tagged(&self.heap).state());
-                self.state = state;
-                if let Some(exception) = main_task.as_tagged(&self.heap).exception(&self.heap) {
-                    self.state.set_pending_exception(exception);
-                    return Err(Thrown);
-                }
-                let heap = &self.heap;
-                return Ok(self.vm.known().undefined.get(heap).raw());
-            }
-
-            let Some(thread) = scheduler.next(&self.heap, carrier) else {
-                let timeout = scheduler
-                    .next_timeout(&self.heap)
-                    .unwrap_or(Duration::from_millis(10));
-                self.heap.block_on(|| scheduler.wait(timeout));
-                continue;
-            };
-            let Some(task) = thread.task(&self.heap) else {
-                carrier.clear_current();
-                continue;
-            };
-            let state = Arc::clone(task.state());
-            let fresh = !state.is_continuation_started();
-            let start = fresh.then(|| TaskStart {
-                callable: thread.target(&self.heap).raw(),
-                args: Vec::new(),
-                runtime: task.runtime().unwrap_or(RuntimeId(0)),
-            });
-            let outcome = self.resume_task(carrier, start);
-
-            let Some(thread) = carrier.current(&self.heap) else {
-                continue;
-            };
-            let Some(task) = thread.task(&self.heap) else {
-                carrier.clear_current();
-                continue;
-            };
-            match outcome {
-                ResumeOutcome::Suspended => {
-                    if thread.state(&self.heap) == ThreadStatus::Running {
-                        scheduler.yield_current(&self.heap, thread);
-                    }
-                    carrier.clear_current();
-                }
-                ResumeOutcome::Finished(result) => {
-                    let is_main = thread.raw() == main.as_tagged(&self.heap).raw();
-                    let take_exception = !(is_main && result.is_err());
-                    let state = Arc::clone(task.state());
-                    self.finish_task(scheduler, thread, task, &state, take_exception);
-                    carrier.clear_current();
-                    if is_main {
-                        self.state = Arc::clone(main_task.as_tagged(&self.heap).state());
-                        return result;
-                    }
-                }
-            }
-        }
     }
 
     pub fn run_program(
@@ -1279,10 +1287,7 @@ impl VM {
             heap,
             ffi: FfiState::default(),
             known: WellKnown::uninit(),
-            thread_states: Mutex::new(Vec::new()),
             threads: ThreadRegistry::default(),
-            default_scheduler: AtomicOptionGcSlot::uninit(),
-            schedulers: Mutex::new(Vec::new()),
             interner,
             prototype_registry: PrototypeRegistry::new(),
             natives: NativeRegistry::new(),
@@ -1375,25 +1380,6 @@ impl VM {
         &self.shared.threads
     }
 
-    /// The default scheduler object.
-    pub fn default_scheduler<'a>(&self, heap: &'a Heap) -> Tagged<'a, SchedulerObject> {
-        self.shared
-            .default_scheduler
-            .load(heap)
-            .expect("default scheduler not installed")
-    }
-
-    pub fn set_default_scheduler(&self, scheduler: Tagged<'_, SchedulerObject>) {
-        self.shared.default_scheduler.store(scheduler);
-    }
-
-    pub fn register_scheduler(&self, scheduler: Tagged<'_, SchedulerObject>) {
-        // Safety: the slot starts empty and is visited as a root.
-        let slot = unsafe { AtomicOptionGcSlot::from_value(self.shared.known.the_hole.raw()) };
-        slot.store(scheduler);
-        self.shared.schedulers.lock().unwrap().push(slot);
-    }
-
     pub fn interner(&self) -> &StringInterner {
         &self.shared.interner
     }
@@ -1460,8 +1446,9 @@ impl VM {
         let state = match self.shared.threads.attached_state() {
             Some(state) => state,
             None => {
-                let state = Arc::new(ThreadState::new(&heap));
-                self.register_thread_state(&state);
+                let id = self.shared.threads.next_id();
+                let state = Arc::new(ThreadState::new(&heap, id));
+                self.shared.threads.register(&state);
                 self.shared.threads.remember_attached(&state);
                 state
             }
@@ -1473,10 +1460,32 @@ impl VM {
         }
     }
 
+    pub fn attach_with_state(&self, state: Arc<ThreadState>) -> Thread {
+        let heap = self
+            .shared
+            .heap
+            .new_local(&self.shared.known, &self.shared.prototype_registry);
+        Thread {
+            vm: self.clone(),
+            heap,
+            state,
+        }
+    }
+
+    pub fn next_thread_id(&self) -> u64 {
+        self.shared.threads.next_id()
+    }
+
     pub fn register_thread_state(&self, state: &Arc<ThreadState>) {
-        let mut thread_states = self.shared.thread_states.lock().unwrap();
-        thread_states.retain(|t| t.strong_count() > 0);
-        thread_states.push(Arc::downgrade(state));
+        self.shared.threads.register(state);
+    }
+
+    pub fn thread_state(&self, id: u64) -> Option<Arc<ThreadState>> {
+        self.shared.threads.get(id)
+    }
+
+    pub fn remove_thread_state(&self, id: u64) -> Option<Arc<ThreadState>> {
+        self.shared.threads.remove(id)
     }
 
     /// Run `R`'s setup (native-fn registration + global installation) and

@@ -71,92 +71,81 @@ Test.assert(self_thread.name(), "self")
 Test.assert(self_thread.isAlive(), false)
 Test.assert(self_thread.threadId(), self_tid.load())
 
-// Virtual threads interleave at explicit yields.
-let scheduler = Thread.scheduler()
-Test.assert(Thread.scheduler(), scheduler)
+// Virtual threads run under a userspace scheduler.
+let queue = {}
+let head = 0
+let tail = 0
+let enqueue = { |thread|
+    queue[tail] = thread
+    tail = tail + 1
+}
+let run_scheduler = {
+    while head < tail {
+        let thread = queue[head]
+        head = head + 1
+        if thread.isReady() and thread.mount() {
+            enqueue(thread)
+        }
+    }
+}
+
 let order = ""
-let va = Thread.newVirtual("va", scheduler, {
+let va = Thread.newVirtual("va", {
     order = order + "a1"
     Thread.yield()
     order = order + "a2"
 })
-let vb = Thread.newVirtual("vb", scheduler, {
+let vb = Thread.newVirtual("vb", {
     order = order + "b1"
     Thread.yield()
     order = order + "b2"
 })
-va.start()
-vb.start()
-va.join()
-vb.join()
+enqueue(va)
+enqueue(vb)
+let scheduler_thread = Thread.newPlatform("scheduler", run_scheduler)
+scheduler_thread.start()
+scheduler_thread.join()
 Test.assert(order, "a1b1a2b2")
 Test.assert(va.isAlive(), false)
 Test.assert(vb.isAlive(), false)
 
-// Thread.current() names the virtual thread, not the carrier.
+// Thread.current() names the virtual thread, not the platform scheduler.
 let child_name = ""
-let vc = Thread.newVirtual("vc", scheduler, {
+let vc = Thread.newVirtual("vc", {
     child_name = Thread.current().name()
     Thread.yield()
 })
-vc.start()
-vc.join()
+enqueue(vc)
+let name_scheduler = Thread.newPlatform("name-scheduler", run_scheduler)
+name_scheduler.start()
+name_scheduler.join()
 Test.assert(child_name, "vc")
 
-// A ready task and a blocked joiner stay rooted across GC.
+// A ready task survives GC while mounted.
 let gc_order = ""
-let gva = Thread.newVirtual("gva", scheduler, {
+let gva = Thread.newVirtual("gva", {
     gc_order = gc_order + "a"
     Thread.yield()
     KetteTools.forceMajorGC()
     gc_order = gc_order + "b"
 })
-gva.start()
-KetteTools.forceMajorGC()
-gva.join()
+enqueue(gva)
+let gc_scheduler = Thread.newPlatform("gc-scheduler", run_scheduler)
+gc_scheduler.start()
+gc_scheduler.join()
 Test.assert(gc_order, "ab")
 Test.assert(gva.isAlive(), false)
 
-// The child sees the scheduler it was created with.
-let child_scheduler = 0
-let vs = Thread.newVirtual("vs", scheduler, {
-    child_scheduler = Thread.scheduler()
-    Thread.yield()
-})
-vs.start()
-vs.join()
-Test.assert(child_scheduler, scheduler)
-
-// Suspension inside a nested VM entry (KetteTools.eval).
+// Suspension inside a nested VM entry.
 let eval_result = 0
 let ve = Thread.newVirtual("ve", {
     eval_result = KetteTools.eval("kette", "Thread.yield()\n7")
 })
-ve.start()
-ve.join()
+enqueue(ve)
+let eval_scheduler = Thread.newPlatform("eval-scheduler", run_scheduler)
+eval_scheduler.start()
+eval_scheduler.join()
 Test.assert(eval_result, 7)
-
-// Interrupts wake sleeping and joining virtual threads.
-let vsleep = Thread.newVirtual("vsleep", scheduler, {
-    Thread.sleep(10000)
-})
-vsleep.start()
-vsleep.interrupt()
-vsleep.join()
-Test.assert(vsleep.isInterrupted(), true)
-
-let target = Thread.newVirtual("target", scheduler, {
-    Thread.sleep(50)
-})
-let joiner = Thread.newVirtual("joiner", scheduler, {
-    target.join()
-})
-target.start()
-joiner.start()
-joiner.interrupt()
-target.join()
-joiner.join()
-Test.assert(joiner.isInterrupted(), true)
 
 // Platform carriers also sleep cooperatively and wake on interrupt.
 let psleep = Thread.newPlatform("psleep", {

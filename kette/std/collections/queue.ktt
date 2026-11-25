@@ -1,0 +1,117 @@
+use sync { Condition, Mutex }
+
+let QueueTraits = {
+    new: {
+        self.newWithCapacity(16)
+    }
+    newWithCapacity: |capacity| {
+        if capacity < 1 {
+            capacity = 1
+        }
+        let queue = self.clone()
+        queue.items = []
+        queue.items[capacity - 1] = null
+        queue.head = 0
+        queue.count = 0
+        queue.capacity = capacity
+        queue.lock = Mutex.new()
+        queue.notEmpty = Condition.new()
+        queue.closed = false
+        queue
+    }
+    grow: {
+        let capacity = self.capacity * 2
+        let items = []
+        items[capacity - 1] = null
+        let index = 0
+        while index < self.count {
+            items[index] = self.items[(self.head + index) % self.capacity]
+            index = index + 1
+        }
+        self.items = items
+        self.head = 0
+        self.capacity = capacity
+    }
+    push: |value| {
+        self.lock.lock()
+        if self.closed {
+            self.lock.unlock()
+            return false
+        }
+        if self.count == self.capacity {
+            self.grow()
+        }
+        let index = (self.head + self.count) % self.capacity
+        self.items[index] = value
+        self.count = self.count + 1
+        self.notEmpty.signal()
+        self.lock.unlock()
+        true
+    }
+    take: {
+        self.lock.lock()
+        while self.count == 0 and !self.closed {
+            self.notEmpty.await(self.lock)
+        }
+        if self.count == 0 {
+            self.lock.unlock()
+            return null
+        }
+        let value = self.items[self.head]
+        self.items[self.head] = null
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        self.lock.unlock()
+        value
+    }
+    tryTake: {
+        self.lock.lock()
+        if self.count == 0 {
+            self.lock.unlock()
+            return null
+        }
+        let value = self.items[self.head]
+        self.items[self.head] = null
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        self.lock.unlock()
+        value
+    }
+    close: {
+        self.lock.lock()
+        if !self.closed {
+            self.closed = true
+            self.notEmpty.signalAll()
+        }
+        self.lock.unlock()
+        self
+    }
+    isClosed: {
+        self.lock.lock()
+        let closed = self.closed
+        self.lock.unlock()
+        closed
+    }
+    size: {
+        self.lock.lock()
+        let size = self.count
+        self.lock.unlock()
+        size
+    }
+    isEmpty: {
+        self.lock.lock()
+        let empty = self.count == 0
+        self.lock.unlock()
+        empty
+    }
+}
+
+let Queue = {
+    traits*: QueueTraits
+    items, head, count, capacity, lock, notEmpty, closed: undefined
+}
+
+mod collections.queue {
+    export Queue = Queue
+    export QueueTraits = QueueTraits
+}

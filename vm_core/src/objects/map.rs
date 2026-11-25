@@ -525,8 +525,6 @@ impl MapKind {
     pub const C_VALUE: MapKind = MapKind(ObjectKind::CValue as u64);
     pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
     pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
-    pub const TASK_STATE: MapKind = MapKind(ObjectKind::TaskStateObject as u64);
-    pub const SCHEDULER: MapKind = MapKind(ObjectKind::SchedulerObject as u64);
     pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
     pub const BIT_ARRAY: MapKind = MapKind(ObjectKind::BitArray as u64);
     pub const RANGE: MapKind = MapKind(ObjectKind::Range as u64);
@@ -552,7 +550,7 @@ impl MapKind {
     }
 
     // TODO: consider transmute with debug assert
-    #[inline]
+    #[inline(always)]
     pub const fn kind(self) -> ObjectKind {
         match Self(self.0 & Self::KIND_MASK) {
             Self::MAP => ObjectKind::Map,
@@ -588,8 +586,6 @@ impl MapKind {
             Self::C_VALUE => ObjectKind::CValue,
             Self::C_TYPE => ObjectKind::TypeInfo,
             Self::THREAD_OBJECT => ObjectKind::ThreadObject,
-            Self::TASK_STATE => ObjectKind::TaskStateObject,
-            Self::SCHEDULER => ObjectKind::SchedulerObject,
             Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
             Self::BIT_ARRAY => ObjectKind::BitArray,
             Self::RANGE => ObjectKind::Range,

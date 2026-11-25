@@ -1,3 +1,5 @@
+use threading { parkNanos, wake }
+
 let IllegalLockState = Modules.error.IllegalLockState
 
 let WaitQueueTraits = {
@@ -152,7 +154,7 @@ let MutexTraits = {
                 self.waiters.remove(waiter)
                 return true
             }
-            let timed_out = me.parkNanos(remaining)
+            let timed_out = parkNanos(remaining)
             if waiter.granted.load() != 0 {
                 return true
             }
@@ -170,7 +172,7 @@ let MutexTraits = {
     unlock: {
         let waiter = self.waiters.dequeue()
         if waiter != 0 {
-            waiter.thread.unpark()
+            wake(waiter.thread)
         } else {
             self.locked.store(0)
         }
@@ -287,7 +289,7 @@ let RecursiveMutexTraits = {
                 self.recursions = 1
                 return true
             }
-            let timed_out = me.parkNanos(remaining)
+            let timed_out = parkNanos(remaining)
             if waiter.granted.load() != 0 {
                 self.owner = me_id
                 self.recursions = 1
@@ -311,7 +313,7 @@ let RecursiveMutexTraits = {
     releaseLock: {
         let waiter = self.waiters.dequeue()
         if waiter != 0 {
-            waiter.thread.unpark()
+            wake(waiter.thread)
         } else {
             self.locked.store(0)
         }
@@ -365,14 +367,14 @@ let ConditionTraits = {
     signal: {
         let waiter = self.waiters.dequeue()
         if waiter != 0 {
-            waiter.thread.unpark()
+            wake(waiter.thread)
         }
     }
     signalAll: {
         let* visit = {
             let waiter = self.waiters.dequeue()
             if waiter != 0 {
-                waiter.thread.unpark()
+                wake(waiter.thread)
                 visit()
             } else {
                 0
@@ -404,7 +406,7 @@ let ConditionTraits = {
                 if remaining <= 0 {
                     self.waiters.remove(waiter)
                     done = true
-                } else if me.parkNanos(remaining) {
+                } else if parkNanos(remaining) {
                     self.waiters.remove(waiter)
                     done = true
                 }

@@ -87,10 +87,8 @@ fn every_object_kind_visits_its_entire_layout() {
                 kind: ThreadKind::Platform,
                 target: undefined,
                 name: undefined,
-                task: None,
                 state: ThreadStatus::New,
                 tid: 1,
-                platform_slot: -1,
             },
             &scope,
         );
@@ -108,10 +106,9 @@ fn every_object_kind_visits_its_entire_layout() {
                     raw.kind,
                     raw.target,
                     raw.name,
-                    raw.task,
                     raw.state,
                     raw.interrupted,
-                    raw.platform_slot,
+                    raw.exception,
                 ]
             );
         }

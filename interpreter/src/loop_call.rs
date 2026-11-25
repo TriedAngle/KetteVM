@@ -12,15 +12,14 @@ use vm_core::{
     Result, Tagged, ThreadState, Unwind, VM, Value, interpreter::unwind,
 };
 
-type DebugHandler =
-    for<'h> fn(*const u8, Regs, &mut Acc, &mut Ctx<'h, 'h>, RootsArg<'h>) -> *const u8;
+type DebugHandler = for<'h> fn(*const u8, Regs, &mut Acc, &mut Ctx<'h>, RootsArg<'h>) -> *const u8;
 
 #[inline(always)]
 fn debug_trap<'h, const STRIDE: usize>(
     _ip: *const u8,
     _regs: Regs,
     _acc: &mut Acc,
-    _ctx: &mut Ctx<'_, '_>,
+    _ctx: &mut Ctx<'_>,
     _roots: RootsArg<'_>,
 ) -> *const u8 {
     unreachable!("invalid opcode")
@@ -31,7 +30,7 @@ fn step_wide<'h, const STRIDE: usize>(
     ip: *const u8,
     regs: Regs,
     acc: &mut Acc,
-    ctx: &mut Ctx<'h, 'h>,
+    ctx: &mut Ctx<'h>,
     roots: RootsArg<'h>,
 ) -> *const u8 {
     let op = unsafe { *ip.add(1) };
@@ -174,7 +173,7 @@ pub fn execute<'a>(
     )
 }
 
-pub fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Acc> {
+pub fn dispatch<'h>(ctx: &mut Ctx<'h>) -> Result<Acc> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let roots = RootsArg::new(ctx.vm().known());
