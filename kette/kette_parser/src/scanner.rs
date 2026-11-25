@@ -334,9 +334,21 @@ impl Scanner<'_> {
                     self.bump();
                     LtEq
                 }
+                Some('>') => {
+                    self.bump();
+                    LtGt
+                }
                 Some('<') => {
                     self.bump();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('<') {
+                        self.bump();
+                        if self.peek() == Some('=') {
+                            self.bump();
+                            LtLtLtEq
+                        } else {
+                            LtLtLt
+                        }
+                    } else if self.peek() == Some('=') {
                         self.bump();
                         LtLtEq
                     } else {
@@ -352,7 +364,15 @@ impl Scanner<'_> {
                 }
                 Some('>') => {
                     self.bump();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('>') {
+                        self.bump();
+                        if self.peek() == Some('=') {
+                            self.bump();
+                            GtGtGtEq
+                        } else {
+                            GtGtGt
+                        }
+                    } else if self.peek() == Some('=') {
                         self.bump();
                         GtGtEq
                     } else {
@@ -362,7 +382,19 @@ impl Scanner<'_> {
                 _ => Gt,
             },
             '|' => {
-                if self.peek() == Some('=') {
+                if self.peek() == Some('|') && self.peek_second() == Some('|') {
+                    self.bump();
+                    self.bump();
+                    if self.peek() == Some('=') {
+                        self.bump();
+                        PipePipePipeEq
+                    } else {
+                        PipePipePipe
+                    }
+                } else if self.peek() == Some('>') {
+                    self.bump();
+                    PipeGt
+                } else if self.peek() == Some('=') {
                     self.bump();
                     self.error(
                         self.range(start),
@@ -374,18 +406,50 @@ impl Scanner<'_> {
                 }
             }
             '&' => {
-                if self.peek() == Some('=') {
+                if self.peek() == Some('&') && self.peek_second() == Some('&') {
                     self.bump();
+                    self.bump();
+                    if self.peek() == Some('=') {
+                        self.bump();
+                        AmpAmpAmpEq
+                    } else {
+                        AmpAmpAmp
+                    }
+                } else {
+                    if self.peek() == Some('=') {
+                        self.bump();
+                    }
+                    self.error(self.range(start), "bitwise operators are not supported");
+                    Error
                 }
-                self.error(self.range(start), "bitwise operators are not supported");
-                Error
             }
             '^' => {
-                if self.peek() == Some('=') {
+                if self.peek() == Some('^') && self.peek_second() == Some('^') {
                     self.bump();
+                    self.bump();
+                    if self.peek() == Some('=') {
+                        self.bump();
+                        CaretCaretCaretEq
+                    } else {
+                        CaretCaretCaret
+                    }
+                } else {
+                    if self.peek() == Some('=') {
+                        self.bump();
+                    }
+                    self.error(self.range(start), "bitwise operators are not supported");
+                    Error
                 }
-                self.error(self.range(start), "bitwise operators are not supported");
-                Error
+            }
+            '~' => {
+                if self.peek() == Some('~') && self.peek_second() == Some('~') {
+                    self.bump();
+                    self.bump();
+                    TildeTildeTilde
+                } else {
+                    self.error(self.range(start), "unexpected character");
+                    Error
+                }
             }
             _ => {
                 self.error(self.range(start), "unexpected character");

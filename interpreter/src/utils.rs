@@ -4,7 +4,8 @@ use vm_core::{
     Acc, Args, CallInfo, CallTarget, Callee, ErasedRuntimeState, Errors, FeedbackVector,
     FunctionKind, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, NativeIndex, Object,
     Tagged, ThreadState, Thrown, VM, Value, VmError, WellKnown, ic::CallHit, ic::CallProbe,
-    ic::CallRecord, ic::InlineCache, proxy::Proxy, raise, raise_runtime,
+    ic::CallRecord, ic::InlineCache, ic::LoadHit, ic::MonoProbe, proxy::Proxy, raise,
+    raise_runtime,
 };
 
 /// Invoke a native function object from `execute`: `args` is the call
@@ -217,11 +218,37 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
     args: &[Tagged<'a, Value>],
 ) -> Result<StagedCall, CallFault> {
     let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * (2 + METHOD as usize + args.len());
+    call_scatter_start_sized::<STRIDE, METHOD, true>(
+        x, roots, pc, size, fb, callee_reg, callee, recv, args,
+    )
+}
+
+/// [`call_scatter_start`] with the caller instruction's byte size and an
+/// optional call-target feedback site, for fused opcodes whose operand
+/// count differs from the call opcodes.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn call_scatter_start_sized<'a, const STRIDE: usize, const METHOD: bool, const CACHE: bool>(
+    x: &'a Ctx<'_, '_>,
+    roots: RootsArg<'_>,
+    pc: usize,
+    size: usize,
+    fb: usize,
+    callee_reg: i32,
+    callee: Tagged<'a, Value>,
+    recv: Tagged<'a, Value>,
+    args: &[Tagged<'a, Value>],
+) -> Result<StagedCall, CallFault> {
     // parameter payload: [receiver, args..]
     let mut window = [recv; 3];
     window[1..1 + args.len()].copy_from_slice(args);
     let values = &window[..1 + args.len()];
-    match InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee) {
+    let probe = if CACHE {
+        InlineCache::call_probe(x.heap(), x.feedback_ref(x.heap()), fb, callee)
+    } else {
+        CallProbe::Miss
+    };
+    match probe {
         CallProbe::Bytecode(CallHit {
             target,
             info,
@@ -264,11 +291,115 @@ pub fn call_scatter_start<'a, const STRIDE: usize, const METHOD: bool>(
                 pc,
                 size,
                 callee_reg,
-                call_target_miss(x.heap(), x.feedback_ref(x.heap()), Some(fb), callee),
+                call_target_miss(
+                    x.heap(),
+                    x.feedback_ref(x.heap()),
+                    if CACHE { Some(fb) } else { None },
+                    callee,
+                ),
                 staged,
             )
         }
     }
+}
+
+/// Resolve the receiver's operator method into `callee_reg`.
+#[inline(always)]
+pub fn load_operator(
+    ctx: &mut Ctx<'_, '_>,
+    regs: Regs,
+    recv_reg: i32,
+    name_idx: usize,
+    load_fb: usize,
+    callee_reg: i32,
+) -> Result<(), CallFault> {
+    let heap = ctx.heap();
+    let recv = regs.get(recv_reg, heap);
+    let probe = if recv.is_smi() {
+        InlineCache::probe_smi(heap, ctx.feedback_ref(heap), load_fb, recv)
+    } else {
+        InlineCache::probe_mono(heap, ctx.feedback_ref(heap), load_fb, recv)
+    };
+    let hit = match probe {
+        MonoProbe::Value(value) => Some(value),
+        MonoProbe::Handler(object, handler) => {
+            match InlineCache::apply_mono(heap, object, handler) {
+                Some(LoadHit::Value(value)) => Some(value),
+                _ => None,
+            }
+        }
+        MonoProbe::Poly {
+            obj,
+            map,
+            pairs,
+            start,
+        } => match InlineCache::try_load_resume(heap, obj, map, pairs, start) {
+            Some(LoadHit::Value(value)) => Some(value),
+            _ => None,
+        },
+        MonoProbe::Miss | MonoProbe::NotReceiver => None,
+    };
+    if let Some(callee) = hit {
+        regs.set(callee_reg, callee);
+        return Ok(());
+    }
+    resolve_operator(ctx, regs, recv_reg, name_idx, load_fb, callee_reg)
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_operator(
+    ctx: &mut Ctx<'_, '_>,
+    regs: Regs,
+    recv_reg: i32,
+    name_idx: usize,
+    load_fb: usize,
+    callee_reg: i32,
+) -> Result<(), CallFault> {
+    let vm = ctx.vm();
+    let state = ctx.state();
+    let base = ctx.frame_base();
+    state.handle_scope(|scope| {
+        let heap = ctx.heap_mut();
+        let recv = scope.handle(regs.get(recv_reg, heap));
+        let name = scope.handle(
+            state
+                .stack()
+                .callable(heap, base)
+                .constant_slot_name(heap, name_idx),
+        );
+        // Nullish receivers have no prototype chain of their own; look the
+        // operator up on Object.prototype with the value as `this`.
+        let (holder, receiver) = if recv.as_tagged(heap).is_nullish(heap) {
+            let prototype = scope.handle(heap.known().object_prototype.get(heap).erase());
+            (prototype, recv)
+        } else {
+            (recv, recv)
+        };
+        let value =
+            match Object::get_property(vm, heap, state, holder, receiver, name.erase(), false) {
+                Ok(value) => scope.handle(value),
+                Err(error) => {
+                    let _ = raise_runtime(heap, error);
+                    return Err(CallFault::Threw);
+                }
+            };
+        regs.set(callee_reg, value.as_tagged(heap));
+        InlineCache::update_load(
+            heap,
+            &scope,
+            state
+                .stack()
+                .frame_header(base)
+                .feedback(heap)
+                .map(|vector| scope.handle(vector)),
+            load_fb,
+            Some(recv),
+            name,
+            true,
+        );
+        Ok(())
+    })
 }
 
 /// The contiguous-window call start (`Call`): the window lives in the

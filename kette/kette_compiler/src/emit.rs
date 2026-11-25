@@ -11,7 +11,7 @@ use kette_syntax::ast::{
     SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr, UseDecl,
     UseTree, WhileExpr,
 };
-use kette_syntax::ops::{AssignOp, BinaryOp, UnaryOp};
+use kette_syntax::ops::{AssignOp, BinaryOp};
 use kette_syntax::resolve::{Binding, BindingId, BindingKind, Resolution, Resolved};
 use kette_syntax::{NodeId, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree};
 use vm_core::{
@@ -1134,70 +1134,33 @@ impl<'a> FunctionGen<'a> {
         let lhs = self.b.stage_acc(&temps);
         self.expr(rhs)?;
         let rhs = self.b.stage_acc(&temps);
-        self.binary_regs(op, lhs, rhs);
+        self.binary_regs(op, lhs, rhs, &temps);
         Ok(())
     }
 
-    fn binary_regs(&mut self, op: BinaryOp, lhs: Reg, rhs: Reg) {
-        match op {
-            BinaryOp::EqEq
-            | BinaryOp::NotEq
-            | BinaryOp::Lt
-            | BinaryOp::Gt
-            | BinaryOp::LtEq
-            | BinaryOp::GtEq => {
-                self.b.load(lhs);
-                match op {
-                    BinaryOp::EqEq => self.b.equal(rhs),
-                    BinaryOp::NotEq => {
-                        self.b.equal(rhs);
-                        self.invert_acc();
-                    }
-                    BinaryOp::Lt => self.b.less_than(rhs),
-                    BinaryOp::Gt => self.b.greater_than(rhs),
-                    BinaryOp::LtEq => self.b.less_than_or_equal(rhs),
-                    BinaryOp::GtEq => self.b.greater_than_or_equal(rhs),
-                    _ => unreachable!(),
-                }
-            }
-            _ => {
-                self.b.load(rhs);
-                match op {
-                    BinaryOp::Plus => self.b.add(lhs),
-                    BinaryOp::Minus => self.b.sub(lhs),
-                    BinaryOp::Star => self.b.mul(lhs),
-                    BinaryOp::Slash => self.b.div(lhs),
-                    BinaryOp::Percent => self.b.mod_(lhs),
-                    BinaryOp::LtLt => self.b.shift_left(lhs),
-                    BinaryOp::GtGt => self.b.shift_right(lhs),
-                    _ => unreachable!(),
-                }
-            }
-        }
+    fn binary_regs(&mut self, op: BinaryOp, lhs: Reg, rhs: Reg, temps: &TempScope) {
+        debug_assert!(op.is_dispatch(), "short-circuit operators are control flow");
+        let callee = temps.reserve(1);
+        let name = self.b.name(op.text().as_bytes());
+        let feedback = self.b.new_feedback();
+        self.b.binary_op(callee, lhs, rhs, name, feedback);
     }
 
     fn unary_expr(&mut self, expr: UnaryExpr<'a>) -> Result<(), CompileError> {
         let Some(operand) = expr.operand() else {
             return self.err_node(expr.syntax().id(), "missing operand");
         };
+        let Some(op) = expr.op() else {
+            return self.err_node(expr.syntax().id(), "unsupported unary operator");
+        };
+        let temps = self.b.temp_scope();
         self.expr(operand)?;
-        match expr.op() {
-            Some(UnaryOp::Neg) => self.b.negate(),
-            Some(UnaryOp::Not) => self.invert_acc(),
-            None => return self.err_node(expr.syntax().id(), "unsupported unary operator"),
-        }
+        let receiver = self.b.stage_acc(&temps);
+        let callee = temps.reserve(1);
+        let name = self.b.name(op.text().as_bytes());
+        let feedback = self.b.new_feedback();
+        self.b.unary_op(callee, receiver, name, feedback);
         Ok(())
-    }
-
-    fn invert_acc(&mut self) {
-        let truthy = self.b.new_label();
-        let end = self.b.new_label();
-        self.b.jump_if_falsy(truthy);
-        self.b.load_false();
-        self.b.jump(end);
-        self.b.bind(truthy);
-        self.b.load_true();
-        self.b.bind(end);
     }
 
     fn assign_expr(&mut self, expr: AssignExpr<'a>) -> Result<(), CompileError> {
@@ -1216,8 +1179,11 @@ impl<'a> FunctionGen<'a> {
             AssignOp::Mul => BinaryOp::Star,
             AssignOp::Div => BinaryOp::Slash,
             AssignOp::Rem => BinaryOp::Percent,
-            AssignOp::Shl => BinaryOp::LtLt,
-            AssignOp::Shr => BinaryOp::GtGt,
+            AssignOp::Shl => BinaryOp::ShiftLeft,
+            AssignOp::Shr => BinaryOp::ShiftRight,
+            AssignOp::BitAnd => BinaryOp::BitAnd,
+            AssignOp::BitOr => BinaryOp::BitOr,
+            AssignOp::BitXor => BinaryOp::BitXor,
             _ => return self.err_node(expr.syntax().id(), "compound assignment"),
         };
         let temps = self.b.temp_scope();
@@ -1227,7 +1193,7 @@ impl<'a> FunctionGen<'a> {
                 let old = self.b.stage_acc(&temps);
                 self.expr(value)?;
                 let rhs = self.b.stage_acc(&temps);
-                self.binary_regs(binary, old, rhs);
+                self.binary_regs(binary, old, rhs, &temps);
                 self.store_target(target)
             }
             Expr::Get(get) => {
@@ -1246,7 +1212,7 @@ impl<'a> FunctionGen<'a> {
                 let old = self.b.stage_acc(&temps);
                 self.expr(value)?;
                 let rhs = self.b.stage_acc(&temps);
-                self.binary_regs(binary, old, rhs);
+                self.binary_regs(binary, old, rhs, &temps);
                 let feedback = self.b.new_feedback();
                 self.b
                     .store_named_property_no_shadow(receiver_reg, name_const, feedback);
@@ -1271,7 +1237,7 @@ impl<'a> FunctionGen<'a> {
                 let old = self.b.stage_acc(&temps);
                 self.expr(value)?;
                 let rhs = self.b.stage_acc(&temps);
-                self.binary_regs(binary, old, rhs);
+                self.binary_regs(binary, old, rhs, &temps);
                 let feedback = self.b.new_feedback();
                 self.b.store_indexed(receiver_reg, key, feedback);
                 Ok(())

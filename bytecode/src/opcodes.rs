@@ -384,4 +384,12 @@ define_opcodes! {
     /// OrdinaryCallBindThis for a non-strict function: convert the receiver
     /// in place (nullish -> global object, primitive -> wrapper).
     BindThis { operands: [], indices: [] },
+
+    /// `receiver[name](arg)`: the receiver's operator method. The method
+    /// lookup is cached on the receiver map; the call target resolves
+    /// directly (no second feedback site). `acc` receives the result.
+    /// Kette-only; JavaScript keeps the dedicated arithmetic opcodes.
+    BinaryOp { operands: [Register, Register, Register, Index, Index], acc: writes, indices: [Unchecked, Unchecked, Unchecked, ConstantPool, Feedback] }, // callee, receiver, arg, name, load fb
+    /// `receiver[name]()`: the unary form of [`Opcode::BinaryOp`].
+    UnaryOp { operands: [Register, Register, Index, Index], acc: writes, indices: [Unchecked, Unchecked, ConstantPool, Feedback] }, // callee, receiver, name, load fb
 }

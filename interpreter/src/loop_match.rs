@@ -3,8 +3,8 @@ use crate::handler;
 use crate::slow::match_slow_construct;
 use crate::utils::{
     CallFault, ConstructStart, StagedCall, bound_apply_staged, call_native_target,
-    call_scatter_start, call_window_start, construct_native, construct_start, proxy_apply_staged,
-    raise_fault, resolve_target,
+    call_scatter_start, call_scatter_start_sized, call_window_start, construct_native,
+    construct_start, load_operator, proxy_apply_staged, raise_fault, resolve_target,
 };
 
 use bytecode::Opcode;
@@ -326,6 +326,8 @@ fn step<'h, const STRIDE: usize>(
         CallMethod0 => regs step_call_method0::<STRIDE>,
         CallMethod1 => regs step_call_method1::<STRIDE>,
         CallMethod2 => regs step_call_method2::<STRIDE>,
+        BinaryOp => regs step_binary_op::<STRIDE>,
+        UnaryOp => regs step_unary_op::<STRIDE>,
         CallFunction0 => regs step_call_function0::<STRIDE>,
         CallFunction1 => regs step_call_function1::<STRIDE>,
         CallFunction2 => regs step_call_function2::<STRIDE>,
@@ -422,40 +424,45 @@ fn step<'h, const STRIDE: usize>(
     );
 }
 
-macro_rules! call_enter {
-    (
-        $ctx:expr,
-        $regs:expr,
-        $acc:expr,
-        $pc:expr,
-        $next_pc:expr,
-        $roots:expr,
-        $staged:expr
-    ) => {{
-        match $staged {
-            Err(e) => raise!($ctx, $acc, $pc, e),
-            Ok(StagedCall::Frame) => {
-                *$acc = Acc::set($roots.undefined.get($ctx.heap()).erase());
-                $ctx.code_ptr()
-            }
-            Ok(StagedCall::Native {
-                rt,
-                callee_reg,
-                staged,
-            }) => {
-                let v = $ctx.call_native(rt, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v)
-            }
-            Ok(StagedCall::Proxy { callee_reg, staged }) => {
-                let v = proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
-            }
-            Ok(StagedCall::Bound { callee_reg, staged }) => {
-                let v = bound_apply_staged($ctx, $roots, $regs, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
-            }
+/// The `call_enter!` body as a function.
+pub fn call_enter<'h>(
+    staged: Result<StagedCall, CallFault>,
+    pc: usize,
+    next_pc: usize,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    match staged {
+        Err(e) => raise!(ctx, acc, pc, e),
+        Ok(StagedCall::Frame) => {
+            set_acc!(acc, roots.undefined.get(ctx.heap()).erase());
+            ctx.code_ptr()
         }
-    }};
+        Ok(StagedCall::Native {
+            rt,
+            callee_reg,
+            staged,
+        }) => {
+            let v = ctx.call_native(rt, callee_reg, staged);
+            reenter!(ctx, acc, pc, next_pc, v)
+        }
+        Ok(StagedCall::Proxy { callee_reg, staged }) => {
+            let v = proxy_apply_staged(ctx, roots, regs, callee_reg, staged);
+            reenter!(ctx, acc, pc, next_pc, v.get(ctx.heap()))
+        }
+        Ok(StagedCall::Bound { callee_reg, staged }) => {
+            let v = bound_apply_staged(ctx, roots, regs, callee_reg, staged);
+            reenter!(ctx, acc, pc, next_pc, v.get(ctx.heap()))
+        }
+    }
+}
+
+macro_rules! call_enter {
+    ($ctx:expr, $regs:expr, $acc:expr, $pc:expr, $next_pc:expr, $roots:expr, $staged:expr) => {
+        return call_enter($staged, $pc, $next_pc, $regs, $acc, $ctx, $roots)
+    };
 }
 
 #[inline(always)]
@@ -783,6 +790,84 @@ pub fn step_call_function2<'h, const STRIDE: usize>(
     roots: RootsArg<'h>,
 ) -> *const u8 {
     op_call_function::<STRIDE, 2>(ip, regs, acc, ctx, roots)
+}
+
+#[inline(always)]
+pub fn step_binary_op<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    decode!(BinaryOp, ip, ctx, ops, _next, pc, next_pc);
+    let callee_reg = ops.signed::<0>();
+    let recv_reg = ops.signed::<1>();
+    let arg_reg = ops.signed::<2>();
+    let staged = load_operator(
+        ctx,
+        regs,
+        recv_reg,
+        ops.unsigned::<3>(),
+        ops.unsigned::<4>(),
+        callee_reg,
+    )
+    .and_then(|()| {
+        let heap = ctx.heap();
+        let callee = regs.get(callee_reg, heap);
+        let recv = regs.get(recv_reg, heap);
+        let arg = regs.get(arg_reg, heap);
+        call_scatter_start_sized::<STRIDE, true, false>(
+            ctx,
+            roots,
+            pc,
+            next_pc - pc,
+            0,
+            callee_reg,
+            callee,
+            recv,
+            &[arg],
+        )
+    });
+    call_enter!(ctx, regs, acc, pc, next_pc, roots, staged)
+}
+
+#[inline(always)]
+pub fn step_unary_op<'h, const STRIDE: usize>(
+    ip: *const u8,
+    regs: Regs,
+    acc: &mut Acc,
+    ctx: &mut Ctx<'h, 'h>,
+    roots: RootsArg<'h>,
+) -> *const u8 {
+    decode!(UnaryOp, ip, ctx, ops, _next, pc, next_pc);
+    let callee_reg = ops.signed::<0>();
+    let recv_reg = ops.signed::<1>();
+    let staged = load_operator(
+        ctx,
+        regs,
+        recv_reg,
+        ops.unsigned::<2>(),
+        ops.unsigned::<3>(),
+        callee_reg,
+    )
+    .and_then(|()| {
+        let heap = ctx.heap();
+        let callee = regs.get(callee_reg, heap);
+        let recv = regs.get(recv_reg, heap);
+        call_scatter_start_sized::<STRIDE, true, false>(
+            ctx,
+            roots,
+            pc,
+            next_pc - pc,
+            0,
+            callee_reg,
+            callee,
+            recv,
+            &[],
+        )
+    });
+    call_enter!(ctx, regs, acc, pc, next_pc, roots, staged)
 }
 
 #[inline(always)]

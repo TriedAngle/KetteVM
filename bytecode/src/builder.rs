@@ -653,6 +653,28 @@ impl FnBuilder {
         self.emit_tracked(Opcode::LoadNamedProperty, &[obj.operand(), name.0, fb.0]);
     }
 
+    /// `callee = obj[name]; acc = callee(arg)` with the method load cached.
+    pub fn binary_op(&mut self, callee: Reg, obj: Reg, arg: Reg, name: ConstIdx, load: Feedback) {
+        self.emit_tracked(
+            Opcode::BinaryOp,
+            &[
+                callee.operand(),
+                obj.operand(),
+                arg.operand(),
+                name.0,
+                load.0,
+            ],
+        );
+    }
+
+    /// `callee = obj[name]; acc = callee()` with the method load cached.
+    pub fn unary_op(&mut self, callee: Reg, obj: Reg, name: ConstIdx, load: Feedback) {
+        self.emit_tracked(
+            Opcode::UnaryOp,
+            &[callee.operand(), obj.operand(), name.0, load.0],
+        );
+    }
+
     pub fn load_own_slot_or_hole(&mut self, obj: Reg, name: ConstIdx) {
         self.emit_tracked(Opcode::LoadOwnSlotOrHole, &[obj.operand(), name.0]);
     }

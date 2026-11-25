@@ -12,8 +12,11 @@ pub enum BinaryOp {
     Gt,
     LtEq,
     GtEq,
-    LtLt,
-    GtGt,
+    BitOr,
+    BitXor,
+    BitAnd,
+    ShiftLeft,
+    ShiftRight,
     Plus,
     Minus,
     Star,
@@ -32,8 +35,11 @@ impl BinaryOp {
             Gt => Self::Gt,
             LtEq => Self::LtEq,
             GtEq => Self::GtEq,
-            LtLt => Self::LtLt,
-            GtGt => Self::GtGt,
+            PipePipePipe => Self::BitOr,
+            CaretCaretCaret => Self::BitXor,
+            AmpAmpAmp => Self::BitAnd,
+            LtLtLt => Self::ShiftLeft,
+            GtGtGt => Self::ShiftRight,
             Plus => Self::Plus,
             Minus => Self::Minus,
             Star => Self::Star,
@@ -53,8 +59,11 @@ impl BinaryOp {
             Self::Gt => Gt,
             Self::LtEq => LtEq,
             Self::GtEq => GtEq,
-            Self::LtLt => LtLt,
-            Self::GtGt => GtGt,
+            Self::BitOr => PipePipePipe,
+            Self::BitXor => CaretCaretCaret,
+            Self::BitAnd => AmpAmpAmp,
+            Self::ShiftLeft => LtLtLt,
+            Self::ShiftRight => GtGtGt,
             Self::Plus => Plus,
             Self::Minus => Minus,
             Self::Star => Star,
@@ -73,8 +82,11 @@ impl BinaryOp {
             Self::Gt => ">",
             Self::LtEq => "<=",
             Self::GtEq => ">=",
-            Self::LtLt => "<<",
-            Self::GtGt => ">>",
+            Self::BitOr => "|||",
+            Self::BitXor => "^^^",
+            Self::BitAnd => "&&&",
+            Self::ShiftLeft => "<<<",
+            Self::ShiftRight => ">>>",
             Self::Plus => "+",
             Self::Minus => "-",
             Self::Star => "*",
@@ -90,10 +102,18 @@ impl BinaryOp {
             Self::And => 2,
             Self::EqEq | Self::NotEq => 3,
             Self::Lt | Self::Gt | Self::LtEq | Self::GtEq => 4,
-            Self::LtLt | Self::GtGt => 5,
-            Self::Plus | Self::Minus => 6,
-            Self::Star | Self::Slash | Self::Percent => 7,
+            Self::BitOr => 5,
+            Self::BitXor => 6,
+            Self::BitAnd => 7,
+            Self::ShiftLeft | Self::ShiftRight => 8,
+            Self::Plus | Self::Minus => 9,
+            Self::Star | Self::Slash | Self::Percent => 10,
         }
+    }
+
+    /// Whether the operator is lowered to a method send.
+    pub fn is_dispatch(self) -> bool {
+        !matches!(self, Self::And | Self::Or)
     }
 }
 
@@ -108,6 +128,7 @@ impl fmt::Display for BinaryOp {
 pub enum UnaryOp {
     Neg,
     Not,
+    Bnot,
 }
 
 impl UnaryOp {
@@ -115,6 +136,7 @@ impl UnaryOp {
         Some(match kind {
             Minus => Self::Neg,
             Bang => Self::Not,
+            TildeTildeTilde => Self::Bnot,
             _ => return None,
         })
     }
@@ -123,6 +145,7 @@ impl UnaryOp {
         match self {
             Self::Neg => Minus,
             Self::Not => Bang,
+            Self::Bnot => TildeTildeTilde,
         }
     }
 
@@ -130,6 +153,7 @@ impl UnaryOp {
         match self {
             Self::Neg => "-",
             Self::Not => "!",
+            Self::Bnot => "~~~",
         }
     }
 }
@@ -153,6 +177,9 @@ pub enum AssignOp {
     Or,
     Shl,
     Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 impl AssignOp {
@@ -166,8 +193,11 @@ impl AssignOp {
             PercentEq => Self::Rem,
             AndEq => Self::And,
             OrEq => Self::Or,
-            LtLtEq => Self::Shl,
-            GtGtEq => Self::Shr,
+            LtLtLtEq => Self::Shl,
+            GtGtGtEq => Self::Shr,
+            AmpAmpAmpEq => Self::BitAnd,
+            PipePipePipeEq => Self::BitOr,
+            CaretCaretCaretEq => Self::BitXor,
             _ => return None,
         })
     }
@@ -182,8 +212,11 @@ impl AssignOp {
             Self::Rem => PercentEq,
             Self::And => AndEq,
             Self::Or => OrEq,
-            Self::Shl => LtLtEq,
-            Self::Shr => GtGtEq,
+            Self::Shl => LtLtLtEq,
+            Self::Shr => GtGtGtEq,
+            Self::BitAnd => AmpAmpAmpEq,
+            Self::BitOr => PipePipePipeEq,
+            Self::BitXor => CaretCaretCaretEq,
         }
     }
 
@@ -197,8 +230,11 @@ impl AssignOp {
             Self::Rem => "%=",
             Self::And => "and=",
             Self::Or => "or=",
-            Self::Shl => "<<=",
-            Self::Shr => ">>=",
+            Self::Shl => "<<<=",
+            Self::Shr => ">>>=",
+            Self::BitAnd => "&&&=",
+            Self::BitOr => "|||=",
+            Self::BitXor => "^^^=",
         }
     }
 

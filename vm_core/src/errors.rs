@@ -68,6 +68,7 @@ vm_errors! {
     InvalidGlobalDeclarations => Type, "invalid global declarations";
     ConstAssign => Type, "assignment to a constant variable";
     CannotConvertToNumber => Type, "cannot convert value to a number";
+    IntegerOverflow => Range, "integer overflow";
     CannotConvertToPrimitive => Type, "cannot convert value to a primitive";
     CannotConvertObjectToPrimitive => Type, "cannot convert object to a primitive";
     CannotConvertToObject => Type, "cannot convert value to an object";

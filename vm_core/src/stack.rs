@@ -581,7 +581,7 @@ impl Stack {
         (needed > self.top()).then_some(needed)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn pop_frame(&self, base: usize) -> FrameMeta {
         let header = self.frame_header(base);
         self.set_top(base - HEADER_SLOTS - header.regcount());

@@ -32,6 +32,7 @@ impl Object {
         Layout::new::<Self>()
     }
 
+    #[inline]
     pub fn callable_info<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, CallableInfoObject>> {
         let kind = self.map(heap).kind();
         if !kind.is_callable() || kind.is_bound() || kind.is_proxy() {
@@ -296,6 +297,7 @@ pub enum CallTarget<'a> {
 }
 
 impl<'a> Tagged<'a, Value> {
+    #[inline]
     pub fn is_callable(self, heap: &Heap) -> bool {
         let Some(obj) = self.as_heap_object() else {
             return false;

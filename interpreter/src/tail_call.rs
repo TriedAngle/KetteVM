@@ -245,6 +245,8 @@ tail_call_table!(
     CallMethod0 => op_call_method0,
     CallMethod1 => op_call_method1,
     CallMethod2 => op_call_method2,
+    BinaryOp => op_binary_op,
+    UnaryOp => op_unary_op,
     CallFunction0 => op_call_function0,
     CallFunction1 => op_call_function1,
     CallFunction2 => op_call_function2,
@@ -707,6 +709,78 @@ fn op_call_method2(frame: Frame) {
         &[arg0, arg1][..2],
     );
     call_enter!(result, pc)
+}
+
+#[handler_tail_call(BinaryOp)]
+fn op_binary_op(frame: Frame) {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * Opcode::BinaryOp.operands().len();
+    let callee_reg = frame.signed::<0>();
+    let recv_reg = frame.signed::<1>();
+    let arg_reg = frame.signed::<2>();
+    let staged = match load_operator(
+        frame.ctx(),
+        frame.regs(),
+        recv_reg,
+        frame.unsigned::<3>(),
+        frame.unsigned::<4>(),
+        callee_reg,
+    ) {
+        Ok(()) => {
+            let heap = frame.ctx().heap();
+            let callee = frame.regs().get(callee_reg, heap);
+            let recv = frame.regs().get(recv_reg, heap);
+            let arg = frame.regs().get(arg_reg, heap);
+            call_scatter_start_sized::<STRIDE, true, false>(
+                frame.ctx_ref(),
+                roots,
+                pc,
+                size,
+                0,
+                callee_reg,
+                callee,
+                recv,
+                &[arg],
+            )
+        }
+        Err(fault) => Err(fault),
+    };
+    call_enter!(staged, pc)
+}
+
+#[handler_tail_call(UnaryOp)]
+fn op_unary_op(frame: Frame) {
+    let pc = frame.pc();
+    let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * Opcode::UnaryOp.operands().len();
+    let callee_reg = frame.signed::<0>();
+    let recv_reg = frame.signed::<1>();
+    let staged = match load_operator(
+        frame.ctx(),
+        frame.regs(),
+        recv_reg,
+        frame.unsigned::<2>(),
+        frame.unsigned::<3>(),
+        callee_reg,
+    ) {
+        Ok(()) => {
+            let heap = frame.ctx().heap();
+            let callee = frame.regs().get(callee_reg, heap);
+            let recv = frame.regs().get(recv_reg, heap);
+            call_scatter_start_sized::<STRIDE, true, false>(
+                frame.ctx_ref(),
+                roots,
+                pc,
+                size,
+                0,
+                callee_reg,
+                callee,
+                recv,
+                &[],
+            )
+        }
+        Err(fault) => Err(fault),
+    };
+    call_enter!(staged, pc)
 }
 
 #[handler_tail_call(CallFunction0)]

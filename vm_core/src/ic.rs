@@ -260,6 +260,86 @@ fn ic_receiver<'a>(receiver: Tagged<'a, Value>, heap: &'a Heap) -> Option<Tagged
     Some(obj)
 }
 
+/// The IC identity and lookup origin for a receiver.
+///
+/// Primitives use their canonical maps (Smi has no heap object, so the
+/// synthetic `smi_map` stands in). Nullish receivers have no prototype
+/// chain of their own, so operators on them look up through
+/// `Object.prototype`.
+#[inline(always)]
+fn ic_origin<'a>(
+    heap: &'a Heap,
+    receiver: Tagged<'a, Value>,
+) -> Option<(Tagged<'a, Map>, Tagged<'a, Object>)> {
+    if let Some(obj) = receiver.as_heap_object() {
+        let kind = obj.map(heap).kind();
+        if kind.is_proxy() {
+            return None;
+        }
+        if kind.kind() == ObjectKind::Oddball && receiver.is_nullish(heap) {
+            return Some((obj.map(heap), heap.known().object_prototype.get(heap)));
+        }
+        if !kind.is_js_receiver()
+            && !matches!(kind.kind(), ObjectKind::Float | ObjectKind::FixedByteArray)
+        {
+            return None;
+        }
+        return Some((obj.map(heap), obj));
+    }
+    if receiver.is_smi() {
+        let origin = receiver.primitive_prototype(heap)?.as_heap_object()?;
+        return Some((heap.known().smi_map.get(heap), origin));
+    }
+    None
+}
+
+/// The original map-keyed probe body. Kept in a helper so the JS heap-object
+/// path stays identical to before the primitive-map work.
+#[inline(always)]
+fn probe_map<'a>(
+    heap: &'a Heap,
+    vector: Tagged<'a, FeedbackVector>,
+    slot: usize,
+    map: Tagged<'a, Map>,
+    obj: Tagged<'a, Object>,
+) -> MonoProbe<'a> {
+    let site = read_site_snapshot(vector, heap, slot);
+    let state = site.state;
+
+    if state.is_weak_ref_to(map) {
+        return mono_result(heap, obj, site.handler);
+    }
+    if state.is_weak_ptr() {
+        return MonoProbe::Miss;
+    }
+
+    let Some(pairs) = state
+        .as_strong()
+        .and_then(|s| s.get_as::<WeakFixedArray>(heap))
+    else {
+        return MonoProbe::Miss;
+    };
+    let len = pairs.len();
+    if len >= 2
+        && let Some(m) = pairs.get(heap, 0).as_strong()
+        && m.ptr_eq(map)
+    {
+        return mono_result(heap, obj, pairs.get(heap, 1));
+    }
+    if len >= 4
+        && let Some(m) = pairs.get(heap, 2).as_strong()
+        && m.ptr_eq(map)
+    {
+        return mono_result(heap, obj, pairs.get(heap, 3));
+    }
+    MonoProbe::Poly {
+        obj,
+        map,
+        pairs,
+        start: if len >= 4 { 4 } else { 2 },
+    }
+}
+
 /// Snapshot a property/call site. Strong states are self-contained; only a
 /// weak mono state needs the pair snapshot.
 #[inline(always)]
@@ -579,13 +659,20 @@ impl<'s> Plan<'s> {
 }
 
 /// Analyze a load into a cacheable plan.
+///
+/// `start` is where the prototype walk begins (the receiver itself, or
+/// `Object.prototype` for nullish receivers); `identity` is the map the
+/// site is guarded on; `receiver` is the actual value, used to decide
+/// whether a hit is an own property of the receiver.
 fn analyze_load<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
-    receiver: Tagged<'_, Object>,
-    name: Tagged<'_, SlotName>,
+    start: Handle<'_, Value>,
+    receiver: Tagged<'_, Value>,
+    identity: Handle<'s, Map>,
+    name: Handle<'_, SlotName>,
 ) -> Plan<'s> {
-    let receiver_map = scope.handle(receiver.map(heap));
+    let receiver_map = identity;
     let mk = |kind, offset, pair, holder, own| Plan {
         kind,
         offset,
@@ -596,9 +683,7 @@ fn analyze_load<'s>(
         own,
     };
     // side-effect-free: no getters or traps run while building the plan
-    let recv_handle = scope.handle(receiver.erase());
-    let key_handle = scope.handle(name.erase());
-    let hit = Lookup::new(heap, scope, recv_handle, key_handle, false).next(heap, scope);
+    let hit = Lookup::new(heap, scope, start, name.erase(), false).next(heap, scope);
     use crate::lookup::{Hit, Lookup};
     let cacheable = |holder: Handle<'s, Object>| -> bool {
         holder
@@ -608,21 +693,34 @@ fn analyze_load<'s>(
             .kind()
             .is_js_receiver()
     };
+    let receiver_object = receiver.as_heap_object();
+    let own = |holder: Tagged<'_, Object>| -> bool {
+        receiver_object.is_some_and(|receiver| holder.ptr_eq(receiver))
+    };
     match hit {
         Hit::Data { holder, offset, .. } => {
             let holder = scope.handle(holder);
             if !cacheable(holder) {
                 return mk(PlanKind::Slow, 0, None, None, false);
             }
-            let own = holder.as_tagged(heap).ptr_eq(receiver);
-            mk(PlanKind::Field, offset, None, Some(holder), own)
+            mk(
+                PlanKind::Field,
+                offset,
+                None,
+                Some(holder),
+                own(holder.as_tagged(heap)),
+            )
         }
-        Hit::NativeAccessor { .. } if receiver.array_length(heap, name).is_some() => {
+        Hit::NativeAccessor { .. }
+            if receiver_object.is_some_and(|receiver| {
+                receiver.array_length(heap, name.as_tagged(heap)).is_some()
+            }) =>
+        {
             mk(PlanKind::ArrayLength, 0, None, None, true)
         }
         Hit::NativeAccessor { holder, info, .. } => {
             let holder = scope.handle(holder);
-            let own = holder.as_tagged(heap).ptr_eq(receiver);
+            let own = own(holder.as_tagged(heap));
             let mut plan = mk(PlanKind::NativeGetter, 0, None, Some(holder), own);
             plan.native_accessor = Some(scope.handle(info.erase()));
             plan
@@ -632,7 +730,7 @@ fn analyze_load<'s>(
             if !cacheable(holder) {
                 return mk(PlanKind::Slow, 0, None, None, false);
             }
-            let own = holder.as_tagged(heap).ptr_eq(receiver);
+            let own = own(holder.as_tagged(heap));
             mk(
                 PlanKind::Accessor,
                 0,
@@ -666,7 +764,15 @@ fn index_method_handler<'s>(
     name: Handle<'_, SlotName>,
     kind: i64,
 ) -> Option<Handler<'s>> {
-    let plan = analyze_load(heap, scope, receiver.as_tagged(heap), name.as_tagged(heap));
+    let identity = scope.handle(receiver.as_tagged(heap).map(heap));
+    let plan = analyze_load(
+        heap,
+        scope,
+        receiver.erase(),
+        receiver.as_tagged(heap).erase(),
+        identity,
+        name,
+    );
     if !matches!(plan.kind, PlanKind::Field) {
         return None;
     }
@@ -1012,42 +1118,28 @@ impl InlineCache {
         let Some(obj) = receiver.as_heap_object() else {
             return MonoProbe::NotReceiver;
         };
-        let map = obj.map(heap);
-        let site = read_site_snapshot(vector, heap, slot);
-        let state = site.state;
+        probe_map(heap, vector, slot, obj.map(heap), obj)
+    }
 
-        if state.is_weak_ref_to(map) {
-            return mono_result(heap, obj, site.handler);
-        }
-        if state.is_weak_ptr() {
-            return MonoProbe::Miss;
-        }
-
-        let Some(pairs) = state
-            .as_strong()
-            .and_then(|s| s.get_as::<WeakFixedArray>(heap))
-        else {
-            return MonoProbe::Miss;
+    /// Smi receiver probe for the Kette operator sites. JavaScript receivers
+    /// always have a heap object, so this path stays out of `probe_mono`.
+    #[inline(never)]
+    pub fn probe_smi<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+        receiver: Tagged<'a, Value>,
+    ) -> MonoProbe<'a> {
+        let Some(vector) = vector else {
+            return MonoProbe::NotReceiver;
         };
-        let len = pairs.len();
-        if len >= 2
-            && let Some(m) = pairs.get(heap, 0).as_strong()
-            && m.ptr_eq(map)
-        {
-            return mono_result(heap, obj, pairs.get(heap, 1));
-        }
-        if len >= 4
-            && let Some(m) = pairs.get(heap, 2).as_strong()
-            && m.ptr_eq(map)
-        {
-            return mono_result(heap, obj, pairs.get(heap, 3));
-        }
-        MonoProbe::Poly {
-            obj,
-            map,
-            pairs,
-            start: if len >= 4 { 4 } else { 2 },
-        }
+        let Some(origin) = receiver
+            .primitive_prototype(heap)
+            .and_then(|proto| proto.as_heap_object())
+        else {
+            return MonoProbe::NotReceiver;
+        };
+        probe_map(heap, vector, slot, heap.known().smi_map.get(heap), origin)
     }
 
     #[inline(never)]
@@ -1155,24 +1247,27 @@ impl InlineCache {
         scope: &HandleScope<'_>,
         vector: Option<Handle<'_, FeedbackVector>>,
         slot: usize,
-        receiver: Option<Handle<'_, Object>>,
+        receiver: Option<Handle<'_, Value>>,
         name: Handle<'_, SlotName>,
         cache_non_existent: bool,
     ) {
         let Some(vector) = vector else { return };
         let Some(receiver) = receiver else { return };
         debug_assert!(slot + 1 < vector.as_tagged(heap).len());
-        let recv = receiver.as_tagged(heap);
-        if ic_receiver(recv.erase(), heap).is_none() {
+        let receiver = scope.handle(receiver.as_tagged(heap));
+        let Some((identity, start)) = ic_origin(heap, receiver.as_tagged(heap)) else {
             return;
-        }
-        let plan = analyze_load(heap, scope, recv, name.as_tagged(heap));
+        };
+        let identity = scope.handle(identity);
+        let start = scope.handle(start.erase());
+        let vector = scope.handle(vector.as_tagged(heap));
+        let name = scope.handle(name.as_tagged(heap));
+        let plan = analyze_load(heap, scope, start, receiver.as_tagged(heap), identity, name);
         if plan.non_existent() && !cache_non_existent {
             return;
         }
-        let map = scope.handle(recv.map(heap));
         let handler = plan.into_handler(heap, scope);
-        update_site(heap, scope, vector, slot, &map, &handler);
+        update_site(heap, scope, vector, slot, &identity, &handler);
     }
 
     #[inline]

@@ -9,6 +9,7 @@ use vm_core::{
     request_shutdown, rt_try, tools::KetteTools,
 };
 
+pub mod ops;
 pub mod process;
 
 /// The Kette runtime: its state is the runtime itself (one instance per VM).
@@ -59,6 +60,29 @@ impl Runtime for KetteRuntime {
         let atom_is_atom = vm.register_native(atom_is_atom);
         let set_cwd = vm.register_native(os_set_cwd);
         let exit = vm.register_native(os_exit);
+        let add = vm.register_native(ops::number_add);
+        let sub = vm.register_native(ops::number_sub);
+        let mul = vm.register_native(ops::number_mul);
+        let div = vm.register_native(ops::number_div);
+        let rem = vm.register_native(ops::number_rem);
+        let lt = vm.register_native(ops::number_lt);
+        let lte = vm.register_native(ops::number_lte);
+        let gt = vm.register_native(ops::number_gt);
+        let gte = vm.register_native(ops::number_gte);
+        let band = vm.register_native(ops::number_band);
+        let bor = vm.register_native(ops::number_bor);
+        let bxor = vm.register_native(ops::number_bxor);
+        let shl = vm.register_native(ops::number_shift_left);
+        let shr = vm.register_native(ops::number_shift_right);
+        let bnot = vm.register_native(ops::number_bnot);
+        let string_add = vm.register_native(ops::string_add);
+        let string_lt = vm.register_native(ops::string_lt);
+        let string_lte = vm.register_native(ops::string_lte);
+        let string_gt = vm.register_native(ops::string_gt);
+        let string_gte = vm.register_native(ops::string_gte);
+        let eq = vm.register_native(ops::any_eq);
+        let ne = vm.register_native(ops::any_ne);
+        let not = vm.register_native(ops::any_not);
         let process = process::Process::capture();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
@@ -89,6 +113,107 @@ impl Runtime for KetteRuntime {
             )
             .expect("install console global");
             Object::add_method(thread_vm, heap, &scope, object_prototype, "clone", clone, 0);
+
+            // Operator protocol: primitives and ordinary objects resolve
+            // their operators through these prototypes, so Kette code can
+            // override them just like any other method.
+            let smi_map = heap.known().smi_map.get(heap);
+            let atom_map = heap.known().atom_map.get(heap);
+            let number_prototype = heap.known().number_prototype.get_handle(heap, &scope);
+            let string_prototype = heap.known().string_prototype.get_handle(heap, &scope);
+            let boolean_prototype = heap.known().boolean_prototype.get_handle(heap, &scope);
+            let number_prototype_value = number_prototype.as_tagged(heap).erase();
+            let string_prototype_value = string_prototype.as_tagged(heap).erase();
+            let boolean_prototype_value = boolean_prototype.as_tagged(heap).erase();
+            smi_map
+                .prototype
+                .set(heap, smi_map.erase(), number_prototype_value);
+            // The IC's prototype-chain validity cell is derived from the
+            // identity map's prototype, so the primitive maps must point at
+            // the same prototype the lookup uses.
+            for map in [
+                heap.known().dense_latin1_string_map.get(heap),
+                heap.known().dense_utf16_string_map.get(heap),
+                heap.known().utf8_string_map.get(heap),
+                heap.known().external_latin1_string_map.get(heap),
+                heap.known().external_utf16_string_map.get(heap),
+                heap.known().external_utf8_string_map.get(heap),
+            ] {
+                map.prototype.set(heap, map.erase(), string_prototype_value);
+            }
+            let float_map = heap.known().float_map.get(heap);
+            float_map
+                .prototype
+                .set(heap, float_map.erase(), number_prototype_value);
+            let boolean_map = heap.known().boolean_map.get(heap);
+            boolean_map
+                .prototype
+                .set(heap, boolean_map.erase(), boolean_prototype_value);
+            atom_map.prototype.set(
+                heap,
+                atom_map.erase(),
+                object_prototype.as_tagged(heap).erase(),
+            );
+            let object_prototype_value = object_prototype.as_tagged(heap).erase();
+            let scheduler_map = heap.known().scheduler_object_map.get(heap);
+            scheduler_map
+                .prototype
+                .set(heap, scheduler_map.erase(), object_prototype_value);
+            for (name, index, length) in [("==", eq, 1), ("!=", ne, 1), ("!", not, 0)] {
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    object_prototype,
+                    name,
+                    index,
+                    length,
+                );
+            }
+            for (name, index, length) in [
+                ("+", add, 1),
+                ("-", sub, 1),
+                ("*", mul, 1),
+                ("/", div, 1),
+                ("%", rem, 1),
+                ("<", lt, 1),
+                ("<=", lte, 1),
+                (">", gt, 1),
+                (">=", gte, 1),
+                ("&&&", band, 1),
+                ("|||", bor, 1),
+                ("^^^", bxor, 1),
+                ("<<<", shl, 1),
+                (">>>", shr, 1),
+                ("~~~", bnot, 0),
+            ] {
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    number_prototype,
+                    name,
+                    index,
+                    length,
+                );
+            }
+            for (name, index, length) in [
+                ("+", string_add, 1),
+                ("<", string_lt, 1),
+                ("<=", string_lte, 1),
+                (">", string_gt, 1),
+                (">=", string_gte, 1),
+            ] {
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    string_prototype,
+                    name,
+                    index,
+                    length,
+                );
+            }
 
             let object_key = thread_vm.interner().intern_str(heap, &scope, "Object");
             let object_key = scope.handle(object_key.as_tagged(heap).erase());

@@ -15,6 +15,7 @@ impl HeapObject for Float {
         Layout::new::<Self>()
     }
 
+    #[inline]
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         self.header.map.init(heap.known().float_map.get(heap));
         self.value.set(*config);

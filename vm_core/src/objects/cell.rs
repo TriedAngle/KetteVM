@@ -15,10 +15,12 @@ pub struct CellInit<'a> {
 }
 
 impl Cell {
+    #[inline]
     pub fn is_valid(&self, _heap: &Heap) -> bool {
         !self.maybe_value.is_cleared()
     }
 
+    #[inline]
     pub fn is_cleared(&self) -> bool {
         self.maybe_value.is_cleared()
     }

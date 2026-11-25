@@ -27,6 +27,7 @@ impl DataHandler {
             .0
     }
 
+    #[inline]
     pub fn data_len(&self) -> usize {
         // Safety: layout/visit callbacks run without a heap borrow, so
         // the map word is promoted unsafely; the map cannot move under
@@ -35,26 +36,31 @@ impl DataHandler {
         map.value_slot_count()
     }
 
+    #[inline]
     pub fn smi_handler<'a>(&self, heap: &'a Heap) -> Tagged<'a, Smi> {
         self.smi_handler.get(heap)
     }
 
+    #[inline]
     pub fn validity_cell<'a>(&self, heap: &'a Heap) -> Tagged<'a, MaybeWeak<Value>> {
         self.validity_cell.get(heap)
     }
 
+    #[inline]
     fn data_slots(&self) -> &[MaybeWeakGcSlot] {
         let len = self.data_len();
         // Safety: the inline data section holds exactly data_len slots.
         unsafe { core::slice::from_raw_parts(self.data.as_ptr(), len) }
     }
 
+    #[inline]
     fn data_slot(&self, i: usize) -> &MaybeWeakGcSlot {
         debug_assert!(i < self.data_len());
         // Safety: checked against the inline data section.
         unsafe { self.data_slots().get_unchecked(i) }
     }
 
+    #[inline]
     pub fn data<'a>(&self, heap: &'a Heap, i: usize) -> Tagged<'a, MaybeWeak<Value>> {
         self.data_slot(i).get(heap)
     }

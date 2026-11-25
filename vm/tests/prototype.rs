@@ -86,7 +86,7 @@ fn multi_parent_name_load_returns_the_parent() {
             &scope,
             Some(vector),
             0,
-            Some(home),
+            Some(home.erase()),
             name,
             false,
         );
@@ -122,7 +122,15 @@ fn multi_parent_cached_miss_invalidates_when_parent_gains_property() {
         let vector = thread
             .heap()
             .allocate_handle::<FeedbackVector>(FeedbackVectorInit { length: 2 }, &scope);
-        InlineCache::update_load(thread.heap(), &scope, Some(vector), 0, Some(home), y, true);
+        InlineCache::update_load(
+            thread.heap(),
+            &scope,
+            Some(vector),
+            0,
+            Some(home.erase()),
+            y,
+            true,
+        );
         {
             let heap = thread.heap();
             let hit = InlineCache::try_load(
@@ -174,7 +182,15 @@ fn multi_parent_ic_invalidates_on_parent_shape_change() {
             .allocate_handle::<FeedbackVector>(FeedbackVectorInit { length: 2 }, &scope);
 
         // Record a load that resolves through the second parent.
-        InlineCache::update_load(thread.heap(), &scope, Some(vector), 0, Some(home), x, false);
+        InlineCache::update_load(
+            thread.heap(),
+            &scope,
+            Some(vector),
+            0,
+            Some(home.erase()),
+            x,
+            false,
+        );
         {
             let heap = thread.heap();
             let hit = InlineCache::try_load(
@@ -215,7 +231,15 @@ fn multi_parent_ic_invalidates_on_parent_shape_change() {
         }
 
         // Re-record and observe the shadowing value.
-        InlineCache::update_load(thread.heap(), &scope, Some(vector), 0, Some(home), x, false);
+        InlineCache::update_load(
+            thread.heap(),
+            &scope,
+            Some(vector),
+            0,
+            Some(home.erase()),
+            x,
+            false,
+        );
         let heap = thread.heap();
         let hit = InlineCache::try_load(
             heap,

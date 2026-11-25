@@ -1129,9 +1129,7 @@ macro_rules! named_load_slow {
                         .feedback(heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
-                    recv.as_tagged(heap)
-                        .as_heap_object()
-                        .map(|o| scope.handle(o)),
+                    Some(scope.handle(recv.as_tagged(heap))),
                     scope.handle(name.as_tagged(heap).erase().as_name()),
                     true,
                 );
@@ -1208,7 +1206,7 @@ pub fn global_load_body<'a>(
                     .feedback(heap)
                     .map(|v| scope.handle(v)),
                 fb_slot,
-                Some(global_handle),
+                Some(global_handle.erase()),
                 scope.handle(name.as_tagged(heap).erase().as_name()),
                 false,
             );

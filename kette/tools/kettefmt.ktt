@@ -85,7 +85,7 @@ let isSlotMarker = match |kind| {
 }
 
 let isUnaryPrefix = match |kind| {
-    :Minus | :Bang => true
+    :Minus | :Bang | :TildeTildeTilde => true
     _ => false
 }
 
@@ -104,7 +104,8 @@ let startsNewLine = |tree, index| {
 let isOperatorKind = match |kind| {
     :And | :Or | :EqEq | :NotEq
     | :Lt | :Gt | :LtEq | :GtEq
-    | :LtLt | :GtGt | :FatArrow
+    | :LtLtLt | :GtGtGt | :AmpAmpAmp | :PipePipePipe | :CaretCaretCaret
+    | :LtGt | :PipeGt | :FatArrow
     | :Plus | :Minus | :Star | :Slash | :Percent => true
     _ => false
 }
@@ -115,7 +116,8 @@ let isOperator = |kind, parent| {
 
 let isAssignment = match |kind| {
     :Assign | :PlusEq | :MinusEq | :StarEq | :SlashEq | :PercentEq
-    | :AndEq | :OrEq | :LtLtEq | :GtGtEq => true
+    | :AndEq | :OrEq | :LtLtLtEq | :GtGtGtEq
+    | :AmpAmpAmpEq | :PipePipePipeEq | :CaretCaretCaretEq => true
     _ => false
 }
 

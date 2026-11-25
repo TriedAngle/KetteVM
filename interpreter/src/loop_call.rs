@@ -2,8 +2,8 @@ use crate::RootsArg;
 use crate::handler;
 use crate::loop_match::{
     DispatchFn, execute_with, offset, op_call, op_call_no_feedback, op_construct, op_jump_loop,
-    step_call_function0, step_call_function1, step_call_function2, step_call_method0,
-    step_call_method1, step_call_method2, step_return, throw_ptr,
+    step_binary_op, step_call_function0, step_call_function1, step_call_function2,
+    step_call_method0, step_call_method1, step_call_method2, step_return, step_unary_op, throw_ptr,
 };
 use bytecode::Opcode;
 use handler_derive::loop_call_table;
@@ -57,6 +57,8 @@ loop_call_table!(
     CallMethod0 => step_call_method0,
     CallMethod1 => step_call_method1,
     CallMethod2 => step_call_method2,
+    BinaryOp => step_binary_op,
+    UnaryOp => step_unary_op,
     CallFunction0 => step_call_function0,
     CallFunction1 => step_call_function1,
     CallFunction2 => step_call_function2,

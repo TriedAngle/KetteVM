@@ -490,7 +490,7 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Result<NodeId, ()> {
         let token = self.peek();
         match token.kind {
-            Minus | Bang => {
+            Minus | Bang | TildeTildeTilde => {
                 self.start(Unary);
                 self.bump();
                 self.parse_unary()?;

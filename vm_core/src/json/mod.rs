@@ -7,7 +7,7 @@
 use crate::{
     Args, Atom, CallInfo, DenseString, Errors, Float, Handle, HandleScope, HandleSlice, Heap,
     HostCtx, Map, MapInit, MapKind, NativeIndex, Object, PropertyDescriptor, Smi, StringInterner,
-    StringRef, Symbol, Tagged, ThreadState, Value, VM, VmError,
+    StringRef, Symbol, Tagged, ThreadState, VM, Value, VmError,
 };
 
 type ParseResult<T> = std::result::Result<T, String>;
