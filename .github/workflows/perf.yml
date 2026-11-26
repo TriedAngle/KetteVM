@@ -22,7 +22,7 @@ jobs:
       image: localhost:5000/kettevm-ci:1
       options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -43,7 +43,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: perf-results
           path: perf-results.md
