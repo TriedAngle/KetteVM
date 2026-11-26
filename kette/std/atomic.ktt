@@ -1,0 +1,7 @@
+let AtomicI64 = KetteTools.primitives.atomic.AtomicI64
+let AtomicRef = KetteTools.primitives.atomic.AtomicRef
+
+mod atomic {
+    export AtomicI64 = AtomicI64
+    export AtomicRef = AtomicRef
+}

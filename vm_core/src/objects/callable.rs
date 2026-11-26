@@ -32,6 +32,11 @@ pub struct CallableInfoObject {
     pub kind: GcSlot<Smi>,
     /// Whether a self tail call may reuse this callable's frame.
     pub tail_callable: GcSlot<Smi>,
+    /// Compile unit this function came from, or 0.
+    pub source_unit: GcSlot<Smi>,
+    /// Definition range in the compile unit.
+    pub source_start: GcSlot<Smi>,
+    pub source_end: GcSlot<Smi>,
 }
 
 #[repr(i64)]
@@ -109,6 +114,8 @@ pub enum CallableInfoInit<'a> {
         expected_slots: usize,
         mode: u8,
         tail_callable: bool,
+        source_unit: u32,
+        source_span: bytecode::SourceSpan,
     },
     /// A native function backed by the VM's NativeRegistry.
     Native { index: NativeIndex, mode: u8 },
@@ -135,6 +142,8 @@ impl HeapObject for CallableInfoObject {
                 expected_slots,
                 mode,
                 tail_callable,
+                source_unit,
+                source_span,
             } => {
                 self.function_data
                     .set(heap, host, code.as_tagged(heap).erase());
@@ -152,6 +161,12 @@ impl HeapObject for CallableInfoObject {
                 self.mode.set(heap, host, Smi::new(*mode as i64));
                 self.tail_callable
                     .set(heap, host, Smi::new(*tail_callable as i64));
+                self.source_unit
+                    .set(heap, host, Smi::new(*source_unit as i64));
+                self.source_start
+                    .set(heap, host, Smi::new(source_span.start as i64));
+                self.source_end
+                    .set(heap, host, Smi::new(source_span.end as i64));
             }
             CallableInfoInit::Native { index, mode } => {
                 self.function_data
@@ -159,6 +174,9 @@ impl HeapObject for CallableInfoObject {
                 self.constants.set(heap, host, empty);
                 self.register_count.set(heap, host, Smi::new(0));
                 self.descriptor.set(heap, host, Smi::new(1 << 16));
+                self.source_unit.set(heap, host, Smi::new(0));
+                self.source_start.set(heap, host, Smi::new(0));
+                self.source_end.set(heap, host, Smi::new(0));
                 self.handlers.clear(heap);
                 self.expected_slots.set(heap, host, Smi::new(0));
                 self.mode.set(heap, host, Smi::new(*mode as i64));

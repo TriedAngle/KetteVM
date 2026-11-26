@@ -2,6 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/queue.ktt
 // Check: kette/kette_tests/check.py
 
+use threads { Thread }
+
 use collections.queue { Queue }
 
 let queue = Queue.new()

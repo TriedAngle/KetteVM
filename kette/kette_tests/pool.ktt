@@ -2,6 +2,9 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/pool.ktt
 // Check: kette/kette_tests/check.py
 
+use atomic { AtomicI64 }
+use threads { Thread }
+
 use collections.pool { ThreadPool }
 use collections.channel { Channel }
 use sync { Mutex }
@@ -41,7 +44,7 @@ second.join()
 Test.assert(order.length, 4)
 
 // More tasks than workers all run.
-let counter = atomic.AtomicI64.new(0)
+let counter = AtomicI64.new(0)
 let tasks = []
 let index = 0
 while index < 20 {
@@ -60,7 +63,7 @@ Test.assert(counter.load(), 20)
 
 // A task parked on a mutex is resubmitted when the lock is released.
 let guard = Mutex.new()
-let shared = atomic.AtomicI64.new(0)
+let shared = AtomicI64.new(0)
 let holder = pool.spawn({
     guard.lock()
     shared.add(1)
@@ -107,7 +110,7 @@ Test.assert(received[0], 1)
 Test.assert(received[2], 3)
 
 // Sleeping tasks do not occupy workers.
-let woke = atomic.AtomicI64.new(0)
+let woke = AtomicI64.new(0)
 let sleepers = []
 index = 0
 while index < 6 {
@@ -127,7 +130,7 @@ Test.assert(woke.load(), 6)
 
 // Many yields resubmit tasks across workers; the VM's debug mount guard
 // fails the test if a task is ever mounted twice.
-let storms = atomic.AtomicI64.new(0)
+let storms = AtomicI64.new(0)
 let storm = []
 index = 0
 while index < 4 {
@@ -152,7 +155,7 @@ Test.assert(storms.load(), 4)
 // More sleeping tasks than carriers, with the main thread fully parked: the
 // timer thread submits them and must never block on a run-queue lock.
 let sleeperCount = 8
-let sleepDone = atomic.AtomicI64.new(0)
+let sleepDone = AtomicI64.new(0)
 let selfThread = Thread.current()
 index = 0
 while index < sleeperCount {

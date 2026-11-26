@@ -2,6 +2,9 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/sync.ktt
 // Check: kette/kette_tests/check.py
 
+use atomic { AtomicI64 }
+use threads { Thread }
+
 let sync = Modules.sync
 let Mutex = sync.Mutex
 let WaitQueue = sync.WaitQueue
@@ -62,7 +65,7 @@ Test.assert(condition.awaitNanos(condition_mutex, 1000000), false)
 condition_mutex.unlock()
 
 let signalled = false
-let waiting = atomic.AtomicI64.new(0)
+let waiting = AtomicI64.new(0)
 let condition_consumer = {
     condition_mutex.lock()
     waiting.store(1)

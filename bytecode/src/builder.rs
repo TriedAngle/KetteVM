@@ -1,6 +1,7 @@
 use crate::{
     CallableKind, Opcode, Operand, Scale, emit, program::AtomSwitchTable, program::Constant,
-    program::Function, program::HandlerEntry, program::SwitchTable,
+    program::Function, program::HandlerEntry, program::SourceEntry, program::SourceEntryKind,
+    program::SourceSpan, program::SwitchTable,
 };
 use core::cell::Cell;
 use std::{collections::HashMap, sync::atomic::AtomicU32, sync::atomic::Ordering};
@@ -181,6 +182,7 @@ pub struct FunctionMeta {
     /// JS-visible `length`: parameters before the first default/rest/pattern.
     pub length: u32,
     pub strict: bool,
+    pub span: SourceSpan,
 }
 
 /// A function failed to build.
@@ -322,7 +324,15 @@ enum Ev {
     TryStart(u32),
     TryEnd(u32),
     Handler(u32),
+    Source(u32),
     Jump(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceEntryRec {
+    pos: usize,
+    span: SourceSpan,
+    kind: SourceEntryKind,
 }
 
 static BUILDER_GEN: AtomicU32 = AtomicU32::new(1);
@@ -395,6 +405,8 @@ pub struct FnBuilder {
     /// `this.<name> = ...` assignments seen while emitting the body.
     expected_slots: u32,
 
+    source_entries: Vec<SourceEntryRec>,
+
     // accumulator analysis
     acc: Acc,
 
@@ -427,6 +439,7 @@ impl FnBuilder {
             other_pool: HashMap::new(),
             feedback_slots: 0,
             expected_slots: 0,
+            source_entries: Vec::new(),
             acc: Acc::Dead,
             last: LastOp::None,
             temp_base: 0,
@@ -501,6 +514,16 @@ impl FnBuilder {
     /// Number of pool entries interned so far.
     pub fn constants_len(&self) -> usize {
         self.constants.len()
+    }
+
+    /// Current bytecode position, for a source entry recorded after emission.
+    pub fn source_position(&self) -> usize {
+        self.code.len()
+    }
+
+    /// Record a source range anchored at `pos`.
+    pub fn record_source_at(&mut self, pos: usize, span: SourceSpan, kind: SourceEntryKind) {
+        self.source_entries.push(SourceEntryRec { pos, span, kind });
     }
 
     /// Reserve one inline-cache `[state, handler]` feedback pair.
@@ -1163,7 +1186,7 @@ impl FnBuilder {
             }
         }
 
-        let (code, label_out, jump_out, handler_out) = self.layout()?;
+        let (code, label_out, jump_out, handler_out, source_out) = self.layout()?;
 
         for switch in &self.switch_tables {
             let pc = label_out[switch.at.id as usize] as i64;
@@ -1212,6 +1235,17 @@ impl FnBuilder {
             expected_slots: self.expected_slots,
             strict: meta.strict,
             tail_callable: false,
+            span: meta.span,
+            source: self
+                .source_entries
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| SourceEntry {
+                    pc: source_out[i] as u32,
+                    span: entry.span,
+                    kind: entry.kind,
+                })
+                .collect(),
         })
     }
 
@@ -1223,7 +1257,9 @@ impl FnBuilder {
     /// final offset. Returns the code plus the resolved final positions of
     /// every label bind, jump site, and handler anchor.
     #[allow(clippy::type_complexity)]
-    fn layout(&mut self) -> Result<(Vec<u8>, Vec<usize>, Vec<usize>, Vec<[usize; 3]>), BuildError> {
+    fn layout(
+        &mut self,
+    ) -> Result<(Vec<u8>, Vec<usize>, Vec<usize>, Vec<[usize; 3]>, Vec<usize>), BuildError> {
         let mut events: Vec<(usize, bool, Ev)> = Vec::new();
         for (i, label) in self.labels.iter().enumerate() {
             if let Some(pos) = label.bind {
@@ -1238,6 +1274,9 @@ impl FnBuilder {
         for (i, jump) in self.jumps.iter().enumerate() {
             events.push((jump.at, true, Ev::Jump(i as u32)));
         }
+        for (i, entry) in self.source_entries.iter().enumerate() {
+            events.push((entry.pos, false, Ev::Source(i as u32)));
+        }
         // at equal positions labels/anchors come before the jump starting
         // there: they resolve to the jump instruction's start
         events.sort_by_key(|&(pos, is_jump, _)| (pos, is_jump));
@@ -1246,6 +1285,7 @@ impl FnBuilder {
         let mut label_out = vec![usize::MAX; self.labels.len()];
         let mut jump_out = vec![usize::MAX; self.jumps.len()];
         let mut handler_out = vec![[usize::MAX; 3]; self.handlers.len()];
+        let mut source_out = vec![usize::MAX; self.source_entries.len()];
 
         // Phase 1: width fixpoint. A jump widened in one pass shifts every
         // later event by 2 bytes, which can push further jumps out of
@@ -1260,6 +1300,7 @@ impl FnBuilder {
                     Ev::TryStart(i) => handler_out[i as usize][0] = pos,
                     Ev::TryEnd(i) => handler_out[i as usize][1] = pos,
                     Ev::Handler(i) => handler_out[i as usize][2] = pos,
+                    Ev::Source(i) => source_out[i as usize] = pos,
                     Ev::Jump(i) => {
                         jump_out[i as usize] = pos;
                         shift += extra[i as usize];
@@ -1318,7 +1359,7 @@ impl FnBuilder {
         }
         out.extend_from_slice(&self.code[pos..]);
 
-        Ok((out, label_out, jump_out, handler_out))
+        Ok((out, label_out, jump_out, handler_out, source_out))
     }
 
     /// Tracks an emitted register operand in slot-offset space: negative

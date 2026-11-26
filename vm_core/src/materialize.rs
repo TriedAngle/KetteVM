@@ -8,6 +8,8 @@
 //! The materializer is frontend-agnostic: it consumes the compiled program
 //! function table and knows nothing about the language that produced it.
 
+use crate::SourceUnit;
+
 use crate::{
     Atom, CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, DenseString,
     FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, FunctionKind, Handle,
@@ -47,7 +49,7 @@ impl Materialize {
         'c: 's,
     {
         let (vm, heap, state) = thread.split();
-        Self::closure_vm(vm, heap, state, scope, program, runtime, context)
+        Self::closure_vm(vm, heap, state, scope, program, runtime, context, None).0
     }
 
     pub fn closure_vm<'s>(
@@ -58,8 +60,10 @@ impl Materialize {
         program: &Program,
         runtime: RuntimeId,
         context: Handle<'s, ContextObject>,
-    ) -> Handle<'s, Object> {
+        unit: Option<&SourceUnit>,
+    ) -> (Handle<'s, Object>, Option<Handle<'s, FixedArray>>) {
         let _span = trace::info_span!("vm::materialize").entered();
+        let unit_id = unit.map_or(0, |unit| unit.id);
         let mut infos: Vec<Option<Handle<'s, CallableInfoObject>>> =
             (0..program.len()).map(|_| None).collect();
         let info = materialize_function(
@@ -71,7 +75,22 @@ impl Materialize {
             runtime,
             &mut infos,
             FunctionId::SCRIPT,
+            unit_id,
         );
+        let callables = if unit.is_some() {
+            let callables = heap.allocate_hole_array(program.len());
+            let callables = callables.as_handle(scope);
+            for (fid, info) in infos.iter().enumerate() {
+                if let Some(info) = info {
+                    callables
+                        .as_tagged(heap)
+                        .set(heap, fid, info.as_tagged(heap).erase());
+                }
+            }
+            Some(callables)
+        } else {
+            None
+        };
 
         let map = heap.known().function_map.get_handle(heap, scope);
         let slots = scope.stage(&[
@@ -79,7 +98,7 @@ impl Materialize {
             context.as_tagged(heap).erase(),
         ]);
         let object = heap.new_object(scope, map, slots).as_handle(scope);
-        object
+        (object, callables)
     }
 }
 
@@ -93,6 +112,7 @@ fn materialize_function<'s>(
     runtime: RuntimeId,
     infos: &mut [Option<Handle<'s, CallableInfoObject>>],
     fid: FunctionId,
+    unit_id: u32,
 ) -> Handle<'s, CallableInfoObject> {
     if let Some(info) = infos[fid.index()] {
         return info;
@@ -115,8 +135,9 @@ fn materialize_function<'s>(
             Constant::Smi(v) => scope.handle(Smi::new(*v)),
             Constant::Float(f) => scope.handle(heap.new_number(*f)),
             Constant::Callable(child) => {
-                let info =
-                    materialize_function(vm, heap, state, scope, program, runtime, infos, *child);
+                let info = materialize_function(
+                    vm, heap, state, scope, program, runtime, infos, *child, unit_id,
+                );
                 info.erase()
             }
             Constant::ScopeInfo(layout) => {
@@ -157,6 +178,7 @@ fn materialize_function<'s>(
                         runtime,
                         infos,
                         decl.function,
+                        unit_id,
                     );
                     values.push(info.erase());
                 }
@@ -219,6 +241,8 @@ fn materialize_function<'s>(
             expected_slots: function.expected_slots as usize,
             mode: mode_from_strict(function.strict),
             tail_callable: function.tail_callable,
+            source_unit: unit_id,
+            source_span: function.span,
         },
         scope,
     );

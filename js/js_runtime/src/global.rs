@@ -36,8 +36,17 @@ fn eval_runtime<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
             }
         };
         let context = eval_global_context(vm, heap, &scope);
-        let closure =
-            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context);
+        let closure = Materialize::closure_vm(
+            vm,
+            heap,
+            state,
+            &scope,
+            &program,
+            JSRuntime::ID,
+            context,
+            None,
+        )
+        .0;
         match HostCtx::enter(
             vm,
             state.runtime(vm, heap),

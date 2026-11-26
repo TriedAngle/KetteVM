@@ -28,8 +28,9 @@ pub enum TestTypeKind {
 }
 pub use program::{
     AtomSwitchTable, CallableKind, Constant, FrontendDiagnostic, FrontendError, FrontendErrorKind,
-    Function, FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program,
-    ScopeLayout, ScopeLocal, SourceMode, SwitchTable,
+    Function, FunctionId, GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, ModuleDecl,
+    ModuleExport, ModuleImport, Program, ScopeLayout, ScopeLocal, SourceEntry, SourceEntryKind,
+    SourceInfo, SourceMode, SourceSpan, SwitchTable,
 };
 pub use validate::{ValidationError, validate, validate_function};
 

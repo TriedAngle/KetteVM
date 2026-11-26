@@ -1,13 +1,19 @@
-use threading { parkNanos, wake }
+use atomic { AtomicI64 }
+use error.traits { ErrorTraits }
+use threads { Thread, parkNanos, wake }
 
-let IllegalLockState = Modules.error.IllegalLockState
+let IllegalLockState = {
+    traits*: ErrorTraits
+    name: "IllegalLockState"
+    message: ""
+}
 
 let WaitQueueTraits = {
     new: {
         let queue = self.clone()
         queue.head = null
         queue.tail = null
-        queue.guard = atomic.AtomicI64.new(0)
+        queue.guard = AtomicI64.new(0)
         queue
     }
     lock: {
@@ -90,13 +96,13 @@ let WaitQueue = {
 
 // One literal site: every waiter shares the same map.
 let newWaiter = |thread| {
-    return { thread: thread, granted: atomic.AtomicI64.new(0), next: 0 }
+    return { thread: thread, granted: AtomicI64.new(0), next: 0 }
 }
 
 let MutexTraits = {
     new: {
         let mutex = self.clone()
-        mutex.locked = atomic.AtomicI64.new(0)
+        mutex.locked = AtomicI64.new(0)
         mutex.waiters = WaitQueue.new()
         mutex
     }
@@ -201,7 +207,7 @@ let Mutex = {
 let RecursiveMutexTraits = {
     new: {
         let mutex = self.clone()
-        mutex.locked = atomic.AtomicI64.new(0)
+        mutex.locked = AtomicI64.new(0)
         mutex.owner = -1
         mutex.recursions = 0
         mutex.waiters = WaitQueue.new()

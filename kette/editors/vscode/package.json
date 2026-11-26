@@ -31,6 +31,11 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "configurationDefaults": {
+      "[kette]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {

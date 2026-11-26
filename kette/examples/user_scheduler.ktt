@@ -2,6 +2,7 @@
 // Run: cargo run -- kette/examples/user_scheduler.ktt
 
 KetteTools.evalFile("kette/std/startup.ktt")
+use threads { Thread }
 
 let Mutex = Modules.sync.Mutex
 let guard = Mutex.new()

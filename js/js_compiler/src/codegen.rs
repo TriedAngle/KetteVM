@@ -1063,6 +1063,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             kind: callable_kind(info.kind),
             length: info.formal_length,
             strict: info.strict,
+            span: bytecode::SourceSpan::default(),
         };
         // build failures (unbalanced temps, unbound labels) are compiler
         // bugs: every emit path pairs its temp marks and binds its labels

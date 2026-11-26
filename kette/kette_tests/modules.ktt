@@ -1,6 +1,9 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/modules.ktt
 // Check: kette/kette_tests/check.py
 
+use atomic { AtomicI64 }
+use threads { Thread }
+
 mod math {
     export value = 1
     export square = |x| { x * x }
@@ -201,8 +204,8 @@ ModuleRegistry.declare("concurrent", |m| {
     m.state = { value: 0 }
 })
 
-let stop = atomic.AtomicI64.new(0)
-let mismatches = atomic.AtomicI64.new(0)
+let stop = AtomicI64.new(0)
+let mismatches = AtomicI64.new(0)
 let reader = Thread.newPlatform("module-reader", {
     while stop.load() == 0 {
         let value = Modules.concurrent.value

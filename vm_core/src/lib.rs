@@ -7,7 +7,8 @@ use core::{
 use std::time::{Duration, Instant};
 use std::{
     sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
-    sync::atomic::AtomicI32, sync::atomic::Ordering,
+    sync::atomic::AtomicI32, sync::atomic::AtomicU8, sync::atomic::AtomicU32,
+    sync::atomic::Ordering,
 };
 
 pub mod access;
@@ -37,6 +38,7 @@ pub mod materialize;
 pub mod native;
 pub mod objects;
 pub mod prototype;
+pub mod source;
 pub mod stack;
 pub mod threading;
 pub mod tools;
@@ -112,6 +114,7 @@ pub use objects::{
     visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry, ShapeChange};
+pub use source::{SourceFunction, SourceUnit, hash_source};
 pub use stack::{Args, Callee, FrameMeta, RUST_STACK_BUDGET, STACK_SLOTS, Stack};
 pub use tools::{KetteTools, Termination, request_shutdown};
 pub use transition::{Change, PartialDescriptor, PropertyDescriptor, SiblingChange, Transition};
@@ -136,6 +139,7 @@ pub trait Compiler {
         vm: &VM,
         source: &str,
         mode: bytecode::SourceMode,
+        source_info: bytecode::SourceInfo,
     ) -> Result<bytecode::Program, bytecode::FrontendError>;
 
     /// The runtime this front end's programs belong to.
@@ -145,8 +149,12 @@ pub trait Compiler {
 /// A source language registered for indirect eval via `KetteTools.eval`.
 pub struct EvalLanguage {
     pub name: &'static str,
-    pub compile:
-        fn(&VM, &str, bytecode::SourceMode) -> Result<bytecode::Program, bytecode::FrontendError>,
+    pub compile: fn(
+        &VM,
+        &str,
+        bytecode::SourceMode,
+        bytecode::SourceInfo,
+    ) -> Result<bytecode::Program, bytecode::FrontendError>,
     pub runtime: RuntimeId,
 }
 
@@ -186,6 +194,11 @@ pub struct SharedVM {
     /// Weak slots the GC clears when their targets die; used for tests and
     /// the seed of a weak-registry feature.
     weak_slots: Mutex<Vec<RawCell>>,
+    /// Source information policy for newly compiled units.
+    source_info: AtomicU8,
+    /// Compiled units kept for source queries.
+    units: Mutex<Vec<SourceUnit>>,
+    next_unit: AtomicU32,
     /// Informational only: set once `KetteTools.shutdown()` ran. Cancels
     /// live on the safepoint nodes, not here — the VM stays usable after a
     /// shutdown.
@@ -1011,6 +1024,11 @@ impl SharedVM {
         for slot in self.weak_slots.lock().unwrap().iter() {
             visitor.visit(slot);
         }
+        for unit in self.units.lock().unwrap().iter() {
+            if let Some(callables) = &unit.callables {
+                visitor.visit(callables);
+            }
+        }
         self.ffi.visit_edges(visitor);
         for state in &self.runtimes {
             state.visit_edges(visitor);
@@ -1248,20 +1266,35 @@ impl Thread {
     }
 
     pub fn eval<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
-        let program = C::compile(self.vm(), src, bytecode::SourceMode::Script)
-            .map_err(ScriptError::from_frontend)?;
+        let program = C::compile(
+            self.vm(),
+            src,
+            bytecode::SourceMode::Script,
+            self.vm().source_info(),
+        )
+        .map_err(ScriptError::from_frontend)?;
         self.run_program(program, C::RUNTIME)
     }
 
     pub fn eval_file<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
-        let program = C::compile(self.vm(), src, bytecode::SourceMode::File)
-            .map_err(ScriptError::from_frontend)?;
+        let program = C::compile(
+            self.vm(),
+            src,
+            bytecode::SourceMode::File,
+            self.vm().source_info(),
+        )
+        .map_err(ScriptError::from_frontend)?;
         self.run_program(program, C::RUNTIME)
     }
 
     pub fn eval_repl<C: Compiler>(&mut self, src: &str) -> Result<Value, ScriptError> {
-        let program = C::compile(self.vm(), src, bytecode::SourceMode::Repl)
-            .map_err(ScriptError::from_frontend)?;
+        let program = C::compile(
+            self.vm(),
+            src,
+            bytecode::SourceMode::Repl,
+            self.vm().source_info(),
+        )
+        .map_err(ScriptError::from_frontend)?;
         self.run_program(program, C::RUNTIME)
     }
 }
@@ -1318,6 +1351,9 @@ impl VM {
             runtimes: Vec::new(),
             eval_languages: Vec::new(),
             weak_slots: Mutex::new(Vec::new()),
+            source_info: AtomicU8::new(bytecode::SourceInfo::Lazy.as_u8()),
+            units: Mutex::new(Vec::new()),
+            next_unit: AtomicU32::new(1),
             shutdown_requested: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
             thread_event_lock: Mutex::new(()),
@@ -1340,6 +1376,33 @@ impl VM {
 
     pub fn is_shutdown(&self) -> bool {
         self.shared.shutdown_requested.load(Ordering::Acquire)
+    }
+
+    pub fn source_info(&self) -> bytecode::SourceInfo {
+        bytecode::SourceInfo::from_u8(self.shared.source_info.load(Ordering::Acquire))
+    }
+
+    pub fn set_source_info(&self, info: bytecode::SourceInfo) {
+        self.shared
+            .source_info
+            .store(info.as_u8(), Ordering::Release);
+    }
+
+    pub fn next_unit_id(&self) -> u32 {
+        self.shared.next_unit.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn register_unit(&self, unit: SourceUnit) {
+        let mut units = self.shared.units.lock().unwrap();
+        if let Some(index) = units.iter().position(|existing| existing.name == unit.name) {
+            units.remove(index);
+        }
+        units.push(unit);
+    }
+
+    pub fn with_units<R>(&self, f: impl FnOnce(&[SourceUnit]) -> R) -> R {
+        let units = self.shared.units.lock().unwrap();
+        f(&units)
     }
 
     pub fn note_shutdown(&self) {

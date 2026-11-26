@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use bytecode::{
-    CallableKind, ConstIdx, Constant, FnBuilder, Function, FunctionId, FunctionMeta,
-    GlobalDeclarations, Label, Program, Reg, RegList, RtArg, ScopeLayout, ScopeLocal, SourceMode,
-    TempScope, TestTypeKind,
+    CallableKind, ConstIdx, Constant, Feedback, FnBuilder, Function, FunctionId, FunctionMeta,
+    GlobalDeclarations, Label, ModuleDecl, ModuleExport, ModuleImport, Program, Reg, RegList,
+    RtArg, ScopeLayout, ScopeLocal, SourceEntryKind, SourceInfo, SourceMode, SourceSpan, TempScope,
+    TestTypeKind,
 };
 use kette_syntax::ast::{
     AssignExpr, AstNode, AtomLiteral, BinaryExpr, BitString, CallExpr, ExportDecl, Expr, ForExpr,
-    GetExpr, IfExpr, IndexExpr, LetStmt, MatchArm, MatchExpr, Object, ObjectEntry, Pattern,
-    PatternValue, SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr, UnaryExpr,
-    UseDecl, UseTree, WhileExpr,
+    GetExpr, IfExpr, IndexExpr, LetStmt, MatchArm, MatchExpr, ModDecl, Object, ObjectEntry,
+    Pattern, PatternValue, SendExpr, SlotEntry, SlotKind, SlotMulti, Stmt, ThrowExpr, TryExpr,
+    UnaryExpr, UseDecl, UseTree, WhileExpr,
 };
 use kette_syntax::ops::{AssignOp, BinaryOp};
 use kette_syntax::resolve::{Binding, BindingId, BindingKind, Resolution, Resolved};
@@ -26,6 +27,7 @@ pub fn generate(
     tree: &Tree,
     resolved: &Resolved,
     mode: SourceMode,
+    source_info: SourceInfo,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
 ) -> Result<Program, CompileError> {
@@ -40,10 +42,21 @@ pub fn generate(
             &plan,
             frame,
             mode,
+            source_info,
             declare_globals,
             install_accessor,
         );
-        program.add_function(generator.generate()?);
+        let (function, modules, exports, imports) = generator.generate()?;
+        program.add_function(function);
+        for module in modules {
+            program.add_module(module);
+        }
+        for export in exports {
+            program.add_export(export);
+        }
+        for import in imports {
+            program.add_import(import);
+        }
     }
     debug_assert!(
         bytecode::validate(&program).is_ok(),
@@ -201,6 +214,7 @@ struct FunctionGen<'a> {
     frame_id: FrameId,
     frame: &'a Frame,
     mode: SourceMode,
+    source_info: SourceInfo,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
     b: FnBuilder,
@@ -209,6 +223,9 @@ struct FunctionGen<'a> {
     loops: Vec<LoopCtx>,
     try_depth: u32,
     loop_label: Option<Label>,
+    modules: Vec<ModuleDecl>,
+    exports: Vec<ModuleExport>,
+    imports: Vec<ModuleImport>,
 }
 
 impl<'a> FunctionGen<'a> {
@@ -218,6 +235,7 @@ impl<'a> FunctionGen<'a> {
         plan: &'a Plan,
         frame_id: FrameId,
         mode: SourceMode,
+        source_info: SourceInfo,
         declare_globals: NativeIndex,
         install_accessor: NativeIndex,
     ) -> Self {
@@ -238,6 +256,7 @@ impl<'a> FunctionGen<'a> {
             frame_id,
             frame,
             mode,
+            source_info,
             declare_globals,
             install_accessor,
             b,
@@ -246,6 +265,9 @@ impl<'a> FunctionGen<'a> {
             loops: Vec::new(),
             try_depth: 0,
             loop_label: None,
+            modules: Vec::new(),
+            exports: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -254,6 +276,7 @@ impl<'a> FunctionGen<'a> {
             && !self.frame.creates_context
             && self.frame.context_slots == 0
             && self.frame.rest.is_none();
+        let span = self.span();
         let mut function = self
             .b
             .finish(FunctionMeta {
@@ -261,10 +284,30 @@ impl<'a> FunctionGen<'a> {
                 kind: CallableKind::Method,
                 length: self.frame.params.len() as u32,
                 strict: true,
+                span,
             })
             .expect("kette function builder invariants");
         function.tail_callable = tail_callable;
         function
+    }
+
+    fn span(&self) -> SourceSpan {
+        let range = match self.frame.kind {
+            FrameKind::Script => self.tree.node(self.tree.root_id()).range,
+            FrameKind::Object(node) | FrameKind::Module(node) => self.tree.node(node).range,
+        };
+        SourceSpan::new(range.start, range.end)
+    }
+
+    fn source_start(&self) -> Option<usize> {
+        (self.source_info == SourceInfo::Complete).then(|| self.b.source_position())
+    }
+
+    fn source_end(&mut self, start: Option<usize>, span: TextRange, kind: SourceEntryKind) {
+        if let Some(start) = start {
+            self.b
+                .record_source_at(start, SourceSpan::new(span.start, span.end), kind);
+        }
     }
 
     fn err<T>(&self, range: TextRange, message: impl Into<String>) -> Result<T, CompileError> {
@@ -404,13 +447,44 @@ impl<'a> FunctionGen<'a> {
             .unwrap_or_default()
     }
 
+    fn current_module_path(&self) -> String {
+        let mut parts = Vec::new();
+        let mut frame = Some(self.frame_id);
+        while let Some(id) = frame {
+            let info = self.plan.frame(id);
+            if let FrameKind::Module(node) = info.kind
+                && let Some(module) = ModDecl::cast(SyntaxNode::new(self.tree, node))
+                && let Some(path) = module.path()
+            {
+                let segment = path
+                    .segments()
+                    .map(|token| token.text().to_string())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                parts.insert(0, segment);
+            }
+            frame = info.parent;
+        }
+        parts.join(".")
+    }
+
     fn load_global(&mut self, name: &str) {
         let name = self.b.name(name.as_bytes());
         let feedback = self.b.new_feedback();
         self.b.load_global(name, feedback);
     }
 
-    fn generate(mut self) -> Result<Function, CompileError> {
+    fn generate(
+        mut self,
+    ) -> Result<
+        (
+            Function,
+            Vec<ModuleDecl>,
+            Vec<ModuleExport>,
+            Vec<ModuleImport>,
+        ),
+        CompileError,
+    > {
         self.prologue()?;
         if self.tail_callable() {
             let label = self.b.new_label();
@@ -439,7 +513,11 @@ impl<'a> FunctionGen<'a> {
             self.b.pop_context(self.ctx_save);
         }
         self.b.ret();
-        Ok(self.finish())
+        let modules = core::mem::take(&mut self.modules);
+        let exports = core::mem::take(&mut self.exports);
+        let imports = core::mem::take(&mut self.imports);
+        let function = self.finish();
+        Ok((function, modules, exports, imports))
     }
 
     fn prologue(&mut self) -> Result<(), CompileError> {
@@ -540,7 +618,9 @@ impl<'a> FunctionGen<'a> {
     }
 
     fn statement(&mut self, statement: Stmt<'a>, sink: Reg) -> Result<(), CompileError> {
-        match statement {
+        let source = self.source_start();
+        let span = statement.syntax().text_range();
+        let result = match statement {
             Stmt::Let(statement) => self.let_statement(statement),
             Stmt::Expr(statement) => {
                 if let Some(expr) = statement.expr() {
@@ -554,7 +634,9 @@ impl<'a> FunctionGen<'a> {
             Stmt::Mod(module) => self.module(module.syntax().id()),
             Stmt::Use(declaration) => self.use_decl(declaration),
             Stmt::Export(export) => self.export(export),
-        }
+        };
+        self.source_end(source, span, SourceEntryKind::Stmt);
+        result
     }
 
     fn object_body(
@@ -1057,10 +1139,19 @@ impl<'a> FunctionGen<'a> {
         };
         let temps = self.b.temp_scope();
         self.expr(receiver)?;
+        let name_range = name.text_range();
+        let source = self.source_start();
         let receiver = self.b.stage_acc(&temps);
         let name = self.b.name(name.text().as_bytes());
         let feedback = self.b.new_feedback();
         self.b.load_named_property(receiver, name, feedback);
+        self.source_end(
+            source,
+            name_range,
+            SourceEntryKind::Get {
+                load: feedback.index(),
+            },
+        );
         Ok(())
     }
 
@@ -1102,15 +1193,35 @@ impl<'a> FunctionGen<'a> {
         };
         let temps = self.b.temp_scope();
         self.expr(receiver)?;
+        let name_range = name.text_range();
+        let source = self.source_start();
         let receiver = self.b.stage_acc(&temps);
         let name = self.b.name(name.text().as_bytes());
         let feedback = self.b.new_feedback();
         self.b.load_named_property(receiver, name, feedback);
         let callee = self.b.stage_acc(&temps);
         if mode == TailMode::Guard {
-            return self.guarded_tail_args(&temps, callee, receiver, &args, false);
+            self.guarded_tail_args(&temps, callee, receiver, &args, false)?;
+            self.source_end(
+                source,
+                name_range,
+                SourceEntryKind::Send {
+                    load: feedback.index(),
+                    call: u32::MAX,
+                },
+            );
+            return Ok(());
         }
-        self.call_args(&temps, callee, Some(receiver), &args)
+        let call = self.call_args(&temps, callee, Some(receiver), &args)?;
+        self.source_end(
+            source,
+            name_range,
+            SourceEntryKind::Send {
+                load: feedback.index(),
+                call: call.index(),
+            },
+        );
+        Ok(())
     }
 
     fn call_expr(&mut self, expr: CallExpr<'a>, tail: bool) -> Result<(), CompileError> {
@@ -1127,15 +1238,36 @@ impl<'a> FunctionGen<'a> {
             TailMode::None
         };
         let temps = self.b.temp_scope();
+        let callee_range = receiver.syntax().text_range();
         if mode == TailMode::Loop {
-            return self.tail_loop_args(&temps, &args, true);
+            let source = self.source_start();
+            self.tail_loop_args(&temps, &args, true)?;
+            self.source_end(
+                source,
+                callee_range,
+                SourceEntryKind::Call { call: u32::MAX },
+            );
+            return Ok(());
         }
         self.expr(receiver)?;
+        let source = self.source_start();
         let callee = self.b.stage_acc(&temps);
         if mode == TailMode::Guard {
-            return self.guarded_tail_args(&temps, callee, callee, &args, true);
+            self.guarded_tail_args(&temps, callee, callee, &args, true)?;
+            self.source_end(
+                source,
+                callee_range,
+                SourceEntryKind::Call { call: u32::MAX },
+            );
+            return Ok(());
         }
-        self.call_args(&temps, callee, None, &args)
+        let call = self.call_args(&temps, callee, None, &args)?;
+        self.source_end(
+            source,
+            callee_range,
+            SourceEntryKind::Call { call: call.index() },
+        );
+        Ok(())
     }
 
     fn call_args(
@@ -1144,7 +1276,7 @@ impl<'a> FunctionGen<'a> {
         callee: Reg,
         receiver: Option<Reg>,
         args: &[Expr<'a>],
-    ) -> Result<(), CompileError> {
+    ) -> Result<Feedback, CompileError> {
         let receiver = receiver.unwrap_or(callee);
         let feedback = self.b.new_feedback();
         match args.len() {
@@ -1178,7 +1310,7 @@ impl<'a> FunctionGen<'a> {
                 )
             }
         }
-        Ok(())
+        Ok(feedback)
     }
 
     fn tail_loop_args(
@@ -1392,7 +1524,8 @@ impl<'a> FunctionGen<'a> {
                 let args: Vec<_> = args.args().collect();
                 self.expr(callee_expr)?;
                 let callee = self.b.stage_acc(&temps);
-                self.call_args_with_prefix(&temps, callee, None, prefix, &args)
+                self.call_args_with_prefix(&temps, callee, None, prefix, &args)?;
+                Ok(())
             }
             Expr::Send(send) => {
                 let Some(receiver_expr) = send.receiver() else {
@@ -1411,12 +1544,14 @@ impl<'a> FunctionGen<'a> {
                 let feedback = self.b.new_feedback();
                 self.b.load_named_property(receiver, name, feedback);
                 let callee = self.b.stage_acc(&temps);
-                self.call_args_with_prefix(&temps, callee, Some(receiver), prefix, &args)
+                self.call_args_with_prefix(&temps, callee, Some(receiver), prefix, &args)?;
+                Ok(())
             }
             rhs => {
                 self.expr(rhs)?;
                 let callee = self.b.stage_acc(&temps);
-                self.call_args_with_prefix(&temps, callee, None, prefix, &[])
+                self.call_args_with_prefix(&temps, callee, None, prefix, &[])?;
+                Ok(())
             }
         }
     }
@@ -1428,7 +1563,7 @@ impl<'a> FunctionGen<'a> {
         receiver: Option<Reg>,
         prefix: Reg,
         args: &[Expr<'a>],
-    ) -> Result<(), CompileError> {
+    ) -> Result<Feedback, CompileError> {
         let receiver = receiver.unwrap_or(callee);
         let feedback = self.b.new_feedback();
         match args.len() {
@@ -1458,7 +1593,7 @@ impl<'a> FunctionGen<'a> {
                 )
             }
         }
-        Ok(())
+        Ok(feedback)
     }
 
     fn unary_expr(&mut self, expr: UnaryExpr<'a>) -> Result<(), CompileError> {
@@ -1844,6 +1979,20 @@ impl<'a> FunctionGen<'a> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let parent = self.current_module_path();
+        let declared = path.join(".");
+        let full = if parent.is_empty() {
+            declared
+        } else {
+            format!("{parent}.{declared}")
+        };
+        self.modules.push(ModuleDecl {
+            path: full,
+            span: SourceSpan::new(
+                module.syntax().text_range().start,
+                module.syntax().text_range().end,
+            ),
+        });
         let temps = self.b.temp_scope();
         let registry_feedback = self.b.new_feedback();
         self.load_global("ModuleRegistry");
@@ -1904,6 +2053,11 @@ impl<'a> FunctionGen<'a> {
         let Some(staging) = self.frame.staging else {
             return self.err_node(export.syntax().id(), "missing module staging");
         };
+        self.exports.push(ModuleExport {
+            module: self.current_module_path(),
+            name: name.text().to_string(),
+            span: SourceSpan::new(name.text_range().start, name.text_range().end),
+        });
         let name = self.b.name(name.text().as_bytes());
         self.expr(value)?;
         let feedback = self.b.new_feedback();
@@ -1931,6 +2085,12 @@ impl<'a> FunctionGen<'a> {
         let Some(alias) = alias else {
             return self.err_node(declaration.syntax().id(), "missing import name");
         };
+        self.imports.push(ModuleImport {
+            module: path.join("."),
+            name: None,
+            alias: alias.text().to_string(),
+            span: SourceSpan::new(alias.text_range().start, alias.text_range().end),
+        });
         self.import(&path, alias)
     }
 
@@ -1944,6 +2104,12 @@ impl<'a> FunctionGen<'a> {
             let Some(alias) = prefix_token else {
                 return self.err_node(tree.syntax().id(), "self import needs a module path");
             };
+            self.imports.push(ModuleImport {
+                module: prefix.join("."),
+                name: None,
+                alias: alias.text().to_string(),
+                span: SourceSpan::new(alias.text_range().start, alias.text_range().end),
+            });
             self.import(prefix, alias)?;
         }
         for item in tree.items() {
@@ -1960,6 +2126,18 @@ impl<'a> FunctionGen<'a> {
             let Some(alias) = alias else {
                 return self.err_node(tree.syntax().id(), "missing import name");
             };
+            let module = if full.len() > 1 {
+                full[..full.len() - 1].join(".")
+            } else {
+                String::new()
+            };
+            let name = last.map(|token| token.text().to_string());
+            self.imports.push(ModuleImport {
+                module,
+                name,
+                alias: alias.text().to_string(),
+                span: SourceSpan::new(alias.text_range().start, alias.text_range().end),
+            });
             self.import(&full, alias)?;
         }
         Ok(())

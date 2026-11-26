@@ -1,10 +1,10 @@
 use crate::{
     Args, AtomicI64Object, AtomicI64ObjectInit, AtomicRefObject, AtomicRefObjectInit, CallInfo,
     Convert, DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
-    Map, MapInit, MapKind, Object, PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged,
-    TaskStart, Termination, ThreadKind, ThreadObject, ThreadObjectInit, ThreadState, ThreadStatus,
-    Thrown, VM, Value, Visitor, VmError, extend_lifetime, prepare_task, raise, raise_runtime,
-    release_task_run, task_outcome,
+    KetteTools, Map, MapInit, MapKind, Object, PropertyDescriptor, RuntimeId, SetupError, Smi,
+    Tagged, TaskStart, Termination, ThreadKind, ThreadObject, ThreadObjectInit, ThreadState,
+    ThreadStatus, Thrown, VM, Value, Visitor, VmError, extend_lifetime, prepare_task, raise,
+    raise_runtime, release_task_run, task_outcome,
 };
 use std::{
     collections::HashMap,
@@ -17,7 +17,7 @@ use std::{
 
 static NANO_TIME_ORIGIN: OnceLock<Instant> = OnceLock::new();
 
-/// Install the `Thread` and `Atomic` globals.
+/// Install the `thread` and `atomic` primitives.
 pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let thread_new_platform_index = vm.register_native(thread_new_platform);
     let thread_new_virtual_index = vm.register_native(thread_new_virtual);
@@ -437,20 +437,21 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             PropertyDescriptor::data(atomic_ref.erase()),
         )
         .expect("install atomic.AtomicRef");
-        let global = heap.known().global_object.get_handle(heap, &scope);
+        let primitives = KetteTools::primitives(heap, thread_vm.interner(), &scope)
+            .expect("KetteTools primitives are installed before threading");
         let thread_value = main_object.erase();
         let atomic_value = atomic_namespace.erase();
-        for (name, value) in [("Thread", thread_value), ("atomic", atomic_value)] {
+        for (name, value) in [("thread", thread_value), ("atomic", atomic_value)] {
             let name = thread_vm.interner().intern_str(heap, &scope, name);
             let name = scope.handle(name.as_tagged(heap));
             Object::define_own_property_ordinary(
                 heap,
                 &scope,
-                global,
+                primitives,
                 name,
                 PropertyDescriptor::data(value),
             )
-            .expect("install concurrency global");
+            .expect("install concurrency primitive");
         }
         Ok(())
     })

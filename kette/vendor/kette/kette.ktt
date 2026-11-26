@@ -9,6 +9,7 @@ let name = match sys.name {
 
 let lib = sys.lib(name)
 let Ptr = ffi.Ptr
+let i64 = ffi.i64
 let u8 = ffi.u8
 let u16 = ffi.u16
 let u32 = ffi.u32
@@ -43,6 +44,18 @@ let raw = {
     tokenTextPtr: lib.fn("kette_token_text_ptr", [Ptr, u32], Ptr),
     tokenTextLen: lib.fn("kette_token_text_len", [Ptr, u32], u64),
     kindCount: lib.fn("kette_kind_count", [], u32),
+    resolve: lib.fn("kette_resolve", [Ptr], Ptr),
+    resolveFree: lib.fn("kette_resolve_free", [Ptr], ffi.void),
+    bindingOfToken: lib.fn("kette_resolve_binding_of_token", [Ptr, u32], i64),
+    resolution: lib.fn("kette_resolve_resolution", [Ptr, u32], u8),
+    bindingOfNode: lib.fn("kette_resolve_binding_of_node", [Ptr, u32], i64),
+    bindingNamePtr: lib.fn("kette_resolve_binding_name_ptr", [Ptr, u32], Ptr),
+    bindingNameLen: lib.fn("kette_resolve_binding_name_len", [Ptr, u32], u64),
+    bindingKind: lib.fn("kette_resolve_binding_kind", [Ptr, u32], u8),
+    bindingStart: lib.fn("kette_resolve_binding_start", [Ptr, u32], u32),
+    bindingEnd: lib.fn("kette_resolve_binding_end", [Ptr, u32], u32),
+    bindingCount: lib.fn("kette_resolve_binding_count", [Ptr], u32),
+    bindingTopLevel: lib.fn("kette_resolve_binding_top_level", [Ptr, u32], u8),
 }
 
 mod kette {

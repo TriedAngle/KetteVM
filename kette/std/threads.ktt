@@ -1,5 +1,6 @@
-// Make a blocked thread runnable, resubmitting virtual threads to their scheduler.
-let wake = { |thread|
+let Thread = KetteTools.primitives.thread
+
+let wake = |thread| { 
     if thread.unpark() {
         let scheduler = thread.scheduler
         if scheduler != null {
@@ -8,9 +9,7 @@ let wake = { |thread|
     }
 }
 
-// Timed park routed through the current thread's scheduler when it has one.
-// The timer deadline is authoritative, so a scheduler wake reports `false`.
-let parkNanos = { |nanos|
+let parkNanos = |nanos| { 
     let me = Thread.current()
     let scheduler = me.scheduler
     if scheduler != null {
@@ -21,7 +20,8 @@ let parkNanos = { |nanos|
     }
 }
 
-mod threading {
+mod threads {
+    export Thread = Thread
     export wake = wake
     export parkNanos = parkNanos
 }

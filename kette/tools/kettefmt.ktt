@@ -29,7 +29,9 @@ if !Modules.kette.syntax {
 
 use kette.syntax
 use sys
+use atomic { AtomicI64 }
 use sys.file { File }
+use threads { Thread }
 
 let INDENT = "    "
 
@@ -486,7 +488,7 @@ let formatFile = |result| {
     result.done = true
 }
 
-let next = atomic.AtomicI64.new(0)
+let next = AtomicI64.new(0)
 let process = {
     while true {
         let index = next.add(1) - 1

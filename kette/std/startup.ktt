@@ -1,5 +1,6 @@
+let ATOMIC_PATH = "kette/std/atomic.ktt"
 let SYNC_PATH = "kette/std/sync.ktt"
-let THREADING_PATH = "kette/std/threading.ktt"
+let THREADS_PATH = "kette/std/threads.ktt"
 let COLLECTIONS_TRAITS_PATH = "kette/std/collections/collections.ktt"
 let COLLECTIONS_SEQUENCE_PATH = "kette/std/collections/sequence.ktt"
 let COLLECTIONS_CHANNEL_PATH = "kette/std/collections/channel.ktt"
@@ -435,8 +436,11 @@ globalThis.ModuleRegistry = {
 if !Modules.error {
     KetteTools.evalFile(ERROR_PATH)
 }
-if !Modules.threading {
-    KetteTools.evalFile(THREADING_PATH)
+if !Modules.atomic {
+    KetteTools.evalFile(ATOMIC_PATH)
+}
+if !Modules.threads {
+    KetteTools.evalFile(THREADS_PATH)
 }
 if !Modules.sync {
     KetteTools.evalFile(SYNC_PATH)

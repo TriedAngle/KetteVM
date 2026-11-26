@@ -1,3 +1,5 @@
+use threads { Thread }
+
 let K_BOX = 0
 let K_WINDOW = 1
 let K_TEXT = 2

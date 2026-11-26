@@ -2101,6 +2101,36 @@ fn decode_descriptor(desc: i64) -> (usize, usize, FunctionKind) {
     )
 }
 
+/// The callee cached at a call site, if the site is still monomorphic.
+pub fn call_site_callee<'a>(
+    heap: &'a Heap,
+    vector: Tagged<'a, FeedbackVector>,
+    slot: usize,
+) -> Option<Tagged<'a, Value>> {
+    let site = vector.read_pair(heap, slot);
+    if !site.state.is_weak_ptr() {
+        return None;
+    }
+    site.state.as_strong()
+}
+
+/// The method/value reached by a monomorphic named load site.
+pub fn load_site_value<'a>(
+    heap: &'a Heap,
+    vector: Tagged<'a, FeedbackVector>,
+    slot: usize,
+) -> Option<Tagged<'a, Value>> {
+    let site = vector.read_pair(heap, slot);
+    if !site.state.is_weak_ptr() {
+        return None;
+    }
+    let handler = site.handler.as_strong()?.get_as::<DataHandler>(heap)?;
+    match apply_data_handler(heap, handler)? {
+        LoadHit::Value(value) | LoadHit::Getter(value) => Some(value),
+        _ => None,
+    }
+}
+
 impl InlineCache {
     /// Probe a call site: a weak-callee match returns the pre-decoded hit
     /// (or the packed runtime callee); anything else is a miss for the

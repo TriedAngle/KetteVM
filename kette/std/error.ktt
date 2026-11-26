@@ -46,12 +46,6 @@ let IndexOutOfBounds = {
     length: 0
 }
 
-let IllegalLockState = {
-    traits*: ErrorTraits
-    name: "IllegalLockState"
-    message: ""
-}
-
 let UnimplementedErrorTraits = {
     parent*: ErrorTraits
 
@@ -95,7 +89,6 @@ mod error {
     export Error = Error
     export ElementDoesNotExist = ElementDoesNotExist
     export IndexOutOfBounds = IndexOutOfBounds
-    export IllegalLockState = IllegalLockState
     export UnimplementedError = UnimplementedError
     export ConcurrentModificationError = ConcurrentModificationError
     export NoSuchElementError = NoSuchElementError

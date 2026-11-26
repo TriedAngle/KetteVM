@@ -1,7 +1,10 @@
 // Compares atomic and racy counters across platform threads.
 // Run: cargo run -- kette/examples/threads.ktt
 
-let AtomicI64 = atomic.AtomicI64
+KetteTools.evalFile("kette/std/startup.ktt")
+use atomic { AtomicI64 }
+use threads { Thread }
+
 let rounds = 200000
 
 // Platform threads: the plain load/store increment races by design.

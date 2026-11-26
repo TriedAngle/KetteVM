@@ -24,5 +24,6 @@ case "$(uname -s)" in
 esac
 
 mkdir -p "$dir"
+rm -f "$dir/$name"
 cp "target/release/$name" "$dir/$name"
 echo "installed $dir/$name"

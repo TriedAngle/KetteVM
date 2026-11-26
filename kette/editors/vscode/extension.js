@@ -648,13 +648,27 @@ async function start(context) {
     {
       async provideDocumentSemanticTokens(document, token) {
         try {
-          const result = await client.request("textDocument/semanticTokens/full", {
+          const result = await client.request("kette/semanticTokens", {
             textDocument: { uri: document.uri.toString() },
           });
           if (token.isCancellationRequested) {
             return undefined;
           }
-          return new vscode.SemanticTokens(new Uint32Array(result.data || []), String(Date.now()));
+          const chunks = result.chunks || [];
+          let length = 0;
+          for (const chunk of chunks) {
+            length += chunk.length;
+          }
+          const data = new Uint32Array(length);
+          let offset = 0;
+          for (const chunk of chunks) {
+            data.set(chunk, offset);
+            offset += chunk.length;
+          }
+          return new vscode.SemanticTokens(
+            data,
+            `${document.uri.toString()}:${document.version}`
+          );
         } catch (error) {
           return undefined;
         }
@@ -663,6 +677,98 @@ async function start(context) {
     LEGEND
   );
   context.subscriptions.push(provider);
+
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider("kette", {
+      async provideHover(document, position) {
+        if (!client) {
+          return undefined;
+        }
+        try {
+          const result = await client.request("textDocument/hover", {
+            textDocument: { uri: document.uri.toString() },
+            position: { line: position.line, character: position.character },
+          });
+          if (!result || !result.contents) {
+            return undefined;
+          }
+          const markdown = new vscode.MarkdownString(result.contents.value || "");
+          const range = result.range
+            ? new vscode.Range(
+                result.range.start.line,
+                result.range.start.character,
+                result.range.end.line,
+                result.range.end.character
+              )
+            : undefined;
+          return new vscode.Hover(markdown, range);
+        } catch (error) {
+          return undefined;
+        }
+      },
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider("kette", {
+      async provideDefinition(document, position) {
+        if (!client) {
+          return undefined;
+        }
+        try {
+          const result = await client.request("textDocument/definition", {
+            textDocument: { uri: document.uri.toString() },
+            position: { line: position.line, character: position.character },
+          });
+          if (!Array.isArray(result)) {
+            return undefined;
+          }
+          return result.map((location) => {
+            const range = new vscode.Range(
+              location.range.start.line,
+              location.range.start.character,
+              location.range.end.line,
+              location.range.end.character
+            );
+            return new vscode.Location(vscode.Uri.parse(location.uri), range);
+          });
+        } catch (error) {
+          return undefined;
+        }
+      },
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerReferenceProvider("kette", {
+      async provideReferences(document, position, context) {
+        if (!client) {
+          return undefined;
+        }
+        try {
+          const result = await client.request("textDocument/references", {
+            textDocument: { uri: document.uri.toString() },
+            position: { line: position.line, character: position.character },
+            context: { includeDeclaration: context.includeDeclaration },
+          });
+          if (!Array.isArray(result)) {
+            return undefined;
+          }
+          return result.map((location) => {
+            const range = new vscode.Range(
+              location.range.start.line,
+              location.range.start.character,
+              location.range.end.line,
+              location.range.end.character
+            );
+            return new vscode.Location(vscode.Uri.parse(location.uri), range);
+          });
+        } catch (error) {
+          return undefined;
+        }
+      },
+    })
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("kette.evalSelection", async () => {
@@ -715,15 +821,28 @@ async function start(context) {
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((document) => syncDocument(document)),
     vscode.workspace.onDidChangeTextDocument((event) => {
-      if (client && event.document.languageId === "kette") {
-        client.notify("textDocument/didChange", {
-          textDocument: {
-            uri: event.document.uri.toString(),
-            version: event.document.version,
-          },
-          contentChanges: [{ text: event.document.getText() }],
-        });
+      if (!client || event.document.languageId !== "kette" || event.contentChanges.length === 0) {
+        return;
       }
+      client.notify("textDocument/didChange", {
+        textDocument: {
+          uri: event.document.uri.toString(),
+          version: event.document.version,
+        },
+        contentChanges: event.contentChanges.map((change) => ({
+          range: {
+            start: {
+              line: change.range.start.line,
+              character: change.range.start.character,
+            },
+            end: {
+              line: change.range.end.line,
+              character: change.range.end.character,
+            },
+          },
+          text: change.text,
+        })),
+      });
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (client && document.languageId === "kette") {

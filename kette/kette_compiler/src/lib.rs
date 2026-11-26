@@ -1,7 +1,7 @@
 pub mod emit;
 pub mod plan;
 
-use bytecode::{FrontendDiagnostic, FrontendError, Program, SourceMode};
+use bytecode::{FrontendDiagnostic, FrontendError, Program, SourceInfo, SourceMode};
 use kette_parser::parse;
 use kette_syntax::resolve::{Resolved, resolve};
 use kette_syntax::validate::validate;
@@ -30,16 +30,25 @@ pub fn compile(
     tree: &Tree,
     resolved: &Resolved,
     mode: SourceMode,
+    source_info: SourceInfo,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
 ) -> Result<Program, CompileError> {
     let _pipeline = trace::info_span!("kette::compile_new");
-    emit::generate(tree, resolved, mode, declare_globals, install_accessor)
+    emit::generate(
+        tree,
+        resolved,
+        mode,
+        source_info,
+        declare_globals,
+        install_accessor,
+    )
 }
 
 pub fn compile_kette(
     source: &str,
     mode: SourceMode,
+    source_info: SourceInfo,
     declare_globals: NativeIndex,
     install_accessor: NativeIndex,
 ) -> Result<Program, FrontendError> {
@@ -75,6 +84,7 @@ pub fn compile_kette(
         &parsed.tree,
         &resolved,
         mode,
+        source_info,
         declare_globals,
         install_accessor,
     )

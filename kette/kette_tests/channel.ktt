@@ -2,6 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/channel.ktt
 // Check: kette/kette_tests/check.py
 
+use threads { Thread }
+
 use collections.channel { Channel }
 use collections.sequence { Sequence }
 use sync { Mutex }

@@ -75,6 +75,7 @@ fn meta() -> FunctionMeta {
         kind: CallableKind::Normal,
         length: 0,
         strict: true,
+        span: bytecode::SourceSpan::default(),
     }
 }
 
@@ -1252,6 +1253,7 @@ fn worked_example_builds_valid_bytecode() {
             kind: CallableKind::Normal,
             length: 1,
             strict: false,
+            span: bytecode::SourceSpan::default(),
         })
         .unwrap();
 

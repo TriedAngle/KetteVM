@@ -3,12 +3,12 @@
 // Check: kette/kette_tests/check.py
 
 use collections.traits { Collection }
+use sync { IllegalLockState }
 
 let errors = Modules.error
 let Error = errors.Error
 let ElementDoesNotExist = errors.ElementDoesNotExist
 let IndexOutOfBounds = errors.IndexOutOfBounds
-let IllegalLockState = errors.IllegalLockState
 let UnimplementedError = errors.UnimplementedError
 
 let caught = try {

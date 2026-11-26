@@ -285,6 +285,103 @@ pub struct HandlerEntry {
     pub handler_pc: usize,
 }
 
+/// A byte range in a compile unit's source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl SourceSpan {
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    pub const fn contains(self, start: u32, end: u32) -> bool {
+        self.start <= start && end <= self.end
+    }
+
+    pub const fn len(self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// How much source information a compile unit keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SourceInfo {
+    #[default]
+    Lazy,
+    Omit,
+    Complete,
+}
+
+impl SourceInfo {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "omit" => Some(Self::Omit),
+            "lazy" => Some(Self::Lazy),
+            "complete" => Some(Self::Complete),
+            _ => None,
+        }
+    }
+
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Omit,
+            2 => Self::Complete,
+            _ => Self::Lazy,
+        }
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// What produced a source entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEntryKind {
+    Expr,
+    Stmt,
+    Get { load: u32 },
+    Set { store: u32 },
+    Send { load: u32, call: u32 },
+    Call { call: u32 },
+}
+
+/// One bytecode position mapped to a source range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceEntry {
+    pub pc: u32,
+    pub span: SourceSpan,
+    pub kind: SourceEntryKind,
+}
+
+/// A `mod path { ... }` declaration and its source range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleDecl {
+    pub path: String,
+    pub span: SourceSpan,
+}
+
+/// An `export name = ...` declaration inside a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExport {
+    pub module: String,
+    pub name: String,
+    pub span: SourceSpan,
+}
+
+/// A `use path { name as alias }` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    pub module: String,
+    pub name: Option<String>,
+    pub alias: String,
+    pub span: SourceSpan,
+}
+
 /// A finished, frozen function: emitted code plus its pools and frame
 /// metadata. Produced by [`FnBuilder::finish`](crate::FnBuilder::finish).
 #[derive(Debug, Clone, Default)]
@@ -310,6 +407,10 @@ pub struct Function {
     /// Whether a tail call to this function may reuse the current frame
     /// when the callee is the frame's own callable.
     pub tail_callable: bool,
+    /// Definition range in the compile unit.
+    pub span: SourceSpan,
+    /// Source entries, present only when compiled with complete source info.
+    pub source: Box<[SourceEntry]>,
 }
 
 /// An ordered function table: `functions[0]` is the entry body.
@@ -320,6 +421,9 @@ pub struct Function {
 #[derive(Debug, Default)]
 pub struct Program {
     functions: Vec<Function>,
+    modules: Vec<ModuleDecl>,
+    exports: Vec<ModuleExport>,
+    imports: Vec<ModuleImport>,
 }
 
 impl Program {
@@ -330,6 +434,9 @@ impl Program {
     pub fn with_capacity(functions: usize) -> Self {
         Self {
             functions: Vec::with_capacity(functions),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -342,6 +449,30 @@ impl Program {
     }
 
     /// Freeze a finished function into the table and return its handle.
+    pub fn add_module(&mut self, module: ModuleDecl) {
+        self.modules.push(module);
+    }
+
+    pub fn add_export(&mut self, export: ModuleExport) {
+        self.exports.push(export);
+    }
+
+    pub fn modules(&self) -> &[ModuleDecl] {
+        &self.modules
+    }
+
+    pub fn exports(&self) -> &[ModuleExport] {
+        &self.exports
+    }
+
+    pub fn add_import(&mut self, import: ModuleImport) {
+        self.imports.push(import);
+    }
+
+    pub fn imports(&self) -> &[ModuleImport] {
+        &self.imports
+    }
+
     pub fn add_function(&mut self, function: Function) -> FunctionId {
         let id = FunctionId(self.functions.len() as u32);
         self.functions.push(function);

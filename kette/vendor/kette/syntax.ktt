@@ -73,7 +73,7 @@ let isAtomParent = match |parent| {
 }
 
 let identType = match |parent| {
-    :Slot | :SlotMulti | :PatternField => 3
+    :Slot | :SlotMulti | :PatternField | :Get => 3
     :Send => 5
     :Call => 4
     :Path | :UseTree | :ModDecl | :UseDecl => 6
@@ -191,6 +191,72 @@ let Tree = {
             self.ptr = null
         }
     }
+    resolve: { resolve(self) }
+}
+
+let Resolution = {
+    None: 0
+    Local: 1
+    Upvar: 2
+    Global: 3
+}
+
+let bindingKindName = match |kind| {
+    0 => "let"
+    1 => "parameter"
+    2 => "rest parameter"
+    3 => "catch parameter"
+    4 => "for binding"
+    5 => "self"
+    6 => "import"
+    7 => "export"
+    _ => "binding"
+}
+
+let Resolved = {
+    ptr: null
+
+    dispose: {
+        if !ffi.isNull(self.ptr) {
+            raw.resolveFree(self.ptr)
+            self.ptr = null
+        }
+    }
+
+    bindingCount>>: { raw.bindingCount(self.ptr) }
+    bindingTopLevel: |id| { raw.bindingTopLevel(self.ptr, id) != 0 }
+    resolutionAt: |node| { raw.resolution(self.ptr, node) }
+
+    bindingAt: |token| {
+        let declaration = raw.bindingOfToken(self.ptr, token.index)
+        if declaration >= 0 {
+            return declaration
+        }
+        let binding = raw.bindingOfNode(self.ptr, token.parentId)
+        if binding >= 0 {
+            return binding
+        }
+        null
+    }
+
+    binding: |id| {
+        {
+            name: ffi.string(raw.bindingNamePtr(self.ptr, id), raw.bindingNameLen(self.ptr, id))
+            kind: bindingKindName(raw.bindingKind(self.ptr, id))
+            start: raw.bindingStart(self.ptr, id)
+            end: raw.bindingEnd(self.ptr, id)
+        }
+    }
+}
+
+let resolve = |tree| {
+    let ptr = raw.resolve(tree.ptr)
+    if ffi.isNull(ptr) {
+        throw "kette: cannot resolve source"
+    }
+    let resolved = Resolved.clone()
+    resolved.ptr = ptr
+    resolved
 }
 
 let isTokenChild = |child| {
@@ -236,4 +302,7 @@ mod kette.syntax {
     export childId = childId
     export parse = parse
     export parseFile = parseFile
+    export resolve = resolve
+    export Resolution = Resolution
+    export Resolved = Resolved
 }

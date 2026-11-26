@@ -13,7 +13,9 @@ fn run<I: Interpreter>(src: &str) {
         .expect("vm core")
         .add::<JSRuntime>()
         .expect("js runtime");
-    let program = JavascriptCompiler::compile(&vm, src, SourceMode::Script).expect("compile");
+    let program =
+        JavascriptCompiler::compile(&vm, src, SourceMode::Script, bytecode::SourceInfo::Lazy)
+            .expect("compile");
     let mut thread = vm.attach();
     thread
         .run_program(program, JSRuntime::ID)

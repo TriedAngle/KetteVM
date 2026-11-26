@@ -66,8 +66,17 @@ fn function_constructor<'a>(
         let Some(context) = scope.cast::<ContextObject>(heap, context.as_tagged(heap)) else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        let closure =
-            Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context);
+        let closure = Materialize::closure_vm(
+            vm,
+            heap,
+            state,
+            &scope,
+            &program,
+            JSRuntime::ID,
+            context,
+            None,
+        )
+        .0;
         let result = match HostCtx::enter(
             vm,
             state.runtime(vm, heap),

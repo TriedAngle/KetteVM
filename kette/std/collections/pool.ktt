@@ -1,4 +1,6 @@
+use atomic { AtomicI64 }
 use collections.delay_scheduler { DelayScheduler }
+use threads { Thread }
 
 let WorkQueueTraits = {
     new: {
@@ -9,10 +11,10 @@ let WorkQueueTraits = {
         queue.head = 0
         queue.count = 0
         queue.capacity = capacity
-        queue.guard = atomic.AtomicI64.new(0)
-        queue.closed = atomic.AtomicI64.new(0)
+        queue.guard = AtomicI64.new(0)
+        queue.closed = AtomicI64.new(0)
         queue.workers = []
-        queue.wakeIndex = atomic.AtomicI64.new(0)
+        queue.wakeIndex = AtomicI64.new(0)
         queue
     }
     lock: {

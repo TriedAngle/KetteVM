@@ -1,8 +1,10 @@
 // Threads, virtual scheduling, and atomic cells.
-// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/threading.ktt
+// Run: cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/threads.ktt
 // Check: kette/kette_tests/check.py
 
-let AtomicI64 = atomic.AtomicI64
+use atomic { AtomicI64 }
+use threads { Thread }
+
 use ffi
 
 // Main thread surface.
@@ -139,7 +141,7 @@ Test.assert(gva.isAlive(), false)
 // Suspension inside a nested VM entry.
 let eval_result = 0
 let ve = Thread.newVirtual("ve", {
-    eval_result = KetteTools.eval("kette", "Thread.yield()\n7")
+    eval_result = KetteTools.eval("kette", "use threads { Thread }\nThread.yield()\n7")
 })
 enqueue(ve)
 let eval_scheduler = Thread.newPlatform("eval-scheduler", run_scheduler)

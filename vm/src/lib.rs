@@ -17,6 +17,7 @@ impl Compiler for JavascriptCompiler {
         vm: &VM,
         source: &str,
         mode: bytecode::SourceMode,
+        _source_info: bytecode::SourceInfo,
     ) -> Result<bytecode::Program, bytecode::FrontendError> {
         js_compiler::compile_js(source, mode, &vm.runtime::<JSRuntime>().ids)
     }
@@ -32,11 +33,13 @@ impl Compiler for KetteCompiler {
         vm: &VM,
         source: &str,
         mode: bytecode::SourceMode,
+        source_info: bytecode::SourceInfo,
     ) -> Result<bytecode::Program, bytecode::FrontendError> {
         let runtime = vm.runtime::<KetteRuntime>();
         kette_compiler::compile_kette(
             source,
             mode,
+            source_info,
             runtime.declare_globals,
             runtime.install_accessor,
         )

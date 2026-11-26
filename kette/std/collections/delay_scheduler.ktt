@@ -1,11 +1,12 @@
-use threading { wake }
+use atomic { AtomicI64, AtomicRef }
+use threads { Thread, wake }
 
 let DelayedTaskTraits = {
     new: |when, action| {
         let task = self.clone()
         task.when = when
         task.action = action
-        task.cancelled = atomic.AtomicI64.new(0)
+        task.cancelled = AtomicI64.new(0)
         task.heapIndex = -1
         task
     }
@@ -27,9 +28,9 @@ let DelaySchedulerTraits = {
         let scheduler = self.clone()
         scheduler.heap = []
         scheduler.length = 0
-        scheduler.pending = atomic.AtomicRef.new(null)
-        scheduler.active = atomic.AtomicI64.new(0)
-        scheduler.closed = atomic.AtomicI64.new(0)
+        scheduler.pending = AtomicRef.new(null)
+        scheduler.active = AtomicI64.new(0)
+        scheduler.closed = AtomicI64.new(0)
         scheduler.thread = Thread.newPlatform("delay-scheduler", {
             scheduler.run()
         })

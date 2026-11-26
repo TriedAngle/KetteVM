@@ -232,3 +232,158 @@ pub extern "C" fn kette_kind_name_len(kind: u16) -> usize {
 pub extern "C" fn kette_kind_is_trivia(kind: u16) -> u8 {
     SyntaxKind::from_u16(kind).is_some_and(SyntaxKind::is_trivia) as u8
 }
+
+/// A resolved symbol table for one parsed tree.
+pub struct KetteResolved {
+    resolved: kette_syntax::resolve::Resolved,
+}
+
+unsafe fn as_resolved<'a>(resolved: *const KetteResolved) -> &'a KetteResolved {
+    unsafe { &*resolved }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve(tree: *const KetteTree) -> *mut KetteResolved {
+    let tree = unsafe { as_tree(tree) };
+    Box::into_raw(Box::new(KetteResolved {
+        resolved: kette_syntax::resolve::resolve(&tree.tree),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_free(resolved: *mut KetteResolved) {
+    if resolved.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(resolved) });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_of_token(
+    resolved: *const KetteResolved,
+    token: u32,
+) -> i64 {
+    unsafe { as_resolved(resolved) }
+        .resolved
+        .binding_of_token(TokenId(token))
+        .map_or(-1, |binding| binding.0 as i64)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_resolution(resolved: *const KetteResolved, node: u32) -> u8 {
+    match unsafe { as_resolved(resolved) }
+        .resolved
+        .resolution(NodeId(node))
+    {
+        Some(kette_syntax::resolve::Resolution::Local(_)) => 1,
+        Some(kette_syntax::resolve::Resolution::Upvar(_)) => 2,
+        Some(kette_syntax::resolve::Resolution::Global) => 3,
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_of_node(
+    resolved: *const KetteResolved,
+    node: u32,
+) -> i64 {
+    match unsafe { as_resolved(resolved) }
+        .resolved
+        .resolution(NodeId(node))
+    {
+        Some(kette_syntax::resolve::Resolution::Local(binding))
+        | Some(kette_syntax::resolve::Resolution::Upvar(binding)) => binding.0 as i64,
+        _ => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_name_ptr(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> *const u8 {
+    let resolved = unsafe { as_resolved(resolved) };
+    let binding = resolved
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding));
+    resolved.resolved.name(binding.name).as_ptr()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_name_len(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> usize {
+    let resolved = unsafe { as_resolved(resolved) };
+    let binding = resolved
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding));
+    resolved.resolved.name(binding.name).len()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_kind(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> u8 {
+    use kette_syntax::resolve::BindingKind;
+    let binding = unsafe { as_resolved(resolved) }
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding));
+    match binding.kind {
+        BindingKind::Let => 0,
+        BindingKind::Param => 1,
+        BindingKind::Rest => 2,
+        BindingKind::CatchParam => 3,
+        BindingKind::ForBinding => 4,
+        BindingKind::SelfParam => 5,
+        BindingKind::Import => 6,
+        BindingKind::Export => 7,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_start(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> u32 {
+    unsafe { as_resolved(resolved) }
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding))
+        .declaration
+        .start
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_end(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> u32 {
+    unsafe { as_resolved(resolved) }
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding))
+        .declaration
+        .end
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_count(resolved: *const KetteResolved) -> u32 {
+    unsafe { as_resolved(resolved) }.resolved.bindings().len() as u32
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kette_resolve_binding_top_level(
+    resolved: *const KetteResolved,
+    binding: u32,
+) -> u8 {
+    use kette_syntax::resolve::ScopeKind;
+    let resolved = unsafe { as_resolved(resolved) };
+    let binding = resolved
+        .resolved
+        .binding(kette_syntax::resolve::BindingId(binding));
+    let scope = resolved.resolved.scope(binding.scope);
+    match scope.kind {
+        ScopeKind::Script => 1,
+        ScopeKind::Module | ScopeKind::Function { .. } => 0,
+    }
+}

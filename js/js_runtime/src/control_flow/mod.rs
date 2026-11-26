@@ -1171,9 +1171,19 @@ fn resolve_direct_eval<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) ->
         let Some(context) = scope.cast::<ContextObject>(heap, context) else {
             raise!(vm, heap, state, VmError::InvalidOperandType);
         };
-        Materialize::closure_vm(vm, heap, state, &scope, &program, JSRuntime::ID, context)
-            .as_tagged(heap)
-            .erase()
+        Materialize::closure_vm(
+            vm,
+            heap,
+            state,
+            &scope,
+            &program,
+            JSRuntime::ID,
+            context,
+            None,
+        )
+        .0
+        .as_tagged(heap)
+        .erase()
     })
 }
 

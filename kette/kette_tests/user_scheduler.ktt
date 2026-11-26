@@ -2,6 +2,8 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/test_runner.ktt kette/kette_tests/user_scheduler.ktt
 // Check: kette/kette_tests/check.py
 
+use threads { Thread }
+
 let Mutex = Modules.sync.Mutex
 
 let guard = Mutex.new()

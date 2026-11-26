@@ -128,6 +128,14 @@ impl Runtime for VmCore {
             vm.register_native(KetteTools::bytecode),
             vm.register_native(KetteTools::read_feedback_vector),
             vm.register_native(KetteTools::eval_repl),
+            vm.register_native(KetteTools::set_source_info),
+            vm.register_native(KetteTools::send_target),
+            vm.register_native(KetteTools::unit_text),
+            vm.register_native(KetteTools::unit_names),
+            vm.register_native(KetteTools::module_source),
+            vm.register_native(KetteTools::export_source),
+            vm.register_native(KetteTools::unit_hash),
+            vm.register_native(KetteTools::import_source),
         ];
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {

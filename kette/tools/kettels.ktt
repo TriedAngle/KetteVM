@@ -4,6 +4,8 @@
 let env = KetteTools.primitives.env
 let loadedFiles = []
 
+KetteTools.setSourceInfo("complete")
+
 let noteLoaded = |path| {
     if !loadedFiles.includes(path) {
         loadedFiles.push(path)
@@ -32,14 +34,35 @@ use sync { Mutex }
 use sys
 use sys.file { File }
 use sys.socket { Bytes, TcpListener, TcpStream }
+use atomic { AtomicI64 }
 use kette.syntax
+use threads { Thread }
 
 let pool = ThreadPool.new()
 let inbox = Queue.new()
 let logLock = Mutex.new()
 
-let pause = {
-    pool.sleep(1000000)
+let POLL_MIN_NANOS = 1000000
+let POLL_MAX_NANOS = 50000000
+
+let pause = |connection| {
+    let idle = connection.idlePolls
+    let delay = POLL_MIN_NANOS
+    if idle > 16 {
+        delay = POLL_MAX_NANOS
+    } else if idle > 8 {
+        delay = 25000000
+    } else if idle > 4 {
+        delay = 10000000
+    } else if idle > 2 {
+        delay = 5000000
+    }
+    connection.idlePolls = idle + 1
+    pool.sleep(delay)
+}
+
+let activity = |connection| {
+    connection.idlePolls = 0
 }
 
 let log = |text| {
@@ -48,7 +71,8 @@ let log = |text| {
     logLock.unlock()
 }
 
-let writeAll = |stream, text| {
+let writeAll = |connection, text| {
+    let stream = connection.stream
     let total = sys.utf8Length(text)
     let offset = 0
     while offset < total {
@@ -58,8 +82,9 @@ let writeAll = |stream, text| {
         }
         let written = stream.writeSome(text, offset, chunk)
         if written == null or written == 0 {
-            pause()
+            pause(connection)
         } else {
+            activity(connection)
             offset = offset + written
         }
     }
@@ -74,10 +99,11 @@ let readOne = |connection| {
         connection.readBuffer.clear()
         let got = connection.stream.readInto(connection.readBuffer, 1)
         if got == null {
-            pause()
+            pause(connection)
         } else if got == 0 {
             return null
         } else {
+            activity(connection)
             let text = connection.readBuffer.text()
             connection.readBuffer.clear()
             return text
@@ -98,11 +124,12 @@ let readExact = |connection, count| {
         }
         let got = connection.stream.readInto(buffer, count - offset)
         if got == null {
-            pause()
+            pause(connection)
         } else if got == 0 {
             buffer.free()
             return null
         } else {
+            activity(connection)
             offset = offset + got
         }
     }
@@ -202,12 +229,24 @@ let ConnectionTraits = {
         connection.stdio = stdio
         connection.documents = Object.create(null)
         connection.outbox = Queue.new()
-        connection.closed = atomic.AtomicI64.new(0)
+        connection.closed = AtomicI64.new(0)
         connection.reader = null
         connection.writer = null
         connection.readBuffer = Bytes.new(1)
-        connection.done = atomic.AtomicI64.new(0)
-        connection.tokensWarned = false
+        connection.done = AtomicI64.new(0)
+        connection.idlePolls = 0
+        connection.sources = Object.create(null)
+        connection.resolutions = Object.create(null)
+        connection.parses = Object.create(null)
+        connection.diagnosticsTask = null
+        connection.unitMaps = Object.create(null)
+        connection.globals = Object.create(null)
+        connection.slots = Object.create(null)
+        connection.names = Object.create(null)
+        connection.semantic = Object.create(null)
+        connection.indexSources = Object.create(null)
+        connection.indexedUnits = Object.create(null)
+        connection.indexedDocs = Object.create(null)
         connection
     }
     send: |message| {
@@ -264,7 +303,7 @@ let ConnectionTraits = {
 
 let Connection = {
     traits*: ConnectionTraits
-    stream, name, stdio, documents, outbox, closed, reader, writer, readBuffer, done, tokensWarned: undefined
+    stream, name, stdio, documents, outbox, closed, reader, writer, readBuffer, done, idlePolls, sources, resolutions, parses, diagnosticsTask, unitMaps, globals, slots, names, semantic, indexSources, indexedUnits, indexedDocs: undefined
 }
 
 let startConnection = |connection| {
@@ -276,7 +315,7 @@ let startConnection = |connection| {
                 break
             }
             try {
-                writeAll(connection.stream, payload)
+                writeAll(connection, payload)
             } catch (error) {
                 if !Thread.current().isInterrupted() {
                     log("kettels: write failed: " + errorText(error))
@@ -325,27 +364,94 @@ let LEGEND = [
     "namespace", "enumMember", "string", "number", "comment", "operator",
 ]
 
-let tokenType = |kind, parent| {
+let NATIVE_DOCS = {
+    new: "Creates a new instance."
+    clone: "Returns a shallow copy of the receiver."
+    yield: "Yields execution to another thread."
+    park: "Blocks the current thread until it is unparked."
+    unpark: "Makes a parked thread runnable."
+    parkNanos: "Blocks the current thread for at most `nanos` nanoseconds."
+    nanoTime: "Returns a monotonic time in nanoseconds."
+    sleep: "Blocks the current thread for `nanos` nanoseconds."
+    availableProcessors: "Returns the number of available processors."
+    load: "Returns the current value."
+    store: "Stores `value` and returns it."
+    swap: "Stores `value` and returns the previous value."
+    compareExchange: "Stores `replacement` when the current value equals `expected`."
+    add: "Adds `value` and returns the previous value."
+}
+
+let bindingIsFunction = |source, map, declaration| {
+    let index = unitAt(map, declaration.end)
+    while index < source.length and (source[index] == " " or source[index] == "\t" or source[index] == "\n" or source[index] == "\r") {
+        index = index + 1
+    }
+    if index >= source.length or source[index] != "=" {
+        return false
+    }
+    index = index + 1
+    while index < source.length and (source[index] == " " or source[index] == "\t" or source[index] == "\n" or source[index] == "\r") {
+        index = index + 1
+    }
+    index < source.length and source[index] == "|"
+}
+
+let tokenType = |tree, map, resolved, source, bindingKinds, token| {
+    let kind = token.kind
     if kind == :LineComment or kind == :BlockComment {
         return 10
-    }
-    if kind == :String or kind == :QuotedName {
-        if syntax.isAtomParent(parent) {
-            return 7
-        }
-        return 8
     }
     if kind == :Number {
         return 9
     }
+    if kind == :Ident {
+        let parent = token.parent
+        if parent == :Send {
+            return 5
+        }
+        if parent == :Get {
+            return 3
+        }
+        if parent == :Path or parent == :UseTree or parent == :ModDecl or parent == :UseDecl {
+            return 6
+        }
+        if parent == :AtomLiteral or parent == :PatternAtom {
+            return 7
+        }
+        let binding = resolved.bindingAt(token)
+        if binding != null {
+            let cached = bindingKinds[binding]
+            if cached != null {
+                return cached
+            }
+            let declaration = resolved.binding(binding)
+            let declarationKind = declaration.kind
+            let result = 1
+            if declarationKind == "parameter" or declarationKind == "rest parameter" or declarationKind == "catch parameter" {
+                result = 2
+            } else if declarationKind != "import" and bindingIsFunction(source, map, declaration) {
+                result = 4
+            }
+            bindingKinds[binding] = result
+            return result
+        }
+        let parentId = tree.nodeParent(token.parentId)
+        if parentId < tree.nodeCount and tree.nodeKind(parentId) == :Call {
+            return 4
+        }
+        return 1
+    }
+    if kind == :String or kind == :QuotedName {
+        if syntax.isAtomParent(token.parent) {
+            return 7
+        }
+        return 8
+    }
     if kind == :Colon {
-        if syntax.isAtomParent(parent) {
+        if syntax.isAtomParent(token.parent) {
             return 7
         }
         return null
-    }
-    if kind == :Ident {
-        return syntax.identType(parent)
     }
     if syntax.isKeyword(kind) {
         return 0
@@ -398,6 +504,7 @@ let buildMap = |source| {
     }
 }
 
+// this is a good function
 let lineOf = |map, byte| {
     let low = 0
     let high = map.lineStarts.length - 1
@@ -442,6 +549,64 @@ let positionOf = |map, byte| {
     }
 }
 
+let byteAt = |map, position| {
+    let line = position.line
+    if line >= map.lineStarts.length {
+        return map.bytes
+    }
+    let low = map.lineStarts[line]
+    let high = if line + 1 < map.lineStarts.length { map.lineStarts[line + 1] } else { map.bytes }
+    let target = map.lineUnits[line] + position.character
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if unitAt(map, mid) < target {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    low
+}
+
+let applyChanges = |connection, uri, changes| {
+    let source = connection.documents[uri]
+    if source == null {
+        return source
+    }
+    let index = 0
+    while index < changes.length {
+        let change = changes[index]
+        if change.range == null {
+            source = change.text
+        } else {
+            let map = buildMap(source)
+            let startByte = byteAt(map, change.range.start)
+            let endByte = byteAt(map, change.range.end)
+            let startUnit = unitAt(map, startByte)
+            let endUnit = unitAt(map, endByte)
+            source = sliceText(source, 0, startUnit) + change.text + sliceText(source, endUnit, source.length)
+        }
+        index = index + 1
+    }
+    source
+}
+
+let scheduleDiagnostics = |connection, uri| {
+    if connection.diagnosticsTask != null {
+        connection.diagnosticsTask.cancel()
+    }
+    let text = connection.documents[uri]
+    connection.diagnosticsTask = pool.scheduler.schedule(120000000, {
+        inbox.push({
+            diagnostics: {
+                connection: connection
+                uri: uri
+                text: text
+            }
+        })
+    })
+}
+
 let rangeOf = |map, start, end| {
     {
         start: positionOf(map, start)
@@ -449,7 +614,705 @@ let rangeOf = |map, start, end| {
     }
 }
 
-let addSegments = |data, map, token, kind, limit| {
+let sliceText = |text, start, end| {
+    let result = ""
+    let index = start
+    while index < end {
+        result = result + text[index]
+        index = index + 1
+    }
+    result
+}
+
+let trimText = |text| {
+    let start = 0
+    let end = text.length
+    while start < end and (text[start] == " " or text[start] == "\t" or text[start] == "\r") {
+        start = start + 1
+    }
+    while end > start and (text[end - 1] == " " or text[end - 1] == "\t" or text[end - 1] == "\r") {
+        end = end - 1
+    }
+    if start == 0 and end == text.length {
+        text
+    } else {
+        sliceText(text, start, end)
+    }
+}
+
+let lineText = |source, map, line| {
+    let start = unitAt(map, map.lineStarts[line])
+    let endByte = if line + 1 < map.lineStarts.length { map.lineStarts[line + 1] - 1 } else { map.bytes }
+    sliceText(source, start, unitAt(map, endByte))
+}
+
+let stripStar = |text| {
+    let line = trimText(text)
+    if line.length > 0 and line[0] == "*" {
+        trimText(sliceText(line, 1, line.length))
+    } else {
+        line
+    }
+}
+
+let reverseJoin = |lines| {
+    let text = ""
+    let index = lines.length - 1
+    let first = true
+    while index >= 0 {
+        let line = lines[index]
+        if line != "" {
+            if !first {
+                text = text + "\n"
+            }
+            text = text + line
+            first = false
+        }
+        index = index - 1
+    }
+    text
+}
+
+let docAt = |source, map, offset| {
+    let line = lineOf(map, offset)
+    let first = line - 1
+    if first < 0 {
+        return ""
+    }
+    let head = trimText(lineText(source, map, first))
+    if head.length >= 2 and findSubstring(head, "*/", 0) == head.length - 2 {
+        let block = []
+        let scan = first
+        while scan >= 0 {
+            let current = trimText(lineText(source, map, scan))
+            if scan == first and current.length >= 2 {
+                current = trimText(sliceText(current, 0, current.length - 2))
+            }
+            let open = findSubstring(current, "/*", 0)
+            if open >= 0 {
+                block.push(stripStar(sliceText(current, open + 2, current.length)))
+                break
+            }
+            block.push(stripStar(current))
+            scan = scan - 1
+        }
+        return reverseJoin(block)
+    }
+    let lines = []
+    let scan = first
+    while scan >= 0 {
+        let current = trimText(lineText(source, map, scan))
+        if findSubstring(current, "//", 0) != 0 {
+            break
+        }
+        lines.push(trimText(sliceText(current, 2, current.length)))
+        scan = scan - 1
+    }
+    reverseJoin(lines)
+}
+
+let docForUnit = |connection, unit, offset| {
+    let entry = unitMap(connection, unit)
+    if entry == null {
+        ""
+    } else {
+        docAt(entry.source, entry.map, offset)
+    }
+}
+
+let hoverText = |title, doc, at| {
+    let text = "**" + title + "**"
+    if doc != null and doc != "" {
+        text = text + "\n\n" + doc
+    }
+    if at != null {
+        text = text + "\n\nDefined at `" + at + "`"
+    }
+    text
+}
+
+let pathOf = |uri| {
+    if findSubstring(uri, "file://", 0) == 0 {
+        let path = ""
+        let index = 7
+        while index < uri.length {
+            path = path + uri[index]
+            index = index + 1
+        }
+        path
+    } else {
+        uri
+    }
+}
+
+let positionInRange = |position, start, end| {
+    let after = position.line > start.line or (position.line == start.line and position.character >= start.character)
+    let before = position.line < end.line or (position.line == end.line and position.character < end.character)
+    after and before
+}
+
+let tokenAtPosition = |tree, map, position| {
+    let low = 0
+    let high = tree.tokenCount
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        let start = positionOf(map, tree.tokenStart(mid))
+        if position.line > start.line or (position.line == start.line and position.character >= start.character) {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    if low == 0 {
+        return null
+    }
+    let token = tree.tokens.get(low - 1)
+    if token.isTrivia {
+        return null
+    }
+    let start = positionOf(map, token.start)
+    let end = positionOf(map, token.end)
+    if positionInRange(position, start, end) {
+        token
+    } else {
+        null
+    }
+}
+
+let tokenAtOffset = |tree, offset| {
+    let low = 0
+    let high = tree.tokenCount
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if tree.tokenStart(mid) <= offset {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    let index = low - 1
+    if index < 0 {
+        return null
+    }
+    let token = tree.tokens.get(index)
+    if token.isTrivia or token.end <= offset {
+        return null
+    }
+    token
+}
+
+let sendAt = |tree, map, position| {
+    let token = tokenAtPosition(tree, map, position)
+    if token != null and token.parent == :Send {
+        token
+    } else {
+        null
+    }
+}
+
+let parseDocument = |connection, uri, source| {
+    let cached = connection.parses[uri]
+    if cached != null and cached.text == source {
+        return cached
+    }
+    if cached != null {
+        cached.tree.dispose()
+    }
+    let tree = syntax.parse(source)
+    let entry = {
+        text: source
+        tree: tree
+        map: buildMap(source)
+    }
+    connection.parses[uri] = entry
+    entry
+}
+
+let resolveDocument = |connection, uri, source| {
+    let cached = connection.resolutions[uri]
+    if cached != null and cached.text == source {
+        return cached
+    }
+    if cached != null {
+        cached.resolved.dispose()
+    }
+    let parsed = parseDocument(connection, uri, source)
+    let resolved = parsed.tree.resolve()
+    let entry = {
+        text: source
+        tree: parsed.tree
+        resolved: resolved
+        map: parsed.map
+    }
+    connection.resolutions[uri] = entry
+    entry
+}
+
+let unitMap = |connection, name| {
+    let source = connection.indexSources[name]
+    if source == null {
+        source = KetteTools.unitText(name)
+    }
+    if source == "" {
+        return null
+    }
+    let cached = connection.unitMaps[name]
+    if cached != null and cached.source == source {
+        return cached
+    }
+    let entry = {
+        source: source
+        map: buildMap(source)
+    }
+    connection.unitMaps[name] = entry
+    entry
+}
+
+let uriFor = |name| {
+    if findSubstring(name, "file://", 0) == 0 {
+        name
+    } else if name[0] == "/" {
+        "file://" + name
+    } else if name.length >= 3 and name[1] == ":" and (name[2] == "/" or name[2] == "\\") {
+        "file:///" + name
+    } else {
+        name
+    }
+}
+
+let unitKey = |connection, uri| {
+    if KetteTools.unitText(uri) != "" {
+        uri
+    } else {
+        let path = pathOf(uri)
+        if KetteTools.unitText(path) != "" {
+            path
+        } else {
+            uri
+        }
+    }
+}
+
+let importUnits = |connection, key, alias| {
+    let info = KetteTools.importSource(key, alias)
+    if info == null or info[0] == "" {
+        return []
+    }
+    let targets = if info[1] != "" {
+        KetteTools.exportSource(info[0], info[1])
+    } else {
+        KetteTools.moduleSource(info[0])
+    }
+    let units = []
+    if targets != null {
+        targets.forEach(|target| {
+            if !units.includes(target[0]) {
+                units.push(target[0])
+            }
+        })
+    }
+    units
+}
+
+let receiverUnits = |connection, tree, resolved, key, token| {
+    let root = tokenAtOffset(tree, tree.nodeStart(token.parentId))
+    if root == null {
+        return []
+    }
+    if root.kind == :SelfKw {
+        return [key]
+    }
+    let binding = resolved.bindingAt(root)
+    if binding != null {
+        let declaration = resolved.binding(binding)
+        if declaration.kind == "import" {
+            return importUnits(connection, key, declaration.name)
+        }
+        return [key]
+    }
+    if resolved.resolutionAt(root.parentId) == syntax.Resolution.Global {
+        ensureIndex(connection)
+        let units = []
+        let locations = connection.globals[root.text]
+        if locations != null {
+            locations.forEach(|location| {
+                if !units.includes(location.unit) {
+                    units.push(location.unit)
+                }
+            })
+        }
+        return units
+    }
+    []
+}
+
+let moduleMember = |connection, tree, resolved, key, token| {
+    let node = token.parentId
+    if tree.nodeChildCount(node) == 0 {
+        return []
+    }
+    let receiver = tree.nodeChild(node, 0)
+    let root = tokenAtOffset(tree, tree.nodeStart(receiver))
+    if root == null {
+        return []
+    }
+    let binding = resolved.bindingAt(root)
+    if binding == null {
+        return []
+    }
+    let declaration = resolved.binding(binding)
+    if declaration.kind != "import" {
+        return []
+    }
+    let info = KetteTools.importSource(key, declaration.name)
+    if info == null or info[1] != "" {
+        return []
+    }
+    let text = tree.nodeText(receiver)
+    let dot = findSubstring(text, ".", 0)
+    let path = info[0]
+    if dot >= 0 {
+        let rest = ""
+        let index = dot
+        while index < text.length {
+            rest = rest + text[index]
+            index = index + 1
+        }
+        path = path + rest
+    }
+    let exports = KetteTools.exportSource(path, token.text)
+    if exports != null and exports.length > 0 {
+        return sourceLocations(connection, exports)
+    }
+    let modules = KetteTools.moduleSource(path + "." + token.text)
+    if modules != null and modules.length > 0 {
+        return sourceLocations(connection, modules)
+    }
+    []
+}
+
+let symbolUnits = |connection, tree, resolved, key, token| {
+    let units = [key]
+    let binding = resolved.bindingAt(token)
+    if binding != null {
+        let declaration = resolved.binding(binding)
+        if declaration.kind == "import" {
+            importUnits(connection, key, declaration.name).forEach(|unit| {
+                if !units.includes(unit) {
+                    units.push(unit)
+                }
+            })
+        }
+    } else if resolved.resolutionAt(token.parentId) == syntax.Resolution.Global {
+        ensureIndex(connection)
+        let locations = connection.globals[token.text]
+        if locations != null {
+            locations.forEach(|location| {
+                if !units.includes(location.unit) {
+                    units.push(location.unit)
+                }
+            })
+        }
+    }
+    units
+}
+
+let referenceUnits = |connection, tree, resolved, key, token| {
+    let units = symbolUnits(connection, tree, resolved, key, token)
+    if token.parent == :Send or token.parent == :Get {
+        receiverUnits(connection, tree, resolved, key, token).forEach(|unit| {
+            if !units.includes(unit) {
+                units.push(unit)
+            }
+        })
+    }
+    units
+}
+
+let slotCandidates = |connection, name, units| {
+    let result = []
+    let locations = connection.slots[name]
+    if locations != null {
+        locations.forEach(|location| {
+            if units.includes(location.unit) {
+                result.push(location)
+            }
+        })
+    }
+    result
+}
+
+let resolveAccess = |connection, tree, resolved, key, source, token| {
+    let result = if KetteTools.unitText(key) == source {
+        KetteTools.sendTarget(key, token.start, token.end)
+    } else {
+        null
+    }
+    let targets = if result == null { [] } else { result[3] }
+    let target = sourceTarget(targets)
+    let member = moduleMember(connection, tree, resolved, key, token)
+    let slot = null
+    if target == null and member.length == 0 {
+        ensureIndex(connection)
+        let units = receiverUnits(connection, tree, resolved, key, token)
+        slot = pickLocation(slotCandidates(connection, token.text, units), key)
+    }
+    {
+        target: target
+        member: member
+        slot: slot
+        native: if target == null and member.length == 0 and slot == null { targets } else { [] }
+    }
+}
+
+let addIndex = |index, name, unit, start, end| {
+    let locations = index[name]
+    if locations == null {
+        locations = []
+        index[name] = locations
+    }
+    locations.push({
+        unit: unit
+        start: start
+        end: end
+    })
+}
+
+let dropUnit = |index, unit| {
+    Object.getOwnPropertyNames(index).forEach(|name| {
+        let kept = []
+        index[name].forEach(|location| {
+            if location.unit != unit {
+                kept.push(location)
+            }
+        })
+        index[name] = kept
+    })
+}
+
+let indexUnit = |connection, name, source| {
+    let tree = syntax.parse(source)
+    let resolved = tree.resolve()
+    let count = resolved.bindingCount
+    let index = 0
+    while index < count {
+        if resolved.bindingTopLevel(index) {
+            let binding = resolved.binding(index)
+            if binding.kind != "import" and binding.kind != "export" {
+                addIndex(connection.globals, binding.name, name, binding.start, binding.end)
+            }
+        }
+        index = index + 1
+    }
+    tree.tokens.forEach(|token| {
+        if token.kind == :Ident {
+            addIndex(connection.names, token.text, name, token.start, token.end)
+        }
+        if token.parent == :Slot or token.parent == :SlotMulti {
+            addIndex(connection.slots, token.text, name, token.start, token.end)
+        }
+    })
+    resolved.dispose()
+    tree.dispose()
+}
+
+let ensureIndex = |connection| {
+    let claimed = Object.create(null)
+    Object.getOwnPropertyNames(connection.documents).forEach(|uri| {
+        let source = connection.documents[uri]
+        let name = unitKey(connection, uri)
+        claimed[name] = true
+        if connection.indexedDocs[uri] != source {
+            dropUnit(connection.globals, name)
+            dropUnit(connection.slots, name)
+            dropUnit(connection.names, name)
+            indexUnit(connection, name, source)
+            connection.indexSources[name] = source
+            connection.indexedDocs[uri] = source
+        }
+    })
+    let names = KetteTools.unitNames()
+    names.forEach(|name| {
+        if claimed[name] {
+            return
+        }
+        let hash = KetteTools.unitHash(name)
+        if connection.indexedUnits[name] != hash {
+            dropUnit(connection.globals, name)
+            dropUnit(connection.slots, name)
+            dropUnit(connection.names, name)
+            let source = KetteTools.unitText(name)
+            if source != "" {
+                indexUnit(connection, name, source)
+                connection.indexSources[name] = source
+            }
+            connection.indexedUnits[name] = hash
+        }
+    })
+}
+
+let orderLocations = |locations, key| {
+    let result = []
+    if locations != null {
+        locations.forEach(|location| {
+            if location.unit == key {
+                result.push(location)
+            }
+        })
+        locations.forEach(|location| {
+            if location.unit != key {
+                result.push(location)
+            }
+        })
+    }
+    result
+}
+
+let sourceTarget = |targets| {
+    let result = null
+    if targets != null {
+        targets.forEach(|target| {
+            if result == null and target[1] != "" {
+                result = target
+            }
+        })
+    }
+    result
+}
+
+let pickLocation = |locations, key| {
+    let ordered = orderLocations(locations, key)
+    if ordered.length == 0 {
+        return null
+    }
+    if ordered[0].unit == key {
+        ordered[0]
+    } else {
+        ordered[ordered.length - 1]
+    }
+}
+
+let sourceLocations = |connection, targets| {
+    let result = []
+    if targets != null {
+        targets.forEach(|target| {
+            let entry = unitMap(connection, target[0])
+            if entry != null {
+                result.push({
+                    uri: uriFor(target[0])
+                    unit: target[0]
+                    start: target[1]
+                    end: target[2]
+                    range: rangeOf(entry.map, target[1], target[2])
+                })
+            }
+        })
+    }
+    result
+}
+
+let resolveImport = |connection, key, alias| {
+    let info = KetteTools.importSource(key, alias)
+    if info == null or info[0] == "" {
+        []
+    } else if info[1] != "" {
+        sourceLocations(connection, KetteTools.exportSource(info[0], info[1]))
+    } else {
+        sourceLocations(connection, KetteTools.moduleSource(info[0]))
+    }
+}
+
+let locationsFor = |connection, locations| {
+    let result = []
+    if locations != null {
+        locations.forEach(|location| {
+            let target = unitMap(connection, location.unit)
+            if target != null {
+                result.push({
+                    uri: uriFor(location.unit)
+                    unit: location.unit
+                    start: location.start
+                    end: location.end
+                    range: rangeOf(target.map, location.start, location.end)
+                })
+            }
+        })
+    }
+    result
+}
+
+let invalidateResolution = |connection, uri| {
+    let cached = connection.resolutions[uri]
+    if cached != null {
+        cached.resolved.dispose()
+    }
+    connection.resolutions[uri] = undefined
+}
+
+// Multiple of 5 so a token never straddles two chunks.
+let TOKEN_CHUNK_ELEMENTS = 510
+
+let TokenSink = {
+    chunks: null
+    chunk: null
+    at: 0
+    previousLine: 0
+    previousCharacter: 0
+    first: true
+
+    new: {
+        let sink = self.clone()
+        sink.chunks = []
+        sink.chunk = Array(TOKEN_CHUNK_ELEMENTS)
+        sink.at = 0
+        sink.previousLine = 0
+        sink.previousCharacter = 0
+        sink.first = true
+        sink
+    }
+    add: |line, character, length, kind| {
+        if self.first {
+            self.chunk[self.at] = line
+            self.at = self.at + 1
+            self.chunk[self.at] = character
+            self.at = self.at + 1
+            self.first = false
+        } else {
+            self.chunk[self.at] = line - self.previousLine
+            self.at = self.at + 1
+            self.chunk[self.at] = if line == self.previousLine { character - self.previousCharacter } else { character }
+            self.at = self.at + 1
+        }
+        self.chunk[self.at] = length
+        self.at = self.at + 1
+        self.chunk[self.at] = kind
+        self.at = self.at + 1
+        self.chunk[self.at] = 0
+        self.at = self.at + 1
+        if self.at >= TOKEN_CHUNK_ELEMENTS {
+            self.chunks.push(self.chunk)
+            self.chunk = Array(TOKEN_CHUNK_ELEMENTS)
+            self.at = 0
+        }
+        self.previousLine = line
+        self.previousCharacter = character
+        self
+    }
+    finish: {
+        if self.at > 0 {
+            let tail = Array(self.at)
+            let index = 0
+            while index < self.at {
+                tail[index] = self.chunk[index]
+                index = index + 1
+            }
+            self.chunks.push(tail)
+        }
+        self.chunks
+    }
+}
+
+let addSegments = |sink, map, token, kind| {
     let startUnit = unitAt(map, token.start)
     let endUnit = unitAt(map, token.end)
     let startLine = lineOf(map, token.start)
@@ -464,69 +1327,47 @@ let addSegments = |data, map, token, kind, limit| {
         }
         let from = if startUnit > lineStart { startUnit } else { lineStart }
         let to = if endUnit < lineEnd { endUnit } else { lineEnd }
-        if to > from and data.length < limit {
-            data.push([line, from - lineStart, to - from, kind])
+        if to > from {
+            sink.add(line, from - lineStart, to - from, kind)
         }
         line = line + 1
     }
 }
 
-// Cap the encoded token data; later tokens are dropped.
-let MAX_TOKEN_DATA = 22000
-
-let semanticTokens = |source| {
-    let tree = syntax.parse(source)
-    let map = buildMap(source)
-    let limit = Math.floor(MAX_TOKEN_DATA / 5)
-    let pieces = []
+let semanticTokens = |tree, map, resolved, source| {
+    let sink = TokenSink.new()
+    let bindingKinds = Object.create(null)
     tree.tokens.forEach(|token| {
-        let kind = tokenType(token.kind, token.parent)
+        let tokenKind = token.kind
+        if tokenKind == :Whitespace or tokenKind == :Newline or tokenKind == :Eof or tokenKind == :Tombstone {
+            return
+        }
+        let kind = tokenType(tree, map, resolved, source, bindingKinds, token)
         if kind != null {
-            addSegments(pieces, map, token, kind, limit)
+            addSegments(sink, map, token, kind)
         }
     })
-    let count = if pieces.length < limit { pieces.length } else { limit }
-    let data = Array(count * 5)
-    let previousLine = 0
-    let previousCharacter = 0
-    let first = true
-    let index = 0
-    let at = 0
-    while index < count {
-        let piece = pieces[index]
-        let line = piece[0]
-        let character = piece[1]
-        if first {
-            data[at] = line
-            at = at + 1
-            data[at] = character
-            at = at + 1
-            first = false
-        } else {
-            data[at] = line - previousLine
-            at = at + 1
-            data[at] = if line == previousLine { character - previousCharacter } else { character }
-            at = at + 1
-        }
-        data[at] = piece[2]
-        at = at + 1
-        data[at] = piece[3]
-        at = at + 1
-        data[at] = 0
-        at = at + 1
-        previousLine = line
-        previousCharacter = character
-        index = index + 1
-    }
-    {
-        data: data
-        truncated: pieces.length >= limit
-    }
+    sink.finish()
 }
 
-let diagnosticsFor = |source| {
-    let tree = syntax.parse(source)
-    let map = buildMap(source)
+let semanticFor = |connection, uri, source| {
+    let cached = connection.semantic[uri]
+    if cached != null and cached.source == source {
+        return cached.chunks
+    }
+    let resolved = resolveDocument(connection, uri, source)
+    let chunks = semanticTokens(resolved.tree, resolved.map, resolved.resolved, source)
+    connection.semantic[uri] = {
+        source: source
+        chunks: chunks
+    }
+    chunks
+}
+
+let diagnosticsFrom = |tree, map| {
+    if tree.errorCount == 0 {
+        return []
+    }
     let diagnostics = []
     let i = 0
     while i < tree.errorCount {
@@ -541,10 +1382,15 @@ let diagnosticsFor = |source| {
     diagnostics
 }
 
+let diagnosticsFor = |connection, uri, source| {
+    let parsed = parseDocument(connection, uri, source)
+    diagnosticsFrom(parsed.tree, parsed.map)
+}
+
 let publishDiagnostics = |connection, uri, source| {
     connection.notify("textDocument/publishDiagnostics", {
         uri: uri
-        diagnostics: diagnosticsFor(source)
+        diagnostics: diagnosticsFor(connection, uri, source)
     })
 }
 
@@ -579,12 +1425,12 @@ let errorText = |error| {
     }
 }
 
-let evaluate = |source| {
+let evaluate = |source, name| {
     let ok = true
     let result = null
     let message = null
     try {
-        result = KetteTools.evalRepl("kette", source)
+        result = KetteTools.evalRepl("kette", source, name)
     } catch (error) {
         ok = false
         message = errorText(error)
@@ -622,9 +1468,11 @@ let methodKind = match |method| {
     "textDocument/didSave" => :didSave
     "textDocument/didClose" => :didClose
     "textDocument/semanticTokens/full" => :semanticTokens
+    "kette/semanticTokens" => :ketteSemanticTokens
     "textDocument/formatting" => :formatting
     "textDocument/hover" => :hover
     "textDocument/definition" => :definition
+    "textDocument/references" => :references
     "textDocument/documentSymbol" => :documentSymbol
     "workspace/symbol" => :workspaceSymbol
     "kette/eval" => :eval
@@ -682,6 +1530,7 @@ let handleRequest = |connection, message| {
         }
         :didOpen => {
             let document = textDocument(params)
+            invalidateResolution(connection, document.uri)
             connection.documents[document.uri] = document.text
             publishDiagnostics(connection, document.uri, document.text)
         }
@@ -689,15 +1538,19 @@ let handleRequest = |connection, message| {
             let uri = textDocument(params).uri
             let changes = params.contentChanges
             if changes.length > 0 {
-                let text = changes[changes.length - 1].text
+                let text = applyChanges(connection, uri, changes)
+                invalidateResolution(connection, uri)
+                connection.semantic[uri] = undefined
                 connection.documents[uri] = text
-                publishDiagnostics(connection, uri, text)
+                scheduleDiagnostics(connection, uri)
             }
         }
         :didSave => {
             let uri = textDocument(params).uri
             if params.text != null {
                 connection.documents[uri] = params.text
+                invalidateResolution(connection, uri)
+                connection.semantic[uri] = undefined
             }
             if connection.documents[uri] != null {
                 publishDiagnostics(connection, uri, connection.documents[uri])
@@ -705,6 +1558,23 @@ let handleRequest = |connection, message| {
         }
         :didClose => {
             let uri = textDocument(params).uri
+            invalidateResolution(connection, uri)
+            if connection.diagnosticsTask != null {
+                connection.diagnosticsTask.cancel()
+                connection.diagnosticsTask = null
+            }
+            if connection.parses[uri] != null {
+                connection.parses[uri].tree.dispose()
+                connection.parses[uri] = undefined
+            }
+            let name = unitKey(connection, uri)
+            dropUnit(connection.globals, name)
+            dropUnit(connection.slots, name)
+            dropUnit(connection.names, name)
+            connection.indexSources[name] = undefined
+            connection.indexedDocs[uri] = undefined
+            connection.indexedUnits[name] = undefined
+            connection.semantic[uri] = undefined
             connection.documents[uri] = undefined
             connection.notify("textDocument/publishDiagnostics", {
                 uri: uri
@@ -716,15 +1586,20 @@ let handleRequest = |connection, message| {
             if connection.documents[uri] == null {
                 connection.respond(id, { data: [] })
             } else {
-                let result = semanticTokens(connection.documents[uri])
-                connection.respond(id, { data: result.data })
-                if result.truncated and !connection.tokensWarned {
-                    connection.tokensWarned = true
-                    connection.notify("window/showMessage", {
-                        type: 2
-                        message: "Kette: semantic tokens truncated for a large document"
-                    })
-                }
+                let source = connection.documents[uri]
+                let chunks = semanticFor(connection, uri, source)
+                let data = if chunks.length > 0 { chunks[0] } else { [] }
+                connection.respond(id, { data: data })
+            }
+        }
+        :ketteSemanticTokens => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, { chunks: [] })
+            } else {
+                let source = connection.documents[uri]
+                let chunks = semanticFor(connection, uri, source)
+                connection.respond(id, { chunks: chunks })
             }
         }
         :formatting => {
@@ -754,10 +1629,277 @@ let handleRequest = |connection, message| {
             }
         }
         :hover => {
-            connection.respond(id, null)
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, null)
+            } else {
+                let cached = resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let key = unitKey(connection, uri)
+                let position = params.position
+                let found = tokenAtPosition(tree, map, position)
+                let access = if found != null and (found.parent == :Send or found.parent == :Get) { found } else { null }
+                if found == null {
+                    connection.respond(id, null)
+                } else if access != null {
+                    let info = resolveAccess(connection, tree, resolved, key, source, access)
+                    if info.target != null {
+                        let target = info.target
+                        let label = if target[0] == "" { access.text } else { target[0] }
+                        let at = if target[1] == key {
+                            let targetPosition = positionOf(map, target[2])
+                            key + ":" + (targetPosition.line + 1) + ":" + (targetPosition.character + 1)
+                        } else {
+                            let targetUnit = unitMap(connection, target[1])
+                            if targetUnit == null {
+                                target[1] + ":" + target[2] + "-" + target[3]
+                            } else {
+                                let targetPosition = positionOf(targetUnit.map, target[2])
+                                target[1] + ":" + (targetPosition.line + 1) + ":" + (targetPosition.character + 1)
+                            }
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: hoverText(label, docForUnit(connection, target[1], target[2]), at)
+                            }
+                            range: rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.member.length > 0 {
+                        let location = info.member[0]
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: hoverText(access.text, docForUnit(connection, location.unit, location.start), location.uri + ":" + (location.range.start.line + 1) + ":" + (location.range.start.character + 1))
+                            }
+                            range: rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.slot != null {
+                        let location = info.slot
+                        let entry = unitMap(connection, location.unit)
+                        let at = if entry == null {
+                            location.unit + ":" + location.start + "-" + location.end
+                        } else {
+                            let locationPosition = positionOf(entry.map, location.start)
+                            location.unit + ":" + (locationPosition.line + 1) + ":" + (locationPosition.character + 1)
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: hoverText(access.text, docForUnit(connection, location.unit, location.start), at)
+                            }
+                            range: rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.native.length > 0 {
+                        let label = if info.native[0][0] == "" { access.text } else { info.native[0][0] }
+                        let doc = NATIVE_DOCS[access.text]
+                        let value = if doc != null { "**" + label + "**\n\n" + doc + "\n\nNative." } else { "**" + label + "**\n\nNative." }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: value
+                            }
+                            range: rangeOf(map, access.start, access.end)
+                        })
+                    } else {
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: "**" + access.text + "**\n\nNo definition found."
+                            }
+                            range: rangeOf(map, access.start, access.end)
+                        })
+                    }
+                } else if found.parent == :Slot or found.parent == :SlotMulti {
+                    let at = positionOf(map, found.start)
+                    connection.respond(id, {
+                        contents: {
+                            kind: "markdown"
+                            value: hoverText(found.text, docAt(source, map, found.start), uri + ":" + (at.line + 1) + ":" + (at.character + 1))
+                        }
+                        range: rangeOf(map, found.start, found.end)
+                    })
+                } else {
+                    let binding = resolved.bindingAt(found)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        let imported = if declaration.kind == "import" {
+                            resolveImport(connection, key, declaration.name)
+                        } else {
+                            []
+                        }
+                        let value = if imported.length != 0 {
+                            let location = imported[imported.length - 1]
+                            hoverText(declaration.name + " (import)", docForUnit(connection, location.unit, location.start), location.uri + ":" + (location.range.start.line + 1) + ":" + (location.range.start.character + 1))
+                        } else {
+                            let at = positionOf(map, declaration.start)
+                            hoverText(declaration.name + " (" + declaration.kind + ")", docAt(source, map, declaration.start), uri + ":" + (at.line + 1) + ":" + (at.character + 1))
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: value
+                            }
+                            range: rangeOf(map, found.start, found.end)
+                        })
+                    } else if resolved.resolutionAt(found.parentId) == syntax.Resolution.Global {
+                        ensureIndex(connection)
+                        let location = pickLocation(connection.globals[found.text], key)
+                        if location == null {
+                            connection.respond(id, null)
+                        } else {
+                            let target = unitMap(connection, location.unit)
+                            let at = if target == null {
+                                location.unit + ":" + location.start + "-" + location.end
+                            } else {
+                                let position = positionOf(target.map, location.start)
+                                location.unit + ":" + (position.line + 1) + ":" + (position.character + 1)
+                            }
+                            connection.respond(id, {
+                                contents: {
+                                    kind: "markdown"
+                                    value: hoverText(found.text + " (global)", docForUnit(connection, location.unit, location.start), at)
+                                }
+                                range: rangeOf(map, found.start, found.end)
+                            })
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                }
+            }
         }
         :definition => {
-            connection.respond(id, null)
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, null)
+            } else {
+                let cached = resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let token = tokenAtPosition(tree, map, params.position)
+                let key = unitKey(connection, uri)
+                if token == null {
+                    connection.respond(id, null)
+                } else if token.parent == :Send or token.parent == :Get {
+                    let info = resolveAccess(connection, tree, resolved, key, source, token)
+                    if info.target != null {
+                        let target = info.target
+                        let targetUnit = if target[1] == key { { map: map } } else { unitMap(connection, target[1]) }
+                        if targetUnit == null {
+                            connection.respond(id, null)
+                        } else {
+                            connection.respond(id, [{
+                                uri: uriFor(target[1])
+                                range: rangeOf(targetUnit.map, target[2], target[3])
+                            }])
+                        }
+                    } else if info.member.length > 0 {
+                        connection.respond(id, info.member)
+                    } else if info.slot != null {
+                        let locations = locationsFor(connection, [info.slot])
+                        if locations.length == 0 {
+                            connection.respond(id, null)
+                        } else {
+                            connection.respond(id, locations)
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                } else {
+                    let binding = resolved.bindingAt(token)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        if declaration.kind == "import" {
+                            let locations = resolveImport(connection, key, declaration.name)
+                            if locations.length != 0 {
+                                connection.respond(id, locations)
+                            } else {
+                                connection.respond(id, [{
+                                    uri: key
+                                    range: rangeOf(map, declaration.start, declaration.end)
+                                }])
+                            }
+                        } else {
+                            connection.respond(id, [{
+                                uri: key
+                                range: rangeOf(map, declaration.start, declaration.end)
+                            }])
+                        }
+                    } else if resolved.resolutionAt(token.parentId) == syntax.Resolution.Global {
+                        ensureIndex(connection)
+                        let location = pickLocation(connection.globals[token.text], key)
+                        if location == null {
+                            connection.respond(id, null)
+                        } else {
+                            let locations = locationsFor(connection, [location])
+                            if locations.length == 0 {
+                                connection.respond(id, null)
+                            } else {
+                                connection.respond(id, locations)
+                            }
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                }
+            }
+        }
+        :references => {
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, [])
+            } else {
+                let cached = resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let token = tokenAtPosition(tree, map, params.position)
+                if token == null or token.kind != :Ident {
+                    connection.respond(id, [])
+                } else {
+                    let include = if params.context != null { params.context.includeDeclaration } else { true }
+                    let result = []
+                    let binding = resolved.bindingAt(token)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        tree.tokens.forEach(|candidate| {
+                            if candidate.kind == :Ident and resolved.bindingAt(candidate) == binding {
+                                if include or candidate.start != declaration.start or candidate.end != declaration.end {
+                                    result.push({
+                                        uri: uri
+                                        range: rangeOf(map, candidate.start, candidate.end)
+                                    })
+                                }
+                            }
+                        })
+                    } else {
+                        ensureIndex(connection)
+                        let units = referenceUnits(connection, tree, resolved, unitKey(connection, uri), token)
+                        let locations = connection.names[token.text]
+                        if locations != null {
+                            locations.forEach(|location| {
+                                if units.includes(location.unit) {
+                                    let entry = unitMap(connection, location.unit)
+                                    if entry != null {
+                                        result.push({
+                                            uri: uriFor(location.unit)
+                                            range: rangeOf(entry.map, location.start, location.end)
+                                        })
+                                    }
+                                }
+                            })
+                        }
+                    }
+                    connection.respond(id, result)
+                }
+            }
         }
         :documentSymbol => {
             connection.respond(id, [])
@@ -766,8 +1908,14 @@ let handleRequest = |connection, message| {
             connection.respond(id, [])
         }
         :eval => {
-            let result = evaluate(params.source)
+            let name = if params.uri != null {
+                params.uri
+            } else {
+                "<repl>"
+            }
+            let result = evaluate(params.source, name)
             if params.uri != null {
+                connection.sources[params.uri] = params.source
                 publishDiagnostics(connection, params.uri, params.source)
             }
             connection.respond(id, result)
@@ -786,12 +1934,16 @@ let handleRequest = |connection, message| {
                 return true
             }
             noteLoaded(path)
-            let result = evaluate(source)
+            connection.sources[path] = source
+            let result = evaluate(source, path)
             connection.respond(id, result)
         }
         :check => {
+            let tree = syntax.parse(params.source)
+            let diagnostics = diagnosticsFrom(tree, buildMap(params.source))
+            tree.dispose()
             connection.respond(id, {
-                diagnostics: diagnosticsFor(params.source)
+                diagnostics: diagnostics
             })
         }
         :format => {
@@ -867,7 +2019,7 @@ if tcpPort > 0 {
                 break
             }
             if stream == null {
-                pause()
+                pool.sleep(10000000)
             } else {
                 inbox.push({
                     accept: stream
@@ -891,6 +2043,12 @@ while true {
         let accepted = Connection.new(item.accept, "tcp", false)
         startConnection(accepted)
         log("kettels: client connected")
+    } else if item.diagnostics != null {
+        let pending = item.diagnostics
+        pending.connection.diagnosticsTask = null
+        if pending.connection.documents[pending.uri] == pending.text {
+            publishDiagnostics(pending.connection, pending.uri, pending.text)
+        }
     } else if !handleRequest(item.connection, item.message) {
         break
     }

@@ -2,6 +2,9 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/timer.ktt
 // Check: kette/kette_tests/check.py
 
+use atomic { AtomicI64 }
+use threads { Thread }
+
 use collections.delay_scheduler { DelayScheduler }
 use collections.queue { Queue }
 
@@ -21,7 +24,7 @@ while fired.size() < 2 {
 Test.assert(fired.take(), "early")
 Test.assert(fired.take(), "late")
 
-let cancelled = atomic.AtomicI64.new(0)
+let cancelled = AtomicI64.new(0)
 let timer = scheduler.schedule(20000000, {
     cancelled.store(1)
 })

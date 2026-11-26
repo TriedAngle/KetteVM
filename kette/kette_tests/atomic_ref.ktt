@@ -2,9 +2,12 @@
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/atomic_ref.ktt
 // Check: kette/kette_tests/check.py
 
+use atomic { AtomicI64, AtomicRef }
+use threads { Thread }
+
 use collections.pool { ThreadPool }
 
-let ref = atomic.AtomicRef.new(null)
+let ref = AtomicRef.new(null)
 Test.assert(ref.load(), null)
 
 let first = { value: 1 }
@@ -26,10 +29,10 @@ Test.assert(ref.load(), young)
 
 // Concurrent lock-free stack.
 let pool = ThreadPool.newWithSize(2)
-let head = atomic.AtomicRef.new(null)
+let head = AtomicRef.new(null)
 let producers = 4
 let perProducer = 100
-let done = atomic.AtomicI64.new(0)
+let done = AtomicI64.new(0)
 let producer = 0
 while producer < producers {
     pool.spawn({
