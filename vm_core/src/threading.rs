@@ -320,6 +320,7 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             },
             &scope,
         );
+        init_thread_fields(heap, thread_vm, &scope, main);
         let main_object = scope
             .cast::<Object>(heap, main.as_tagged(heap).erase())
             .expect("main thread object");
@@ -434,6 +435,29 @@ fn state_for<'a>(
 }
 
 // Creates a not-yet-started platform thread for `target`.
+fn init_thread_fields(
+    heap: &mut Heap,
+    vm: &VM,
+    scope: &HandleScope<'_>,
+    thread: Handle<'_, ThreadObject>,
+) {
+    let thread = scope
+        .cast::<Object>(heap, thread.as_tagged(heap).erase())
+        .expect("thread object");
+    let null = heap.known().null.get_handle(heap, scope).erase();
+    for name in ["scheduler", "queued", "waiter"] {
+        let name = vm.interner().intern_str(heap, scope, name);
+        Object::define_own_property_ordinary(
+            heap,
+            scope,
+            thread,
+            scope.handle(name.as_tagged(heap)),
+            PropertyDescriptor::data(null),
+        )
+        .expect("thread field");
+    }
+}
+
 fn thread_new_platform<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -462,6 +486,7 @@ fn thread_new_platform<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) ->
             },
             &scope,
         );
+        init_thread_fields(heap, vm, &scope, object);
         object.as_tagged(heap).erase()
     })
 }
@@ -497,6 +522,7 @@ fn thread_new_virtual<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> 
             },
             &scope,
         );
+        init_thread_fields(heap, vm, &scope, object);
         vm_state.set_thread_object(object.as_tagged(heap));
         object.as_tagged(heap).erase()
     })
@@ -690,6 +716,7 @@ pub fn create_thread_object(vm: &VM, heap: &mut Heap, state: &ThreadState) {
             },
             &scope,
         );
+        init_thread_fields(heap, vm, &scope, object);
         state.set_thread_object(object.as_tagged(heap));
     });
 }
@@ -825,9 +852,11 @@ fn thread_mount<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         target.as_tagged(heap).set_state(ThreadStatus::Running);
         target_state.set_resume_target(state.continuation_ptr(), true);
         target_state.set_resume_fiber(crate::tsan::current_fiber());
-        target_state.run_on_heap(heap, || unsafe {
-            crate::continuation::switch(state.continuation_ptr(), target_state.continuation_ptr())
-        });
+        target_state.run_on_heap(
+            heap,
+            state.continuation_ptr(),
+            target_state.continuation_ptr(),
+        );
 
         // The continuation has yielded: publish the park, and report whether
         // this mount owns resubmission (yield or a permit that arrived while

@@ -182,6 +182,10 @@ impl Continuation {
 /// # Safety
 /// `from` and `to` must be valid continuations; `to` must be suspended or
 /// freshly prepared.
+///
+/// Always inline: an instrumented frame here would straddle the fiber switch
+/// and unbalance TSan's per-fiber shadow stack.
+#[inline(always)]
 pub unsafe fn switch(from: *mut Continuation, to: *const Continuation) {
     // Safety: caller upholds the continuation invariants.
     unsafe { kette_switch(from, to) }

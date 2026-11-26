@@ -5,8 +5,9 @@ use bytecode::{FunctionId, SourceMode, disassemble, disassemble_function};
 use crate::materialize::Materialize;
 use crate::{
     Args, CallInfo, Errors, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, StringInterner, StringRef, Tagged, ThreadState, VM,
-    Value, VmError, WellKnown, eval_global_context, raise_runtime,
+    NativeIndex, Object, PropertyDescriptor, Smi, StringInterner, StringRef, Tagged, ThreadState,
+    VM, Value, VmError, WeakFixedArray, WellKnown, eval_global_context, ic::handler_kind_name,
+    raise_runtime,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -228,12 +229,139 @@ impl KetteTools {
         )
     }
 
+    /// Snapshot a function's inline-cache state into a normal array.
+    ///
+    /// One entry per feedback site: `[stateKind, state, handlerKind, handler]`.
+    /// `state` is the cached map (mono), a copied normal array of
+    /// `[map, handler, ...]` (poly), or null. `handler` is the decoded
+    /// directive payload or an object identity. Internal objects (maps and
+    /// handler objects) are reported by identity as a Smi, so the snapshot is
+    /// always printable and never aliases the live feedback vector.
+    pub fn read_feedback_vector<'a>(
+        ctx: HostCtx<'a>,
+        _call: CallInfo<'_>,
+        args: Args,
+    ) -> Tagged<'a, Value> {
+        let HostCtx {
+            vm, heap, state, ..
+        } = ctx;
+        if args.is_empty() {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::InvalidOperandType,
+                "readFeedbackVector expects a function",
+            );
+        }
+        state.handle_scope(|scope| {
+            let null = scope.handle(heap.known().null.get(heap).erase());
+            let Some(object) = args
+                .get_handle(heap, 0)
+                .as_tagged(heap)
+                .get_as::<Object>(heap)
+            else {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::InvalidOperandType,
+                    "readFeedbackVector expects a function",
+                );
+            };
+            let Some(info) = object.callable_info(heap) else {
+                return Errors::raise_with(
+                    vm,
+                    heap,
+                    state,
+                    VmError::InvalidOperandType,
+                    "readFeedbackVector expects a function",
+                );
+            };
+            let Some(feedback) = info.feedback(heap) else {
+                return heap.new_array(&scope, HandleSlice::EMPTY).erase();
+            };
+            let vector = scope.handle(feedback);
+            let sites = vector.as_tagged(heap).len() / 2;
+            let mut entries = Vec::with_capacity(sites);
+            for site in 0..sites {
+                let pair = vector.as_tagged(heap).read_pair(heap, site * 2);
+                let handler = pair.handler.as_strong();
+                let (handler_kind, handler_handle) = if pair.handler.is_cleared()
+                    || handler.is_some_and(|value| value.ptr_eq(heap.known().the_hole.get(heap)))
+                {
+                    ("none", null)
+                } else if let Some(word) = pair.handler.to_i64() {
+                    (
+                        handler_kind_name(word & 0xff),
+                        scope.handle(Smi::new(word >> 8).into_tagged()),
+                    )
+                } else if let Some(strong) = handler {
+                    ("object", scope.handle(identity(strong)))
+                } else {
+                    ("dead", null)
+                };
+                let (state_kind, state_handle) = if pair.state.is_cleared() {
+                    ("cleared", null)
+                } else if pair.state.is_weak_ptr() {
+                    match pair.state.as_strong() {
+                        Some(map) => ("mono", scope.handle(identity(map.erase()))),
+                        None => ("cleared", null),
+                    }
+                } else if let Some(strong) = pair.state.as_strong() {
+                    if strong.ptr_eq(heap.known().the_hole.get(heap)) {
+                        ("unset", null)
+                    } else if strong.ptr_eq(heap.known().megamorphic_symbol.get(heap)) {
+                        ("megamorphic", null)
+                    } else if let Some(pairs) = strong.get_as::<WeakFixedArray>(heap) {
+                        let staged = {
+                            let mut values = Vec::with_capacity(pairs.len());
+                            for i in 0..pairs.len() {
+                                let entry = pairs.get(heap, i);
+                                let value = if let Some(word) = entry.to_i64() {
+                                    Smi::new(word >> 8).into_tagged()
+                                } else if let Some(value) = entry.as_strong() {
+                                    if value.ptr_eq(heap.known().the_hole.get(heap)) {
+                                        null.as_tagged(heap)
+                                    } else {
+                                        identity(value)
+                                    }
+                                } else {
+                                    null.as_tagged(heap)
+                                };
+                                values.push(value);
+                            }
+                            scope.stage(&values)
+                        };
+                        ("poly", scope.handle(heap.new_array(&scope, staged).erase()))
+                    } else {
+                        ("strong", scope.handle(identity(strong)))
+                    }
+                } else {
+                    ("unset", null)
+                };
+                let state_kind = vm.interner().intern_str(heap, &scope, state_kind);
+                let handler_kind = vm.interner().intern_str(heap, &scope, handler_kind);
+                let words = [
+                    state_kind.as_tagged(heap).erase(),
+                    state_handle.as_tagged(heap).erase(),
+                    handler_kind.as_tagged(heap).erase(),
+                    handler_handle.as_tagged(heap).erase(),
+                ];
+                let staged = scope.stage(&words);
+                entries.push(scope.handle(heap.new_array(&scope, staged)));
+            }
+            let staged = scope.stage_handles(&entries);
+            heap.new_array(&scope, staged).erase()
+        })
+    }
+
     pub fn install(
         heap: &mut Heap,
         roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
-        natives: [NativeIndex; 6],
+        natives: [NativeIndex; 7],
     ) {
         let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
@@ -248,13 +376,14 @@ impl KetteTools {
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
         let primitives = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
-        let methods: [(&str, NativeIndex); 6] = [
+        let methods: [(&str, NativeIndex); 7] = [
             ("forceMinorGC", natives[0]),
             ("forceMajorGC", natives[1]),
             ("shutdown", natives[2]),
             ("eval", natives[3]),
             ("evalFile", natives[4]),
             ("bytecode", natives[5]),
+            ("readFeedbackVector", natives[6]),
         ];
         for (name, index) in methods {
             let method = Object::native_function(heap, scope, index, 0);
@@ -309,6 +438,10 @@ impl KetteTools {
         let primitives = Object::get_data_property(heap, scope, tools.erase(), primitives_name);
         Some(scope.handle(primitives.as_heap_object()?))
     }
+}
+
+fn identity(value: Tagged<'_, Value>) -> Tagged<'static, Value> {
+    Smi::new(value.raw_addr() as i64).into_tagged()
 }
 
 fn string_arg(heap: &Heap, args: Args, index: usize) -> Option<String> {

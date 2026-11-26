@@ -1,3 +1,4 @@
+use crate::continuation::{Continuation, switch};
 use core::ffi::c_void;
 
 #[cfg(feature = "tsan")]
@@ -28,13 +29,23 @@ pub fn current_fiber() -> *mut c_void {
     unsafe { __tsan_get_current_fiber() }
 }
 
-#[cfg(feature = "tsan")]
-pub fn switch_to(fiber: *mut c_void) {
-    if fiber.is_null() || fiber == current_fiber() {
-        return;
+/// Switch TSan's fiber and the machine stack in one uninstrumented step.
+///
+/// The TSan switch must not be separated from the raw switch by any
+/// instrumented function: its `__tsan_func_exit` would run on the target
+/// fiber while its `__tsan_func_entry` ran on the source, walking the
+/// source fiber's shadow stack below its base.
+#[inline(always)]
+pub unsafe fn switch_fiber(fiber: *mut c_void, from: *mut Continuation, to: *const Continuation) {
+    #[cfg(feature = "tsan")]
+    if !fiber.is_null() && fiber != current_fiber() {
+        // Safety: `fiber` belongs to a live ThreadState and the raw switch follows immediately.
+        unsafe { __tsan_switch_to_fiber(fiber, 0) };
     }
-    // Safety: `fiber` belongs to a live ThreadState and the raw switch follows.
-    unsafe { __tsan_switch_to_fiber(fiber, 0) };
+    #[cfg(not(feature = "tsan"))]
+    let _ = fiber;
+    // Safety: caller upholds the continuation invariants.
+    unsafe { switch(from, to) }
 }
 
 #[cfg(not(feature = "tsan"))]
@@ -49,6 +60,3 @@ pub fn destroy_fiber(_fiber: *mut c_void) {}
 pub fn current_fiber() -> *mut c_void {
     core::ptr::null_mut()
 }
-
-#[cfg(not(feature = "tsan"))]
-pub fn switch_to(_fiber: *mut c_void) {}

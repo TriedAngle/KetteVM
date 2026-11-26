@@ -303,9 +303,15 @@ extern "C" fn kette_task_entry(arg: *mut ()) -> ! {
     } else {
         outcome
     });
-    // Safety: the carrier continuation is the active target.
-    tsan::switch_to(state.resume_fiber());
-    unsafe { continuation::switch(state.continuation_ptr(), state.resume_target()) };
+    // Safety: the carrier continuation is the active target; the switch
+    // is one uninstrumented step.
+    unsafe {
+        tsan::switch_fiber(
+            state.resume_fiber(),
+            state.continuation_ptr(),
+            state.resume_target(),
+        )
+    };
     unreachable!()
 }
 
@@ -492,20 +498,24 @@ impl ThreadState {
     }
 
     /// Run the raw continuation switch with this task's allocator installed,
-    /// then give the allocator back to the carrier. `switch` must perform the
-    /// continuation switch itself.
-    pub fn run_on_heap<R>(&self, carrier: &mut Heap, switch: impl FnOnce() -> R) -> R {
+    /// then give the allocator back to the carrier.
+    pub fn run_on_heap(
+        &self,
+        carrier: &mut Heap,
+        from: *mut Continuation,
+        to: *const Continuation,
+    ) {
         {
             let task_heap = self.task_heap();
             carrier.swap_allocator(task_heap);
         }
-        tsan::switch_to(self.fiber());
-        let result = switch();
+        // Safety: `from` is the carrier's continuation and `to` the task's;
+        // the switch is a single uninstrumented boundary.
+        unsafe { tsan::switch_fiber(self.fiber(), from, to) };
         {
             let task_heap = self.task_heap();
             carrier.swap_allocator(task_heap);
         }
-        result
     }
 
     #[inline(always)]
@@ -725,9 +735,8 @@ impl ThreadState {
         let target = self.resume_target();
         debug_assert!(!target.is_null(), "suspend without a resume target");
         // Safety: the target is the active switch target and the task has
-        // a prepared continuation.
-        tsan::switch_to(self.resume_fiber());
-        unsafe { continuation::switch(self.continuation_ptr(), target) };
+        // a prepared continuation; the switch is one uninstrumented step.
+        unsafe { tsan::switch_fiber(self.resume_fiber(), self.continuation_ptr(), target) };
     }
 
     #[inline(always)]
@@ -1171,9 +1180,7 @@ impl Thread {
 
         // Safety: the continuation yields its heap borrow until the task
         // suspends or finishes.
-        state.run_on_heap(&mut self.heap, || unsafe {
-            continuation::switch(continuation, state.continuation_ptr())
-        });
+        state.run_on_heap(&mut self.heap, continuation, state.continuation_ptr());
 
         match task_outcome(&state) {
             Some(result) => {

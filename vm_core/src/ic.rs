@@ -43,6 +43,28 @@ const KIND_GLOBAL_LEXICAL: i64 = 11;
 const KIND_NATIVE_GETTER: i64 = 12;
 const KIND_INDEX_GET: i64 = 13;
 const KIND_INDEX_SET: i64 = 14;
+
+/// Debug name for the kind byte of a directive handler word.
+pub fn handler_kind_name(kind: i64) -> &'static str {
+    match kind {
+        KIND_FIELD => "field",
+        KIND_SLOW => "slow",
+        KIND_ELEMENT => "element",
+        KIND_ELEMENT_STORE => "element-store",
+        KIND_INDEXED_STRING => "indexed-string",
+        KIND_ARRAY_LENGTH => "array-length",
+        KIND_ACCESSOR => "accessor",
+        KIND_SETTER => "setter",
+        KIND_NON_EXISTENT => "non-existent",
+        KIND_PARENT => "parent",
+        KIND_NATIVE_SETTER => "native-setter",
+        KIND_GLOBAL_LEXICAL => "global-lexical",
+        KIND_NATIVE_GETTER => "native-getter",
+        KIND_INDEX_GET => "index-get",
+        KIND_INDEX_SET => "index-set",
+        _ => "unknown",
+    }
+}
 const GLOBAL_LEXICAL_INFO_SHIFT: i64 = 32;
 const GLOBAL_LEXICAL_SLOT_MASK: i64 = 0xffff_ffff;
 

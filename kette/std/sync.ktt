@@ -5,8 +5,8 @@ let IllegalLockState = Modules.error.IllegalLockState
 let WaitQueueTraits = {
     new: {
         let queue = self.clone()
-        queue.head = 0
-        queue.tail = 0
+        queue.head = null
+        queue.tail = null
         queue.guard = atomic.AtomicI64.new(0)
         queue
     }
@@ -31,8 +31,8 @@ let WaitQueueTraits = {
     enqueue: { |item|
         self.lock()
         item.granted.store(0)
-        item.next = 0
-        if self.head == 0 {
+        item.next = null
+        if self.head == null {
             self.head = item
         } else {
             self.tail.next = item
@@ -43,11 +43,11 @@ let WaitQueueTraits = {
     dequeue: {
         self.lock()
         let item = self.head
-        if item != 0 {
+        if item != null {
             self.head = item.next
-            item.next = 0
-            if self.head == 0 {
-                self.tail = 0
+            item.next = null
+            if self.head == null {
+                self.tail = null
             }
             item.granted.store(1)
         }
@@ -56,12 +56,12 @@ let WaitQueueTraits = {
     }
     remove: { |item|
         self.lock()
-        let prev = 0
+        let prev = null
         let removed = false
         let* visit = |current| {
-            if current != 0 and !removed {
+            if current != null and !removed {
                 if current == item {
-                    if prev == 0 {
+                    if prev == null {
                         self.head = current.next
                     } else {
                         prev.next = current.next
@@ -69,7 +69,7 @@ let WaitQueueTraits = {
                     if self.tail == current {
                         self.tail = prev
                     }
-                    current.next = 0
+                    current.next = null
                     removed = true
                 } else {
                     prev = current
@@ -88,6 +88,11 @@ let WaitQueue = {
     head, tail, guard: undefined
 }
 
+// One literal site: every waiter shares the same map.
+let newWaiter = |thread| {
+    return { thread: thread, granted: atomic.AtomicI64.new(0), next: 0 }
+}
+
 let MutexTraits = {
     new: {
         let mutex = self.clone()
@@ -98,11 +103,7 @@ let MutexTraits = {
     waiterFor: |me| {
         let waiter = me.waiter
         if waiter == null {
-            waiter = {
-                thread: me
-                granted: atomic.AtomicI64.new(0)
-                next: 0
-            }
+            waiter = newWaiter(me)
             me.waiter = waiter
         }
         waiter
@@ -171,7 +172,7 @@ let MutexTraits = {
     }
     unlock: {
         let waiter = self.waiters.dequeue()
-        if waiter != 0 {
+        if waiter != null {
             wake(waiter.thread)
         } else {
             self.locked.store(0)
@@ -209,11 +210,7 @@ let RecursiveMutexTraits = {
     waiterFor: |me| {
         let waiter = me.waiter
         if waiter == null {
-            waiter = {
-                thread: me
-                granted: atomic.AtomicI64.new(0)
-                next: 0
-            }
+            waiter = newWaiter(me)
             me.waiter = waiter
         }
         waiter
@@ -312,7 +309,7 @@ let RecursiveMutexTraits = {
     }
     releaseLock: {
         let waiter = self.waiters.dequeue()
-        if waiter != 0 {
+        if waiter != null {
             wake(waiter.thread)
         } else {
             self.locked.store(0)
@@ -366,14 +363,14 @@ let ConditionTraits = {
     }
     signal: {
         let waiter = self.waiters.dequeue()
-        if waiter != 0 {
+        if waiter != null {
             wake(waiter.thread)
         }
     }
     signalAll: {
         let* visit = {
             let waiter = self.waiters.dequeue()
-            if waiter != 0 {
+            if waiter != null {
                 wake(waiter.thread)
                 visit()
             } else {
@@ -390,11 +387,7 @@ let ConditionTraits = {
     }
     awaitUntil: |mutex, deadline, timed| {
         let me = Thread.current()
-        let waiter = {
-            thread: me
-            granted: atomic.AtomicI64.new(0)
-            next: 0
-        }
+        let waiter = newWaiter(me)
         self.waiters.enqueue(waiter)
         let depth = mutex.releaseAllForAwait()
         let done = false
