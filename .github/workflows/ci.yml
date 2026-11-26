@@ -26,7 +26,7 @@ jobs:
       image: localhost:5000/kettevm-ci:1
       options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -51,7 +51,7 @@ jobs:
         # test and extended-check jobs only have to run the binaries.
         - kettevm-cargo-target:/target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -97,7 +97,7 @@ jobs:
       volumes:
         - kettevm-cargo-target:/target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -124,7 +124,7 @@ jobs:
       volumes:
         - kettevm-cargo-target:/target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false

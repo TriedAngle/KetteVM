@@ -28,7 +28,7 @@ jobs:
         - kettevm-cargo-target:/target
         - kettevm-test262:/test262:ro
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -40,7 +40,7 @@ jobs:
 
       - name: Upload test262 log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test262-match-log-${{ github.sha }}
           path: test262.log
@@ -61,7 +61,7 @@ jobs:
         - kettevm-cargo-target:/target
         - kettevm-test262:/test262:ro
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -73,7 +73,7 @@ jobs:
 
       - name: Upload test262 log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test262-become-log-${{ github.sha }}
           path: test262.log
@@ -93,7 +93,7 @@ jobs:
       volumes:
         - kettevm-cargo-target:/target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -113,7 +113,7 @@ jobs:
       volumes:
         - kettevm-cargo-target:/target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
           persist-credentials: false
