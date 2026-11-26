@@ -179,7 +179,7 @@
         },
         "kette.serverScript": {
           "type": "string",
-          "default": "kette/tools/kettels.ktt",
+          "default": "kette/tools/kettels/kettels.ktt",
           "description": "Image LSP script, relative to the workspace root."
         },
         "kette.root": {

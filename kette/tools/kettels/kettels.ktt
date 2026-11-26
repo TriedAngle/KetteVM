@@ -1,0 +1,123 @@
+// Kette image LSP server.
+// Run: kettevm kette/tools/kettels/kettels.ktt -- --stdio
+
+let env = KetteTools.primitives.env
+let loadedFiles = []
+
+KetteTools.setSourceInfo("complete")
+
+let noteLoaded = |path| {
+    if !loadedFiles.includes(path) {
+        loadedFiles.push(path)
+    }
+}
+
+// Record files loaded into the image.
+let evalFile = KetteTools.evalFile
+KetteTools.evalFile = |path| {
+    noteLoaded(path)
+    evalFile(path)
+}
+if env.script != null {
+    noteLoaded(env.script)
+}
+
+if globalThis.Modules == undefined {
+    KetteTools.evalFile("kette/std/startup.ktt")
+}
+globalThis.KETTEFMT_LIBRARY = true
+KetteTools.evalFile("kette/tools/kettefmt.ktt")
+
+mod kettels {
+    export env = env
+    export loadedFiles = loadedFiles
+    export noteLoaded = noteLoaded
+}
+
+KetteTools.evalFile("kette/tools/kettels/utils.ktt")
+KetteTools.evalFile("kette/tools/kettels/semantics.ktt")
+KetteTools.evalFile("kette/tools/kettels/server.ktt")
+
+use sys
+use threads { Thread }
+use sys.socket { TcpListener, TcpStream }
+use kettels as kls
+
+let arguments = sys.env.arguments
+let tcpPort = 0
+let argumentIndex = 0
+while argumentIndex < arguments.length {
+    let argument = arguments[argumentIndex]
+    if argument == "--tcp" or argument == "--port" {
+        if argumentIndex + 1 < arguments.length {
+            tcpPort = arguments[argumentIndex + 1] * 1
+            argumentIndex = argumentIndex + 1
+        }
+    }
+    argumentIndex = argumentIndex + 1
+}
+
+let connection = null
+if tcpPort > 0 {
+    let listener = null
+    try {
+        listener = TcpListener.bind("127.0.0.1", tcpPort)
+    } catch (error) {
+        kls.log("kettels: " + kls.errorText(error))
+        sys.exit(1)
+    }
+    kls.log("kettels: listening on 127.0.0.1:" + tcpPort)
+    kls.pool.spawnNamed("kettels-acceptor", {
+        while true {
+            let stream = try {
+                listener.tryAccept()
+            } catch (error) {
+                kls.log("kettels: accept failed: " + kls.errorText(error))
+                kls.inbox.close()
+                break
+            }
+            if stream == null {
+                kls.pool.sleep(10000000)
+            } else {
+                kls.inbox.push({
+                    accept: stream
+                })
+            }
+        }
+        listener.dispose()
+    })
+} else {
+    connection = kls.Connection.new(TcpStream.fromFds(0, 1, false), "stdio", true)
+    kls.startConnection(connection)
+}
+
+kls.log("kettels: image ready")
+while true {
+    let item = kls.inbox.take()
+    if item == null {
+        break
+    }
+    if item.accept != null {
+        let accepted = kls.Connection.new(item.accept, "tcp", false)
+        kls.startConnection(accepted)
+        kls.log("kettels: client connected")
+    } else if item.diagnostics != null {
+        let pending = item.diagnostics
+        pending.connection.diagnosticsTask = null
+        if pending.connection.documents[pending.uri] == pending.text {
+            kls.publishDiagnostics(pending.connection, pending.uri, pending.text)
+        }
+    } else if !kls.handleRequest(item.connection, item.message) {
+        break
+    }
+}
+
+if connection != null {
+    connection.close()
+    while connection.io.reader.isAlive() or connection.io.writer.isAlive() {
+        Thread.sleep(1)
+    }
+}
+kls.inbox.close()
+kls.log("kettels: image stopped")
+kls.pool.shutdown()

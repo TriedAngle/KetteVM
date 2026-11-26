@@ -1,0 +1,866 @@
+// Parsing, resolution, indexing, semantic tokens, and diagnostics.
+use kettels as kls
+
+use kette.syntax
+
+let LEGEND = [
+    "keyword", "variable", "parameter", "property", "function", "method",
+    "namespace", "enumMember", "string", "number", "comment", "operator",
+]
+let NATIVE_DOCS = {
+    new: "Creates a new instance."
+    clone: "Returns a shallow copy of the receiver."
+    yield: "Yields execution to another thread."
+    park: "Blocks the current thread until it is unparked."
+    unpark: "Makes a parked thread runnable."
+    parkNanos: "Blocks the current thread for at most `nanos` nanoseconds."
+    nanoTime: "Returns a monotonic time in nanoseconds."
+    sleep: "Blocks the current thread for `nanos` nanoseconds."
+    availableProcessors: "Returns the number of available processors."
+    load: "Returns the current value."
+    store: "Stores `value` and returns it."
+    swap: "Stores `value` and returns the previous value."
+    compareExchange: "Stores `replacement` when the current value equals `expected`."
+    add: "Adds `value` and returns the previous value."
+}
+let bindingIsFunction = |source, map, declaration| {
+    let index = kls.unitAt(map, declaration.end)
+    while index < source.length and (source[index] == " " or source[index] == "\t" or source[index] == "\n" or source[index] == "\r") {
+        index = index + 1
+    }
+    if index >= source.length or source[index] != "=" {
+        return false
+    }
+    index = index + 1
+    while index < source.length and (source[index] == " " or source[index] == "\t" or source[index] == "\n" or source[index] == "\r") {
+        index = index + 1
+    }
+    index < source.length and source[index] == "|"
+}
+let tokenType = |tree, map, resolved, source, bindingKinds, token| {
+    let kind = token.kind
+    if kind == :LineComment or kind == :BlockComment {
+        return 10
+    }
+    if kind == :Number {
+        return 9
+    }
+    if kind == :Ident {
+        let parent = token.parent
+        if parent == :Send {
+            return 5
+        }
+        if parent == :Get {
+            return 3
+        }
+        if parent == :Path or parent == :UseTree or parent == :ModDecl or parent == :UseDecl {
+            return 6
+        }
+        if parent == :AtomLiteral or parent == :PatternAtom {
+            return 7
+        }
+        let binding = resolved.bindingAt(token)
+        if binding != null {
+            let cached = bindingKinds[binding]
+            if cached != null {
+                return cached
+            }
+            let declaration = resolved.binding(binding)
+            let declarationKind = declaration.kind
+            let result = 1
+            if declarationKind == "parameter" or declarationKind == "rest parameter" or declarationKind == "catch parameter" {
+                result = 2
+            } else if declarationKind != "import" and bindingIsFunction(source, map, declaration) {
+                result = 4
+            }
+            bindingKinds[binding] = result
+            return result
+        }
+        let parentId = tree.nodeParent(token.parentId)
+        if parentId < tree.nodeCount and tree.nodeKind(parentId) == :Call {
+            return 4
+        }
+        return 1
+    }
+    if kind == :String or kind == :QuotedName {
+        if syntax.isAtomParent(token.parent) {
+            return 7
+        }
+        return 8
+    }
+    if kind == :Colon {
+        if syntax.isAtomParent(token.parent) {
+            return 7
+        }
+        return null
+    }
+    if syntax.isKeyword(kind) {
+        return 0
+    }
+    if syntax.isOperator(kind) {
+        return 11
+    }
+    null
+}
+
+// Maps byte offsets to UTF-16 line/column positions.
+let parseDocument = |connection, uri, source| {
+    let cached = connection.index.parses[uri]
+    if cached != null and cached.text == source {
+        return cached
+    }
+    if cached != null {
+        cached.tree.dispose()
+    }
+    let tree = syntax.parse(source)
+    let entry = {
+        text: source
+        tree: tree
+        map: kls.buildMap(source)
+    }
+    connection.index.parses[uri] = entry
+    entry
+}
+let resolveDocument = |connection, uri, source| {
+    let cached = connection.index.resolutions[uri]
+    if cached != null and cached.text == source {
+        return cached
+    }
+    if cached != null {
+        cached.resolved.dispose()
+    }
+    let parsed = parseDocument(connection, uri, source)
+    let resolved = parsed.tree.resolve()
+    let entry = {
+        text: source
+        tree: parsed.tree
+        resolved: resolved
+        map: parsed.map
+    }
+    connection.index.resolutions[uri] = entry
+    entry
+}
+let unitMap = |connection, name| {
+    let source = connection.index.indexSources[name]
+    if source == null {
+        source = KetteTools.unitText(name)
+    }
+    if source == "" {
+        return null
+    }
+    let cached = connection.index.unitMaps[name]
+    if cached != null and cached.source == source {
+        return cached
+    }
+    let entry = {
+        source: source
+        map: kls.buildMap(source)
+    }
+    connection.index.unitMaps[name] = entry
+    entry
+}
+let docForUnit = |connection, unit, offset| {
+    let entry = unitMap(connection, unit)
+    if entry == null {
+        ""
+    } else {
+        kls.docAt(entry.source, entry.map, offset)
+    }
+}
+let importUnits = |connection, key, alias| {
+    let info = KetteTools.importSource(key, alias)
+    if info == null or info[0] == "" {
+        return []
+    }
+    let targets = if info[1] != "" {
+        KetteTools.exportSource(info[0], info[1])
+    } else {
+        KetteTools.moduleSource(info[0])
+    }
+    let units = []
+    if targets != null {
+        targets.forEach(|target| {
+            if !units.includes(target[0]) {
+                units.push(target[0])
+            }
+        })
+    }
+    units
+}
+let receiverUnits = |connection, tree, resolved, key, token| {
+    let root = kls.tokenAtOffset(tree, tree.nodeStart(token.parentId))
+    if root == null {
+        return []
+    }
+    if root.kind == :SelfKw {
+        return [key]
+    }
+    let binding = resolved.bindingAt(root)
+    if binding != null {
+        let declaration = resolved.binding(binding)
+        if declaration.kind == "import" {
+            return importUnits(connection, key, declaration.name)
+        }
+        return aliasUnits(connection, tree, resolved, key, declaration, 0)
+    }
+    if resolved.resolutionAt(root.parentId) == syntax.Resolution.Global {
+        ensureIndex(connection)
+        let units = []
+        let locations = connection.index.globals[root.text]
+        if locations != null {
+            locations.forEach(|location| {
+                if !units.includes(location.unit) {
+                    units.push(location.unit)
+                }
+            })
+        }
+        return units
+    }
+    []
+}
+let suffixAfterDot = |text| {
+    let dot = kls.findSubstring(text, ".", 0)
+    if dot < 0 {
+        ""
+    } else {
+        kls.sliceText(text, dot, text.length)
+    }
+}
+let bindingValueNode = |tree, declaration| {
+    let token = kls.tokenAtOffset(tree, declaration.start)
+    if token == null {
+        return null
+    }
+    let node = token.parentId
+    while node < tree.nodeCount {
+        if tree.nodeKind(node) == :LetStmt {
+            let count = tree.nodeChildCount(node)
+            let value = null
+            let after = false
+            let index = 0
+            while index < count {
+                let child = tree.nodeChild(node, index)
+                if syntax.isTokenChild(child) {
+                    if tree.tokenKind(syntax.childId(child)) == :Assign {
+                        after = true
+                    }
+                } else if after {
+                    value = child
+                }
+                index = index + 1
+            }
+            return value
+        }
+        node = tree.nodeParent(node)
+    }
+    null
+}
+let hasModule = |path| {
+    let modules = KetteTools.moduleSource(path)
+    modules != null and modules.length > 0
+}
+let* aliasModulePath = |connection, tree, resolved, key, declaration, depth| {
+    if depth > 8 {
+        return ""
+    }
+    let value = bindingValueNode(tree, declaration)
+    if value == null {
+        return ""
+    }
+    let text = kls.trimText(tree.nodeText(value))
+    if text == "Modules" {
+        return ""
+    }
+    if kls.findSubstring(text, "Modules.", 0) == 0 {
+        return kls.sliceText(text, 8, text.length)
+    }
+    let kind = tree.nodeKind(value)
+    if kind != :Atom and kind != :Get {
+        return ""
+    }
+    let root = kls.tokenAtOffset(tree, tree.nodeStart(value))
+    if root == null {
+        return ""
+    }
+    let suffix = suffixAfterDot(text)
+    let binding = resolved.bindingAt(root)
+    if binding == null {
+        return ""
+    }
+    let nested = resolved.binding(binding)
+    if nested.kind == "import" {
+        let info = KetteTools.importSource(key, nested.name)
+        if info != null and info[0] != "" and info[1] == "" {
+            let path = info[0] + suffix
+            if suffix == "" or hasModule(path) {
+                return path
+            }
+        }
+        return ""
+    }
+    if nested.kind == "let" or nested.kind == "export" {
+        let base = aliasModulePath(connection, tree, resolved, key, nested, depth + 1)
+        if base != "" {
+            let path = base + suffix
+            if suffix == "" or hasModule(path) {
+                return path
+            }
+        }
+    }
+    ""
+}
+let* aliasUnits = |connection, tree, resolved, key, declaration, depth| {
+    if depth > 8 {
+        return [key]
+    }
+    let value = bindingValueNode(tree, declaration)
+    if value == null {
+        return [key]
+    }
+    let text = kls.trimText(tree.nodeText(value))
+    if kls.findSubstring(text, "Modules.", 0) == 0 {
+        let units = moduleUnits(connection, kls.sliceText(text, 8, text.length))
+        if units.length == 0 {
+            units.push(key)
+        }
+        return units
+    }
+    if text == "Modules" {
+        return [key]
+    }
+    let kind = tree.nodeKind(value)
+    if kind != :Atom and kind != :Get {
+        return [key]
+    }
+    let root = kls.tokenAtOffset(tree, tree.nodeStart(value))
+    if root == null {
+        return [key]
+    }
+    let binding = resolved.bindingAt(root)
+    if binding == null {
+        if resolved.resolutionAt(root.parentId) == syntax.Resolution.Global {
+            ensureIndex(connection)
+            let units = [key]
+            let locations = connection.index.globals[root.text]
+            if locations != null {
+                locations.forEach(|location| {
+                    if !units.includes(location.unit) {
+                        units.push(location.unit)
+                    }
+                })
+            }
+            return units
+        }
+        return [key]
+    }
+    let nested = resolved.binding(binding)
+    if nested.kind == "import" {
+        let units = importUnits(connection, key, nested.name)
+        if units.length == 0 {
+            units.push(key)
+        }
+        return units
+    }
+    if nested.kind == "let" or nested.kind == "export" {
+        return aliasUnits(connection, tree, resolved, key, nested, depth + 1)
+    }
+    [key]
+}
+let moduleUnits = |connection, path| {
+    let units = []
+    let modules = KetteTools.moduleSource(path)
+    if modules != null {
+        modules.forEach(|module| {
+            if !units.includes(module[0]) {
+                units.push(module[0])
+            }
+        })
+    }
+    units
+}
+let moduleMember = |connection, tree, resolved, key, token| {
+    let node = token.parentId
+    if tree.nodeChildCount(node) == 0 {
+        return []
+    }
+    let receiver = tree.nodeChild(node, 0)
+    let text = tree.nodeText(receiver)
+    let root = kls.tokenAtOffset(tree, tree.nodeStart(receiver))
+    if root == null {
+        return []
+    }
+    let path = ""
+    if root.text == "Modules" {
+        let receiverPath = ""
+        if text != "Modules" {
+            if kls.findSubstring(text, "Modules.", 0) == 0 {
+                receiverPath = kls.sliceText(text, 8, text.length)
+            } else {
+                return []
+            }
+        }
+        if receiverPath != "" {
+            let exports = KetteTools.exportSource(receiverPath, token.text)
+            if exports != null and exports.length > 0 {
+                return sourceLocations(connection, exports)
+            }
+        }
+        let modules = KetteTools.moduleSource(if receiverPath == "" { token.text } else { receiverPath + "." + token.text })
+        if modules != null and modules.length > 0 {
+            return sourceLocations(connection, modules)
+        }
+        return []
+    }
+    let binding = resolved.bindingAt(root)
+    if binding == null {
+        return []
+    }
+    let declaration = resolved.binding(binding)
+    if declaration.kind == "import" {
+        let info = KetteTools.importSource(key, declaration.name)
+        if info == null or info[1] != "" {
+            return []
+        }
+        path = info[0] + suffixAfterDot(text)
+    } else if declaration.kind == "let" or declaration.kind == "export" {
+        path = aliasModulePath(connection, tree, resolved, key, declaration, 0)
+    } else {
+        return []
+    }
+    if path == "" {
+        return []
+    }
+    let exports = KetteTools.exportSource(path, token.text)
+    if exports != null and exports.length > 0 {
+        return sourceLocations(connection, exports)
+    }
+    let modules = KetteTools.moduleSource(path + "." + token.text)
+    if modules != null and modules.length > 0 {
+        return sourceLocations(connection, modules)
+    }
+    []
+}
+let symbolUnits = |connection, tree, resolved, key, token| {
+    let units = [key]
+    let binding = resolved.bindingAt(token)
+    if binding != null {
+        let declaration = resolved.binding(binding)
+        if declaration.kind == "import" {
+            importUnits(connection, key, declaration.name).forEach(|unit| {
+                if !units.includes(unit) {
+                    units.push(unit)
+                }
+            })
+        }
+    } else if resolved.resolutionAt(token.parentId) == syntax.Resolution.Global {
+        ensureIndex(connection)
+        let locations = connection.index.globals[token.text]
+        if locations != null {
+            locations.forEach(|location| {
+                if !units.includes(location.unit) {
+                    units.push(location.unit)
+                }
+            })
+        }
+    }
+    units
+}
+let referenceUnits = |connection, tree, resolved, key, token| {
+    let units = symbolUnits(connection, tree, resolved, key, token)
+    if token.parent == :Send or token.parent == :Get {
+        receiverUnits(connection, tree, resolved, key, token).forEach(|unit| {
+            if !units.includes(unit) {
+                units.push(unit)
+            }
+        })
+    }
+    units
+}
+let slotCandidates = |connection, name, units| {
+    let result = []
+    let locations = connection.index.slots[name]
+    if locations != null {
+        locations.forEach(|location| {
+            if units.includes(location.unit) {
+                result.push(location)
+            }
+        })
+    }
+    result
+}
+let resolveAccess = |connection, tree, resolved, key, source, token| {
+    let result = if KetteTools.unitText(key) == source {
+        KetteTools.sendTarget(key, token.start, token.end)
+    } else {
+        null
+    }
+    let targets = if result == null { [] } else { result[3] }
+    let target = sourceTarget(targets)
+    let member = moduleMember(connection, tree, resolved, key, token)
+    let slot = null
+    if target == null and member.length == 0 {
+        ensureIndex(connection)
+        let units = receiverUnits(connection, tree, resolved, key, token)
+        slot = pickLocation(slotCandidates(connection, token.text, units), key)
+    }
+    {
+        target: target
+        member: member
+        slot: slot
+        native: if target == null and member.length == 0 and slot == null { targets } else { [] }
+    }
+}
+let addIndex = |index, name, unit, start, end| {
+    let locations = index[name]
+    if locations == null {
+        locations = []
+        index[name] = locations
+    }
+    locations.push({
+        unit: unit
+        start: start
+        end: end
+    })
+}
+let dropUnit = |index, unit| {
+    Object.getOwnPropertyNames(index).forEach(|name| {
+        let kept = []
+        index[name].forEach(|location| {
+            if location.unit != unit {
+                kept.push(location)
+            }
+        })
+        index[name] = kept
+    })
+}
+let indexUnit = |connection, name, source| {
+    let tree = syntax.parse(source)
+    let resolved = tree.resolve()
+    let count = resolved.bindingCount
+    let index = 0
+    while index < count {
+        if resolved.bindingTopLevel(index) {
+            let binding = resolved.binding(index)
+            if binding.kind != "import" and binding.kind != "export" {
+                addIndex(connection.index.globals, binding.name, name, binding.start, binding.end)
+            }
+        }
+        index = index + 1
+    }
+    tree.tokens.forEach(|token| {
+        if token.kind == :Ident {
+            addIndex(connection.index.names, token.text, name, token.start, token.end)
+        }
+        if token.parent == :Slot or token.parent == :SlotMulti {
+            addIndex(connection.index.slots, token.text, name, token.start, token.end)
+        }
+    })
+    resolved.dispose()
+    tree.dispose()
+}
+let ensureIndex = |connection| {
+    let claimed = Object.create(null)
+    Object.getOwnPropertyNames(connection.documents).forEach(|uri| {
+        let source = connection.documents[uri]
+        let name = kls.unitKey(connection, uri)
+        claimed[name] = true
+        if connection.index.indexedDocs[uri] != source {
+            dropUnit(connection.index.globals, name)
+            dropUnit(connection.index.slots, name)
+            dropUnit(connection.index.names, name)
+            indexUnit(connection, name, source)
+            connection.index.indexSources[name] = source
+            connection.index.indexedDocs[uri] = source
+        }
+    })
+    let names = KetteTools.unitNames()
+    names.forEach(|name| {
+        if claimed[name] {
+            return
+        }
+        let hash = KetteTools.unitHash(name)
+        if connection.index.indexedUnits[name] != hash {
+            dropUnit(connection.index.globals, name)
+            dropUnit(connection.index.slots, name)
+            dropUnit(connection.index.names, name)
+            let source = KetteTools.unitText(name)
+            if source != "" {
+                indexUnit(connection, name, source)
+                connection.index.indexSources[name] = source
+            }
+            connection.index.indexedUnits[name] = hash
+        }
+    })
+}
+let orderLocations = |locations, key| {
+    let result = []
+    if locations != null {
+        locations.forEach(|location| {
+            if location.unit == key {
+                result.push(location)
+            }
+        })
+        locations.forEach(|location| {
+            if location.unit != key {
+                result.push(location)
+            }
+        })
+    }
+    result
+}
+let sourceTarget = |targets| {
+    let result = null
+    if targets != null {
+        targets.forEach(|target| {
+            if result == null and target[1] != "" {
+                result = target
+            }
+        })
+    }
+    result
+}
+let pickLocation = |locations, key| {
+    let ordered = orderLocations(locations, key)
+    if ordered.length == 0 {
+        return null
+    }
+    if ordered[0].unit == key {
+        ordered[0]
+    } else {
+        ordered[ordered.length - 1]
+    }
+}
+let sourceLocations = |connection, targets| {
+    let result = []
+    if targets != null {
+        targets.forEach(|target| {
+            let entry = unitMap(connection, target[0])
+            if entry != null {
+                result.push({
+                    uri: kls.uriFor(target[0])
+                    unit: target[0]
+                    start: target[1]
+                    end: target[2]
+                    range: kls.rangeOf(entry.map, target[1], target[2])
+                })
+            }
+        })
+    }
+    result
+}
+let resolveImport = |connection, key, alias| {
+    let info = KetteTools.importSource(key, alias)
+    if info == null or info[0] == "" {
+        []
+    } else if info[1] != "" {
+        sourceLocations(connection, KetteTools.exportSource(info[0], info[1]))
+    } else {
+        sourceLocations(connection, KetteTools.moduleSource(info[0]))
+    }
+}
+let locationsFor = |connection, locations| {
+    let result = []
+    if locations != null {
+        locations.forEach(|location| {
+            let target = unitMap(connection, location.unit)
+            if target != null {
+                result.push({
+                    uri: kls.uriFor(location.unit)
+                    unit: location.unit
+                    start: location.start
+                    end: location.end
+                    range: kls.rangeOf(target.map, location.start, location.end)
+                })
+            }
+        })
+    }
+    result
+}
+let invalidateResolution = |connection, uri| {
+    let cached = connection.index.resolutions[uri]
+    if cached != null {
+        cached.resolved.dispose()
+    }
+    connection.index.resolutions[uri] = undefined
+}
+
+// Multiple of 5 so a token never straddles two chunks.
+let TOKEN_CHUNK_ELEMENTS = 510
+let TokenSink = {
+    chunks: null
+    chunk: null
+    at: 0
+    previousLine: 0
+    previousCharacter: 0
+    first: true
+
+    new: {
+        let sink = self.clone()
+        sink.chunks = []
+        sink.chunk = Array(TOKEN_CHUNK_ELEMENTS)
+        sink.at = 0
+        sink.previousLine = 0
+        sink.previousCharacter = 0
+        sink.first = true
+        sink
+    }
+    add: |line, character, length, kind| {
+        if self.first {
+            self.chunk[self.at] = line
+            self.at = self.at + 1
+            self.chunk[self.at] = character
+            self.at = self.at + 1
+            self.first = false
+        } else {
+            self.chunk[self.at] = line - self.previousLine
+            self.at = self.at + 1
+            self.chunk[self.at] = if line == self.previousLine { character - self.previousCharacter } else { character }
+            self.at = self.at + 1
+        }
+        self.chunk[self.at] = length
+        self.at = self.at + 1
+        self.chunk[self.at] = kind
+        self.at = self.at + 1
+        self.chunk[self.at] = 0
+        self.at = self.at + 1
+        if self.at >= TOKEN_CHUNK_ELEMENTS {
+            self.chunks.push(self.chunk)
+            self.chunk = Array(TOKEN_CHUNK_ELEMENTS)
+            self.at = 0
+        }
+        self.previousLine = line
+        self.previousCharacter = character
+        self
+    }
+    finish: {
+        if self.at > 0 {
+            let tail = Array(self.at)
+            let index = 0
+            while index < self.at {
+                tail[index] = self.chunk[index]
+                index = index + 1
+            }
+            self.chunks.push(tail)
+        }
+        self.chunks
+    }
+}
+let addSegments = |sink, map, token, kind| {
+    let startUnit = kls.unitAt(map, token.start)
+    let endUnit = kls.unitAt(map, token.end)
+    let startLine = kls.lineOf(map, token.start)
+    let endLine = kls.lineOf(map, token.end)
+    let line = startLine
+    while line <= endLine {
+        let lineStart = map.lineUnits[line]
+        let lineEnd = if line + 1 < map.lineUnits.length {
+            map.lineUnits[line + 1] - 1
+        } else {
+            map.units
+        }
+        let from = if startUnit > lineStart { startUnit } else { lineStart }
+        let to = if endUnit < lineEnd { endUnit } else { lineEnd }
+        if to > from {
+            sink.add(line, from - lineStart, to - from, kind)
+        }
+        line = line + 1
+    }
+}
+let semanticTokens = |tree, map, resolved, source| {
+    let sink = TokenSink.new()
+    let bindingKinds = Object.create(null)
+    tree.tokens.forEach(|token| {
+        let tokenKind = token.kind
+        if tokenKind == :Whitespace or tokenKind == :Newline or tokenKind == :Eof or tokenKind == :Tombstone {
+            return
+        }
+        let kind = tokenType(tree, map, resolved, source, bindingKinds, token)
+        if kind != null {
+            addSegments(sink, map, token, kind)
+        }
+    })
+    sink.finish()
+}
+let semanticFor = |connection, uri, source| {
+    let cached = connection.index.semantic[uri]
+    if cached != null and cached.source == source {
+        return cached.chunks
+    }
+    let resolved = resolveDocument(connection, uri, source)
+    let chunks = semanticTokens(resolved.tree, resolved.map, resolved.resolved, source)
+    connection.index.semantic[uri] = {
+        source: source
+        chunks: chunks
+    }
+    chunks
+}
+let diagnosticsFrom = |tree, map| {
+    if tree.errorCount == 0 {
+        return []
+    }
+    let diagnostics = []
+    let i = 0
+    while i < tree.errorCount {
+        diagnostics.push({
+            range: kls.rangeOf(map, tree.errorStart(i), tree.errorEnd(i))
+            severity: 1
+            source: "kette"
+            message: tree.errorMessage(i)
+        })
+        i = i + 1
+    }
+    diagnostics
+}
+let diagnosticsFor = |connection, uri, source| {
+    let parsed = parseDocument(connection, uri, source)
+    diagnosticsFrom(parsed.tree, parsed.map)
+}
+let publishDiagnostics = |connection, uri, source| {
+    connection.notify("textDocument/publishDiagnostics", {
+        uri: uri
+        diagnostics: diagnosticsFor(connection, uri, source)
+    })
+}
+
+mod kettels extend semantics {
+    export LEGEND = LEGEND
+    export NATIVE_DOCS = NATIVE_DOCS
+    export bindingIsFunction = bindingIsFunction
+    export tokenType = tokenType
+    export parseDocument = parseDocument
+    export resolveDocument = resolveDocument
+    export unitMap = unitMap
+    export docForUnit = docForUnit
+    export importUnits = importUnits
+    export receiverUnits = receiverUnits
+    export suffixAfterDot = suffixAfterDot
+    export bindingValueNode = bindingValueNode
+    export hasModule = hasModule
+    export aliasModulePath = aliasModulePath
+    export aliasUnits = aliasUnits
+    export moduleUnits = moduleUnits
+    export moduleMember = moduleMember
+    export symbolUnits = symbolUnits
+    export referenceUnits = referenceUnits
+    export slotCandidates = slotCandidates
+    export resolveAccess = resolveAccess
+    export addIndex = addIndex
+    export dropUnit = dropUnit
+    export indexUnit = indexUnit
+    export ensureIndex = ensureIndex
+    export orderLocations = orderLocations
+    export sourceTarget = sourceTarget
+    export pickLocation = pickLocation
+    export sourceLocations = sourceLocations
+    export resolveImport = resolveImport
+    export locationsFor = locationsFor
+    export invalidateResolution = invalidateResolution
+    export TOKEN_CHUNK_ELEMENTS = TOKEN_CHUNK_ELEMENTS
+    export TokenSink = TokenSink
+    export addSegments = addSegments
+    export semanticTokens = semanticTokens
+    export semanticFor = semanticFor
+    export diagnosticsFrom = diagnosticsFrom
+    export diagnosticsFor = diagnosticsFor
+    export publishDiagnostics = publishDiagnostics
+}

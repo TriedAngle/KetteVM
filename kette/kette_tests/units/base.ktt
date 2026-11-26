@@ -1,4 +1,0 @@
-mod unit.math {
-    export value = globalThis.UNIT_VALUE
-    export nested = { value: globalThis.UNIT_VALUE }
-}

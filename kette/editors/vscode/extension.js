@@ -618,7 +618,7 @@ async function start(context) {
 
   const root = findRoot();
   const command = vscode.workspace.getConfiguration("kette").get("serverCommand") || "kettevm";
-  const script = vscode.workspace.getConfiguration("kette").get("serverScript") || "kette/tools/kettels.ktt";
+  const script = vscode.workspace.getConfiguration("kette").get("serverScript") || "kette/tools/kettels/kettels.ktt";
   const scriptPath = path.isAbsolute(script) ? script : path.join(root, script);
   if (!fs.existsSync(scriptPath)) {
     output.appendLine(`cannot find ${scriptPath}`);

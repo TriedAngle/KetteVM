@@ -1,0 +1,934 @@
+// JSON-RPC transport, connection state, and request dispatch.
+use collections.pool { ThreadPool }
+use collections.queue { Queue }
+use sync { Mutex }
+use sys
+use sys.file { File }
+use sys.socket { Bytes, TcpListener, TcpStream }
+use atomic { AtomicI64 }
+use kette.syntax
+use threads { Thread }
+use kettels as kls
+
+
+let pool = ThreadPool.new()
+let inbox = Queue.new()
+let logLock = Mutex.new()
+let POLL_MIN_NANOS = 1000000
+let POLL_MAX_NANOS = 50000000
+let pause = |connection| {
+    let idle = connection.io.idlePolls
+    let delay = POLL_MIN_NANOS
+    if idle > 16 {
+        delay = POLL_MAX_NANOS
+    } else if idle > 8 {
+        delay = 25000000
+    } else if idle > 4 {
+        delay = 10000000
+    } else if idle > 2 {
+        delay = 5000000
+    }
+    connection.io.idlePolls = idle + 1
+    pool.sleep(delay)
+}
+let activity = |connection| {
+    connection.io.idlePolls = 0
+}
+let log = |text| {
+    logLock.lock()
+    sys.writeStderr(text + "\n")
+    logLock.unlock()
+}
+let writeAll = |connection, text| {
+    let stream = connection.stream
+    let total = sys.utf8Length(text)
+    let offset = 0
+    while offset < total {
+        let chunk = total - offset
+        if chunk > 256 {
+            chunk = 256
+        }
+        let written = stream.writeSome(text, offset, chunk)
+        if written == null or written == 0 {
+            pause(connection)
+        } else {
+            activity(connection)
+            offset = offset + written
+        }
+    }
+    offset
+}
+let readOne = |connection| {
+    while true {
+        if Thread.current().isInterrupted() {
+            return null
+        }
+        connection.io.readBuffer.clear()
+        let got = connection.stream.readInto(connection.io.readBuffer, 1)
+        if got == null {
+            pause(connection)
+        } else if got == 0 {
+            return null
+        } else {
+            activity(connection)
+            let text = connection.io.readBuffer.text()
+            connection.io.readBuffer.clear()
+            return text
+        }
+    }
+}
+let readExact = |connection, count| {
+    if count == 0 {
+        return ""
+    }
+    let buffer = Bytes.new(count)
+    let offset = 0
+    while offset < count {
+        if Thread.current().isInterrupted() {
+            buffer.free()
+            return null
+        }
+        let got = connection.stream.readInto(buffer, count - offset)
+        if got == null {
+            pause(connection)
+        } else if got == 0 {
+            buffer.free()
+            return null
+        } else {
+            activity(connection)
+            offset = offset + got
+        }
+    }
+    let text = buffer.text()
+    buffer.free()
+    text
+}
+let digit = match |c| {
+    "0" => 0
+    "1" => 1
+    "2" => 2
+    "3" => 3
+    "4" => 4
+    "5" => 5
+    "6" => 6
+    "7" => 7
+    "8" => 8
+    "9" => 9
+    _ => -1
+}
+let parseNumber = |text, start| {
+    let index = start
+    while index < text.length and (text[index] == " " or text[index] == "\t") {
+        index = index + 1
+    }
+    let value = 0
+    while index < text.length {
+        let d = digit(text[index])
+        if d < 0 {
+            break
+        }
+        value = value * 10 + d
+        index = index + 1
+    }
+    { value: value }
+}
+let parseContentLength = |header| {
+    let at = kls.findSubstring(header, "Content-Length:", 0)
+    if at < 0 {
+        throw "lsp: missing Content-Length"
+    }
+    let { value } = parseNumber(header, at + 15)
+    value
+}
+let readMessage = |connection| {
+    let header = ""
+    while true {
+        let byte = match readOne(connection) {
+            null => {
+                return null
+            }
+            byte => byte
+        }
+        header = header + byte
+        if header.length >= 4 and header[header.length - 4] == "\r" and header[header.length - 3] == "\n" and header[header.length - 2] == "\r" and header[header.length - 1] == "\n" {
+            break
+        }
+    }
+    let length = parseContentLength(header)
+    let body = match readExact(connection, length) {
+        null => {
+            return null
+        }
+        body => body
+    }
+    JSON.parse(body)
+}
+let ConnectionTraits = {
+    new: |stream, name, stdio| {
+        let connection = self.clone()
+        connection.stream = stream
+        connection.name = name
+        connection.stdio = stdio
+        connection.documents = Object.create(null)
+        connection.closed = AtomicI64.new(0)
+        connection.diagnosticsTask = null
+        connection.io = {
+            outbox: Queue.new()
+            reader: null
+            writer: null
+            readBuffer: Bytes.new(1)
+            done: AtomicI64.new(0)
+            idlePolls: 0
+        }
+        connection.index = {
+            sources: Object.create(null)
+            resolutions: Object.create(null)
+            parses: Object.create(null)
+            semantic: Object.create(null)
+            unitMaps: Object.create(null)
+            globals: Object.create(null)
+            slots: Object.create(null)
+            names: Object.create(null)
+            indexSources: Object.create(null)
+            indexedUnits: Object.create(null)
+            indexedDocs: Object.create(null)
+        }
+        connection
+    }
+    send: |message| {
+        let body = JSON.stringify(message)
+        let body_len = sys.utf8Length(body)
+        self.io.outbox.push("Content-Length: " + body_len + "\r\n\r\n" + body)
+    }
+    respond: |id, result| {
+        if id != null {
+            self.send({
+                jsonrpc: "2.0"
+                id: id
+                result: result
+            })
+        }
+    }
+    respondError: |id, code, message| {
+        if id != null {
+            self.send({
+                jsonrpc: "2.0"
+                id: id
+                error: {
+                    code: code
+                    message: message
+                }
+            })
+        }
+    }
+    notify: |method, params| {
+        self.send({
+            jsonrpc: "2.0"
+            method: method
+            params: params
+        })
+    }
+    close: {
+        if self.closed.compareExchange(0, 1) != 0 {
+            return self
+        }
+        self.io.outbox.close()
+        let reader = self.io.reader
+        if reader != null {
+            reader.interrupt()
+        }
+        self
+    }
+    finish: {
+        if self.io.done.add(1) == 2 {
+            self.io.readBuffer.free()
+            self.stream.dispose()
+        }
+    }
+}
+let Connection = {
+    traits*: ConnectionTraits
+    stream, name, stdio, documents, io, index, closed, diagnosticsTask: undefined
+}
+let startConnection = |connection| {
+    let writer = pool.spawnNamed("kettels-writer-" + connection.name, {
+        let failed = false
+        while true {
+            let payload = connection.io.outbox.take()
+            if payload == null {
+                break
+            }
+            try {
+                writeAll(connection, payload)
+            } catch (error) {
+                if !Thread.current().isInterrupted() {
+                    log("kettels: write failed: " + errorText(error))
+                }
+                failed = true
+                break
+            }
+        }
+        connection.finish()
+        if failed {
+            connection.close()
+        }
+    })
+    connection.io.writer = writer
+    let reader = pool.spawnNamed("kettels-reader-" + connection.name, {
+        while true {
+            let message = null
+            try {
+                message = readMessage(connection)
+            } catch (error) {
+                if !Thread.current().isInterrupted() {
+                    log("kettels: " + errorText(error))
+                }
+                break
+            }
+            if message == null {
+                break
+            }
+            inbox.push({
+                connection: connection
+                message: message
+            })
+        }
+        connection.finish()
+        connection.close()
+        if connection.stdio {
+            inbox.close()
+        }
+    })
+    connection.io.reader = reader
+    connection
+}
+let scheduleDiagnostics = |connection, uri| {
+    if connection.diagnosticsTask != null {
+        connection.diagnosticsTask.cancel()
+    }
+    let text = connection.documents[uri]
+    connection.diagnosticsTask = pool.scheduler.schedule(120000000, {
+        inbox.push({
+            diagnostics: {
+                connection: connection
+                uri: uri
+                text: text
+            }
+        })
+    })
+}
+let evaluations = 0
+let imageEpoch = 0
+let started = Thread.nanoTime()
+globalThis.KETTE_TRANSCRIPT = []
+globalThis.print = |value| {
+    globalThis.KETTE_TRANSCRIPT.push("" + value)
+}
+if globalThis.Console != undefined {
+    Console.print = |value| {
+        globalThis.KETTE_TRANSCRIPT.push("" + value)
+    }
+    Console.write = |value| {
+        globalThis.KETTE_TRANSCRIPT.push("" + value)
+    }
+}
+let drainTranscript = {
+    let text = globalThis.KETTE_TRANSCRIPT.join("")
+    globalThis.KETTE_TRANSCRIPT.length = 0
+    text
+}
+let errorText = |error| {
+    if error.message != null {
+        "" + error.message
+    } else {
+        "" + error
+    }
+}
+let evaluate = |source, name| {
+    let ok = true
+    let result = null
+    let message = null
+    try {
+        result = KetteTools.evalRepl("kette", source, name)
+    } catch (error) {
+        ok = false
+        message = errorText(error)
+    }
+    evaluations = evaluations + 1
+    imageEpoch = imageEpoch + 1
+    let valueText = null
+    if !Object.is(result, null) {
+        try {
+            valueText = "" + result
+        } catch (error) {
+            valueText = "<object>"
+        }
+    }
+    {
+        ok: ok
+        value: valueText
+        error: message
+        transcript: drainTranscript()
+    }
+}
+let textDocument = |params| {
+    params.textDocument
+}
+
+// Known methods only; never intern wire strings.
+let methodKind = match |method| {
+    "initialize" => :initialize
+    "initialized" => :initialized
+    "shutdown" => :shutdown
+    "exit" => :exit
+    "textDocument/didOpen" => :didOpen
+    "textDocument/didChange" => :didChange
+    "textDocument/didSave" => :didSave
+    "textDocument/didClose" => :didClose
+    "textDocument/semanticTokens/full" => :semanticTokens
+    "kette/semanticTokens" => :ketteSemanticTokens
+    "textDocument/formatting" => :formatting
+    "textDocument/hover" => :hover
+    "textDocument/definition" => :definition
+    "textDocument/references" => :references
+    "textDocument/documentSymbol" => :documentSymbol
+    "workspace/symbol" => :workspaceSymbol
+    "kette/eval" => :eval
+    "kette/loadFile" => :loadFile
+    "kette/check" => :check
+    "kette/format" => :format
+    "kette/transcript" => :transcript
+    "kette/imageInfo" => :imageInfo
+    _ => null
+}
+let handleRequest = |connection, message| {
+    let method = message.method
+    let kind = methodKind(method)
+    let params = message.params
+    let id = message.id
+    match kind {
+        :initialize => {
+            connection.respond(id, {
+                capabilities: {
+                    positionEncoding: "utf-16"
+                    textDocumentSync: {
+                        openClose: true
+                        change: 1
+                        save: {
+                            includeText: true
+                        }
+                    }
+                    semanticTokensProvider: {
+                        legend: {
+                            tokenTypes: kls.LEGEND
+                            tokenModifiers: []
+                        }
+                        full: true
+                        range: false
+                    }
+                    documentFormattingProvider: true
+                    hoverProvider: true
+                    definitionProvider: true
+                    documentSymbolProvider: true
+                }
+                serverInfo: {
+                    name: "kette-image"
+                    version: "0.1.0"
+                }
+            })
+        }
+        :initialized => {}
+        :shutdown => {
+            connection.respond(id, null)
+        }
+        :exit => {
+            connection.close()
+            return !connection.stdio
+        }
+        :didOpen => {
+            let document = textDocument(params)
+            kls.invalidateResolution(connection, document.uri)
+            connection.documents[document.uri] = document.text
+            kls.publishDiagnostics(connection, document.uri, document.text)
+        }
+        :didChange => {
+            let uri = textDocument(params).uri
+            let changes = params.contentChanges
+            if changes.length > 0 {
+                let text = kls.applyChanges(connection, uri, changes)
+                kls.invalidateResolution(connection, uri)
+                connection.index.semantic[uri] = undefined
+                connection.documents[uri] = text
+                scheduleDiagnostics(connection, uri)
+            }
+        }
+        :didSave => {
+            let uri = textDocument(params).uri
+            if params.text != null {
+                connection.documents[uri] = params.text
+                kls.invalidateResolution(connection, uri)
+                connection.index.semantic[uri] = undefined
+            }
+            if connection.documents[uri] != null {
+                kls.publishDiagnostics(connection, uri, connection.documents[uri])
+            }
+        }
+        :didClose => {
+            let uri = textDocument(params).uri
+            kls.invalidateResolution(connection, uri)
+            if connection.diagnosticsTask != null {
+                connection.diagnosticsTask.cancel()
+                connection.diagnosticsTask = null
+            }
+            if connection.index.parses[uri] != null {
+                connection.index.parses[uri].tree.dispose()
+                connection.index.parses[uri] = undefined
+            }
+            let name = kls.unitKey(connection, uri)
+            kls.dropUnit(connection.index.globals, name)
+            kls.dropUnit(connection.index.slots, name)
+            kls.dropUnit(connection.index.names, name)
+            connection.index.indexSources[name] = undefined
+            connection.index.indexedDocs[uri] = undefined
+            connection.index.indexedUnits[name] = undefined
+            connection.index.semantic[uri] = undefined
+            connection.documents[uri] = undefined
+            connection.notify("textDocument/publishDiagnostics", {
+                uri: uri
+                diagnostics: []
+            })
+        }
+        :semanticTokens => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, { data: [] })
+            } else {
+                let source = connection.documents[uri]
+                let chunks = kls.semanticFor(connection, uri, source)
+                let data = if chunks.length > 0 { chunks[0] } else { [] }
+                connection.respond(id, { data: data })
+            }
+        }
+        :ketteSemanticTokens => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, { chunks: [] })
+            } else {
+                let source = connection.documents[uri]
+                let chunks = kls.semanticFor(connection, uri, source)
+                connection.respond(id, { chunks: chunks })
+            }
+        }
+        :formatting => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, [])
+            } else {
+                let source = connection.documents[uri]
+                let formatted = try {
+                    Modules.kettefmt.formatSource(source)
+                } catch (error) {
+                    connection.respondError(id, -32603, errorText(error))
+                    return true
+                }
+                if formatted == source {
+                    connection.respond(id, [])
+                } else {
+                    let map = kls.buildMap(source)
+                    connection.respond(id, [{
+                            range: {
+                                start: { line: 0, character: 0 }
+                                end: kls.positionOf(map, map.bytes)
+                            }
+                            newText: formatted
+                        }])
+                }
+            }
+        }
+        :hover => {
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, null)
+            } else {
+                let cached = kls.resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let key = kls.unitKey(connection, uri)
+                let position = params.position
+                let found = kls.tokenAtPosition(tree, map, position)
+                let access = if found != null and (found.parent == :Send or found.parent == :Get) { found } else { null }
+                if found == null {
+                    connection.respond(id, null)
+                } else if access != null {
+                    let info = kls.resolveAccess(connection, tree, resolved, key, source, access)
+                    if info.target != null {
+                        let target = info.target
+                        let label = if target[0] == "" { access.text } else { target[0] }
+                        let at = if target[1] == key {
+                            let targetPosition = kls.positionOf(map, target[2])
+                            key + ":" + (targetPosition.line + 1) + ":" + (targetPosition.character + 1)
+                        } else {
+                            let targetUnit = kls.unitMap(connection, target[1])
+                            if targetUnit == null {
+                                target[1] + ":" + target[2] + "-" + target[3]
+                            } else {
+                                let targetPosition = kls.positionOf(targetUnit.map, target[2])
+                                target[1] + ":" + (targetPosition.line + 1) + ":" + (targetPosition.character + 1)
+                            }
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: kls.hoverText(label, kls.docForUnit(connection, target[1], target[2]), at)
+                            }
+                            range: kls.rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.member.length > 0 {
+                        let location = info.member[0]
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: kls.hoverText(access.text, kls.docForUnit(connection, location.unit, location.start), location.uri + ":" + (location.range.start.line + 1) + ":" + (location.range.start.character + 1))
+                            }
+                            range: kls.rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.slot != null {
+                        let location = info.slot
+                        let entry = kls.unitMap(connection, location.unit)
+                        let at = if entry == null {
+                            location.unit + ":" + location.start + "-" + location.end
+                        } else {
+                            let locationPosition = kls.positionOf(entry.map, location.start)
+                            location.unit + ":" + (locationPosition.line + 1) + ":" + (locationPosition.character + 1)
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: kls.hoverText(access.text, kls.docForUnit(connection, location.unit, location.start), at)
+                            }
+                            range: kls.rangeOf(map, access.start, access.end)
+                        })
+                    } else if info.native.length > 0 {
+                        let label = if info.native[0][0] == "" { access.text } else { info.native[0][0] }
+                        let doc = kls.NATIVE_DOCS[access.text]
+                        let value = if doc != null { "**" + label + "**\n\n" + doc + "\n\nNative." } else { "**" + label + "**\n\nNative." }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: value
+                            }
+                            range: kls.rangeOf(map, access.start, access.end)
+                        })
+                    } else {
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: "**" + access.text + "**\n\nNo definition found."
+                            }
+                            range: kls.rangeOf(map, access.start, access.end)
+                        })
+                    }
+                } else if found.parent == :Slot or found.parent == :SlotMulti {
+                    let at = kls.positionOf(map, found.start)
+                    connection.respond(id, {
+                        contents: {
+                            kind: "markdown"
+                            value: kls.hoverText(found.text, kls.docAt(source, map, found.start), uri + ":" + (at.line + 1) + ":" + (at.character + 1))
+                        }
+                        range: kls.rangeOf(map, found.start, found.end)
+                    })
+                } else {
+                    let binding = resolved.bindingAt(found)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        let imported = if declaration.kind == "import" {
+                            kls.resolveImport(connection, key, declaration.name)
+                        } else {
+                            []
+                        }
+                        let value = if imported.length != 0 {
+                            let location = imported[imported.length - 1]
+                            kls.hoverText(declaration.name + " (import)", kls.docForUnit(connection, location.unit, location.start), location.uri + ":" + (location.range.start.line + 1) + ":" + (location.range.start.character + 1))
+                        } else {
+                            let at = kls.positionOf(map, declaration.start)
+                            kls.hoverText(declaration.name + " (" + declaration.kind + ")", kls.docAt(source, map, declaration.start), uri + ":" + (at.line + 1) + ":" + (at.character + 1))
+                        }
+                        connection.respond(id, {
+                            contents: {
+                                kind: "markdown"
+                                value: value
+                            }
+                            range: kls.rangeOf(map, found.start, found.end)
+                        })
+                    } else if resolved.resolutionAt(found.parentId) == syntax.Resolution.Global {
+                        kls.ensureIndex(connection)
+                        let location = kls.pickLocation(connection.index.globals[found.text], key)
+                        if location == null {
+                            connection.respond(id, null)
+                        } else {
+                            let target = kls.unitMap(connection, location.unit)
+                            let at = if target == null {
+                                location.unit + ":" + location.start + "-" + location.end
+                            } else {
+                                let position = kls.positionOf(target.map, location.start)
+                                location.unit + ":" + (position.line + 1) + ":" + (position.character + 1)
+                            }
+                            connection.respond(id, {
+                                contents: {
+                                    kind: "markdown"
+                                    value: kls.hoverText(found.text + " (global)", kls.docForUnit(connection, location.unit, location.start), at)
+                                }
+                                range: kls.rangeOf(map, found.start, found.end)
+                            })
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                }
+            }
+        }
+        :definition => {
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, null)
+            } else {
+                let cached = kls.resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let token = kls.tokenAtPosition(tree, map, params.position)
+                let key = kls.unitKey(connection, uri)
+                if token == null {
+                    connection.respond(id, null)
+                } else if token.parent == :Send or token.parent == :Get {
+                    let info = kls.resolveAccess(connection, tree, resolved, key, source, token)
+                    if info.target != null {
+                        let target = info.target
+                        let targetUnit = if target[1] == key { { map: map } } else { kls.unitMap(connection, target[1]) }
+                        if targetUnit == null {
+                            connection.respond(id, null)
+                        } else {
+                            connection.respond(id, [{
+                                uri: kls.uriFor(target[1])
+                                range: kls.rangeOf(targetUnit.map, target[2], target[3])
+                            }])
+                        }
+                    } else if info.member.length > 0 {
+                        connection.respond(id, info.member)
+                    } else if info.slot != null {
+                        let locations = kls.locationsFor(connection, [info.slot])
+                        if locations.length == 0 {
+                            connection.respond(id, null)
+                        } else {
+                            connection.respond(id, locations)
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                } else {
+                    let binding = resolved.bindingAt(token)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        if declaration.kind == "import" {
+                            let locations = kls.resolveImport(connection, key, declaration.name)
+                            if locations.length != 0 {
+                                connection.respond(id, locations)
+                            } else {
+                                connection.respond(id, [{
+                                    uri: key
+                                    range: kls.rangeOf(map, declaration.start, declaration.end)
+                                }])
+                            }
+                        } else {
+                            connection.respond(id, [{
+                                uri: key
+                                range: kls.rangeOf(map, declaration.start, declaration.end)
+                            }])
+                        }
+                    } else if resolved.resolutionAt(token.parentId) == syntax.Resolution.Global {
+                        kls.ensureIndex(connection)
+                        let location = kls.pickLocation(connection.index.globals[token.text], key)
+                        if location == null {
+                            connection.respond(id, null)
+                        } else {
+                            let locations = kls.locationsFor(connection, [location])
+                            if locations.length == 0 {
+                                connection.respond(id, null)
+                            } else {
+                                connection.respond(id, locations)
+                            }
+                        }
+                    } else {
+                        connection.respond(id, null)
+                    }
+                }
+            }
+        }
+        :references => {
+            let uri = textDocument(params).uri
+            let source = connection.documents[uri]
+            if source == null {
+                connection.respond(id, [])
+            } else {
+                let cached = kls.resolveDocument(connection, uri, source)
+                let tree = cached.tree
+                let resolved = cached.resolved
+                let map = cached.map
+                let token = kls.tokenAtPosition(tree, map, params.position)
+                if token == null or token.kind != :Ident {
+                    connection.respond(id, [])
+                } else {
+                    let include = if params.context != null { params.context.includeDeclaration } else { true }
+                    let result = []
+                    let binding = resolved.bindingAt(token)
+                    if binding != null {
+                        let declaration = resolved.binding(binding)
+                        tree.tokens.forEach(|candidate| {
+                            if candidate.kind == :Ident and resolved.bindingAt(candidate) == binding {
+                                if include or candidate.start != declaration.start or candidate.end != declaration.end {
+                                    result.push({
+                                        uri: uri
+                                        range: kls.rangeOf(map, candidate.start, candidate.end)
+                                    })
+                                }
+                            }
+                        })
+                    } else {
+                        kls.ensureIndex(connection)
+                        let units = kls.referenceUnits(connection, tree, resolved, kls.unitKey(connection, uri), token)
+                        let locations = connection.index.names[token.text]
+                        if locations != null {
+                            locations.forEach(|location| {
+                                if units.includes(location.unit) {
+                                    let entry = kls.unitMap(connection, location.unit)
+                                    if entry != null {
+                                        result.push({
+                                            uri: kls.uriFor(location.unit)
+                                            range: kls.rangeOf(entry.map, location.start, location.end)
+                                        })
+                                    }
+                                }
+                            })
+                        }
+                    }
+                    connection.respond(id, result)
+                }
+            }
+        }
+        :documentSymbol => {
+            connection.respond(id, [])
+        }
+        :workspaceSymbol => {
+            connection.respond(id, [])
+        }
+        :eval => {
+            let name = if params.uri != null {
+                params.uri
+            } else {
+                "<repl>"
+            }
+            let result = evaluate(params.source, name)
+            if params.uri != null {
+                connection.index.sources[params.uri] = params.source
+                kls.publishDiagnostics(connection, params.uri, params.source)
+            }
+            connection.respond(id, result)
+        }
+        :loadFile => {
+            let path = params.path
+            let source = try {
+                with(File.open(path, "rb"), |file| {
+                    file.readText()
+                })
+            } catch (error) {
+                connection.respond(id, {
+                    ok: false
+                    error: errorText(error)
+                })
+                return true
+            }
+            kls.noteLoaded(path)
+            connection.index.sources[path] = source
+            let result = evaluate(source, path)
+            connection.respond(id, result)
+        }
+        :check => {
+            let tree = syntax.parse(params.source)
+            let diagnostics = kls.diagnosticsFrom(tree, kls.buildMap(params.source))
+            tree.dispose()
+            connection.respond(id, {
+                diagnostics: diagnostics
+            })
+        }
+        :format => {
+            let result = try {
+                {
+                    ok: true
+                    text: Modules.kettefmt.formatSource(params.source)
+                }
+            } catch (error) {
+                {
+                    ok: false
+                    error: errorText(error)
+                }
+            }
+            connection.respond(id, result)
+        }
+        :transcript => {
+            connection.respond(id, {
+                ok: true
+                text: drainTranscript()
+            })
+        }
+        :imageInfo => {
+            connection.respond(id, {
+                root: sys.cwd
+                uptimeMs: Math.floor((Thread.nanoTime() - started) / 1000000)
+                evaluations: evaluations
+                epoch: imageEpoch
+                modules: Object.getOwnPropertyNames(Modules).join(",")
+                files: kls.loadedFiles
+            })
+        }
+        _ => {
+            if id != null {
+                connection.respondError(id, -32601, "unknown method: " + method)
+            }
+        }
+    }
+    true
+}
+
+mod kettels extend server {
+    export pool = pool
+    export inbox = inbox
+    export logLock = logLock
+    export POLL_MIN_NANOS = POLL_MIN_NANOS
+    export POLL_MAX_NANOS = POLL_MAX_NANOS
+    export pause = pause
+    export activity = activity
+    export log = log
+    export writeAll = writeAll
+    export readOne = readOne
+    export readExact = readExact
+    export digit = digit
+    export parseNumber = parseNumber
+    export parseContentLength = parseContentLength
+    export readMessage = readMessage
+    export ConnectionTraits = ConnectionTraits
+    export Connection = Connection
+    export startConnection = startConnection
+    export scheduleDiagnostics = scheduleDiagnostics
+    export evaluations = evaluations
+    export imageEpoch = imageEpoch
+    export started = started
+    export drainTranscript = drainTranscript
+    export errorText = errorText
+    export evaluate = evaluate
+    export textDocument = textDocument
+    export methodKind = methodKind
+    export handleRequest = handleRequest
+}

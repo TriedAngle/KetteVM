@@ -61,7 +61,7 @@ function M.start()
     return
   end
   local server = vim.g.kette_server or "kettevm"
-  local script = root .. "/kette/tools/kettels.ktt"
+  local script = root .. "/kette/tools/kettels/kettels.ktt"
   local quoted = vim.fn.shellescape
   local command = string.format(
     "cd %s && exec %s %s -- --stdio",

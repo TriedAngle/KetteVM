@@ -1,6 +1,6 @@
 # Kette image editors
 
-The image is the server. `kette/tools/kettels.ktt` runs inside the Kette VM,
+The image is the server. `kette/tools/kettels/kettels.ktt` runs inside the Kette VM,
 reads LSP on stdin, and writes LSP on stdout. There is no separate static
 analysis process and no TextMate grammar: highlighting is supplied as LSP
 semantic tokens from the image's parser.
@@ -21,7 +21,7 @@ it with `vsce package`.
 Settings:
 
 - `kette.serverCommand`: VM executable (default `kettevm`).
-- `kette.serverScript`: image server script (default `kette/tools/kettels.ktt`).
+- `kette.serverScript`: image server script (default `kette/tools/kettels/kettels.ktt`).
 - `kette.root`: image root; empty uses the workspace root.
 
 Commands: `Kette: Eval Selection`, `Eval Buffer`, `Load File`, `REPL`,
@@ -60,7 +60,7 @@ zero-timeout readiness checks before touching the descriptors, so a slow
 editor never pins a carrier thread. It can also listen on TCP loopback and
 serve multiple image connections:
 
-    kettevm kette/tools/kettels.ktt -- --tcp 9433
+    kettevm kette/tools/kettels/kettels.ktt -- --tcp 9433
 
 Each connection has its own reader, writer, outbox, and open-document map.
 Document changes are full-text updates and never evaluate or reload image

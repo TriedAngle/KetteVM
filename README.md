@@ -26,9 +26,9 @@ UI sketch demo (layout tree and terminal preview):
 
     cargo run -q -p vm -- kette/std/startup.ktt kette/examples/ui/demo.ktt
 
-The UI checks run with the normal Kette suite:
+The Kette suite runs with:
 
-    python3 kette/kette_tests/check.py kette/kette_tests/ui.ktt
+    python3 kette/kette_tests/check.py
 
 See `kette/examples/README.md` for the terminal modes (`TERMINAL=0/1/2`).
 
@@ -48,10 +48,7 @@ TSan (nightly; `--features tsan` enables fiber tracking):
 
     TSAN_OPTIONS="halt_on_error=0:history_size=7" \
     target/aarch64-apple-darwin/debug/kettevm \
-      kette/kette_tests/test_runner.ktt \
-      kette/std/startup.ktt \
-      kette/std/functional.ktt \
-      kette/kette_tests/pool.ktt
+      kette/examples/threads.ktt
 
 `fast,tsan` is unsupported: `preserve-none` has an open ARMv8 sanitizer bug ([LLVM #177519](https://github.com/llvm/llvm-project/issues/177519)), and TSan fibers do not make it reliable either; use the match-loop TSan build.
 

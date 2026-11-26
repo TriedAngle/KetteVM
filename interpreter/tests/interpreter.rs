@@ -1,6 +1,6 @@
 #![cfg(feature = "fast")]
 
-use bytecode::{Opcode, emit};
+use bytecode::{Opcode, SourceSpan, emit};
 use interpreter::TailCallInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
@@ -55,6 +55,8 @@ fn callable<'s>(
             handlers: None,
             mode: MODE_SLOPPY,
             tail_callable: false,
+            source_unit: 0,
+            source_span: SourceSpan::new(0, 0),
         },
         scope,
     );

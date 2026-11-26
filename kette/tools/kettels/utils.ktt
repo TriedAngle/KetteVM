@@ -1,0 +1,383 @@
+// Source maps and text/position helpers for the image LSP.
+use sys
+
+/// Returns the first index of `needle` at or after `from`, or -1.
+let findSubstring = |text, needle, from| {
+    let i = from
+    while i + needle.length <= text.length {
+        let j = 0
+        let matched = true
+        while j < needle.length {
+            if text[i + j] != needle[j] {
+                matched = false
+                break
+            }
+            j = j + 1
+        }
+        if matched {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+/// Maps byte offsets to UTF-16 line/character positions.
+let buildMap = |source| {
+    let source_view = sys.utf8View(source)
+    let bytes = source_view.size
+    let lineStarts = [0]
+    let lineUnits = [0]
+    let shifts = []
+    let byte = 0
+    let unit = 0
+    let excess = 0
+    while byte < bytes {
+        let first = source_view.at(byte)
+        let size = if first < 128 {
+            1
+        } else if first < 224 {
+            2
+        } else if first < 240 {
+            3
+        } else {
+            4
+        }
+        if first == 10 {
+            lineStarts.push(byte + 1)
+            lineUnits.push(unit + 1)
+        }
+        byte = byte + size
+        unit = unit + if size == 4 { 2 } else { 1 }
+        if size > 1 {
+            excess = excess + if size == 4 { 2 } else { size - 1 }
+            shifts.push([byte, excess])
+        }
+    }
+    source_view.free()
+    {
+        lineStarts: lineStarts
+        lineUnits: lineUnits
+        shifts: shifts
+        units: unit
+        bytes: bytes
+    }
+}
+/// Returns the 0-based line containing a byte offset.
+let lineOf = |map, byte| {
+    let low = 0
+    let high = map.lineStarts.length - 1
+    while low < high {
+        let mid = Math.floor((low + high + 1) / 2)
+        if map.lineStarts[mid] <= byte {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    low
+}
+let excessAt = |map, byte| {
+    let low = 0
+    let high = map.shifts.length
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if map.shifts[mid][0] <= byte {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    if low == 0 {
+        0
+    } else {
+        map.shifts[low - 1][1]
+    }
+}
+/// Converts a byte offset to a UTF-16 code-unit offset.
+let unitAt = |map, byte| {
+    byte - excessAt(map, byte)
+}
+/// Converts a byte offset to an LSP line/character position.
+let positionOf = |map, byte| {
+    let line = lineOf(map, byte)
+    {
+        line: line
+        character: unitAt(map, byte) - map.lineUnits[line]
+    }
+}
+/// Converts an LSP line/character position to a byte offset.
+let byteAt = |map, position| {
+    let line = position.line
+    if line >= map.lineStarts.length {
+        return map.bytes
+    }
+    let low = map.lineStarts[line]
+    let high = if line + 1 < map.lineStarts.length { map.lineStarts[line + 1] } else { map.bytes }
+    let target = map.lineUnits[line] + position.character
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if unitAt(map, mid) < target {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    low
+}
+/// Builds an LSP range from two byte offsets.
+let rangeOf = |map, start, end| {
+    {
+        start: positionOf(map, start)
+        end: positionOf(map, end)
+    }
+}
+/// Returns the text between two UTF-16 code-unit offsets.
+let sliceText = |text, start, end| {
+    let result = ""
+    let index = start
+    while index < end {
+        result = result + text[index]
+        index = index + 1
+    }
+    result
+}
+/// Trims spaces, tabs, and carriage returns.
+let trimText = |text| {
+    let start = 0
+    let end = text.length
+    while start < end and (text[start] == " " or text[start] == "\t" or text[start] == "\r") {
+        start = start + 1
+    }
+    while end > start and (text[end - 1] == " " or text[end - 1] == "\t" or text[end - 1] == "\r") {
+        end = end - 1
+    }
+    if start == 0 and end == text.length {
+        text
+    } else {
+        sliceText(text, start, end)
+    }
+}
+/// Returns one line of source without its trailing newline.
+let lineText = |source, map, line| {
+    let start = unitAt(map, map.lineStarts[line])
+    let endByte = if line + 1 < map.lineStarts.length { map.lineStarts[line + 1] - 1 } else { map.bytes }
+    sliceText(source, start, unitAt(map, endByte))
+}
+let stripStar = |text| {
+    let line = trimText(text)
+    if line.length > 0 and line[0] == "*" {
+        trimText(sliceText(line, 1, line.length))
+    } else {
+        line
+    }
+}
+/// Joins lines in reverse order, skipping empty lines.
+let reverseJoin = |lines| {
+    let text = ""
+    let index = lines.length - 1
+    let first = true
+    while index >= 0 {
+        let line = lines[index]
+        if line != "" {
+            if !first {
+                text = text + "\n"
+            }
+            text = text + line
+            first = false
+        }
+        index = index - 1
+    }
+    text
+}
+let docAt = |source, map, offset| {
+    let line = lineOf(map, offset)
+    let first = line - 1
+    if first < 0 {
+        return ""
+    }
+    let head = trimText(lineText(source, map, first))
+    if head.length >= 2 and findSubstring(head, "*/", 0) == head.length - 2 {
+        let block = []
+        let scan = first
+        while scan >= 0 {
+            let current = trimText(lineText(source, map, scan))
+            if scan == first and current.length >= 2 {
+                current = trimText(sliceText(current, 0, current.length - 2))
+            }
+            let open = findSubstring(current, "/*", 0)
+            if open >= 0 {
+                block.push(stripStar(sliceText(current, open + 2, current.length)))
+                break
+            }
+            block.push(stripStar(current))
+            scan = scan - 1
+        }
+        return reverseJoin(block)
+    }
+    let lines = []
+    let scan = first
+    while scan >= 0 {
+        let current = trimText(lineText(source, map, scan))
+        if findSubstring(current, "//", 0) != 0 {
+            break
+        }
+        lines.push(trimText(sliceText(current, 2, current.length)))
+        scan = scan - 1
+    }
+    reverseJoin(lines)
+}
+let hoverText = |title, doc, at| {
+    let text = "**" + title + "**"
+    if doc != null and doc != "" {
+        text = text + "\n\n" + doc
+    }
+    if at != null {
+        text = text + "\n\nDefined at `" + at + "`"
+    }
+    text
+}
+let pathOf = |uri| {
+    if findSubstring(uri, "file://", 0) == 0 {
+        let path = ""
+        let index = 7
+        while index < uri.length {
+            path = path + uri[index]
+            index = index + 1
+        }
+        path
+    } else {
+        uri
+    }
+}
+let uriFor = |name| {
+    if findSubstring(name, "file://", 0) == 0 {
+        name
+    } else if name[0] == "/" {
+        "file://" + name
+    } else if name.length >= 3 and name[1] == ":" and (name[2] == "/" or name[2] == "\\") {
+        "file:///" + name
+    } else {
+        name
+    }
+}
+let unitKey = |connection, uri| {
+    if KetteTools.unitText(uri) != "" {
+        uri
+    } else {
+        let path = pathOf(uri)
+        if KetteTools.unitText(path) != "" {
+            path
+        } else {
+            uri
+        }
+    }
+}
+let positionInRange = |position, start, end| {
+    let after = position.line > start.line or (position.line == start.line and position.character >= start.character)
+    let before = position.line < end.line or (position.line == end.line and position.character < end.character)
+    after and before
+}
+let tokenAtPosition = |tree, map, position| {
+    let low = 0
+    let high = tree.tokenCount
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        let start = positionOf(map, tree.tokenStart(mid))
+        if position.line > start.line or (position.line == start.line and position.character >= start.character) {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    if low == 0 {
+        return null
+    }
+    let token = tree.tokens.get(low - 1)
+    if token.isTrivia {
+        return null
+    }
+    let start = positionOf(map, token.start)
+    let end = positionOf(map, token.end)
+    if positionInRange(position, start, end) {
+        token
+    } else {
+        null
+    }
+}
+let tokenAtOffset = |tree, offset| {
+    let low = 0
+    let high = tree.tokenCount
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if tree.tokenStart(mid) <= offset {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    let index = low - 1
+    if index < 0 {
+        return null
+    }
+    let token = tree.tokens.get(index)
+    if token.isTrivia or token.end <= offset {
+        return null
+    }
+    token
+}
+let sendAt = |tree, map, position| {
+    let token = tokenAtPosition(tree, map, position)
+    if token != null and token.parent == :Send {
+        token
+    } else {
+        null
+    }
+}
+let applyChanges = |connection, uri, changes| {
+    let source = connection.documents[uri]
+    if source == null {
+        return source
+    }
+    let index = 0
+    while index < changes.length {
+        let change = changes[index]
+        if change.range == null {
+            source = change.text
+        } else {
+            let map = buildMap(source)
+            let startByte = byteAt(map, change.range.start)
+            let endByte = byteAt(map, change.range.end)
+            let startUnit = unitAt(map, startByte)
+            let endUnit = unitAt(map, endByte)
+            source = sliceText(source, 0, startUnit) + change.text + sliceText(source, endUnit, source.length)
+        }
+        index = index + 1
+    }
+    source
+}
+
+mod kettels extend utils {
+    export findSubstring = findSubstring
+    export buildMap = buildMap
+    export lineOf = lineOf
+    export excessAt = excessAt
+    export unitAt = unitAt
+    export positionOf = positionOf
+    export byteAt = byteAt
+    export rangeOf = rangeOf
+    export sliceText = sliceText
+    export trimText = trimText
+    export lineText = lineText
+    export stripStar = stripStar
+    export reverseJoin = reverseJoin
+    export docAt = docAt
+    export hoverText = hoverText
+    export pathOf = pathOf
+    export uriFor = uriFor
+    export unitKey = unitKey
+    export positionInRange = positionInRange
+    export tokenAtPosition = tokenAtPosition
+    export tokenAtOffset = tokenAtOffset
+    export sendAt = sendAt
+    export applyChanges = applyChanges
+}
