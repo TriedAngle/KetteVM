@@ -261,6 +261,7 @@ impl<'s> Lookup<'s> {
         None
     }
 
+    #[inline(always)]
     fn pick_parent(&mut self, heap: &Heap, scope: &'s HandleScope<'_>) -> bool {
         let hole = heap.known().the_hole.get(heap).erase();
         loop {
@@ -302,6 +303,7 @@ impl<'s> Lookup<'s> {
         }
     }
 
+    #[inline(always)]
     fn advance_past(&mut self, heap: &Heap, scope: &'s HandleScope<'_>, holder: Tagged<'_, Value>) {
         if self.own_only {
             self.retire_position();
@@ -310,6 +312,7 @@ impl<'s> Lookup<'s> {
         }
     }
 
+    #[inline(always)]
     fn advance_from(&mut self, heap: &Heap, scope: &'s HandleScope<'_>, holder: Tagged<'_, Value>) {
         let next = if let Some(proto) = holder.primitive_prototype(heap) {
             proto
@@ -330,6 +333,7 @@ impl<'s> Lookup<'s> {
         }
     }
 
+    #[inline(always)]
     fn enter_list(
         &mut self,
         heap: &Heap,
@@ -354,6 +358,7 @@ impl<'s> Lookup<'s> {
         })
     }
 
+    #[inline(always)]
     fn retire_position(&mut self) {
         self.holder = None;
         if matches!(self.chain.last(), Some(Link::Parent { .. })) {

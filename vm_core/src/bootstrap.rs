@@ -1,10 +1,11 @@
 use crate::ffi::FfiTypes;
 use crate::{
     AccessorInfo, AccessorInfoInit, Cell, CellInit, ContextInit, ContextObject, DenseString,
-    EdgeVisitable, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice, Heap, Map,
-    MapInit, MapKind, NameToIndexHashTable, NameToIndexHashTableInit, Object, ObjectInit,
-    PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit,
-    SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
+    EdgeVisitable, ElementsKind, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice,
+    Heap, Map, MapInit, MapKind, NameToIndexHashTable, NameToIndexHashTableInit, Object,
+    ObjectInit, PropertyDescriptor, ScopeInfo, ScopeInfoInit, ScriptContextTable,
+    ScriptContextTableInit, SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged, Value,
+    Visitor,
 };
 use core::ptr::NonNull;
 
@@ -672,7 +673,11 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .thread_object_map
         .init(thread_object_map.as_tagged(heap));
-    let atomic_i64_map = alloc_map(heap, &scope, MapKind::ATOMIC_I64);
+    let atomic_i64_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::ATOMIC_I64.with_elements(ElementsKind::None),
+    );
     known.atomic_i64_map.init(atomic_i64_map.as_tagged(heap));
     let array_map = alloc_map(heap, &scope, MapKind::FIXED_ARRAY);
     let byte_array_map = alloc_map(heap, &scope, MapKind::FIXED_BYTE_ARRAY);

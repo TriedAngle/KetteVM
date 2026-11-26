@@ -235,7 +235,7 @@ fn trackable_prototype<'a>(heap: &'a Heap, value: Tagged<'a, Value>) -> Option<T
         return None;
     }
     let object = value.get_as::<Object>(heap)?;
-    if !object.map(heap).kind().kind().is_js_receiver() {
+    if !object.map(heap).kind().kind().is_receiver() {
         return None;
     }
     Some(object)
@@ -298,7 +298,7 @@ fn push_parent_map<'s>(
         return false;
     };
     let kind = obj.map(heap).kind();
-    if kind.is_proxy() || !kind.kind().is_js_receiver() {
+    if kind.is_proxy() || !kind.kind().is_receiver() {
         return false;
     }
     out.push(scope.handle(obj.map(heap)));

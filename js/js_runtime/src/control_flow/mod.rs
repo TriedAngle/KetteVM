@@ -7,7 +7,7 @@ use vm_core::{
     PropertyDescriptor, Result, Runtime, SlotName, Smi, StoreSemantics, StringData, Symbol, Tagged,
     ThreadState, VM, Value, VmError, access::own_property_enumerable, bail, extend_lifetime,
     frame_context_value, info_is_immutable, info_is_lexical, intrinsics, materialize::Materialize,
-    proxy::Proxy, raise, raise_runtime, rt_try,
+    raise, raise_runtime, rt_try,
 };
 
 mod for_in;
@@ -181,7 +181,7 @@ fn has_property<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged
     let obj = args.get_handle(heap, 1);
     // a non-Object right operand is a TypeError, thrown before the key is
     // coerced
-    if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
+    if !obj.as_tagged(heap).is_object(heap) {
         raise!(vm, heap, state, VmError::InvalidOperandType);
     }
     state.handle_scope(|scope| {

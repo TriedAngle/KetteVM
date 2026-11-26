@@ -367,7 +367,7 @@ impl HeapObject for Map {
         self.prototype.set(heap, host, prototype);
         self.pred.clear(heap);
         self.transitions.clear(heap);
-        if config.kind.is_js_receiver() {
+        if config.kind.is_receiver() {
             self.prototype_validity_cell.set(
                 heap,
                 host,
@@ -434,12 +434,14 @@ pub enum ElementsKind {
     HoleyDouble = 3,
     /// Dictionary backing (`NumberDictionary`) for sparse arrays.
     Dictionary = 4,
+    /// No indexed properties at all; `elements` is never read.
+    None = 5,
 }
 
 impl ElementsKind {
     #[inline]
     pub const fn is_holey(self) -> bool {
-        (self as u8) & 1 == 1
+        matches!(self, Self::Holey | Self::HoleyDouble)
     }
 
     /// Dense `FixedArray` backing: direct indexing, no lookup dispatch.
@@ -593,11 +595,7 @@ impl MapKind {
         }
     }
 
-    pub const fn is_builtin(self) -> bool {
-        let kind = self.0 & Self::KIND_MASK;
-        kind > ObjectKind::BUILTIN_START && kind < ObjectKind::BUILTIN_END
-    }
-
+    #[inline(always)]
     pub const fn is_extendable(self) -> bool {
         self.0 & Self::EXTENDABLE.0 != 0
     }
@@ -606,20 +604,20 @@ impl MapKind {
         self.0 & Self::KIND_MASK == ObjectKind::Array as u64
     }
 
-    /// Whether this map belongs to an ordinary JSReceiver layout
-    /// (Object/Array/ByteArray/String/Oddball), excluding exotic Proxy.
-    pub const fn is_js_receiver(self) -> bool {
+    /// Whether values with this map participate in property lookup.
+    #[inline(always)]
+    pub const fn is_receiver(self) -> bool {
         let k = self.0 & Self::KIND_MASK;
-        k == ObjectKind::Object as u64
-            || k == ObjectKind::Array as u64
-            || k == ObjectKind::ByteArray as u64
-            || k == ObjectKind::String as u64
-            || k == ObjectKind::Oddball as u64
-            || k == ObjectKind::CValue as u64
-            || k == ObjectKind::ThreadObject as u64
+        k >= ObjectKind::Object as u64 && k < ObjectKind::ReceiverEnd as u64
+    }
+
+    #[inline(always)]
+    pub const fn is_oddball(self) -> bool {
+        self.0 & Self::KIND_MASK == ObjectKind::Oddball as u64
     }
 
     /// Whether this map is a Proxy.
+    #[inline(always)]
     pub const fn is_proxy(self) -> bool {
         self.0 & Self::KIND_MASK == ObjectKind::Proxy as u64
     }
@@ -632,7 +630,8 @@ impl MapKind {
             1 => ElementsKind::Holey,
             2 => ElementsKind::PackedDouble,
             3 => ElementsKind::HoleyDouble,
-            _ => ElementsKind::Dictionary,
+            4 => ElementsKind::Dictionary,
+            _ => ElementsKind::None,
         }
     }
 

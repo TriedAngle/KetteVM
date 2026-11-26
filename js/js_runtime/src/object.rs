@@ -526,7 +526,7 @@ fn object_prevent_extensions<'a>(
         let target = scope.handle(target);
         // the (possibly proxy) receiver is returned after traps ran user
         // code: keep it rooted across the call
-        if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+        if !target.as_tagged(heap).is_object(heap) {
             return target.as_tagged(heap).erase(); // primitives returned unchanged
         }
         let v = rt_try!(heap, Proxy::prevent_extensions(vm, heap, state, target));
@@ -562,7 +562,7 @@ fn object_is_extensible<'a>(
         vm, heap, state, ..
     } = ctx;
     let obj = args.get_handle(heap, 0);
-    if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
+    if !obj.as_tagged(heap).is_object(heap) {
         return Convert::boolean(heap, false);
     }
     let extensible = rt_try!(heap, Proxy::object_is_extensible(vm, heap, state, obj));
@@ -645,7 +645,7 @@ fn object_seal<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 0);
-    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+    if !target.as_tagged(heap).is_object(heap) {
         return target.as_tagged(heap).erase();
     }
     state.handle_scope(|scope| {
@@ -669,7 +669,7 @@ fn object_freeze<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagge
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 0);
-    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+    if !target.as_tagged(heap).is_object(heap) {
         return target.as_tagged(heap).erase();
     }
     state.handle_scope(|scope| {
@@ -693,7 +693,7 @@ fn object_is_frozen<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Ta
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 0);
-    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+    if !target.as_tagged(heap).is_object(heap) {
         return Convert::boolean(heap, true);
     }
     state.handle_scope(|scope| {
@@ -713,7 +713,7 @@ fn object_is_sealed<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Ta
         vm, heap, state, ..
     } = ctx;
     let target = args.get_handle(heap, 0);
-    if !Proxy::is_js_receiver(heap, target.as_tagged(heap)) {
+    if !target.as_tagged(heap).is_object(heap) {
         return Convert::boolean(heap, true);
     }
     state.handle_scope(|scope| {

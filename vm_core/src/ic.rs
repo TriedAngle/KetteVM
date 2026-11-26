@@ -264,7 +264,7 @@ fn global_lexical_site<'a>(
 }
 
 /// Decode the `(kind, payload)` view of a handler word.
-#[inline]
+#[inline(always)]
 fn decode_handler_smi<T>(word: Tagged<'_, T>) -> Option<(i64, i64)> {
     let v = word.to_i64()?;
     Some((v & 0xff, v >> 8))
@@ -276,7 +276,8 @@ fn decode_handler_smi<T>(word: Tagged<'_, T>) -> Option<(i64, i64)> {
 fn ic_receiver<'a>(receiver: Tagged<'a, Value>, heap: &'a Heap) -> Option<Tagged<'a, Object>> {
     let obj = receiver.as_heap_object()?;
     let kind = obj.map(heap).kind();
-    if !kind.is_js_receiver() || kind.is_proxy() {
+    // Proxy dispatch and nullish are semantic, not cache gates.
+    if kind.is_proxy() || (kind.is_oddball() && receiver.is_nullish(heap)) {
         return None;
     }
     Some(obj)
@@ -298,13 +299,8 @@ fn ic_origin<'a>(
         if kind.is_proxy() {
             return None;
         }
-        if kind.kind() == ObjectKind::Oddball && receiver.is_nullish(heap) {
+        if kind.is_oddball() && receiver.is_nullish(heap) {
             return Some((obj.map(heap), heap.known().object_prototype.get(heap)));
-        }
-        if !kind.is_js_receiver()
-            && !matches!(kind.kind(), ObjectKind::Float | ObjectKind::FixedByteArray)
-        {
-            return None;
         }
         return Some((obj.map(heap), obj));
     }
@@ -708,12 +704,7 @@ fn analyze_load<'s>(
     let hit = Lookup::new(heap, scope, start, name.erase(), false).next(heap, scope);
     use crate::lookup::{Hit, Lookup};
     let cacheable = |holder: Handle<'s, Object>| -> bool {
-        holder
-            .as_tagged(heap)
-            .map(heap)
-            .kind()
-            .kind()
-            .is_js_receiver()
+        holder.as_tagged(heap).map(heap).kind().kind().is_receiver()
     };
     let receiver_object = receiver.as_heap_object();
     let own = |holder: Tagged<'_, Object>| -> bool {

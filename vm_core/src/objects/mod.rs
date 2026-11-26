@@ -160,6 +160,8 @@ pub enum ObjectKind {
     FeedbackVector = 12,
     BuiltinEnd = 13,
 
+    // Property receivers. Every kind in this range must either start with the
+    // `Object` layout prefix or have an explicitly guarded lookup path.
     /// `elements` points to the well-known `empty_fixed_array`, `len` is 0
     Object = 14,
     /// `elements` points to a `FixedArray`
@@ -171,59 +173,54 @@ pub enum ObjectKind {
     /// A Proxy exotic object (`ProxyObject`): no own properties, all
     /// internal methods dispatch through handler traps.
     Proxy = 18,
-    /// Sentinel and odd heap values
+    /// Sentinel and odd heap values.
     Oddball = 19,
-    Cell = 20,
-    PrototypeInfo = 21,
-    DataHandler = 22,
-    /// Sparse-array elements backing store (internal, never a receiver)
-    NumberDictionary = 23,
-    /// Compiled code: the instruction bytes.
-    Code = 24,
-    /// Native accessor backing: registry indices for a native getter/setter.
-    AccessorInfo = 25,
-    /// One loaded script's lexical context and its name index.
-    ScriptContextTable = 26,
-    /// Internal name -> script-context-index hash table.
-    NameToIndexHashTable = 27,
-    /// A loaded foreign library: dynamic-loader handle and path.
-    ForeignLibrary = 29,
     /// Storage for a C aggregate value (struct, union, array).
-    CValue = 31,
-    /// A C type descriptor: kind, layout, related types, call plan.
-    TypeInfo = 32,
-    /// A Valid UTF-8 string with inline bytes (non-ECma representation).
-    Utf8String = 33,
-    /// A string whose payload lives in host memory, kept alive by `owner`.
-    ExternalString = 34,
+    CValue = 20,
     /// A guest `Thread` object; host execution state lives in `VmCore`.
-    ThreadObject = 35,
+    ThreadObject = 21,
     /// A shared cell with an atomically accessed `Value` payload.
-    AtomicI64Object = 36,
+    AtomicI64Object = 22,
+    ReceiverEnd = 23,
+
+    // Internal values that are never property receivers.
+    Cell = 24,
+    PrototypeInfo = 25,
+    DataHandler = 26,
+    /// Sparse-array elements backing store (internal, never a receiver)
+    NumberDictionary = 27,
+    /// Compiled code: the instruction bytes.
+    Code = 28,
+    /// Native accessor backing: registry indices for a native getter/setter.
+    AccessorInfo = 29,
+    /// One loaded script's lexical context and its name index.
+    ScriptContextTable = 30,
+    /// Internal name -> script-context-index hash table.
+    NameToIndexHashTable = 31,
+    /// A loaded foreign library: dynamic-loader handle and path.
+    ForeignLibrary = 32,
+    /// A C type descriptor: kind, layout, related types, call plan.
+    TypeInfo = 33,
+    /// A Valid UTF-8 string with inline bytes (non-ECma representation).
+    Utf8String = 34,
+    /// A string whose payload lives in host memory, kept alive by `owner`.
+    ExternalString = 35,
     /// A globally interned symbolic name (Kette atom).
-    Atom = 39,
+    Atom = 36,
     /// An immutable bit string (inline bytes or a view into a root).
-    BitArray = 40,
+    BitArray = 37,
     /// An integer range with an iteration cursor.
-    Range = 41,
+    Range = 38,
 }
 
 impl ObjectKind {
-    pub const BUILTIN_START: u64 = ObjectKind::BuiltinStart as u64;
-    pub const BUILTIN_END: u64 = ObjectKind::BuiltinEnd as u64;
+    pub const RECEIVER_START: u64 = ObjectKind::Object as u64;
+    pub const RECEIVER_END: u64 = ObjectKind::ReceiverEnd as u64;
 
-    /// Whether values of this kind are ECMAScript receivers (JSReceiver)
-    pub const fn is_js_receiver(self) -> bool {
-        matches!(
-            self,
-            ObjectKind::Object
-                | ObjectKind::Array
-                | ObjectKind::ByteArray
-                | ObjectKind::String
-                | ObjectKind::Proxy
-                | ObjectKind::CValue
-                | ObjectKind::ThreadObject
-        )
+    /// Whether values of this kind participate in property lookup.
+    #[inline(always)]
+    pub const fn is_receiver(self) -> bool {
+        (self as u64) >= Self::RECEIVER_START && (self as u64) < Self::RECEIVER_END
     }
 }
 
@@ -283,7 +280,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             | ObjectKind::String
             | ObjectKind::Oddball => (*addr.cast::<Object>().as_ptr()).layout(),
             ObjectKind::Proxy => (*addr.cast::<ProxyObject>().as_ptr()).layout(),
-            ObjectKind::BuiltinStart | ObjectKind::BuiltinEnd => {
+            ObjectKind::BuiltinStart | ObjectKind::BuiltinEnd | ObjectKind::ReceiverEnd => {
                 unreachable!("sentinel kind in object header")
             }
         }
@@ -360,7 +357,7 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             | ObjectKind::String
             | ObjectKind::Oddball => (*addr.cast::<Object>().as_ptr()).visit_edges(visitor),
             ObjectKind::Proxy => (*addr.cast::<ProxyObject>().as_ptr()).visit_edges(visitor),
-            ObjectKind::BuiltinStart | ObjectKind::BuiltinEnd => {
+            ObjectKind::BuiltinStart | ObjectKind::BuiltinEnd | ObjectKind::ReceiverEnd => {
                 unreachable!("sentinel kind in object header")
             }
         }

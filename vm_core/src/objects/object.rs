@@ -104,12 +104,13 @@ impl Object {
     }
 
     /// Whether the object's map allows adding new properties.
+    #[inline(always)]
     pub fn is_extendable(&self, heap: &Heap) -> bool {
         self.map(heap).kind().is_extendable()
     }
 
     /// The slot holding the value of the data slot at `offset`.
-    #[inline]
+    #[inline(always)]
     pub fn slot<'a>(&self, heap: &'a Heap, offset: usize) -> &'a GcSlot {
         self.slots(heap).as_ref().element_slot(offset)
     }
@@ -124,7 +125,7 @@ impl Object {
         let kind = self.map(heap).kind();
         // JSReceiver layout guard: non-receiver heap objects (strings,
         // pairs, ...) do not have this layout
-        if !kind.is_js_receiver() || !kind.is_dense_elements() {
+        if !kind.is_receiver() || kind.is_proxy() || !kind.is_dense_elements() {
             // dictionary-backed: not a FixedArray
             return None;
         }
@@ -135,10 +136,10 @@ impl Object {
 
     /// The sparse-elements backing store, when the receiver is in
     /// dictionary-elements mode.
-    #[inline]
+    #[inline(always)]
     pub fn element_dictionary<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, NumberDictionary>> {
         let kind = self.map(heap).kind();
-        if !kind.is_js_receiver() || !kind.is_dictionary_elements() {
+        if !kind.is_receiver() || kind.is_proxy() || !kind.is_dictionary_elements() {
             return None;
         }
         // Safety: the receiver map's elements kind says the backing store
@@ -190,7 +191,7 @@ impl Object {
 
     /// Arrays bound element visibility by the `length` field; every
     /// other receiver by the elements capacity.
-    #[inline]
+    #[inline(always)]
     pub fn max_element_index(&self, heap: &Heap) -> usize {
         if self.is_array_exotic(heap) {
             return self.length();
@@ -228,7 +229,7 @@ impl Object {
     pub fn element_value_dense<'a>(&self, heap: &'a Heap, i: usize) -> Option<Tagged<'a, Value>> {
         let kind = self.map(heap).kind();
         // JSReceiver layout guard (see `elements_array`)
-        if !kind.is_js_receiver() || !kind.is_dense_elements() {
+        if !kind.is_receiver() || kind.is_proxy() || !kind.is_dense_elements() {
             return None;
         }
         let elements = self.elements.get(heap).get_as::<FixedArray>(heap)?;
@@ -258,7 +259,7 @@ impl Object {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn element_value<'a>(&self, heap: &'a Heap, i: usize) -> Option<Tagged<'a, Value>> {
         if let Some(v) = self.element_value_dense(heap, i) {
             return Some(v);

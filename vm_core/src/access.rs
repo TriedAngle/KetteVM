@@ -215,7 +215,7 @@ impl Object {
             if receiver.as_tagged(heap).is_nullish(heap) {
                 bail!(vm, heap, state, VmError::CannotSetPropertyOfNullish);
             }
-            let receiver_is_object = Proxy::is_js_receiver(heap, receiver.as_tagged(heap));
+            let receiver_is_object = receiver.as_tagged(heap).is_object(heap);
             let hit = {
                 let start = scope.handle(start.as_tagged(heap).erase());
                 let mut it = Lookup::new(heap, &scope, start, key, false);
@@ -415,9 +415,14 @@ impl Object {
             if target.as_tagged(heap).is_primitive(heap) {
                 return Ok(true);
             }
-            let receiver = scope
-                .cast::<Object>(heap, target.as_tagged(heap))
-                .expect("non-primitive receivers are objects");
+            let Some(receiver) = target
+                .as_tagged(heap)
+                .as_heap_object()
+                .and_then(|object| scope.cast::<Object>(heap, object.erase()))
+            else {
+                // Slotless receivers have no own properties to delete.
+                return Ok(true);
+            };
             Self::delete_own_property(vm, heap, state, &scope, receiver, key)
         })
     }
@@ -708,9 +713,15 @@ impl Object {
         // TODO: dispatch typed-array and module-namespace exotic
         // [[DefineOwnProperty]] once those object kinds exist (ES 10.4.5,
         // 10.4.6).
-        let receiver = scope
-            .cast::<Object>(heap, obj.as_tagged(heap))
-            .expect("non-proxy target is an object");
+        let Some(receiver) = obj
+            .as_tagged(heap)
+            .as_heap_object()
+            .and_then(|object| scope.cast::<Object>(heap, object.erase()))
+        else {
+            // A non-extensible receiver without the Object layout has no own
+            // properties to define.
+            return should_throw.reject(vm, heap, state);
+        };
         let current = Self::own_property_ordinary(heap, scope, obj, name);
         let name = scope.handle(name.as_tagged(heap).as_name());
         Self::define_own_property_apply(

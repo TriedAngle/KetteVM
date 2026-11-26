@@ -100,6 +100,19 @@ impl<'a> Tagged<'a, Value> {
             || self.get_as::<Symbol>(heap).is_some()
     }
 
+    /// Whether the value is an ECMAScript Object (JSReceiver) for
+    /// `Object.*` / `Reflect.*` checks and proxy target validation.
+    #[inline]
+    pub fn is_object(self, heap: &Heap) -> bool {
+        let Some(obj) = self.as_heap_object() else {
+            return false;
+        };
+        if self == heap.known().the_hole.get(heap) {
+            return false;
+        }
+        obj.map(heap).kind().is_receiver() && !self.is_primitive(heap)
+    }
+
     /// Whether the value is `null` or `undefined` (the spec's nullish
     /// predicate). No GC.
     #[inline(always)]

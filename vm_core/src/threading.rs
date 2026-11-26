@@ -336,6 +336,16 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             atomic_i64_new_index,
             1,
         );
+        let prototype_name = thread_vm.interner().intern_str(heap, &scope, "prototype");
+        let prototype_name = scope.handle(prototype_name.as_tagged(heap));
+        Object::define_own_property_ordinary(
+            heap,
+            &scope,
+            atomic_i64,
+            prototype_name,
+            PropertyDescriptor::data(atomic_prototype.erase()),
+        )
+        .expect("install AtomicI64.prototype");
         let atomic_namespace = make_prototype(heap);
         let atomic_i64_name = thread_vm.interner().intern_str(heap, &scope, "AtomicI64");
         let atomic_i64_name = scope.handle(atomic_i64_name.as_tagged(heap));

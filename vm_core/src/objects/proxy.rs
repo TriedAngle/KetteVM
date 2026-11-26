@@ -927,8 +927,14 @@ fn prevent_extensions_h<'a>(
 ) -> Result<bool> {
     let cond_20 = Proxy::is_proxy(heap, obj.as_tagged(heap));
     if !cond_20 {
-        let Some(obj) = scope.cast::<Object>(heap, obj.as_tagged(heap)) else {
-            bail!(vm, heap, state, VmError::PreventExtensionsTargetNotObject);
+        let target = obj.as_tagged(heap);
+        let Some(obj) = scope.cast::<Object>(heap, target) else {
+            // A slotless receiver has no own properties; the atomic cell map
+            // is already non-extensible.
+            let Some(target) = target.as_heap_object() else {
+                bail!(vm, heap, state, VmError::PreventExtensionsTargetNotObject);
+            };
+            return Ok(!target.map(heap).kind().is_extendable());
         };
         prevent_extensions_ordinary(heap, scope, obj);
         return Ok(true);
@@ -1005,16 +1011,6 @@ impl Proxy {
         // bit test on the already-loaded map kind, no kind decode/match
         v.as_heap_object()
             .is_some_and(|obj| obj.map(heap).kind().is_proxy())
-    }
-
-    /// Whether `v` is a valid ECMAScript receiver ([[ProxyTarget]] /
-    /// [[ProxyHandler]] validation, `Reflect.*` / `Object.*` argument
-    /// checks)
-    pub fn is_js_receiver<'a>(heap: &'a Heap, v: Tagged<'a, Value>) -> bool {
-        let Some(obj) = v.as_heap_object() else {
-            return false;
-        };
-        obj.header.map.get(heap).kind().kind().is_js_receiver()
     }
 
     pub fn allocate<'a>(

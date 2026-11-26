@@ -67,6 +67,7 @@ impl Value {
     }
 
     /// The Smi payload as an `i64`; `None` for pointers (incl. weak).
+    #[inline(always)]
     pub fn to_i64(self) -> Option<i64> {
         Smi::decode(self).map(|s| s.value())
     }

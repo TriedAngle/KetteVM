@@ -1764,7 +1764,7 @@ pub fn op_bind_this(frame: Frame) {
         .regs()
         .get(0, heap)
         .as_heap_object()
-        .is_some_and(|obj| obj.map(heap).kind().kind().is_js_receiver())
+        .is_some_and(|obj| obj.map(heap).kind().kind().is_receiver())
     {
         tail!(slow_bind_this)
     }

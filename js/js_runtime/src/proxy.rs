@@ -27,8 +27,7 @@ fn proxy_constructor<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Ta
     }
     let target = args.get_handle(heap, 0);
     let handler = args.get_handle(heap, 1);
-    let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
-        && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
+    let ok = target.as_tagged(heap).is_object(heap) && handler.as_tagged(heap).is_object(heap);
     if !ok {
         raise!(vm, heap, state, VmError::ProxyBadTargetOrHandler);
     }
@@ -47,8 +46,7 @@ fn proxy_revocable<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tag
     } = ctx;
     let target = args.get_handle(heap, 0);
     let handler = args.get_handle(heap, 1);
-    let ok = Proxy::is_js_receiver(heap, target.as_tagged(heap))
-        && Proxy::is_js_receiver(heap, handler.as_tagged(heap));
+    let ok = target.as_tagged(heap).is_object(heap) && handler.as_tagged(heap).is_object(heap);
     if !ok {
         raise!(vm, heap, state, VmError::ProxyBadTargetOrHandler);
     }
