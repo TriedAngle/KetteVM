@@ -399,8 +399,9 @@ impl<'a> Resolver<'a> {
 
     fn collect_use(&mut self, declaration: UseDecl<'a>) {
         let scope = self.current_scope();
+        let prefix = declaration.path().and_then(|path| path.last_segment());
         if let Some(tree) = declaration.tree() {
-            self.collect_use_tree(tree, scope);
+            self.collect_use_tree(tree, scope, prefix);
             return;
         }
         let Some(path) = declaration.path() else {
@@ -412,15 +413,26 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn collect_use_tree(&mut self, tree: UseTree<'a>, scope: ScopeId) {
+    fn collect_use_tree(
+        &mut self,
+        tree: UseTree<'a>,
+        scope: ScopeId,
+        prefix: Option<SyntaxToken<'a>>,
+    ) {
+        if tree.has_self()
+            && let Some(token) = prefix
+        {
+            self.declare_token(scope, token, BindingKind::Import);
+        }
         for item in tree.items() {
+            let last = item.path.last_segment();
             if let Some(nested) = item.tree
                 && item.alias.is_none()
             {
-                self.collect_use_tree(nested, scope);
+                self.collect_use_tree(nested, scope, last);
                 continue;
             }
-            let token = item.alias.or_else(|| item.path.last_segment());
+            let token = item.alias.or(last);
             if let Some(token) = token {
                 self.declare_token(scope, token, BindingKind::Import);
             }

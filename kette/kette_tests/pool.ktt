@@ -1,4 +1,4 @@
-// Userspace virtual-thread pool on top of Queue and TimerQueue.
+// Userspace virtual-thread pool on top of a non-blocking run queue and DelayScheduler.
 // Run:  cargo run -q -p vm -- kette/std/startup.ktt kette/kette_tests/pool.ktt
 // Check: kette/kette_tests/check.py
 
@@ -148,6 +148,28 @@ storm.forEach(|task| {
     task.join()
 })
 Test.assert(storms.load(), 4)
+
+// More sleeping tasks than carriers, with the main thread fully parked: the
+// timer thread submits them and must never block on a run-queue lock.
+let sleeperCount = 8
+let sleepDone = atomic.AtomicI64.new(0)
+let selfThread = Thread.current()
+index = 0
+while index < sleeperCount {
+    pool.spawn({
+        let count = 0
+        while count < 5 {
+            pool.sleep(1000000) // 1 ms
+            count = count + 1
+        }
+        if sleepDone.add(1) == sleeperCount {
+            selfThread.unpark()
+        }
+    })
+    index = index + 1
+}
+selfThread.park()
+Test.assert(sleepDone.load(), sleeperCount)
 
 pool.shutdown()
 Test.assert(pool.isClosed(), true)

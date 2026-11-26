@@ -235,6 +235,28 @@ impl Runtime for KetteRuntime {
                     length,
                 );
             }
+            // String operands coerce for arithmetic and bitwise operators.
+            for (name, index, length) in [
+                ("-", sub, 1),
+                ("*", mul, 1),
+                ("/", div, 1),
+                ("%", rem, 1),
+                ("&&&", band, 1),
+                ("|||", bor, 1),
+                ("^^^", bxor, 1),
+                ("<<<", shl, 1),
+                (">>>", shr, 1),
+            ] {
+                Object::add_method(
+                    thread_vm,
+                    heap,
+                    &scope,
+                    string_prototype,
+                    name,
+                    index,
+                    length,
+                );
+            }
 
             let bit_array_map = heap.known().bit_array_map.get_handle(heap, &scope);
             let proto_map = heap.allocate_handle::<Map>(
@@ -652,6 +674,7 @@ impl Runtime for KetteRuntime {
                 PropertyDescriptor::data(os.erase()),
             )
             .expect("install os primitive");
+
             Ok(())
         })
     }

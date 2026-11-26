@@ -1921,8 +1921,9 @@ impl<'a> FunctionGen<'a> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let prefix = declaration.path().and_then(|path| path.last_segment());
         if let Some(tree) = declaration.tree() {
-            return self.use_tree(&path, tree);
+            return self.use_tree(&path, prefix, tree);
         }
         let alias = declaration
             .alias()
@@ -1933,17 +1934,29 @@ impl<'a> FunctionGen<'a> {
         self.import(&path, alias)
     }
 
-    fn use_tree(&mut self, prefix: &[String], tree: UseTree<'a>) -> Result<(), CompileError> {
+    fn use_tree(
+        &mut self,
+        prefix: &[String],
+        prefix_token: Option<SyntaxToken<'a>>,
+        tree: UseTree<'a>,
+    ) -> Result<(), CompileError> {
+        if tree.has_self() {
+            let Some(alias) = prefix_token else {
+                return self.err_node(tree.syntax().id(), "self import needs a module path");
+            };
+            self.import(prefix, alias)?;
+        }
         for item in tree.items() {
             let mut full = prefix.to_vec();
             full.extend(item.path.segments().map(|token| token.text().to_string()));
+            let last = item.path.last_segment();
             if let Some(nested) = item.tree
                 && item.alias.is_none()
             {
-                self.use_tree(&full, nested)?;
+                self.use_tree(&full, last, nested)?;
                 continue;
             }
-            let alias = item.alias.or_else(|| item.path.last_segment());
+            let alias = item.alias.or(last);
             let Some(alias) = alias else {
                 return self.err_node(tree.syntax().id(), "missing import name");
             };
@@ -2154,7 +2167,7 @@ impl<'a> FunctionGen<'a> {
         self.b.jump_if_falsy(end);
         self.inline_body(body, sink)?;
         if self.b.is_live() {
-            self.b.jump(start);
+            self.b.jump_loop(start);
         }
         self.loops.pop();
         self.b.bind(end);

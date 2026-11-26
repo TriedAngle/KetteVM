@@ -1,7 +1,11 @@
-use ffi
-let { Ptr, void, i32, u32, i64, f32, f64, u8, u64, CString, ... } = ffi
+use ffi { self, Ptr, void, i32, u32, i64, f32, f64, u8, u64, CString }
 
-let lib = globalThis.SysLib
+let lib = ffi.library(null)
+let errno_location = if KetteTools.primitives.os.name == "macos" {
+    lib.fn("__error", [], Ptr)
+} else {
+    lib.fn("__errno_location", [], Ptr)
+}
 
 let raw = {
     lib: lib,
@@ -27,6 +31,16 @@ let raw = {
     cosf: lib.fn("cosf", [f32], f32),
     fabsf: lib.fn("fabsf", [f32], f32),
     exit: lib.fn("exit", [i32], void),
+    strlen: lib.fn("strlen", [CString], u64),
+    socket: lib.fn("socket", [i32, i32, i32], i32),
+    bind: lib.fn("bind", [i32, Ptr, u32], i32),
+    listen: lib.fn("listen", [i32, i32], i32),
+    accept: lib.fn("accept", [i32, Ptr, Ptr], i32),
+    close: lib.fn("close", [i32], i32),
+    read: lib.fn("read", [i32, Ptr, u64], i64),
+    write: lib.fn("write", [i32, Ptr, u64], i64),
+    poll: lib.fn("poll", [Ptr, u32, i32], i32),
+    errno_location: errno_location,
 }
 
 let getcwd = {

@@ -111,17 +111,8 @@ let startsNewLine = |tree, index| {
     token != null and token.kind == :Newline
 }
 
-let isOperatorKind = match |kind| {
-    :And | :Or | :EqEq | :NotEq
-    | :Lt | :Gt | :LtEq | :GtEq
-    | :LtLtLt | :GtGtGt | :AmpAmpAmp | :PipePipePipe | :CaretCaretCaret
-    | :LtGt | :PipeGt | :FatArrow
-    | :Plus | :Minus | :Star | :Slash | :Percent => true
-    _ => false
-}
-
 let isOperator = |kind, parent| {
-    parent != :Slot and isOperatorKind(kind)
+    parent != :Slot and syntax.isOperatorKind(kind)
 }
 
 let isAssignment = match |kind| {

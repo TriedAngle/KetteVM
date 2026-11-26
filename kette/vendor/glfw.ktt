@@ -129,8 +129,7 @@ let WindowTraits = {
 
         raw.default_window_hints()
         let client_api = match options.clientApi {
-            null => ClientApi.opengl
-            undefined => ClientApi.opengl
+            null | undefined => ClientApi.opengl
             value => value
         }
         match client_api {

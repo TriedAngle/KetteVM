@@ -1,0 +1,197 @@
+{
+  "name": "kette-image",
+  "displayName": "Kette Image",
+  "description": "Kette live image, semantic highlighting, and REPL",
+  "version": "0.1.0",
+  "publisher": "kette",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:kette",
+    "onView:kette.commands",
+    "onView:kette.repl",
+    "onView:kette.loadedFiles"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kette",
+        "aliases": [
+          "Kette",
+          "kette"
+        ],
+        "extensions": [
+          ".ktt"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kette",
+          "title": "Kette",
+          "icon": "media/kette.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "kette-panel",
+          "title": "Kette",
+          "icon": "media/kette.svg"
+        }
+      ]
+    },
+    "views": {
+      "kette": [
+        {
+          "id": "kette.commands",
+          "name": "Image Commands",
+          "type": "webview"
+        },
+        {
+          "id": "kette.loadedFiles",
+          "name": "Loaded Files"
+        }
+      ],
+      "kette-panel": [
+        {
+          "type": "webview",
+          "id": "kette.repl",
+          "name": "REPL",
+          "icon": "media/kette.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kette.evalSelection",
+        "title": "Kette: Eval Selection"
+      },
+      {
+        "command": "kette.evalBuffer",
+        "title": "Kette: Eval Buffer"
+      },
+      {
+        "command": "kette.loadFile",
+        "title": "Kette: Load File"
+      },
+      {
+        "command": "kette.showTranscript",
+        "title": "Kette: Show Transcript"
+      },
+      {
+        "command": "kette.imageInfo",
+        "title": "Kette: Image Info"
+      },
+      {
+        "command": "kette.restart",
+        "title": "Kette: Restart Image"
+      },
+      {
+        "command": "kette.openRepl",
+        "title": "Kette: REPL"
+      },
+      {
+        "command": "kette.refreshLoadedFiles",
+        "title": "Kette: Refresh Loaded Files",
+        "icon": "$(refresh)"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "kette",
+        "scopes": {
+          "keyword": [
+            "keyword.control.kette"
+          ],
+          "variable": [
+            "variable.other.kette"
+          ],
+          "parameter": [
+            "variable.parameter.kette"
+          ],
+          "property": [
+            "variable.other.property.kette"
+          ],
+          "function": [
+            "entity.name.function.kette"
+          ],
+          "method": [
+            "entity.name.function.kette"
+          ],
+          "namespace": [
+            "entity.name.namespace.kette"
+          ],
+          "enumMember": [
+            "constant.language.kette"
+          ],
+          "string": [
+            "string.quoted.kette"
+          ],
+          "number": [
+            "constant.numeric.kette"
+          ],
+          "comment": [
+            "comment.line.kette"
+          ],
+          "operator": [
+            "keyword.operator.kette"
+          ]
+        }
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kette.evalSelection",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == kette"
+      },
+      {
+        "command": "kette.evalSelection",
+        "key": "ctrl+alt+e",
+        "when": "editorLangId == kette"
+      },
+      {
+        "command": "kette.evalBuffer",
+        "key": "ctrl+alt+b",
+        "when": "editorLangId == kette"
+      }
+    ],
+    "configuration": {
+      "title": "Kette Image",
+      "properties": {
+        "kette.serverCommand": {
+          "type": "string",
+          "default": "kettevm",
+          "description": "VM executable used to run the image."
+        },
+        "kette.serverScript": {
+          "type": "string",
+          "default": "kette/tools/kettels.ktt",
+          "description": "Image LSP script, relative to the workspace root."
+        },
+        "kette.root": {
+          "type": "string",
+          "default": "",
+          "description": "Image root. Empty uses the workspace folder."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "kette.refreshLoadedFiles",
+          "when": "view == kette.loadedFiles",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}

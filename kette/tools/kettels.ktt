@@ -1,0 +1,907 @@
+// Kette image LSP server.
+// Run: kettevm kette/tools/kettels.ktt -- --stdio
+
+let env = KetteTools.primitives.env
+let loadedFiles = []
+
+let noteLoaded = |path| {
+    if !loadedFiles.includes(path) {
+        loadedFiles.push(path)
+    }
+}
+
+// Record files loaded into the image.
+let evalFile = KetteTools.evalFile
+KetteTools.evalFile = |path| {
+    noteLoaded(path)
+    evalFile(path)
+}
+if env.script != null {
+    noteLoaded(env.script)
+}
+
+if globalThis.Modules == undefined {
+    KetteTools.evalFile("kette/std/startup.ktt")
+}
+globalThis.KETTEFMT_LIBRARY = true
+KetteTools.evalFile("kette/tools/kettefmt.ktt")
+
+use collections.pool { ThreadPool }
+use collections.queue { Queue }
+use sync { Mutex }
+use sys
+use sys.file { File }
+use sys.socket { Bytes, TcpListener, TcpStream }
+use kette.syntax
+
+let pool = ThreadPool.new()
+let inbox = Queue.new()
+let logLock = Mutex.new()
+
+let pause = {
+    pool.sleep(1000000)
+}
+
+let log = |text| {
+    logLock.lock()
+    sys.writeStderr(text + "\n")
+    logLock.unlock()
+}
+
+let writeAll = |stream, text| {
+    let total = sys.utf8Length(text)
+    let offset = 0
+    while offset < total {
+        let chunk = total - offset
+        if chunk > 256 {
+            chunk = 256
+        }
+        let written = stream.writeSome(text, offset, chunk)
+        if written == null or written == 0 {
+            pause()
+        } else {
+            offset = offset + written
+        }
+    }
+    offset
+}
+
+let readOne = |connection| {
+    while true {
+        if Thread.current().isInterrupted() {
+            return null
+        }
+        connection.readBuffer.clear()
+        let got = connection.stream.readInto(connection.readBuffer, 1)
+        if got == null {
+            pause()
+        } else if got == 0 {
+            return null
+        } else {
+            let text = connection.readBuffer.text()
+            connection.readBuffer.clear()
+            return text
+        }
+    }
+}
+
+let readExact = |connection, count| {
+    if count == 0 {
+        return ""
+    }
+    let buffer = Bytes.new(count)
+    let offset = 0
+    while offset < count {
+        if Thread.current().isInterrupted() {
+            buffer.free()
+            return null
+        }
+        let got = connection.stream.readInto(buffer, count - offset)
+        if got == null {
+            pause()
+        } else if got == 0 {
+            buffer.free()
+            return null
+        } else {
+            offset = offset + got
+        }
+    }
+    let text = buffer.text()
+    buffer.free()
+    text
+}
+
+let findSubstring = |text, needle, from| {
+    let i = from
+    while i + needle.length <= text.length {
+        let j = 0
+        let matched = true
+        while j < needle.length {
+            if text[i + j] != needle[j] {
+                matched = false
+                break
+            }
+            j = j + 1
+        }
+        if matched {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+let digit = match |c| {
+    "0" => 0
+    "1" => 1
+    "2" => 2
+    "3" => 3
+    "4" => 4
+    "5" => 5
+    "6" => 6
+    "7" => 7
+    "8" => 8
+    "9" => 9
+    _ => -1
+}
+
+let parseNumber = |text, start| {
+    let index = start
+    while index < text.length and (text[index] == " " or text[index] == "\t") {
+        index = index + 1
+    }
+    let value = 0
+    while index < text.length {
+        let d = digit(text[index])
+        if d < 0 {
+            break
+        }
+        value = value * 10 + d
+        index = index + 1
+    }
+    { value: value }
+}
+
+let parseContentLength = |header| {
+    let at = findSubstring(header, "Content-Length:", 0)
+    if at < 0 {
+        throw "lsp: missing Content-Length"
+    }
+    let { value } = parseNumber(header, at + 15)
+    value
+}
+
+let readMessage = |connection| {
+    let header = ""
+    while true {
+        let byte = match readOne(connection) {
+            null => {
+                return null
+            }
+            byte => byte
+        }
+        header = header + byte
+        if header.length >= 4 and header[header.length - 4] == "\r" and header[header.length - 3] == "\n" and header[header.length - 2] == "\r" and header[header.length - 1] == "\n" {
+            break
+        }
+    }
+    let body = match readExact(connection, parseContentLength(header)) {
+        null => {
+            return null
+        }
+        body => body
+    }
+    JSON.parse(body)
+}
+
+let ConnectionTraits = {
+    new: |stream, name, stdio| {
+        let connection = self.clone()
+        connection.stream = stream
+        connection.name = name
+        connection.stdio = stdio
+        connection.documents = Object.create(null)
+        connection.outbox = Queue.new()
+        connection.closed = atomic.AtomicI64.new(0)
+        connection.reader = null
+        connection.writer = null
+        connection.readBuffer = Bytes.new(1)
+        connection.done = atomic.AtomicI64.new(0)
+        connection.tokensWarned = false
+        connection
+    }
+    send: |message| {
+        let body = JSON.stringify(message)
+        let body_len = sys.utf8Length(body)
+        self.outbox.push("Content-Length: " + body_len + "\r\n\r\n" + body)
+    }
+    respond: |id, result| {
+        if id != null {
+            self.send({
+                jsonrpc: "2.0"
+                id: id
+                result: result
+            })
+        }
+    }
+    respondError: |id, code, message| {
+        if id != null {
+            self.send({
+                jsonrpc: "2.0"
+                id: id
+                error: {
+                    code: code
+                    message: message
+                }
+            })
+        }
+    }
+    notify: |method, params| {
+        self.send({
+            jsonrpc: "2.0"
+            method: method
+            params: params
+        })
+    }
+    close: {
+        if self.closed.compareExchange(0, 1) != 0 {
+            return self
+        }
+        self.outbox.close()
+        let reader = self.reader
+        if reader != null {
+            reader.interrupt()
+        }
+        self
+    }
+    finish: {
+        if self.done.add(1) == 2 {
+            self.readBuffer.free()
+            self.stream.dispose()
+        }
+    }
+}
+
+let Connection = {
+    traits*: ConnectionTraits
+    stream, name, stdio, documents, outbox, closed, reader, writer, readBuffer, done, tokensWarned: undefined
+}
+
+let startConnection = |connection| {
+    let writer = pool.spawnNamed("kettels-writer-" + connection.name, {
+        let failed = false
+        while true {
+            let payload = connection.outbox.take()
+            if payload == null {
+                break
+            }
+            try {
+                writeAll(connection.stream, payload)
+            } catch (error) {
+                if !Thread.current().isInterrupted() {
+                    log("kettels: write failed: " + errorText(error))
+                }
+                failed = true
+                break
+            }
+        }
+        connection.finish()
+        if failed {
+            connection.close()
+        }
+    })
+    connection.writer = writer
+    let reader = pool.spawnNamed("kettels-reader-" + connection.name, {
+        while true {
+            let message = null
+            try {
+                message = readMessage(connection)
+            } catch (error) {
+                if !Thread.current().isInterrupted() {
+                    log("kettels: " + errorText(error))
+                }
+                break
+            }
+            if message == null {
+                break
+            }
+            inbox.push({
+                connection: connection
+                message: message
+            })
+        }
+        connection.finish()
+        connection.close()
+        if connection.stdio {
+            inbox.close()
+        }
+    })
+    connection.reader = reader
+    connection
+}
+
+let LEGEND = [
+    "keyword", "variable", "parameter", "property", "function", "method",
+    "namespace", "enumMember", "string", "number", "comment", "operator",
+]
+
+let tokenType = |kind, parent| {
+    if kind == :LineComment or kind == :BlockComment {
+        return 10
+    }
+    if kind == :String or kind == :QuotedName {
+        if syntax.isAtomParent(parent) {
+            return 7
+        }
+        return 8
+    }
+    if kind == :Number {
+        return 9
+    }
+    if kind == :Colon {
+        if syntax.isAtomParent(parent) {
+            return 7
+        }
+        return null
+    }
+    if kind == :Ident {
+        return syntax.identType(parent)
+    }
+    if syntax.isKeyword(kind) {
+        return 0
+    }
+    if syntax.isOperator(kind) {
+        return 11
+    }
+    null
+}
+
+// Maps byte offsets to UTF-16 line/column positions.
+let buildMap = |source| {
+    let source_view = sys.utf8View(source)
+    let bytes = source_view.size
+    let lineStarts = [0]
+    let lineUnits = [0]
+    let shifts = []
+    let byte = 0
+    let unit = 0
+    let excess = 0
+    while byte < bytes {
+        let first = source_view.at(byte)
+        let size = if first < 128 {
+            1
+        } else if first < 224 {
+            2
+        } else if first < 240 {
+            3
+        } else {
+            4
+        }
+        if first == 10 {
+            lineStarts.push(byte + 1)
+            lineUnits.push(unit + 1)
+        }
+        byte = byte + size
+        unit = unit + if size == 4 { 2 } else { 1 }
+        if size > 1 {
+            excess = excess + if size == 4 { 2 } else { 1 }
+            shifts.push([byte, excess])
+        }
+    }
+    source_view.free()
+    {
+        lineStarts: lineStarts
+        lineUnits: lineUnits
+        shifts: shifts
+        units: unit
+        bytes: bytes
+    }
+}
+
+let lineOf = |map, byte| {
+    let low = 0
+    let high = map.lineStarts.length - 1
+    while low < high {
+        let mid = Math.floor((low + high + 1) / 2)
+        if map.lineStarts[mid] <= byte {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    low
+}
+
+let excessAt = |map, byte| {
+    let low = 0
+    let high = map.shifts.length
+    while low < high {
+        let mid = Math.floor((low + high) / 2)
+        if map.shifts[mid][0] <= byte {
+            low = mid + 1
+        } else {
+            high = mid
+        }
+    }
+    if low == 0 {
+        0
+    } else {
+        map.shifts[low - 1][1]
+    }
+}
+
+let unitAt = |map, byte| {
+    byte - excessAt(map, byte)
+}
+
+let positionOf = |map, byte| {
+    let line = lineOf(map, byte)
+    {
+        line: line
+        character: unitAt(map, byte) - map.lineUnits[line]
+    }
+}
+
+let rangeOf = |map, start, end| {
+    {
+        start: positionOf(map, start)
+        end: positionOf(map, end)
+    }
+}
+
+let addSegments = |data, map, token, kind, limit| {
+    let startUnit = unitAt(map, token.start)
+    let endUnit = unitAt(map, token.end)
+    let startLine = lineOf(map, token.start)
+    let endLine = lineOf(map, token.end)
+    let line = startLine
+    while line <= endLine {
+        let lineStart = map.lineUnits[line]
+        let lineEnd = if line + 1 < map.lineUnits.length {
+            map.lineUnits[line + 1] - 1
+        } else {
+            map.units
+        }
+        let from = if startUnit > lineStart { startUnit } else { lineStart }
+        let to = if endUnit < lineEnd { endUnit } else { lineEnd }
+        if to > from and data.length < limit {
+            data.push([line, from - lineStart, to - from, kind])
+        }
+        line = line + 1
+    }
+}
+
+// Cap the encoded token data; later tokens are dropped.
+let MAX_TOKEN_DATA = 22000
+
+let semanticTokens = |source| {
+    let tree = syntax.parse(source)
+    let map = buildMap(source)
+    let limit = Math.floor(MAX_TOKEN_DATA / 5)
+    let pieces = []
+    tree.tokens.forEach(|token| {
+        let kind = tokenType(token.kind, token.parent)
+        if kind != null {
+            addSegments(pieces, map, token, kind, limit)
+        }
+    })
+    let count = if pieces.length < limit { pieces.length } else { limit }
+    let data = Array(count * 5)
+    let previousLine = 0
+    let previousCharacter = 0
+    let first = true
+    let index = 0
+    let at = 0
+    while index < count {
+        let piece = pieces[index]
+        let line = piece[0]
+        let character = piece[1]
+        if first {
+            data[at] = line
+            at = at + 1
+            data[at] = character
+            at = at + 1
+            first = false
+        } else {
+            data[at] = line - previousLine
+            at = at + 1
+            data[at] = if line == previousLine { character - previousCharacter } else { character }
+            at = at + 1
+        }
+        data[at] = piece[2]
+        at = at + 1
+        data[at] = piece[3]
+        at = at + 1
+        data[at] = 0
+        at = at + 1
+        previousLine = line
+        previousCharacter = character
+        index = index + 1
+    }
+    {
+        data: data
+        truncated: pieces.length >= limit
+    }
+}
+
+let diagnosticsFor = |source| {
+    let tree = syntax.parse(source)
+    let map = buildMap(source)
+    let diagnostics = []
+    let i = 0
+    while i < tree.errorCount {
+        diagnostics.push({
+            range: rangeOf(map, tree.errorStart(i), tree.errorEnd(i))
+            severity: 1
+            source: "kette"
+            message: tree.errorMessage(i)
+        })
+        i = i + 1
+    }
+    diagnostics
+}
+
+let publishDiagnostics = |connection, uri, source| {
+    connection.notify("textDocument/publishDiagnostics", {
+        uri: uri
+        diagnostics: diagnosticsFor(source)
+    })
+}
+
+let evaluations = 0
+let imageEpoch = 0
+let started = Thread.nanoTime()
+
+globalThis.KETTE_TRANSCRIPT = []
+globalThis.print = |value| {
+    globalThis.KETTE_TRANSCRIPT.push("" + value)
+}
+if globalThis.Console != undefined {
+    Console.print = |value| {
+        globalThis.KETTE_TRANSCRIPT.push("" + value)
+    }
+    Console.write = |value| {
+        globalThis.KETTE_TRANSCRIPT.push("" + value)
+    }
+}
+
+let drainTranscript = {
+    let text = globalThis.KETTE_TRANSCRIPT.join("")
+    globalThis.KETTE_TRANSCRIPT.length = 0
+    text
+}
+
+let errorText = |error| {
+    if error.message != null {
+        "" + error.message
+    } else {
+        "" + error
+    }
+}
+
+let evaluate = |source| {
+    let ok = true
+    let result = null
+    let message = null
+    try {
+        result = KetteTools.evalRepl("kette", source)
+    } catch (error) {
+        ok = false
+        message = errorText(error)
+    }
+    evaluations = evaluations + 1
+    imageEpoch = imageEpoch + 1
+    let valueText = null
+    if !Object.is(result, null) {
+        try {
+            valueText = "" + result
+        } catch (error) {
+            valueText = "<object>"
+        }
+    }
+    {
+        ok: ok
+        value: valueText
+        error: message
+        transcript: drainTranscript()
+    }
+}
+
+let textDocument = |params| {
+    params.textDocument
+}
+
+// Known methods only; never intern wire strings.
+let methodKind = match |method| {
+    "initialize" => :initialize
+    "initialized" => :initialized
+    "shutdown" => :shutdown
+    "exit" => :exit
+    "textDocument/didOpen" => :didOpen
+    "textDocument/didChange" => :didChange
+    "textDocument/didSave" => :didSave
+    "textDocument/didClose" => :didClose
+    "textDocument/semanticTokens/full" => :semanticTokens
+    "textDocument/formatting" => :formatting
+    "textDocument/hover" => :hover
+    "textDocument/definition" => :definition
+    "textDocument/documentSymbol" => :documentSymbol
+    "workspace/symbol" => :workspaceSymbol
+    "kette/eval" => :eval
+    "kette/loadFile" => :loadFile
+    "kette/check" => :check
+    "kette/format" => :format
+    "kette/transcript" => :transcript
+    "kette/imageInfo" => :imageInfo
+    _ => null
+}
+
+let handleRequest = |connection, message| {
+    let method = message.method
+    let kind = methodKind(method)
+    let params = message.params
+    let id = message.id
+    match kind {
+        :initialize => {
+            connection.respond(id, {
+                capabilities: {
+                    positionEncoding: "utf-16"
+                    textDocumentSync: {
+                        openClose: true
+                        change: 1
+                        save: {
+                            includeText: true
+                        }
+                    }
+                    semanticTokensProvider: {
+                        legend: {
+                            tokenTypes: LEGEND
+                            tokenModifiers: []
+                        }
+                        full: true
+                        range: false
+                    }
+                    documentFormattingProvider: true
+                    hoverProvider: true
+                    definitionProvider: true
+                    documentSymbolProvider: true
+                }
+                serverInfo: {
+                    name: "kette-image"
+                    version: "0.1.0"
+                }
+            })
+        }
+        :initialized => {}
+        :shutdown => {
+            connection.respond(id, null)
+        }
+        :exit => {
+            connection.close()
+            return !connection.stdio
+        }
+        :didOpen => {
+            let document = textDocument(params)
+            connection.documents[document.uri] = document.text
+            publishDiagnostics(connection, document.uri, document.text)
+        }
+        :didChange => {
+            let uri = textDocument(params).uri
+            let changes = params.contentChanges
+            if changes.length > 0 {
+                let text = changes[changes.length - 1].text
+                connection.documents[uri] = text
+                publishDiagnostics(connection, uri, text)
+            }
+        }
+        :didSave => {
+            let uri = textDocument(params).uri
+            if params.text != null {
+                connection.documents[uri] = params.text
+            }
+            if connection.documents[uri] != null {
+                publishDiagnostics(connection, uri, connection.documents[uri])
+            }
+        }
+        :didClose => {
+            let uri = textDocument(params).uri
+            connection.documents[uri] = undefined
+            connection.notify("textDocument/publishDiagnostics", {
+                uri: uri
+                diagnostics: []
+            })
+        }
+        :semanticTokens => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, { data: [] })
+            } else {
+                let result = semanticTokens(connection.documents[uri])
+                connection.respond(id, { data: result.data })
+                if result.truncated and !connection.tokensWarned {
+                    connection.tokensWarned = true
+                    connection.notify("window/showMessage", {
+                        type: 2
+                        message: "Kette: semantic tokens truncated for a large document"
+                    })
+                }
+            }
+        }
+        :formatting => {
+            let uri = textDocument(params).uri
+            if connection.documents[uri] == null {
+                connection.respond(id, [])
+            } else {
+                let source = connection.documents[uri]
+                let formatted = try {
+                    Modules.kettefmt.formatSource(source)
+                } catch (error) {
+                    connection.respondError(id, -32603, errorText(error))
+                    return true
+                }
+                if formatted == source {
+                    connection.respond(id, [])
+                } else {
+                    let map = buildMap(source)
+                    connection.respond(id, [{
+                            range: {
+                                start: { line: 0, character: 0 }
+                                end: positionOf(map, map.bytes)
+                            }
+                            newText: formatted
+                        }])
+                }
+            }
+        }
+        :hover => {
+            connection.respond(id, null)
+        }
+        :definition => {
+            connection.respond(id, null)
+        }
+        :documentSymbol => {
+            connection.respond(id, [])
+        }
+        :workspaceSymbol => {
+            connection.respond(id, [])
+        }
+        :eval => {
+            let result = evaluate(params.source)
+            if params.uri != null {
+                publishDiagnostics(connection, params.uri, params.source)
+            }
+            connection.respond(id, result)
+        }
+        :loadFile => {
+            let path = params.path
+            let source = try {
+                with(File.open(path, "rb"), |file| {
+                    file.readText()
+                })
+            } catch (error) {
+                connection.respond(id, {
+                    ok: false
+                    error: errorText(error)
+                })
+                return true
+            }
+            noteLoaded(path)
+            let result = evaluate(source)
+            connection.respond(id, result)
+        }
+        :check => {
+            connection.respond(id, {
+                diagnostics: diagnosticsFor(params.source)
+            })
+        }
+        :format => {
+            let result = try {
+                {
+                    ok: true
+                    text: Modules.kettefmt.formatSource(params.source)
+                }
+            } catch (error) {
+                {
+                    ok: false
+                    error: errorText(error)
+                }
+            }
+            connection.respond(id, result)
+        }
+        :transcript => {
+            connection.respond(id, {
+                ok: true
+                text: drainTranscript()
+            })
+        }
+        :imageInfo => {
+            connection.respond(id, {
+                root: sys.cwd
+                uptimeMs: Math.floor((Thread.nanoTime() - started) / 1000000)
+                evaluations: evaluations
+                epoch: imageEpoch
+                modules: Object.getOwnPropertyNames(Modules).join(",")
+                files: loadedFiles
+            })
+        }
+        _ => {
+            if id != null {
+                connection.respondError(id, -32601, "unknown method: " + method)
+            }
+        }
+    }
+    true
+}
+
+let arguments = sys.env.arguments
+let tcpPort = 0
+let argumentIndex = 0
+while argumentIndex < arguments.length {
+    let argument = arguments[argumentIndex]
+    if argument == "--tcp" or argument == "--port" {
+        if argumentIndex + 1 < arguments.length {
+            tcpPort = arguments[argumentIndex + 1] * 1
+            argumentIndex = argumentIndex + 1
+        }
+    }
+    argumentIndex = argumentIndex + 1
+}
+
+let connection = null
+if tcpPort > 0 {
+    let listener = null
+    try {
+        listener = TcpListener.bind("127.0.0.1", tcpPort)
+    } catch (error) {
+        log("kettels: " + errorText(error))
+        sys.exit(1)
+    }
+    log("kettels: listening on 127.0.0.1:" + tcpPort)
+    pool.spawnNamed("kettels-acceptor", {
+        while true {
+            let stream = try {
+                listener.tryAccept()
+            } catch (error) {
+                log("kettels: accept failed: " + errorText(error))
+                inbox.close()
+                break
+            }
+            if stream == null {
+                pause()
+            } else {
+                inbox.push({
+                    accept: stream
+                })
+            }
+        }
+        listener.dispose()
+    })
+} else {
+    connection = Connection.new(TcpStream.fromFds(0, 1, false), "stdio", true)
+    startConnection(connection)
+}
+
+log("kettels: image ready")
+while true {
+    let item = inbox.take()
+    if item == null {
+        break
+    }
+    if item.accept != null {
+        let accepted = Connection.new(item.accept, "tcp", false)
+        startConnection(accepted)
+        log("kettels: client connected")
+    } else if !handleRequest(item.connection, item.message) {
+        break
+    }
+}
+
+if connection != null {
+    connection.close()
+    while connection.reader.isAlive() or connection.writer.isAlive() {
+        Thread.sleep(1)
+    }
+}
+inbox.close()
+log("kettels: image stopped")
+pool.shutdown()

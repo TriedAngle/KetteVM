@@ -1,13 +1,7 @@
-use ffi
+use ffi { self, Ptr, i32, i64, u32, u64, f32 }
 
-let lib = globalThis.SysLib
-let Ptr = ffi.Ptr
+let lib = ffi.library("ucrtbase.dll")
 let WString = ffi.pointer(ffi.char16)
-let i32 = ffi.i32
-let i64 = ffi.i64
-let u32 = ffi.u32
-let u64 = ffi.u64
-let f32 = ffi.f32
 
 let raw = {
     lib: lib,
@@ -30,6 +24,8 @@ let raw = {
     cosf: lib.fn("cosf", [f32], f32),
     fabsf: lib.fn("fabsf", [f32], f32),
     exit: lib.fn("exit", [i32], ffi.void),
+    strlen: lib.fn("strlen", [ffi.CString], u64),
+    write: lib.fn("_write", [i32, Ptr, u32], i32),
 }
 
 let getcwd = {

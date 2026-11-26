@@ -1,0 +1,158 @@
+use ffi { self, u8 }
+use sys { name, platform }
+
+let unavailable = |method| {
+    throw "sockets are not implemented on windows: " + method
+}
+
+let windowsSocket = {
+    TcpStream: {
+        fromFd: |fd| { unavailable("TcpStream.fromFd") }
+        fromFds: |readFd, writeFd, owned| { unavailable("TcpStream.fromFds") }
+        readInto: |buffer, max| { unavailable("TcpStream.readInto") }
+        writeSome: |text, offset, count| { unavailable("TcpStream.writeSome") }
+    }
+    TcpListener: {
+        bind: |host, port| { unavailable("TcpListener.bind") }
+        tryAccept: { unavailable("TcpListener.tryAccept") }
+    }
+}
+
+let backend = match name {
+    "windows" => windowsSocket
+    _ => platform.socket
+}
+
+let ByteBufferTraits = {
+    new: |capacity| {
+        let buffer = self.clone()
+        buffer.data = ffi.array(u8, capacity + 1).new()
+        buffer.length = 0
+        buffer.capacity = capacity + 1
+        buffer
+    }
+    ensure: |capacity| {
+        if capacity > self.capacity {
+            let next_capacity = self.capacity
+            while next_capacity < capacity {
+                next_capacity = next_capacity * 2
+            }
+            let data = ffi.array(u8, next_capacity + 1).new()
+            let index = 0
+            while index < self.length {
+                data.set(index, self.data.get(index))
+                index = index + 1
+            }
+            self.data.free()
+            self.data = data
+            self.capacity = next_capacity + 1
+        }
+    }
+    text: {
+        if self.length == 0 {
+            return ""
+        }
+        ffi.string(self.data, self.length)
+    }
+    clear: {
+        self.length = 0
+        self
+    }
+    free: {
+        if self.data != null {
+            self.data.free()
+            self.data = null
+            self.length = 0
+            self.capacity = 0
+        }
+        self
+    }
+    disposed>>: { self.data == null }
+    dispose: { self.free() }
+}
+
+let Bytes = {
+    traits*: ByteBufferTraits
+    data: null
+    length: 0
+    capacity: 0
+}
+
+let TcpStreamTraits = {
+    disposable*: Disposable
+
+    fromFd: |fd| {
+        let stream = self.clone()
+        stream.inner = backend.TcpStream.fromFd(fd)
+        stream
+    }
+
+    fromFds: |readFd, writeFd, owned| {
+        let stream = self.clone()
+        stream.inner = backend.TcpStream.fromFds(readFd, writeFd, owned)
+        stream
+    }
+
+    readInto: |buffer, max| { self.inner.readInto(buffer, max) }
+
+    writeSome: |text, offset, count| {
+        self.inner.writeSome(text, offset, count)
+    }
+
+    dispose: {
+        if self.inner == null {
+            return 0
+        }
+        let inner = self.inner
+        self.inner = null
+        inner.dispose()
+    }
+}
+
+let TcpStream = {
+    traits*: TcpStreamTraits
+    inner: null
+}
+
+let TcpListenerTraits = {
+    disposable*: Disposable
+
+    bind: |host, port| {
+        let listener = self.clone()
+        listener.inner = backend.TcpListener.bind(host, port)
+        listener
+    }
+
+    tryAccept: {
+        let inner = self.inner.tryAccept()
+        if inner == null {
+            return null
+        }
+        let stream = TcpStream.clone()
+        stream.inner = inner
+        stream
+    }
+
+    dispose: {
+        if self.inner == null {
+            return 0
+        }
+        let inner = self.inner
+        self.inner = null
+        inner.dispose()
+    }
+}
+
+let TcpListener = {
+    traits*: TcpListenerTraits
+    inner: null
+}
+
+mod sys.socket {
+    export Bytes = Bytes
+    export ByteBufferTraits = ByteBufferTraits
+    export TcpListener = TcpListener
+    export TcpListenerTraits = TcpListenerTraits
+    export TcpStream = TcpStream
+    export TcpStreamTraits = TcpStreamTraits
+}

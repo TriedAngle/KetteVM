@@ -1,4 +1,4 @@
-use ffi
+use ffi { self, u8 }
 use sys.libc { raw }
 
 let Seek = {
@@ -55,7 +55,7 @@ let FileTraits = {
     }
 
     read: |size| {
-        let data = ffi.array(ffi.u8, size).new()
+        let data = ffi.array(u8, size).new()
         let count = raw.fread(data, 1, size, self.handle)
         if count != size {
             data.free()
@@ -75,7 +75,7 @@ let FileTraits = {
         if size == 0 {
             return ""
         }
-        let data = ffi.array(ffi.u8, size).new()
+        let data = ffi.array(u8, size).new()
         self.seek(0, Seek.SET)
         let count = raw.fread(data, 1, size, self.handle)
         if count != size {
@@ -94,7 +94,7 @@ let FileTraits = {
     }
 
     write: |data, size| {
-        let count = raw.fwrite(data.cast(ffi.u8), 1, size, self.handle)
+        let count = raw.fwrite(data.cast(u8), 1, size, self.handle)
         if count != size {
             throw "short write"
         }

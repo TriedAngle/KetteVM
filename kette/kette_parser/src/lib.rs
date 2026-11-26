@@ -409,13 +409,17 @@ impl<'a> Parser<'a> {
             if self.peek().kind == RBrace {
                 break;
             }
-            self.parse_path()?;
-            if self.peek().kind == As {
+            if self.peek().kind == SelfKw {
                 self.bump();
-                self.expect_name()?;
-            }
-            if self.peek().kind == LBrace {
-                self.parse_use_tree()?;
+            } else {
+                self.parse_path()?;
+                if self.peek().kind == As {
+                    self.bump();
+                    self.expect_name()?;
+                }
+                if self.peek().kind == LBrace {
+                    self.parse_use_tree()?;
+                }
             }
             if self.peek().kind != Comma {
                 break;

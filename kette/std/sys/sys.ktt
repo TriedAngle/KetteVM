@@ -1,8 +1,35 @@
-use ffi
+use ffi { self, cstring }
 
-let backend = globalThis.SysBackend
 let process = KetteTools.primitives.os
 let env = KetteTools.primitives.env
+let backend = match process.name {
+    "windows" => Modules.sys.windows
+    _ => Modules.sys.libc
+}
+
+let utf8Length = |text| {
+    let data = cstring(text)
+    let size = backend.raw.strlen(data)
+    data.free()
+    size
+}
+
+let utf8View = |text| {
+    let data = cstring(text)
+    let size = backend.raw.strlen(data)
+    {
+        size: size
+        at: |index| { data.add(index).get(0) }
+        free: { data.free() }
+    }
+}
+
+let writeStderr = |text| {
+    let data = cstring(text)
+    let size = backend.raw.strlen(data)
+    backend.raw.write(2, data, size)
+    data.free()
+}
 
 let lib = |name| {
     let home = if env.HOME != undefined { env.HOME } else { env.USERPROFILE }
@@ -21,8 +48,12 @@ let lib = |name| {
 }
 
 mod sys {
+    export platform = backend
     export raw = backend.raw
     export lib = lib
+    export utf8Length = utf8Length
+    export utf8View = utf8View
+    export writeStderr = writeStderr
     export getcwd = backend.getcwd
     export chdir = backend.chdir
     export getenv = backend.getenv

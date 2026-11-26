@@ -1,4 +1,6 @@
-let backend = globalThis.SysBackend.file
+use sys { platform }
+
+let backend = platform.file
 let Seek = backend.Seek
 
 let FileTraits = {

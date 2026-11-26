@@ -1,5 +1,96 @@
-use collections.queue { Queue }
-use collections.timer { TimerQueue }
+use collections.delay_scheduler { DelayScheduler }
+
+let WorkQueueTraits = {
+    new: {
+        let capacity = 64
+        let queue = self.clone()
+        queue.items = []
+        queue.items[capacity - 1] = null
+        queue.head = 0
+        queue.count = 0
+        queue.capacity = capacity
+        queue.guard = atomic.AtomicI64.new(0)
+        queue.closed = atomic.AtomicI64.new(0)
+        queue.workers = []
+        queue.wakeIndex = atomic.AtomicI64.new(0)
+        queue
+    }
+    lock: {
+        while self.guard.compareExchange(0, 1) != 0 {
+            Thread.yield()
+        }
+    }
+    unlock: { self.guard.store(0) }
+    grow: {
+        let capacity = self.capacity * 2
+        let items = []
+        items[capacity - 1] = null
+        let index = 0
+        while index < self.count {
+            items[index] = self.items[(self.head + index) % self.capacity]
+            index = index + 1
+        }
+        self.items = items
+        self.head = 0
+        self.capacity = capacity
+    }
+    wakeOne: {
+        let workers = self.workers
+        if workers.length > 0 {
+            let index = self.wakeIndex.add(1) % workers.length
+            workers[index].unpark()
+        }
+    }
+    push: |thread| {
+        self.lock()
+        if self.closed.load() != 0 {
+            self.unlock()
+            return false
+        }
+        if self.count == self.capacity {
+            self.grow()
+        }
+        let index = (self.head + self.count) % self.capacity
+        self.items[index] = thread
+        self.count = self.count + 1
+        self.unlock()
+        self.wakeOne()
+        true
+    }
+    take: {
+        while true {
+            self.lock()
+            if self.count > 0 {
+                let thread = self.items[self.head]
+                self.items[self.head] = null
+                self.head = (self.head + 1) % self.capacity
+                self.count = self.count - 1
+                self.unlock()
+                return thread
+            }
+            let closed = self.closed.load() != 0
+            self.unlock()
+            if closed {
+                return null
+            }
+            Thread.park()
+        }
+    }
+    close: {
+        self.closed.store(1)
+        let index = 0
+        while index < self.workers.length {
+            self.workers[index].unpark()
+            index = index + 1
+        }
+        self
+    }
+}
+
+let WorkQueue = {
+    traits*: WorkQueueTraits
+    items, head, count, capacity, guard, closed, workers, wakeIndex: undefined
+}
 
 let ThreadPoolTraits = {
     disposable*: Disposable
@@ -7,11 +98,11 @@ let ThreadPoolTraits = {
     newWithSize: |workers| {
         let pool = self.clone()
         pool.size = if workers < 1 { 1 } else { workers }
-        pool.queue = Queue.new()
-        pool.timers = TimerQueue.new()
+        pool.workQueue = WorkQueue.new()
+        pool.scheduler = DelayScheduler.new()
         pool.threads = []
+        pool.workQueue.workers = pool.threads
         pool.closed = false
-        pool.timers.start()
         let startWorker = |name| {
             let thread = Thread.newPlatform(name, {
                 pool.work()
@@ -32,54 +123,42 @@ let ThreadPoolTraits = {
     spawnNamed: |name, target| {
         let thread = Thread.newVirtual(name, target)
         thread.scheduler = self
-        thread.queued = atomic.AtomicI64.new(0)
         thread.start()
         self.enqueue(thread)
         thread
     }
     enqueue: |thread| {
-        if thread.queued.compareExchange(0, 1) != 0 {
-            return false
-        }
-        if !self.queue.push(thread) {
-            thread.queued.store(0)
-            return false
-        }
-        true
+        self.workQueue.push(thread)
     }
-    // Any worker may mount a runnable task; the continuation rebinds its
-    // carrier heap when it resumes.
     work: {
         while true {
-            let thread = self.queue.take()
+            let thread = self.workQueue.take()
             if thread == null {
                 return 0
             }
-            thread.queued.store(0)
             if thread.isReady() and thread.mount() {
                 self.enqueue(thread)
             }
         }
     }
     parkNanos: |nanos| {
-        self.timers.parkNanos(nanos)
+        self.scheduler.parkNanos(nanos)
     }
     sleep: |nanos| {
-        self.timers.sleep(nanos)
+        self.scheduler.sleep(nanos)
     }
     isClosed: { self.closed }
     shutdown: {
         if !self.closed {
             self.closed = true
-            self.queue.close()
-            self.timers.close()
+            self.workQueue.close()
+            self.scheduler.shutdown()
         }
         let index = 0
         while index < self.threads.length {
             self.threads[index].join()
             index = index + 1
         }
-        self.timers.shutdown()
         self
     }
     dispose: { self.shutdown() }
@@ -87,7 +166,7 @@ let ThreadPoolTraits = {
 
 let ThreadPool = {
     traits*: ThreadPoolTraits
-    size, queue, timers, threads, closed: undefined
+    size, workQueue, scheduler, threads, closed: undefined
 }
 
 mod collections.pool {

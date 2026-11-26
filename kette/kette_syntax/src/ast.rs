@@ -260,6 +260,15 @@ impl<'a> UseTree<'a> {
     pub fn trees(self) -> AstChildren<'a, UseTree<'a>> {
         self.syntax.children_as()
     }
+
+    pub fn has_self(self) -> bool {
+        self.syntax.tokens().any(|token| {
+            token.kind() == SelfKw
+                && token
+                    .parent()
+                    .is_some_and(|parent| parent.id() == self.syntax.id())
+        })
+    }
 }
 
 impl<'a> ExportDecl<'a> {
@@ -883,7 +892,7 @@ impl<'a> Iterator for UseItems<'a> {
         loop {
             match self.elements.next_element()? {
                 SyntaxElement::Token(token) => match token.kind() {
-                    LBrace | Comma => continue,
+                    LBrace | Comma | SelfKw => continue,
                     RBrace => {
                         self.done = true;
                         return None;

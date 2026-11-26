@@ -27,7 +27,7 @@ pub mod thread;
 
 pub use array::{FixedArray, WeakFixedArray, WeakFixedArrayInit};
 pub use atom::Atom;
-pub use atomic::{AtomicI64Object, AtomicI64ObjectInit};
+pub use atomic::{AtomicI64Object, AtomicI64ObjectInit, AtomicRefObject, AtomicRefObjectInit};
 pub use bit_array::{BitArray, BitArrayInit};
 pub use byte_array::FixedByteArray;
 pub use callable::{CallableInfoInit, CallableInfoObject, FunctionKind};
@@ -179,38 +179,40 @@ pub enum ObjectKind {
     CValue = 20,
     /// A guest `Thread` object; host execution state lives in `VmCore`.
     ThreadObject = 21,
-    /// A shared cell with an atomically accessed `Value` payload.
+    /// A shared 64-bit atomic cell.
     AtomicI64Object = 22,
-    ReceiverEnd = 23,
+    /// A shared atomic reference cell.
+    AtomicRefObject = 23,
+    ReceiverEnd = 24,
 
     // Internal values that are never property receivers.
-    Cell = 24,
-    PrototypeInfo = 25,
-    DataHandler = 26,
+    Cell = 25,
+    PrototypeInfo = 26,
+    DataHandler = 27,
     /// Sparse-array elements backing store (internal, never a receiver)
-    NumberDictionary = 27,
+    NumberDictionary = 28,
     /// Compiled code: the instruction bytes.
-    Code = 28,
+    Code = 29,
     /// Native accessor backing: registry indices for a native getter/setter.
-    AccessorInfo = 29,
+    AccessorInfo = 30,
     /// One loaded script's lexical context and its name index.
-    ScriptContextTable = 30,
+    ScriptContextTable = 31,
     /// Internal name -> script-context-index hash table.
-    NameToIndexHashTable = 31,
+    NameToIndexHashTable = 32,
     /// A loaded foreign library: dynamic-loader handle and path.
-    ForeignLibrary = 32,
+    ForeignLibrary = 33,
     /// A C type descriptor: kind, layout, related types, call plan.
-    TypeInfo = 33,
+    TypeInfo = 34,
     /// A Valid UTF-8 string with inline bytes (non-ECma representation).
-    Utf8String = 34,
+    Utf8String = 35,
     /// A string whose payload lives in host memory, kept alive by `owner`.
-    ExternalString = 35,
+    ExternalString = 36,
     /// A globally interned symbolic name (Kette atom).
-    Atom = 36,
+    Atom = 37,
     /// An immutable bit string (inline bytes or a view into a root).
-    BitArray = 37,
+    BitArray = 38,
     /// An integer range with an iteration cursor.
-    Range = 38,
+    Range = 39,
 }
 
 impl ObjectKind {
@@ -274,6 +276,7 @@ pub unsafe fn object_layout(addr: ObjectAddr) -> Layout {
             ObjectKind::TypeInfo => (*addr.cast::<TypeInfo>().as_ptr()).layout(),
             ObjectKind::ThreadObject => (*addr.cast::<ThreadObject>().as_ptr()).layout(),
             ObjectKind::AtomicI64Object => (*addr.cast::<AtomicI64Object>().as_ptr()).layout(),
+            ObjectKind::AtomicRefObject => (*addr.cast::<AtomicRefObject>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -350,6 +353,9 @@ pub unsafe fn visit_object(addr: ObjectAddr, visitor: &mut dyn Visitor) {
             }
             ObjectKind::AtomicI64Object => {
                 (*addr.cast::<AtomicI64Object>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::AtomicRefObject => {
+                (*addr.cast::<AtomicRefObject>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::Object
             | ObjectKind::Array

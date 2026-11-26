@@ -4,7 +4,13 @@ use vm_core::{
 };
 
 fn number(value: Tagged<'_, Value>, heap: &vm_core::Heap) -> Option<f64> {
-    value.as_number(heap)
+    value.to_number(heap)
+}
+
+fn integer(value: Tagged<'_, Value>, heap: &vm_core::Heap) -> Option<i64> {
+    value
+        .to_i64()
+        .or_else(|| value.to_number(heap).map(|number| number as i64))
 }
 
 fn checked<'a>(
@@ -128,8 +134,8 @@ macro_rules! integer_binary {
             let HostCtx {
                 vm, heap, state, ..
             } = ctx;
-            let a = call.receiver.as_tagged(heap).to_i64();
-            let b = args.get(heap, 0).to_i64();
+            let a = integer(call.receiver.as_tagged(heap), heap);
+            let b = integer(args.get(heap, 0), heap);
             let (Some(a), Some(b)) = (a, b) else {
                 raise!(vm, heap, state, VmError::InvalidOperandType)
             };
@@ -192,8 +198,8 @@ pub fn number_shift_left<'a>(
         vm, heap, state, ..
     } = ctx;
     let (Some(value), Some(count)) = (
-        call.receiver.as_tagged(heap).to_i64(),
-        args.get(heap, 0).to_i64(),
+        integer(call.receiver.as_tagged(heap), heap),
+        integer(args.get(heap, 0), heap),
     ) else {
         raise!(vm, heap, state, VmError::InvalidOperandType)
     };
@@ -209,8 +215,8 @@ pub fn number_shift_right<'a>(
         vm, heap, state, ..
     } = ctx;
     let (Some(value), Some(count)) = (
-        call.receiver.as_tagged(heap).to_i64(),
-        args.get(heap, 0).to_i64(),
+        integer(call.receiver.as_tagged(heap), heap),
+        integer(args.get(heap, 0), heap),
     ) else {
         raise!(vm, heap, state, VmError::InvalidOperandType)
     };
@@ -221,7 +227,7 @@ pub fn number_bnot<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tag
     let HostCtx {
         vm, heap, state, ..
     } = ctx;
-    match call.receiver.as_tagged(heap).to_i64() {
+    match integer(call.receiver.as_tagged(heap), heap) {
         Some(value) => Smi::new(!value).into_tagged(),
         None => raise!(vm, heap, state, VmError::InvalidOperandType),
     }

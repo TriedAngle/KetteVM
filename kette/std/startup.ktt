@@ -4,16 +4,18 @@ let COLLECTIONS_TRAITS_PATH = "kette/std/collections/collections.ktt"
 let COLLECTIONS_SEQUENCE_PATH = "kette/std/collections/sequence.ktt"
 let COLLECTIONS_CHANNEL_PATH = "kette/std/collections/channel.ktt"
 let COLLECTIONS_QUEUE_PATH = "kette/std/collections/queue.ktt"
-let COLLECTIONS_TIMER_PATH = "kette/std/collections/timer.ktt"
+let COLLECTIONS_DELAY_SCHEDULER_PATH = "kette/std/collections/delay_scheduler.ktt"
 let COLLECTIONS_POOL_PATH = "kette/std/collections/pool.ktt"
 let ERROR_PATH = "kette/std/error.ktt"
 let FFI_PATH = "kette/std/ffi.ktt"
 let LIBC_SYS_PATH = "kette/std/sys/libc/sys.ktt"
 let LIBC_FILE_PATH = "kette/std/sys/libc/fs.ktt"
+let LIBC_SOCKET_PATH = "kette/std/sys/libc/socket.ktt"
 let WINDOWS_SYS_PATH = "kette/std/sys/windows/sys.ktt"
 let WINDOWS_FILE_PATH = "kette/std/sys/windows/fs.ktt"
 let SYS_PATH = "kette/std/sys/sys.ktt"
 let FS_PATH = "kette/std/sys/fs.ktt"
+let SOCKET_PATH = "kette/std/sys/socket.ktt"
 let RANDOM_PATH = "kette/std/random.ktt"
 let UI_PATH = "kette/std/ui/ui.ktt"
 let UI_VERIFY_PATH = "kette/std/ui/verify.ktt"
@@ -451,8 +453,8 @@ if !Modules.collections or !Modules.collections.channel {
 if !Modules.collections or !Modules.collections.queue {
     KetteTools.evalFile(COLLECTIONS_QUEUE_PATH)
 }
-if !Modules.collections or !Modules.collections.timer {
-    KetteTools.evalFile(COLLECTIONS_TIMER_PATH)
+if !Modules.collections or !Modules.collections.delay_scheduler {
+    KetteTools.evalFile(COLLECTIONS_DELAY_SCHEDULER_PATH)
 }
 if !Modules.collections or !Modules.collections.pool {
     KetteTools.evalFile(COLLECTIONS_POOL_PATH)
@@ -462,14 +464,6 @@ if !Modules.ffi {
 }
 
 let windows = KetteTools.primitives.os.name == "windows"
-
-if globalThis.SysLib == undefined {
-    globalThis.SysLib = if windows {
-        Modules.ffi.library("ucrtbase.dll")
-    } else {
-        Modules.ffi.library(null)
-    }
-}
 
 if windows {
     if !Modules.sys or Modules.sys.windows == undefined {
@@ -485,15 +479,19 @@ if windows {
     if Modules.sys.libc.file == undefined {
         KetteTools.evalFile(LIBC_FILE_PATH)
     }
+    if Modules.sys.libc.socket == undefined {
+        KetteTools.evalFile(LIBC_SOCKET_PATH)
+    }
 }
-
-globalThis.SysBackend = if windows { Modules.sys.windows } else { Modules.sys.libc }
 
 if !Modules.sys or Modules.sys.raw == undefined {
     KetteTools.evalFile(SYS_PATH)
 }
 if !Modules.sys or Modules.sys.file == undefined {
     KetteTools.evalFile(FS_PATH)
+}
+if !Modules.sys or Modules.sys.socket == undefined {
+    KetteTools.evalFile(SOCKET_PATH)
 }
 if !Modules.random {
     KetteTools.evalFile(RANDOM_PATH)

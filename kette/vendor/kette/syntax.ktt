@@ -42,6 +42,46 @@ let isTrivia = match |kind| {
     _ => false
 }
 
+let isKeyword = match |kind| {
+    :Let | :Mod | :If | :Else | :While | :For | :In | :SelfKw | :Null
+    | :True | :False | :Return | :Break | :Continue | :As | :SelfContext
+    | :Try | :Catch | :Throw | :LetStar | :Match => true
+    _ => false
+}
+
+let isOperatorKind = match |kind| {
+    :And | :Or | :EqEq | :NotEq
+    | :Lt | :Gt | :LtEq | :GtEq
+    | :LtLtLt | :GtGtGt | :AmpAmpAmp | :PipePipePipe | :CaretCaretCaret
+    | :LtGt | :PipeGt | :FatArrow
+    | :Plus | :Minus | :Star | :Slash | :Percent => true
+    _ => false
+}
+
+let isOperator = match |kind| {
+    :And | :Or | :EqEq | :NotEq | :Lt | :Gt | :LtEq | :GtEq
+    | :LtLt | :GtGt | :FatArrow | :Plus | :Minus | :Star | :Slash
+    | :Percent | :Assign | :PlusEq | :MinusEq | :StarEq | :SlashEq
+    | :PercentEq | :AndEq | :OrEq | :LtLtEq | :GtGtEq | :Bang | :Pipe
+    | :Ellipsis => true
+    _ => false
+}
+
+let isAtomParent = match |parent| {
+    :AtomLiteral | :PatternAtom => true
+    _ => false
+}
+
+let identType = match |parent| {
+    :Slot | :SlotMulti | :PatternField => 3
+    :Send => 5
+    :Call => 4
+    :Path | :UseTree | :ModDecl | :UseDecl => 6
+    :PatternName => 2
+    :AtomLiteral | :PatternAtom => 7
+    _ => 1
+}
+
 let Token = {
     tree: null
     index: 0
@@ -187,6 +227,11 @@ mod kette.syntax {
     export TOKEN_BIT = TOKEN_BIT
     export NO_NODE = NO_NODE
     export isTrivia = isTrivia
+    export isKeyword = isKeyword
+    export isOperatorKind = isOperatorKind
+    export isOperator = isOperator
+    export isAtomParent = isAtomParent
+    export identType = identType
     export isTokenChild = isTokenChild
     export childId = childId
     export parse = parse

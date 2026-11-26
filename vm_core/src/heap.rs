@@ -555,6 +555,60 @@ impl<T> AtomicGcSlot<T> {
         )
     }
 
+    /// Atomic value swap. The new reference is published before the barrier
+    /// runs; Kette collections stop the world, so no mutator can scan the
+    /// host between the swap and the remembered-set update.
+    pub fn swap_value<'h, 'x>(
+        &self,
+        heap: &Heap,
+        host: Tagged<'h, Value>,
+        value: Tagged<'x, Value>,
+    ) -> Word {
+        let value = value.erase();
+        debug_assert!(
+            !value.raw().is_weak_ptr(),
+            "weak value stored into a strong slot"
+        );
+        let old = self
+            .slot
+            .as_raw()
+            .swap_atomic(value.raw().to_bits(), Ordering::AcqRel);
+        if value.raw().is_ptr() {
+            heap.write_barrier(host, self.slot.as_raw(), value);
+        }
+        old
+    }
+
+    /// Atomic compare-and-exchange. The barrier is only needed for a
+    /// successful publication of the new pointer.
+    pub fn compare_exchange_value<'h, 'x>(
+        &self,
+        heap: &Heap,
+        host: Tagged<'h, Value>,
+        expected: Word,
+        value: Tagged<'x, Value>,
+    ) -> Result<Word, Word> {
+        let value = value.erase();
+        debug_assert!(
+            !value.raw().is_weak_ptr(),
+            "weak value stored into a strong slot"
+        );
+        match self.slot.as_raw().compare_exchange(
+            expected,
+            value.raw().to_bits(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(old) => {
+                if value.raw().is_ptr() {
+                    heap.write_barrier(host, self.slot.as_raw(), value);
+                }
+                Ok(old)
+            }
+            Err(old) => Err(old),
+        }
+    }
+
     #[inline(always)]
     pub fn as_raw(&self) -> &RawCell {
         self.slot.as_raw()
@@ -742,32 +796,38 @@ impl<T> AtomicOptionGcSlot<T> {
 pub struct Register(RawCell);
 
 impl Register {
+    #[inline(always)]
     pub unsafe fn from_value(v: Tagged<'_, Value>) -> Self {
         Self(unsafe { RawCell::from_word(v.raw().to_bits()) })
     }
 
+    #[inline(always)]
     pub fn get<'a>(&self, _heap: &'a Heap) -> Tagged<'a, Value> {
         unsafe { Tagged::from_value_unchecked(Value::from_bits(self.0.load())) }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_smi(&self) -> Smi {
         Smi::decode(Value::from_bits(self.0.load())).expect("register holds a Smi")
     }
 
+    #[inline(always)]
     pub fn raw(&self) -> Value {
         Value::from_bits(self.0.load())
     }
 
+    #[inline(always)]
     pub fn as_ref<'a>(&self, _heap: &'a Heap) -> &'a Value {
         unsafe { &*self.0.as_ptr().cast::<Value>() }
     }
 
+    #[inline(always)]
     pub fn store<'x, T: 'x>(&self, v: Tagged<'x, T>) {
         debug_assert!(!v.is_weak_ptr(), "weak value stored into a strong slot");
         self.0.store_raw(v.raw().to_bits());
     }
 
+    #[inline(always)]
     pub fn as_raw(&self) -> &RawCell {
         &self.0
     }

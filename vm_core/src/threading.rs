@@ -1,9 +1,10 @@
 use crate::{
-    Args, AtomicI64Object, AtomicI64ObjectInit, CallInfo, Convert, DenseString, EdgeVisitable,
-    Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, Object,
-    PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged, TaskStart, Termination, ThreadKind,
-    ThreadObject, ThreadObjectInit, ThreadState, ThreadStatus, Thrown, VM, Value, Visitor, VmError,
-    extend_lifetime, prepare_task, raise, raise_runtime, release_task_run, task_outcome,
+    Args, AtomicI64Object, AtomicI64ObjectInit, AtomicRefObject, AtomicRefObjectInit, CallInfo,
+    Convert, DenseString, EdgeVisitable, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx,
+    Map, MapInit, MapKind, Object, PropertyDescriptor, RuntimeId, SetupError, Smi, Tagged,
+    TaskStart, Termination, ThreadKind, ThreadObject, ThreadObjectInit, ThreadState, ThreadStatus,
+    Thrown, VM, Value, Visitor, VmError, extend_lifetime, prepare_task, raise, raise_runtime,
+    release_task_run, task_outcome,
 };
 use std::{
     collections::HashMap,
@@ -42,6 +43,11 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
     let atomic_i64_swap_index = vm.register_native(atomic_i64_swap);
     let atomic_i64_compare_exchange_index = vm.register_native(atomic_i64_compare_exchange);
     let atomic_i64_add_index = vm.register_native(atomic_i64_add);
+    let atomic_ref_new_index = vm.register_native(atomic_ref_new);
+    let atomic_ref_load_index = vm.register_native(atomic_ref_load);
+    let atomic_ref_store_index = vm.register_native(atomic_ref_store);
+    let atomic_ref_swap_index = vm.register_native(atomic_ref_swap);
+    let atomic_ref_compare_exchange_index = vm.register_native(atomic_ref_compare_exchange);
 
     let mut thread = vm.attach();
     thread.handle_scope(|thread, scope| {
@@ -307,6 +313,50 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             atomic_prototype.as_tagged(heap).erase(),
         );
 
+        let atomic_ref_prototype = make_prototype(heap);
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_ref_prototype,
+            "load",
+            atomic_ref_load_index,
+            0,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_ref_prototype,
+            "store",
+            atomic_ref_store_index,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_ref_prototype,
+            "swap",
+            atomic_ref_swap_index,
+            1,
+        );
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_ref_prototype,
+            "compareExchange",
+            atomic_ref_compare_exchange_index,
+            2,
+        );
+        let map = heap.known().atomic_ref_map.get_handle(heap, &scope);
+        map.as_tagged(heap).prototype.set(
+            heap,
+            map.as_tagged(heap).erase(),
+            atomic_ref_prototype.as_tagged(heap).erase(),
+        );
+
         let main_name = thread_vm.interner().intern_str(heap, &scope, "main");
         let main_tid = state.id();
         let hole = heap.known().the_hole.get_handle(heap, &scope).erase();
@@ -346,6 +396,26 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             PropertyDescriptor::data(atomic_prototype.erase()),
         )
         .expect("install AtomicI64.prototype");
+        let atomic_ref = make_prototype(heap);
+        Object::add_method(
+            thread_vm,
+            heap,
+            &scope,
+            atomic_ref,
+            "new",
+            atomic_ref_new_index,
+            1,
+        );
+        let prototype_name = thread_vm.interner().intern_str(heap, &scope, "prototype");
+        let prototype_name = scope.handle(prototype_name.as_tagged(heap));
+        Object::define_own_property_ordinary(
+            heap,
+            &scope,
+            atomic_ref,
+            prototype_name,
+            PropertyDescriptor::data(atomic_ref_prototype.erase()),
+        )
+        .expect("install AtomicRef.prototype");
         let atomic_namespace = make_prototype(heap);
         let atomic_i64_name = thread_vm.interner().intern_str(heap, &scope, "AtomicI64");
         let atomic_i64_name = scope.handle(atomic_i64_name.as_tagged(heap));
@@ -357,6 +427,16 @@ pub fn install(vm: &mut VM) -> Result<(), SetupError> {
             PropertyDescriptor::data(atomic_i64.erase()),
         )
         .expect("install atomic.AtomicI64");
+        let atomic_ref_name = thread_vm.interner().intern_str(heap, &scope, "AtomicRef");
+        let atomic_ref_name = scope.handle(atomic_ref_name.as_tagged(heap));
+        Object::define_own_property_ordinary(
+            heap,
+            &scope,
+            atomic_namespace,
+            atomic_ref_name,
+            PropertyDescriptor::data(atomic_ref.erase()),
+        )
+        .expect("install atomic.AtomicRef");
         let global = heap.known().global_object.get_handle(heap, &scope);
         let thread_value = main_object.erase();
         let atomic_value = atomic_namespace.erase();
@@ -792,7 +872,10 @@ fn thread_unpark<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagge
     };
     let woke = task.unpark();
     if woke {
-        target.as_ref().set_state(ThreadStatus::Ready);
+        let _ = target.as_ref().state.compare_exchange_smi(
+            Smi::new(ThreadStatus::Blocked as i64),
+            Smi::new(ThreadStatus::Ready as i64),
+        );
     }
     Convert::boolean(heap, woke)
 }
@@ -829,15 +912,31 @@ fn thread_mount<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
         };
         let status = target.as_tagged(heap).state(heap);
         let mounted = target_state.is_mounted_by_task();
-        let runnable = status == ThreadStatus::New
-            || status == ThreadStatus::Ready
-            || (status == ThreadStatus::Running && mounted);
         let current_task = state
             .thread_object(heap)
             .and_then(|object| object.erase().get_as::<ThreadObject>(heap))
             .is_some_and(|object| state_for(vm, heap, object).is_some());
-        if !runnable || !current_task || !state.is_continuation_started() {
+        if !current_task || !state.is_continuation_started() {
             raise!(vm, heap, state, VmError::InvalidOperandType);
+        }
+        match status {
+            ThreadStatus::New | ThreadStatus::Ready => {
+                let claimed = target
+                    .as_tagged(heap)
+                    .state
+                    .compare_exchange_smi(
+                        Smi::new(status as i64),
+                        Smi::new(ThreadStatus::Running as i64),
+                    )
+                    .is_ok();
+                if !claimed {
+                    // Another carrier claimed this submission. Duplicate
+                    // submissions are expected with an idempotent scheduler.
+                    return Convert::boolean(heap, false);
+                }
+            }
+            ThreadStatus::Running if mounted => {}
+            _ => raise!(vm, heap, state, VmError::InvalidOperandType),
         }
 
         if !target_state.begin_mount() {
@@ -859,7 +958,6 @@ fn thread_mount<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged
             prepare_task(&target_state, vm, start);
         }
 
-        target.as_tagged(heap).set_state(ThreadStatus::Running);
         target_state.set_resume_target(state.continuation_ptr(), true);
         target_state.set_resume_fiber(crate::tsan::current_fiber());
         target_state.run_on_heap(
@@ -1132,6 +1230,121 @@ fn atomic_i64_compare_exchange<'a>(
         Ok(old) | Err(old) => old,
     };
     state.handle_scope(|scope| i64_to_value(heap, &scope, observed).as_tagged(heap).erase())
+}
+
+fn atomic_ref_new<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let value = args.get_handle(heap, 0);
+    let has_value = !args.is_empty();
+    state.handle_scope(|scope| {
+        let value = if has_value {
+            value
+        } else {
+            heap.known().null.get_handle(heap, &scope).erase()
+        };
+        let raw = value.as_tagged(heap).raw();
+        if !raw.is_ptr() || raw.is_weak_ptr() {
+            raise!(vm, heap, state, VmError::InvalidOperandType);
+        }
+        let object = heap.allocate_handle::<AtomicRefObject>(
+            AtomicRefObjectInit {
+                // Safety: the raw word is rooted by `value`; no collection
+                // runs before the fresh object initializes its slot.
+                value: unsafe { Tagged::from_value_unchecked(raw) },
+            },
+            &scope,
+        );
+        object.as_tagged(heap).erase()
+    })
+}
+
+fn atomic_ref_load<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, _args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicRefObject>(heap)
+    else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    object.as_ref().load(heap)
+}
+
+fn atomic_ref_store<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicRefObject>(heap)
+    else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    if !value.raw().is_ptr() || value.raw().is_weak_ptr() {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    }
+    object
+        .as_ref()
+        .store(heap, call.receiver.as_tagged(heap), value);
+    vm.known().undefined.get(heap).erase()
+}
+
+fn atomic_ref_swap<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicRefObject>(heap)
+    else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    let value = args.get_handle(heap, 0).as_tagged(heap);
+    if !value.raw().is_ptr() || value.raw().is_weak_ptr() {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    }
+    object
+        .as_ref()
+        .swap(heap, call.receiver.as_tagged(heap), value)
+}
+
+fn atomic_ref_compare_exchange<'a>(
+    ctx: HostCtx<'a>,
+    call: CallInfo<'_>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = ctx;
+    let Some(object) = call
+        .receiver
+        .as_tagged(heap)
+        .get_as::<AtomicRefObject>(heap)
+    else {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    };
+    let expected = args.get_handle(heap, 0).as_tagged(heap);
+    let value = args.get_handle(heap, 1).as_tagged(heap);
+    if !expected.raw().is_ptr()
+        || expected.raw().is_weak_ptr()
+        || !value.raw().is_ptr()
+        || value.raw().is_weak_ptr()
+    {
+        raise!(vm, heap, state, VmError::InvalidOperandType);
+    }
+    object.as_ref().compare_exchange(
+        heap,
+        call.receiver.as_tagged(heap),
+        expected.raw().to_bits(),
+        value,
+    )
 }
 
 fn atomic_i64_add<'a>(ctx: HostCtx<'a>, call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {

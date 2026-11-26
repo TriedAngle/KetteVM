@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use bytecode::{FunctionId, SourceMode, disassemble, disassemble_function};
 
@@ -99,6 +99,49 @@ impl KetteTools {
         )
     }
 
+    /// REPL eval: compile in `Repl` mode so top-level declarations become
+    /// globals of the running image.
+    pub fn eval_repl<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
+        let HostCtx {
+            vm, heap, state, ..
+        } = ctx;
+        if args.len() < 2 {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "evalRepl expects (language, source)",
+            );
+        }
+        let Some(language) = string_arg(heap, args, 0) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "evalRepl expects a language string",
+            );
+        };
+        let Some(source) = string_arg(heap, args, 1) else {
+            return Errors::raise_with(
+                vm,
+                heap,
+                state,
+                VmError::EvalError,
+                "evalRepl expects a source string",
+            );
+        };
+        eval_source(
+            vm,
+            heap,
+            state,
+            &language,
+            &source,
+            bytecode::SourceMode::Repl,
+        )
+    }
+
     /// Compile `(language, source[, function])` and return its bytecode.
     /// Without a function index, prints every function in the program.
     pub fn bytecode<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
@@ -180,7 +223,8 @@ impl KetteTools {
     }
 
     /// Read `path` and run it as an isolated file unit, inferring the
-    /// language from the `.ktt` / `.js` extension.
+    /// language from the `.ktt` / `.js` extension. Relative paths resolve
+    /// against the current process directory.
     pub fn eval_file<'a>(ctx: HostCtx<'a>, _call: CallInfo<'_>, args: Args) -> Tagged<'a, Value> {
         let HostCtx {
             vm, heap, state, ..
@@ -194,6 +238,15 @@ impl KetteTools {
                 "evalFile expects a path string",
             );
         };
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&path))
+                .unwrap_or(path)
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
         let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
@@ -202,11 +255,11 @@ impl KetteTools {
                     heap,
                     state,
                     VmError::EvalError,
-                    &format!("cannot read {path}: {error}"),
+                    &format!("cannot read {}: {error}", path.display()),
                 );
             }
         };
-        let language = match Path::new(&path).extension().and_then(|ext| ext.to_str()) {
+        let language = match path.extension().and_then(|ext| ext.to_str()) {
             Some("ktt") => "kette",
             Some("js") => "js",
             _ => {
@@ -215,7 +268,7 @@ impl KetteTools {
                     heap,
                     state,
                     VmError::EvalError,
-                    &format!("evalFile expects a .ktt or .js file: {path}"),
+                    &format!("evalFile expects a .ktt or .js file: {}", path.display()),
                 );
             }
         };
@@ -361,7 +414,7 @@ impl KetteTools {
         roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
-        natives: [NativeIndex; 7],
+        natives: [NativeIndex; 8],
     ) {
         let global = roots.global_object.get_handle(heap, scope);
         let map = heap.allocate_handle::<Map>(
@@ -376,7 +429,7 @@ impl KetteTools {
         let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
         let primitives = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
-        let methods: [(&str, NativeIndex); 7] = [
+        let methods: [(&str, NativeIndex); 8] = [
             ("forceMinorGC", natives[0]),
             ("forceMajorGC", natives[1]),
             ("shutdown", natives[2]),
@@ -384,6 +437,7 @@ impl KetteTools {
             ("evalFile", natives[4]),
             ("bytecode", natives[5]),
             ("readFeedbackVector", natives[6]),
+            ("evalRepl", natives[7]),
         ];
         for (name, index) in methods {
             let method = Object::native_function(heap, scope, index, 0);

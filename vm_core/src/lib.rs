@@ -4,7 +4,7 @@ use core::{
     cell::{Cell as StdCell, UnsafeCell},
     ptr::NonNull,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     sync::Arc, sync::Condvar, sync::Mutex, sync::Weak, sync::atomic::AtomicBool,
     sync::atomic::AtomicI32, sync::atomic::Ordering,
@@ -93,15 +93,15 @@ pub use native::{
 };
 pub use objects::{
     AccessorInfo, AccessorInfoInit, AccessorPair, ArgumentsCreate, Atom, AtomicI64Object,
-    AtomicI64ObjectInit, BitArray, BitArrayInit, CValue, CValueFlags, CValueInit, CallTarget,
-    CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit,
-    ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE,
-    DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind, Encoding,
-    ExternalString, ExternalStringInit, FeedbackVector, FeedbackVectorInit, FixedArray,
-    FixedByteArray, Float, ForeignLibrary, ForeignLibraryInit, FunctionKind, GlobalLexicalBinding,
-    HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject,
-    INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit,
-    MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
+    AtomicI64ObjectInit, AtomicRefObject, AtomicRefObjectInit, BitArray, BitArrayInit, CValue,
+    CValueFlags, CValueInit, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit,
+    Code, CodeInit, ContextInit, ContextObject, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE,
+    DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString,
+    ElementsKind, Encoding, ExternalString, ExternalStringInit, FeedbackVector, FeedbackVectorInit,
+    FixedArray, FixedByteArray, Float, ForeignLibrary, ForeignLibraryInit, FunctionKind,
+    GlobalLexicalBinding, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header,
+    HeapObject, INFO_GLOBAL, INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map,
+    MapInit, MapKind, NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary,
     NumberDictionaryInit, Object, ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo,
     ProxyInit, ProxyObject, Range, RangeInit, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT,
     ScopeInfo, ScopeInfoInit, ScriptContextTable, ScriptContextTableInit, SiteRead, SlotDescriptor,
@@ -633,37 +633,54 @@ impl ThreadState {
 
     fn park_platform(&self, heap: &mut Heap, thread: Value, timeout: Option<Duration>) -> bool {
         let thread = unsafe { Tagged::<ThreadObject>::from_value_unchecked(thread) };
-        let mut park = self.sync.park_state.lock().unwrap();
-        park.timed_out = false;
-        if park.permit {
-            park.permit = false;
-            return false;
+        {
+            let mut park = self.sync.park_state.lock().unwrap();
+            park.timed_out = false;
+            if park.permit {
+                park.permit = false;
+                return false;
+            }
+            park.blocked = true;
+            park.parked = true;
+            thread.as_ref().set_state(ThreadStatus::Blocked);
         }
-        park.blocked = true;
-        park.parked = true;
-        thread.as_ref().set_state(ThreadStatus::Blocked);
-        let timed_out = match timeout {
-            Some(duration) => heap.block_on(|| {
-                let (guard, result) = self.sync.park_event.wait_timeout(park, duration).unwrap();
-                let outcome = result.timed_out() || guard.timed_out;
-                (guard, outcome)
-            }),
-            None => heap.block_on(|| {
-                let mut park = park;
-                while park.blocked {
-                    park = self.sync.park_event.wait(park).unwrap();
+        // No park-state lock may be held across `block_on`: the safepoint park
+        // can wait for a collection, while an unparker needs the same lock.
+        heap.block_on(|| {
+            let mut park = self.sync.park_state.lock().unwrap();
+            let timed_out = match timeout {
+                Some(duration) => {
+                    let deadline = Instant::now() + duration;
+                    loop {
+                        if !park.blocked {
+                            break false;
+                        }
+                        let now = Instant::now();
+                        if now >= deadline {
+                            park.timed_out = true;
+                            park.blocked = false;
+                            break true;
+                        }
+                        let (next, _) = self
+                            .sync
+                            .park_event
+                            .wait_timeout(park, deadline - now)
+                            .unwrap();
+                        park = next;
+                    }
                 }
-                (park, false)
-            }),
-        };
-        let (mut park, timed_out) = match timed_out {
-            (park, timed_out) => (park, timed_out),
-        };
-        park.blocked = false;
-        park.parked = false;
-        park.timed_out = false;
-        park.permit = false;
-        timed_out
+                None => {
+                    while park.blocked {
+                        park = self.sync.park_event.wait(park).unwrap();
+                    }
+                    false
+                }
+            };
+            park.blocked = false;
+            park.parked = false;
+            park.permit = false;
+            timed_out
+        })
     }
 
     /// Returns true when a parked task must be made runnable. A request that

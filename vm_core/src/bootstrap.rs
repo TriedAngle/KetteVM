@@ -57,6 +57,8 @@ pub struct WellKnown {
     pub thread_object_map: GcSlot<Map>,
     /// 64-bit atomic cells.
     pub atomic_i64_map: GcSlot<Map>,
+    /// Atomic reference cells.
+    pub atomic_ref_map: GcSlot<Map>,
     pub feedback_vector_map: GcSlot<Map>,
     /// Maps of the prototype-validity machinery: `Cell` and `PrototypeInfo`.
     pub cell_map: GcSlot<Map>,
@@ -307,6 +309,7 @@ impl WellKnown {
             c_value_map: smi_slot::<Map>(),
             thread_object_map: smi_slot::<Map>(),
             atomic_i64_map: smi_slot::<Map>(),
+            atomic_ref_map: smi_slot::<Map>(),
             feedback_vector_map: smi_slot::<Map>(),
             cell_map: smi_slot::<Map>(),
             prototype_info_map: smi_slot::<Map>(),
@@ -408,6 +411,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.c_value_map.as_raw());
         visitor.visit(self.thread_object_map.as_raw());
         visitor.visit(self.atomic_i64_map.as_raw());
+        visitor.visit(self.atomic_ref_map.as_raw());
         visitor.visit(self.feedback_vector_map.as_raw());
         visitor.visit(self.cell_map.as_raw());
         visitor.visit(self.prototype_info_map.as_raw());
@@ -679,6 +683,12 @@ pub fn bootstrap_basics(heap: &mut Heap) {
         MapKind::ATOMIC_I64.with_elements(ElementsKind::None),
     );
     known.atomic_i64_map.init(atomic_i64_map.as_tagged(heap));
+    let atomic_ref_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::ATOMIC_REF.with_elements(ElementsKind::None),
+    );
+    known.atomic_ref_map.init(atomic_ref_map.as_tagged(heap));
     let array_map = alloc_map(heap, &scope, MapKind::FIXED_ARRAY);
     let byte_array_map = alloc_map(heap, &scope, MapKind::FIXED_BYTE_ARRAY);
     let code_map = alloc_map(heap, &scope, MapKind::CODE);

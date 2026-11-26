@@ -1,0 +1,259 @@
+use threading { wake }
+
+let DelayedTaskTraits = {
+    new: |when, action| {
+        let task = self.clone()
+        task.when = when
+        task.action = action
+        task.cancelled = atomic.AtomicI64.new(0)
+        task.heapIndex = -1
+        task
+    }
+    cancel: {
+        self.cancelled.store(1)
+        self
+    }
+}
+
+let DelayedTask = {
+    traits*: DelayedTaskTraits
+    when, action, cancelled, heapIndex: undefined
+}
+
+let DelaySchedulerTraits = {
+    disposable*: Disposable
+
+    new: {
+        let scheduler = self.clone()
+        scheduler.heap = []
+        scheduler.length = 0
+        scheduler.pending = atomic.AtomicRef.new(null)
+        scheduler.active = atomic.AtomicI64.new(0)
+        scheduler.closed = atomic.AtomicI64.new(0)
+        scheduler.thread = Thread.newPlatform("delay-scheduler", {
+            scheduler.run()
+        })
+        scheduler.thread.start()
+        scheduler
+    }
+    signal: {
+        if self.active.compareExchange(0, 1) == 0 {
+            self.thread.unpark()
+        }
+    }
+    swap: |first, second| {
+        let left = self.heap[first]
+        let right = self.heap[second]
+        self.heap[first] = right
+        self.heap[second] = left
+        left.heapIndex = second
+        right.heapIndex = first
+    }
+    siftUp: |index| {
+        let current = index
+        while current > 0 {
+            let parent = Math.floor((current - 1) / 4)
+            if self.heap[parent].when <= self.heap[current].when {
+                break
+            }
+            self.swap(parent, current)
+            current = parent
+        }
+    }
+    siftDown: |index| {
+        let current = index
+        while true {
+            let first = current * 4 + 1
+            let smallest = current
+            let child = 0
+            while child < 4 {
+                let candidate = first + child
+                if candidate < self.length and self.heap[candidate].when < self.heap[smallest].when {
+                    smallest = candidate
+                }
+                child = child + 1
+            }
+            if smallest == current {
+                break
+            }
+            self.swap(current, smallest)
+            current = smallest
+        }
+    }
+    insert: |task| {
+        let index = self.length
+        self.length = index + 1
+        self.heap[index] = task
+        task.heapIndex = index
+        self.siftUp(index)
+    }
+    removeAt: |index| {
+        let last = self.length - 1
+        let removed = self.heap[index]
+        let tail = self.heap[last]
+        self.heap[last] = null
+        self.length = last
+        if index < last {
+            self.heap[index] = tail
+            tail.heapIndex = index
+            self.siftDown(index)
+            self.siftUp(index)
+        }
+        removed.heapIndex = -1
+        removed
+    }
+    clear: {
+        let index = 0
+        while index < self.length {
+            let task = self.heap[index]
+            if task != null {
+                task.cancelled.store(1)
+                task.heapIndex = -1
+                self.heap[index] = null
+            }
+            index = index + 1
+        }
+        self.length = 0
+    }
+    pushPending: |task| {
+        let next = self.pending.load()
+        let node = { task: task, next: next }
+        while self.pending.compareExchange(next, node) != next {
+            next = self.pending.load()
+            node.next = next
+        }
+    }
+    popPending: {
+        while true {
+            let head = self.pending.load()
+            if head == null {
+                return null
+            }
+            let next = head.next
+            if self.pending.compareExchange(head, next) == head {
+                return head.task
+            }
+        }
+    }
+    drain: {
+        let batch = []
+        let task = self.popPending()
+        while task != null {
+            batch.push(task)
+            task = self.popPending()
+        }
+        batch
+    }
+    run: {
+        while true {
+            let batch = self.drain()
+            if batch.length == 0 {
+                self.active.store(0)
+                let head = self.pending.load()
+                if head != null {
+                    self.active.store(1)
+                } else if self.closed.load() != 0 {
+                    self.clear()
+                    break
+                } else if self.length == 0 {
+                    Thread.park()
+                } else {
+                    let wait = self.heap[0].when - Thread.nanoTime()
+                    if wait > 0 {
+                        Thread.parkNanos(wait)
+                    }
+                }
+            } else {
+                batch.forEach(|task| {
+                    if task.cancelled.load() != 0 {
+                        if task.heapIndex >= 0 {
+                            self.removeAt(task.heapIndex)
+                        }
+                    } else {
+                        self.insert(task)
+                    }
+                })
+            }
+
+            if self.closed.load() != 0 {
+                self.clear()
+                break
+            }
+
+            let now = Thread.nanoTime()
+            while self.length > 0 {
+                let task = self.heap[0]
+                if task.when > now {
+                    break
+                }
+                self.removeAt(0)
+                if task.cancelled.load() == 0 {
+                    try {
+                        task.action()
+                    } catch (error) {
+                    }
+                }
+            }
+        }
+        self.active.store(-1)
+        self
+    }
+    schedule: |nanos, action| {
+        let task = DelayedTask.new(Thread.nanoTime() + nanos, action)
+        if self.closed.load() != 0 {
+            task.cancelled.store(1)
+            return task
+        }
+        self.pushPending(task)
+        self.signal()
+        task
+    }
+    cancel: |task| {
+        task.cancel()
+        if self.closed.load() != 0 {
+            return task
+        }
+        self.pushPending(task)
+        self.signal()
+        task
+    }
+    parkNanos: |nanos| {
+        let me = Thread.current()
+        let task = self.schedule(nanos, {
+            wake(me)
+        })
+        Thread.park()
+        self.cancel(task)
+    }
+    sleep: |nanos| {
+        let me = Thread.current()
+        let start = Thread.nanoTime()
+        let remaining = nanos
+        while remaining > 0 and !me.isInterrupted() {
+            self.parkNanos(remaining)
+            remaining = nanos - (Thread.nanoTime() - start)
+        }
+    }
+    isClosed: { self.closed.load() != 0 }
+    shutdown: {
+        if self.closed.load() == 0 {
+            self.closed.store(1)
+            self.signal()
+        }
+        self.thread.join()
+        self
+    }
+    dispose: { self.shutdown() }
+}
+
+let DelayScheduler = {
+    traits*: DelaySchedulerTraits
+    heap, length, pending, active, closed, thread: undefined
+}
+
+mod collections.delay_scheduler {
+    export DelayedTask = DelayedTask
+    export DelayedTaskTraits = DelayedTaskTraits
+    export DelayScheduler = DelayScheduler
+    export DelaySchedulerTraits = DelaySchedulerTraits
+}

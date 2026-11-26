@@ -68,6 +68,11 @@ impl RawCell {
         }
     }
 
+    #[inline]
+    pub fn swap_atomic(&self, new: Word, order: Ordering) -> Word {
+        unsafe { (*self.raw.get().cast::<AtomicU64>()).swap(new, order) }
+    }
+
     pub fn as_ptr(&self) -> *mut Word {
         self.raw.get()
     }

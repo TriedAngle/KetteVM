@@ -1,0 +1,248 @@
+use ffi { self, i16, i32, u8 }
+use sys.libc { raw }
+
+let AF_INET = 2
+let SOCK_STREAM = 1
+let POLLIN = 1
+let POLLOUT = 4
+
+let EINTR = 4
+let EAGAIN = if KetteTools.primitives.os.name == "macos" { 35 } else { 11 }
+
+let errno = {
+    raw.errno_location().cast(i32).get(0)
+}
+
+let wouldBlock = {
+    errno() == EAGAIN or errno() == EINTR
+}
+
+let ready = |pollFd, fd, events| {
+    pollFd.set(0, fd &&& 65535)
+    pollFd.set(1, (fd >>> 16) &&& 65535)
+    pollFd.set(2, events)
+    pollFd.set(3, 0)
+    raw.poll(pollFd, 1, 0) > 0
+}
+
+let parseIpv4 = |host| {
+    let parts = [0, 0, 0, 0]
+    let part = 0
+    let value = 0
+    let digits = 0
+    let index = 0
+    while index < host.length {
+        match host[index] {
+            "." => {
+                if digits == 0 or part >= 3 {
+                    throw "invalid IPv4 address: " + host
+                }
+                parts[part] = value
+                part = part + 1
+                value = 0
+                digits = 0
+            }
+            "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                value = value * 10 + host[index] * 1
+                digits = digits + 1
+                if value > 255 {
+                    throw "invalid IPv4 address: " + host
+                }
+            }
+            _ => {
+                throw "invalid IPv4 address: " + host
+            }
+        }
+        index = index + 1
+    }
+    if digits == 0 or part != 3 {
+        throw "invalid IPv4 address: " + host
+    }
+    parts[part] = value
+    parts
+}
+
+let makeAddress = |host, port| {
+    if port < 0 or port > 65535 {
+        throw "invalid TCP port: " + port
+    }
+    let parts = parseIpv4(host)
+    let address = ffi.array(u8, 16).new()
+    let index = 0
+    while index < 16 {
+        address[index] = 0
+        index = index + 1
+    }
+    if KetteTools.primitives.os.name == "macos" {
+        address[0] = 16
+        address[1] = 2
+    } else {
+        address[0] = 2
+        address[1] = 0
+    }
+    address[2] = Math.floor(port / 256) % 256
+    address[3] = port % 256
+    address[4] = parts[0]
+    address[5] = parts[1]
+    address[6] = parts[2]
+    address[7] = parts[3]
+    address
+}
+
+let TcpStreamTraits = {
+    disposable*: Disposable
+
+    fromFd: |fd| {
+        self.fromFds(fd, fd, true)
+    }
+    fromFds: |readFd, writeFd, owned| {
+        let stream = self.clone()
+        stream.readFd = readFd
+        stream.writeFd = writeFd
+        stream.owned = owned
+        stream.disposed = false
+        stream.readPoll = ffi.array(i16, 4).new()
+        stream.writePoll = ffi.array(i16, 4).new()
+        stream
+    }
+
+    readInto: |buffer, max| {
+        if self.disposed {
+            throw "socket is closed"
+        }
+        buffer.ensure(buffer.length + max)
+        if !ready(self.readPoll, self.readFd, POLLIN) {
+            return null
+        }
+        let count = raw.read(self.readFd, buffer.data.add(buffer.length), max)
+        if count == 0 {
+            return 0
+        }
+        if count < 0 {
+            if wouldBlock() {
+                return null
+            }
+            throw "socket read failed with errno " + errno()
+        }
+        buffer.length = buffer.length + count
+        count
+    }
+
+    writeSome: |text, offset, count| {
+        if self.disposed {
+            throw "socket is closed"
+        }
+        if !ready(self.writePoll, self.writeFd, POLLOUT) {
+            return null
+        }
+        let data = ffi.cstring(text)
+        let written = raw.write(self.writeFd, data.add(offset), count)
+        data.free()
+        if written < 0 {
+            if wouldBlock() {
+                return null
+            }
+            throw "socket write failed with errno " + errno()
+        }
+        written
+    }
+
+    dispose: {
+        if self.disposed {
+            return 0
+        }
+        self.disposed = true
+        self.readPoll.free()
+        self.writePoll.free()
+        if self.owned {
+            let status = raw.close(self.readFd)
+            self.readFd = -1
+            self.writeFd = -1
+            if status != 0 {
+                throw "socket close failed"
+            }
+        }
+        0
+    }
+}
+
+let TcpStream = {
+    traits*: TcpStreamTraits
+    readFd: -1
+    writeFd: -1
+    owned: false
+    readPoll: null
+    writePoll: null
+    disposed: false
+}
+
+let TcpListenerTraits = {
+    disposable*: Disposable
+
+    bind: |host, port| {
+        let listener = self.clone()
+        listener.fd = raw.socket(AF_INET, SOCK_STREAM, 0)
+        if listener.fd < 0 {
+            throw "socket creation failed"
+        }
+        listener.disposed = false
+        listener.poll = ffi.array(i16, 4).new()
+        let address = makeAddress(host, port)
+        if raw.bind(listener.fd, address, 16) != 0 {
+            address.free()
+            listener.dispose()
+            throw "socket bind failed on " + host + ":" + port
+        }
+        address.free()
+        if raw.listen(listener.fd, 16) != 0 {
+            listener.dispose()
+            throw "socket listen failed"
+        }
+        listener
+    }
+
+    tryAccept: {
+        if self.disposed {
+            throw "socket is closed"
+        }
+        if !ready(self.poll, self.fd, POLLIN) {
+            return null
+        }
+        let client = raw.accept(self.fd, null, null)
+        if client < 0 {
+            if wouldBlock() {
+                return null
+            }
+            throw "socket accept failed with errno " + errno()
+        }
+        TcpStream.fromFd(client)
+    }
+
+    dispose: {
+        if self.disposed {
+            return 0
+        }
+        self.disposed = true
+        self.poll.free()
+        let status = raw.close(self.fd)
+        self.fd = -1
+        if status != 0 {
+            throw "socket close failed"
+        }
+        0
+    }
+}
+
+let TcpListener = {
+    traits*: TcpListenerTraits
+    fd: -1
+    poll: null
+    disposed: false
+}
+
+mod sys.libc.socket {
+    export TcpListener = TcpListener
+    export TcpListenerTraits = TcpListenerTraits
+    export TcpStream = TcpStream
+    export TcpStreamTraits = TcpStreamTraits
+}

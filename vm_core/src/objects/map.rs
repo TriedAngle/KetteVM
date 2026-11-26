@@ -528,6 +528,7 @@ impl MapKind {
     pub const C_TYPE: MapKind = MapKind(ObjectKind::TypeInfo as u64);
     pub const THREAD_OBJECT: MapKind = MapKind(ObjectKind::ThreadObject as u64);
     pub const ATOMIC_I64: MapKind = MapKind(ObjectKind::AtomicI64Object as u64);
+    pub const ATOMIC_REF: MapKind = MapKind(ObjectKind::AtomicRefObject as u64);
     pub const BIT_ARRAY: MapKind = MapKind(ObjectKind::BitArray as u64);
     pub const RANGE: MapKind = MapKind(ObjectKind::Range as u64);
 
@@ -589,6 +590,7 @@ impl MapKind {
             Self::C_TYPE => ObjectKind::TypeInfo,
             Self::THREAD_OBJECT => ObjectKind::ThreadObject,
             Self::ATOMIC_I64 => ObjectKind::AtomicI64Object,
+            Self::ATOMIC_REF => ObjectKind::AtomicRefObject,
             Self::BIT_ARRAY => ObjectKind::BitArray,
             Self::RANGE => ObjectKind::Range,
             _ => panic!("invalid object kind"),

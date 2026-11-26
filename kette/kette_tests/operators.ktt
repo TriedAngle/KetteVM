@@ -104,3 +104,13 @@ Test.assert(g, 2)
 let s = "x"
 s += 1
 Test.assert(s, "x1")
+
+// Numeric operators coerce string operands.
+Test.assert("6" * 2, 12)
+Test.assert(6 * "2", 12)
+Test.assert("6" - 2, 4)
+Test.assert("6" / 2, 3)
+Test.assert("7" % 4, 3)
+Test.assert("6" &&& 3, 2)
+Test.assert("6" <<< 1, 12)
+Test.assert(-"5", -5)
